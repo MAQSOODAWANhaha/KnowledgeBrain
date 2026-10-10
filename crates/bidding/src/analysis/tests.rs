@@ -7,7 +7,7 @@ mod input;
 
 fn input() -> FrozenInput {
     FrozenInput {
-        schema_version: 2,
+        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
         project_id: "project".into(),
         document_set_id: "set".into(),
         documents: vec![],
@@ -614,7 +614,7 @@ fn search_and_index_do_not_establish_reading_coverage() {
 #[test]
 fn reading_gaps_keep_interleaved_source_order_without_acknowledging_evidence() {
     let mut input = grid_citation_input();
-    input.documents.push(json!({"id":"document"}));
+    input.documents.push(FrozenDocument::fixture("document"));
     input.source_units.push(Source {
         source_unit_revision_id: "later-text".into(),
         document_id: "document".into(),

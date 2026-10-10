@@ -1,6 +1,6 @@
 # Check 执行闭环改造方案
 
-状态：第0阶段已完成；第1阶段正在实现来源处置、逐主张模板字段复核及统一完成门槛。下面的后续阶段仍是计划。检查点契约已提升为21，旧版本明确拒绝，不增加兼容分支。本地合成测试不能替代真实模型验收。
+状态：第0、1阶段已完成；第2阶段实现了 PDF＋Excel 类型化来源清单、跨文档分包及关联原文读取的本地纵向链路。Word/图片关联扩展、局部 repair 和后续性能工作仍是计划。检查点契约为22，Frozen schema 为3，解析合同仍为 source-v2；旧版本明确拒绝，不增加兼容分支。本地合成测试不能替代真实模型验收。
 
 ## 1. 目标与审查结论
 
@@ -188,7 +188,7 @@ repair提交检查当前版本；旧工作者晚到结果不应用。修改后�
 
 ## 12. 文档与验证记录
 
-本文件是当前方案及实施顺序的唯一主线。`docs/bidding/frozen-input.md`、`docs/design/evidence-runtime-contract.md`、`docs/bidding/outline.md`只记录已实现合同；旧总体方案仅作导航。此次review收敛不代表新增类型、源覆盖、局部repair或多文件模板验收已经实现。
+本文件是当前方案及实施顺序的唯一主线。`docs/bidding/frozen-input.md`、`docs/design/evidence-runtime-contract.md`、`docs/bidding/outline.md`只记录已实现合同；旧总体方案仅作导航。具体已实现范围见本文开头状态及 frozen-input.md；局部 repair 和真实多文件模板验收尚未完成。
 
 本地常用验证入口：
 

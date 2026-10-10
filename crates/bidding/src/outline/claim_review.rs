@@ -318,7 +318,9 @@ pub(crate) fn condition_support_options(
         super::evidence::validate_evidence(&evidence, input, reads)
             .map_err(|e| format!("condition support requires current Check reads: {e}"))?;
         options.push(super::discover::ConditionSupport {
-            source_requirement_id: unit.requirement_id.clone(),
+            origin: super::discover::ConditionSupportOrigin::ReviewedRequirement {
+                requirement_id: unit.requirement_id.clone(),
+            },
             review_version: unit.version.clone(),
             evidence,
         });

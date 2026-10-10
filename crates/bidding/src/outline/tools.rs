@@ -556,6 +556,9 @@ fn finish(
 
 /// The same completion contract guards tool finish, projection and direct publication.
 pub(crate) fn template_ready(input: &FrozenInput, draft: &Draft) -> Result<(), String> {
+    if !input.required_relations_ready() {
+        return Err("required source relation is missing, unconfirmed or conflicting".into());
+    }
     validate_final_outline(input, &draft.required_requirement_ids, draft)?;
     if draft.reviewed_requirement_ids != draft.required_requirement_ids
         || draft.reviewed_pack_ids != draft.required_pack_ids
@@ -641,7 +644,7 @@ pub fn validate_final_outline(
     requirements: &BTreeSet<String>,
     draft: &Draft,
 ) -> Result<(), String> {
-    if input.schema_version != 2 {
+    if input.schema_version != crate::outline::frozen::FROZEN_SCHEMA_VERSION {
         return Err(
             "FrozenInput schema is unsupported; reparse instead of resuming an old snapshot".into(),
         );
@@ -1459,7 +1462,7 @@ mod tests {
     use crate::analysis::Source;
     fn input() -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![],
@@ -1508,7 +1511,7 @@ mod tests {
     }
     fn two_chains() -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![],
@@ -1538,7 +1541,7 @@ mod tests {
     }
     fn continued_chain() -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![],

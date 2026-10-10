@@ -331,6 +331,63 @@ pub fn evidence_schema() -> Value {
     ]})
 }
 
+/// Remaining ordered ranges after a prefix page; a split UTF-8 carrier keeps
+/// its exact end position rather than silently skipping the rest of the unit.
+pub(crate) fn selection_tail(refs: &[EvidenceRef], selected: &[EvidenceRef]) -> Vec<EvidenceRef> {
+    let mut tail = refs[selected.len()..].to_vec();
+    let original = &refs[selected.len() - 1];
+    let last = selected.last().expect("nonempty selected page");
+    if let (Some((_, end)), Some((_, full_end))) = (last.range(), original.range())
+        && end < full_end
+    {
+        let mut rest = original.clone();
+        match &mut rest {
+            EvidenceRef::Text { start_byte, .. } | EvidenceRef::GridCell { start_byte, .. } => {
+                *start_byte = end
+            }
+            _ => {}
+        }
+        tail.insert(0, rest);
+    }
+    tail
+}
+
+/// Shared range reduction for ordinary evidence reads and worker dependencies.
+/// The caller tests the complete serialized next request, never a byte quota.
+pub(crate) fn shrink_selection(
+    input: &FrozenInput,
+    selected: &mut Vec<EvidenceRef>,
+) -> Result<(), String> {
+    if selected.len() > 1 {
+        selected.truncate(selected.len().div_ceil(2));
+        return Ok(());
+    }
+    let quote = resolve_evidence(input, selected)?.remove(0).quote;
+    let boundaries = quote
+        .char_indices()
+        .map(|(i, _)| i)
+        .filter(|i| *i > 0)
+        .collect::<Vec<_>>();
+    if boundaries.is_empty() {
+        return Err("remaining request token budget cannot fit source metadata plus one UTF-8 character; finish the current comparison or release redundant history, then retry the same cursor".into());
+    }
+    let cut = boundaries[boundaries.len() / 2];
+    match &mut selected[0] {
+        EvidenceRef::Text {
+            start_byte,
+            end_byte,
+            ..
+        }
+        | EvidenceRef::GridCell {
+            start_byte,
+            end_byte,
+            ..
+        } => *end_byte = *start_byte + cut,
+        _ => return Err("image evidence requires original view delivery".into()),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

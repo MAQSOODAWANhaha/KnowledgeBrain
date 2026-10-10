@@ -127,7 +127,12 @@ pub fn registry() -> Vec<ToolSpec> {
         ("put_fulfillments", &[Organize], Draft, true),
         ("read_outline", &[Discover, Organize, Check], Draft, false),
         ("read_requirements", &[Organize, Check], Requirements, false),
-        ("read_evidence", &[Organize, Check], Evidence, false),
+        (
+            "read_evidence",
+            &[Discover, Organize, Check],
+            Evidence,
+            false,
+        ),
         (
             "read_source_view",
             &[Discover, Organize, Check],
@@ -1124,6 +1129,9 @@ fn read_evidence(
     args: &Value,
     duty: Duty,
 ) -> Result<Value, String> {
+    if duty == Duty::Discover {
+        return Err("Discover dependency reads require the owning worker's scoped route".into());
+    }
     let refs: Vec<super::evidence::EvidenceRef> =
         serde_json::from_value(args["refs"].clone()).map_err(|e| e.to_string())?;
     if refs

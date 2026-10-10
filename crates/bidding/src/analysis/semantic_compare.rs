@@ -424,7 +424,7 @@ mod tests {
 
     fn input(units: Vec<(&str, &str)>) -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![],

@@ -1,16 +1,19 @@
 //! Mandatory parse -> OCR -> ordered, complete, immutable input boundary.
-use crate::analysis::{FrozenInput, Source};
+use crate::analysis::{
+    DocumentAvailability, DocumentRelation, DocumentRole, FrozenDocument, FrozenInput, Source,
+};
 use docparser::{ReadResult, SourceCompleteness, SourceContract, StructuredSourceUnitKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const FROZEN_SCHEMA_VERSION: u32 = 2;
+pub const FROZEN_SCHEMA_VERSION: u32 = 3;
 pub const PARSER_CONTRACT_VERSION: &str = "source-v2";
 
 #[derive(Debug, Clone)]
 pub struct ParsedDocument {
+    pub role: DocumentRole,
     pub document_id: String,
     pub parsed: ReadResult,
 }
@@ -19,7 +22,7 @@ pub struct FrozenBuildInput {
     pub project_id: String,
     pub document_set_id: String,
     pub documents: Vec<ParsedDocument>,
-    pub document_relations: Vec<Value>,
+    pub document_relations: Vec<DocumentRelation>,
     pub decisions: Vec<Value>,
 }
 /// A successful caption is not an OCR receipt. The literal OCR termination and
@@ -239,7 +242,16 @@ pub fn build_frozen_input(
             completed_image_keys: completed_images,
             complete: true,
         };
-        frozen.documents.push(json!({"document_id":document.document_id,"document_revision":contract.document_revision,"parser_contract_version":parser_contract_version,"page_count":contract.page_manifest.len(),"source_contract":contract,"parse_coverage":coverage}));
+        frozen.documents.push(FrozenDocument {
+            document_id: document.document_id,
+            document_revision: contract.document_revision.clone(),
+            parser_contract_version: parser_contract_version.into(),
+            page_count: contract.page_manifest.len(),
+            role: document.role,
+            availability: DocumentAvailability::Available,
+            source_contract: Some(contract),
+            parse_coverage: Some(coverage),
+        });
         frozen.source_units.extend(ordered);
     }
     if !images.is_empty() {
@@ -270,15 +282,16 @@ fn validate_image_result(
     Ok(())
 }
 
-/// Runtime entry gate. A caller cannot label an arbitrary payload V2 and skip
+/// Runtime entry gate. A caller cannot label an arbitrary payload V3 and skip
 /// parse identity, completeness, physical coverage or mandatory OCR checks.
 pub fn validate_frozen_input_contract(input: &FrozenInput) -> Result<(), String> {
     if input.schema_version != FROZEN_SCHEMA_VERSION
         || input.project_id.trim().is_empty()
         || input.document_set_id.trim().is_empty()
     {
-        return Err("FrozenInput V2 with complete identity is required".into());
+        return Err("FrozenInput V3 with complete identity is required".into());
     }
+    input.validate_document_relations()?;
     if input.documents.is_empty() {
         return Err("frozen input has no parsed documents".into());
     }
@@ -286,19 +299,21 @@ pub fn validate_frozen_input_contract(input: &FrozenInput) -> Result<(), String>
     let mut all_units = BTreeSet::new();
     let mut table_ids = BTreeSet::new();
     for document in &input.documents {
-        let id = document["document_id"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or("frozen document identity missing")?;
+        let id = document.document_id.as_str();
+        if id.trim().is_empty() || document.availability != DocumentAvailability::Available {
+            return Err("frozen document identity or availability invalid".into());
+        }
         if !documents.insert(id) {
             return Err("duplicate frozen document".into());
         }
-        if document["parser_contract_version"].as_str() != Some(PARSER_CONTRACT_VERSION) {
+        if document.parser_contract_version != PARSER_CONTRACT_VERSION {
             return Err("unsupported parser contract version".into());
         }
-        let contract: SourceContract = serde_json::from_value(document["source_contract"].clone())
-            .map_err(|e| format!("required source contract: {e}"))?;
-        docparser::validate_glyph_normalizations(&contract).map_err(|error| error.to_string())?;
+        let contract = document
+            .source_contract
+            .as_ref()
+            .ok_or("required source contract missing")?;
+        docparser::validate_glyph_normalizations(contract).map_err(|error| error.to_string())?;
         if contract.schema_version != 2
             || contract.document_revision.len() != 64
             || !contract
@@ -306,12 +321,14 @@ pub fn validate_frozen_input_contract(input: &FrozenInput) -> Result<(), String>
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit())
             || contract.parser_version.trim().is_empty()
-            || document["document_revision"] != contract.document_revision
+            || document.document_revision != contract.document_revision
         {
             return Err("frozen source revision is invalid".into());
         }
-        let coverage: ParseCoverage = serde_json::from_value(document["parse_coverage"].clone())
-            .map_err(|e| format!("required parse coverage: {e}"))?;
+        let coverage = document
+            .parse_coverage
+            .as_ref()
+            .ok_or("required parse coverage missing")?;
         let expected = coverage
             .expected_unit_keys
             .iter()
@@ -385,7 +402,7 @@ pub fn validate_frozen_input_contract(input: &FrozenInput) -> Result<(), String>
             &independently_expected,
             &coverage.expected_unit_keys,
         )?;
-        if document["page_count"].as_u64() != Some(contract.page_manifest.len() as u64) {
+        if document.page_count != contract.page_manifest.len() {
             return Err("frozen physical page count differs from parsed inventory".into());
         }
         let required = coverage
@@ -607,6 +624,7 @@ pub fn validate_frozen_input_contract(input: &FrozenInput) -> Result<(), String>
 
 #[derive(Debug, Clone)]
 pub struct RawTenderDocument {
+    pub role: DocumentRole,
     pub document_id: String,
     pub file_name: String,
     pub bytes: Vec<u8>,
@@ -616,7 +634,7 @@ pub struct PrepareTenderInput {
     pub project_id: String,
     pub document_set_id: String,
     pub documents: Vec<RawTenderDocument>,
-    pub document_relations: Vec<Value>,
+    pub document_relations: Vec<DocumentRelation>,
     pub decisions: Vec<Value>,
     pub parser_contract_version: String,
 }
@@ -803,6 +821,7 @@ pub async fn prepare_tender_input_with(
             image_results.push(result?);
         }
         documents.push(ParsedDocument {
+            role: raw.role,
             document_id: raw.document_id,
             parsed,
         });
@@ -882,6 +901,7 @@ pub(crate) mod tests {
                 project_id: "project".into(),
                 document_set_id: "set".into(),
                 documents: vec![ParsedDocument {
+                    role: crate::analysis::DocumentRole::Unspecified,
                     document_id: "document".into(),
                     parsed,
                 }],
@@ -955,6 +975,168 @@ pub(crate) mod tests {
             "formula_cached_error"
         );
         assert_eq!(cell("H1")["display_text"], "普通文字");
+    }
+
+    pub(crate) fn related_native_input() -> FrozenInput {
+        use crate::analysis::source_manifest::*;
+        use prost::Message;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../docparser/tests/fixtures/python-related-tender-wire.json"
+        ))
+        .unwrap();
+        let mut documents = Vec::new();
+        for (key, id, role) in [
+            ("main_pdf", "main", DocumentRole::Primary),
+            ("pricing_xlsx", "pricing", DocumentRole::Supplement),
+        ] {
+            let bytes = hex::decode(fixture[key].as_str().unwrap()).unwrap();
+            let parsed = ReadResult::try_from(
+                docparser::proto::ReadResponse::decode(bytes.as_slice()).unwrap(),
+            )
+            .unwrap();
+            documents.push(ParsedDocument {
+                document_id: id.into(),
+                role,
+                parsed,
+            });
+        }
+        build_frozen_input(
+            FrozenBuildInput {
+                project_id: "project".into(),
+                document_set_id: "related-set".into(),
+                documents,
+                document_relations: vec![DocumentRelation {
+                    id: "pricing-reference".into(),
+                    from: RelationEndpoint {
+                        document_id: "main".into(),
+                        unit_id: None,
+                    },
+                    to: Some(RelationEndpoint {
+                        document_id: "pricing".into(),
+                        unit_id: None,
+                    }),
+                    kind: DocumentRelationKind::ExplicitReference,
+                    status: DocumentRelationStatus::Confirmed,
+                    required: true,
+                    basis: "pricing schedule is provided in synthetic.xlsx".into(),
+                    locator: json!({"page_ordinal":0}),
+                }],
+                decisions: vec![],
+            },
+            vec![],
+            PARSER_CONTRACT_VERSION,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn related_native_pdf_excel_selects_sources_and_keeps_split_read_dependencies() {
+        let input = related_native_input();
+        validate_frozen_input_contract(&input).unwrap();
+        assert_eq!(input.documents[0].role, DocumentRole::Primary);
+        assert!(
+            input.source_units.iter().any(
+                |source| source.document_id == "main" && source.text.contains("synthetic.xlsx")
+            )
+        );
+        let combined =
+            crate::outline::discover::plan_packs_with_budget(&input, &|_| Ok(true)).unwrap();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].document_ids, vec!["main", "pricing"]);
+        let split = crate::outline::discover::plan_packs_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        })
+        .unwrap();
+        assert_eq!(split.len(), 2);
+        let all_atoms = combined
+            .iter()
+            .flat_map(|pack| &pack.atoms)
+            .map(|atom| &atom.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            all_atoms,
+            split
+                .iter()
+                .flat_map(|pack| &pack.atoms)
+                .map(|atom| &atom.id)
+                .collect()
+        );
+        assert!(split.iter().flat_map(|pack| &pack.atoms).all(|atom| {
+            input.source_units.iter().any(|source| {
+                source.source_unit_revision_id == atom.source_unit_revision_id
+                    && source.document_id == atom.document_id
+            })
+        }));
+        let mut work =
+            crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+                Ok(sessions
+                    .iter()
+                    .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+            });
+        work.claim(work.pack_ids().len());
+        let session = work
+            .session(&input, work.pack_ids().first().unwrap())
+            .unwrap();
+        assert_eq!(
+            session["pack"]["read_dependencies"][0]["relation"]["id"],
+            "pricing-reference"
+        );
+        assert_eq!(
+            session["pack"]["read_dependencies"][0]["target_in_pack"],
+            false
+        );
+    }
+
+    #[test]
+    fn related_manifest_rejects_implicit_links_missing_sources_and_stale_sets() {
+        use crate::analysis::source_manifest::*;
+        let input = related_native_input();
+        let mut unconfirmed = input.clone();
+        unconfirmed.document_relations[0].kind = DocumentRelationKind::InferredCandidate;
+        unconfirmed.document_relations[0].status = DocumentRelationStatus::Unconfirmed;
+        assert_eq!(
+            crate::outline::discover::plan_packs_with_budget(&unconfirmed, &|_| Ok(true))
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!unconfirmed.required_relations_ready());
+        unconfirmed.document_relations[0].status = DocumentRelationStatus::Confirmed;
+        assert!(unconfirmed.validate_document_relations().is_err());
+        let mut missing = input.clone();
+        missing.document_relations[0].status = DocumentRelationStatus::Missing;
+        missing.document_relations[0].to = None;
+        assert!(!missing.required_relations_ready());
+        assert!(crate::outline::tools::template_ready(&missing, &Default::default()).is_err());
+        let mut invented = input.clone();
+        invented.document_relations[0].basis = "invented reference not in the source".into();
+        assert!(invented.validate_document_relations().is_err());
+        invented = input.clone();
+        invented.document_relations[0].locator = json!({"page_ordinal":999});
+        assert!(invented.validate_document_relations().is_err());
+        let mut duplicate = input.clone();
+        duplicate.documents.push(duplicate.documents[0].clone());
+        assert!(duplicate.validate_document_relations().is_err());
+        let mut member = serde_json::to_value(&input.documents[0]).unwrap();
+        member.as_object_mut().unwrap().remove("role");
+        assert!(serde_json::from_value::<FrozenDocument>(member).is_err());
+        let mut other_set = input.clone();
+        other_set.document_set_id = "other-set".into();
+        assert_ne!(
+            crate::outline::evidence::input_digest(&input).unwrap(),
+            crate::outline::evidence::input_digest(&other_set).unwrap()
+        );
+        assert_eq!(
+            input.source_units[0].source_unit_revision_id,
+            other_set.source_units[0].source_unit_revision_id
+        );
+        let work = crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|_| Ok(true));
+        assert!(
+            work.session(&other_set, work.pack_ids().first().unwrap())
+                .is_err()
+        );
     }
 
     pub(crate) fn python_fixture_input(index: usize) -> FrozenInput {
@@ -1048,6 +1230,7 @@ pub(crate) mod tests {
                 "required image OCR has not been authorized or completed"
             );
             documents.push(ParsedDocument {
+                role: crate::analysis::DocumentRole::Unspecified,
                 document_id: format!("document-{index}"),
                 parsed,
             });
@@ -1093,7 +1276,15 @@ pub(crate) mod tests {
         }
         for (document, receipt) in input.documents.iter().zip(&glyph_receipts) {
             assert!(
-                document["source_contract"]["glyph_normalizations"] == *receipt,
+                serde_json::to_value(
+                    &document
+                        .source_contract
+                        .as_ref()
+                        .unwrap()
+                        .glyph_normalizations
+                )
+                .unwrap()
+                    == *receipt,
                 "glyph provenance changed during freezing"
             );
         }
@@ -1160,13 +1351,13 @@ pub(crate) mod tests {
                 work.pack_evidence(&input, pack["id"].as_str().unwrap())
                     .unwrap(),
             );
-            let document = pack["document_id"].as_str().unwrap();
-            let document_order = input
-                .documents
-                .iter()
-                .position(|row| row["document_id"] == document)
-                .unwrap();
             for atom in pack["atoms"].as_array().unwrap() {
+                let document = atom["document_id"].as_str().unwrap();
+                let document_order = input
+                    .documents
+                    .iter()
+                    .position(|row| row.document_id == document)
+                    .unwrap();
                 if atom["context_only"] == true {
                     continue;
                 }
@@ -1295,7 +1486,7 @@ pub(crate) mod tests {
             .map(|s| s.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ocr, vec!["OCR 1", "OCR 2", "OCR 3"]);
-        assert_eq!(frozen.documents[0]["page_count"], 3);
+        assert_eq!(frozen.documents[0].page_count, 3);
     }
     #[test]
     fn freeze_rejects_missing_partial_or_truncated_ocr() {
@@ -1361,12 +1552,9 @@ pub(crate) mod tests {
     fn frozen_validation_rejects_coordinated_source_and_coverage_deletion() {
         let mut frozen = native_office_fixture_input(0);
         frozen.source_units.pop();
-        for field in ["expected_unit_keys", "published_unit_keys"] {
-            frozen.documents[0]["parse_coverage"][field]
-                .as_array_mut()
-                .unwrap()
-                .pop();
-        }
+        let coverage = frozen.documents[0].parse_coverage.as_mut().unwrap();
+        coverage.expected_unit_keys.pop();
+        coverage.published_unit_keys.pop();
         assert!(
             validate_frozen_input_contract(&frozen)
                 .unwrap_err()
@@ -1376,11 +1564,16 @@ pub(crate) mod tests {
     #[test]
     fn frozen_validation_rechecks_glyph_provenance_before_registration() {
         let mut frozen = python_fixture_input(0);
-        frozen.documents[0]["source_contract"]["glyph_normalizations"] = json!([{
+        frozen.documents[0]
+            .source_contract
+            .as_mut()
+            .unwrap()
+            .glyph_normalizations = serde_json::from_value(json!([{
             "page_ordinal":0,"char_index":0,"raw_symbol":"\u{f052}","normalized_symbol":"wrong",
             "font_name":"Wingdings 2","font_sha256":"a".repeat(64),"glyph_name":"boxcheck",
             "left":0.0,"bottom":0.0,"right":10.0,"top":10.0,"page_width":300.0,"page_height":300.0
-        }]);
+        }]))
+        .unwrap();
         assert!(
             validate_frozen_input_contract(&frozen)
                 .unwrap_err()
@@ -1398,9 +1591,11 @@ pub(crate) mod tests {
                 .contains("grid differs")
         );
         let mut pdf = python_fixture_input(0);
-        pdf.documents[0]["source_contract"]["page_manifest"]
-            .as_array_mut()
+        pdf.documents[0]
+            .source_contract
+            .as_mut()
             .unwrap()
+            .page_manifest
             .remove(1);
         assert!(validate_frozen_input_contract(&pdf).is_err());
     }
@@ -1520,6 +1715,7 @@ pub(crate) mod tests {
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![RawTenderDocument {
+                role: crate::analysis::DocumentRole::Unspecified,
                 document_id: "document".into(),
                 file_name: "fixture.pdf".into(),
                 bytes: b"raw parser input".to_vec(),
@@ -1547,7 +1743,7 @@ pub(crate) mod tests {
             vec!["OCR 1", "OCR 2", "OCR 3"]
         );
         assert_eq!(
-            frozen.documents[0]["document_revision"],
+            frozen.documents[0].document_revision,
             hex::encode(Sha256::digest(b"raw parser input"))
         );
     }

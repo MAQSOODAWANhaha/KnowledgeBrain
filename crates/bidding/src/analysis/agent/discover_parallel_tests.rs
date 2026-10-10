@@ -1005,3 +1005,719 @@ fn worker_image_credit_validates_exact_bytes_atomically_and_requires_received() 
         );
     }
 }
+
+struct RelatedCycleModel {
+    cycle: CycleModel,
+    saw_attachment: AtomicBool,
+    form_step: AtomicUsize,
+}
+#[async_trait]
+impl Model for RelatedCycleModel {
+    async fn turn(&self, config: &Config, bytes: &[u8]) -> Result<ChatTurn, AgentError> {
+        let body: Value = serde_json::from_slice(bytes).unwrap();
+        let payloads = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .collect::<Vec<_>>();
+        let scope = payloads
+            .iter()
+            .rev()
+            .find_map(|value| value["wire_scope"].as_str())
+            .unwrap();
+        if let Some(packet) = payloads
+            .iter()
+            .find(|value| value["reading_packs"].is_array())
+        {
+            let session = &packet["reading_packs"][0];
+            let dependency = &session["pack"]["read_dependencies"][0];
+            if dependency.is_object() {
+                let reads = payloads
+                    .iter()
+                    .filter(|value| value["result"]["status"] == "read_pending_delivery")
+                    .collect::<Vec<_>>();
+                let read = reads.last();
+                if read.is_none() {
+                    let refs = dependency["available_originals"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|source| source["evidence"].clone())
+                        .collect::<Vec<_>>();
+                    assert!(!refs.is_empty());
+                    return Ok(ChatTurn {
+                        content: String::new(),
+                        finish_reason: "tool_calls".into(),
+                        usage: None,
+                        tool_calls: vec![knowledge::models::ChatToolCall {
+                            id: "read-pricing".into(),
+                            name: "read_evidence".into(),
+                            arguments: json!({"wire_scope":scope,"refs":refs}).to_string(),
+                        }],
+                    });
+                }
+                let read = &read.unwrap()["result"]["read"];
+                let excerpts = read["excerpts"].as_array().unwrap();
+                let numeric = excerpts.iter().any(|excerpt| {
+                    excerpt["quote"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("15%") && text.contains("1,234.50元"))
+                });
+                let formula = excerpts.iter().any(|excerpt| {
+                    excerpt["locator"]["cells"].as_array().is_some_and(|cells| {
+                        cells.iter().any(|cell| {
+                            cell["formula"] == "=C1*(1+A1)"
+                                && cell["display_incomplete_reason"]
+                                    == "formula_cached_value_missing"
+                        })
+                    })
+                });
+                if numeric && formula {
+                    self.saw_attachment.store(true, Ordering::SeqCst);
+                }
+                let note = if numeric && formula {
+                    "Observed attachment: 15%, 1,234.50元; formula cache explicitly missing."
+                } else {
+                    "Continue the current dependency selection."
+                };
+                if let Some(cursor) = read["next_cursor"].as_str() {
+                    let generation = payloads
+                        .iter()
+                        .find_map(|value| value["generation"].as_u64())
+                        .unwrap();
+                    return Ok(ChatTurn {
+                        content: note.into(),
+                        finish_reason: "tool_calls".into(),
+                        usage: None,
+                        tool_calls: vec![knowledge::models::ChatToolCall {
+                            id: format!("read-pricing-{generation}"),
+                            name: "read_evidence".into(),
+                            arguments: json!({"wire_scope":scope,"cursor":cursor}).to_string(),
+                        }],
+                    });
+                }
+                assert_eq!(read["selection_complete"], true);
+                assert!(
+                    numeric && formula
+                        || body["messages"].as_array().unwrap().iter().any(
+                            |message| message["role"] == "assistant"
+                                && message["content"]
+                                    .to_string()
+                                    .contains("Observed attachment: 15%")
+                                && message["content"]
+                                    .to_string()
+                                    .contains("formula cache explicitly missing")
+                        )
+                );
+                let supports = session["pack"]["condition_support_options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(read["condition_support_options"].as_array().unwrap().iter())
+                    .map(|option| json!({"support_key":option["support_key"]}))
+                    .collect::<Vec<_>>();
+                let mut response = self.cycle.discover.turn(config, bytes).await?;
+                let atom = session["pack"]["atoms"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|atom| {
+                        atom["excerpts"]
+                            .as_array()
+                            .is_some_and(|excerpts| !excerpts.is_empty())
+                    })
+                    .unwrap();
+                let mut args: Value =
+                    serde_json::from_str(&response.tool_calls[0].arguments).unwrap();
+                args["requirements"] = json!([{"description":"Complete the prescribed pricing schedule using 15% and the stated currency; preserve unavailable formula results.","kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":atom["atom_key"]},"evidence":[{"evidence_key":atom["excerpts"][0]["evidence_key"]}],"condition_support":supports}]);
+                args["inspected_atom_ids"] = json!([]);
+                args["no_requirement_reason"] = Value::Null;
+                response.tool_calls[0].arguments = args.to_string();
+                return Ok(response);
+            }
+            return self.cycle.discover.turn(config, bytes).await;
+        }
+        // Bind native forms using only the visible host's current identities.
+        if self.cycle.step.load(Ordering::SeqCst) == 1 && self.form_step.load(Ordering::SeqCst) < 2
+        {
+            if self.form_step.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(ChatTurn {
+                    content: String::new(),
+                    finish_reason: "tool_calls".into(),
+                    usage: None,
+                    tool_calls: vec![knowledge::models::ChatToolCall {
+                        id: "read-pricing-forms".into(),
+                        name: "read_outline".into(),
+                        arguments: json!({"wire_scope":scope,"mode":"forms"}).to_string(),
+                    }],
+                });
+            }
+            let forms = payloads
+                .iter()
+                .rev()
+                .find_map(|value| value["result"]["items"].as_array())
+                .expect("form directory in actual request");
+            return Ok(ChatTurn {content:String::new(),finish_reason:"tool_calls".into(),usage:None,
+                tool_calls:vec![knowledge::models::ChatToolCall {id:"bind-pricing".into(),name:"bind_forms".into(),arguments:json!({"wire_scope":scope,"mode":"replace","bindings":forms.iter().map(|form|json!({"form_id":form["form_id"],"chapter_id":"synthetic"})).collect::<Vec<_>>()}).to_string()}]});
+        }
+        self.cycle.turn(config, bytes).await
+    }
+}
+
+#[tokio::test]
+async fn production_related_read_reaches_condition_support_and_fresh_check() {
+    let input = crate::outline::frozen::tests::related_native_input();
+    let config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.config_sha256 = digest(&config).unwrap();
+    state.outline_run.reading_packs = Some(
+        crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        }),
+    );
+    let journal = CycleJournal {
+        state: Mutex::new(state),
+        stop_check: AtomicBool::new(false),
+        stop_repair: AtomicBool::new(false),
+    };
+    let model = RelatedCycleModel {
+        cycle: CycleModel {
+            discover: Delayed::default(),
+            step: AtomicUsize::new(0),
+            automatic: true,
+            saw_repair_wire: AtomicBool::new(true),
+        },
+        saw_attachment: AtomicBool::new(false),
+        form_step: AtomicUsize::new(0),
+    };
+    super::super::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap();
+    let final_state = journal.load().await.unwrap().unwrap();
+    assert!(model.saw_attachment.load(Ordering::SeqCst));
+    assert!(final_state.done);
+    assert!(final_state.outline_run.tool_draft.finished);
+    let work = final_state.outline_run.reading_packs.as_ref().unwrap();
+    assert_eq!(work.requirement_records().len(), 1);
+    let requirement = work.requirement_records().values().next().unwrap();
+    assert!(requirement.condition_support.len() > 1);
+    assert!(matches!(
+        requirement.condition_support[0].origin,
+        crate::outline::discover::ConditionSupportOrigin::ConfirmedRelation { .. }
+    ));
+    assert!(
+        !final_state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .evidence
+            .is_empty()
+    );
+    let mut changed_set = input.clone();
+    changed_set.document_set_id.push_str("-replacement");
+    assert!(
+        crate::outline::tools::template_ready(&changed_set, &final_state.outline_run.tool_draft)
+            .is_err()
+    );
+}
+
+struct LongRelatedModel {
+    submit: Delayed,
+    pages: Mutex<Vec<(String, String)>>,
+}
+#[async_trait]
+impl Model for LongRelatedModel {
+    async fn turn(&self, config: &Config, bytes: &[u8]) -> Result<ChatTurn, AgentError> {
+        let body: Value = serde_json::from_slice(bytes).unwrap();
+        let count = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
+            &body,
+            &config.limits.tokenizer,
+            config.limits.image_token_reserve,
+            config.limits.token_safety_margin,
+            config.provider.output_token_reserve as usize,
+        )
+        .unwrap();
+        assert!(count.total_context_tokens <= config.limits.max_context_tokens);
+        let payloads = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .collect::<Vec<_>>();
+        let scope = payloads
+            .iter()
+            .rev()
+            .find_map(|value| value["wire_scope"].as_str())
+            .unwrap();
+        let generation = payloads
+            .iter()
+            .find_map(|value| value["generation"].as_u64())
+            .unwrap();
+        let session = &payloads
+            .iter()
+            .find(|value| value["reading_packs"].is_array())
+            .unwrap()["reading_packs"][0];
+        if session["pack"]["read_dependencies"]
+            .as_array()
+            .is_some_and(|values| !values.is_empty())
+        {
+            for message in body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "tool")
+            {
+                let value: Value =
+                    serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+                assert!(value["ok"] != false, "read failed: {value}");
+                if value["result"]["status"] == "read_pending_delivery" {
+                    let id = message["tool_call_id"].as_str().unwrap().to_string();
+                    let quote = value["result"]["read"]["excerpts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|excerpt| excerpt["quote"].as_str().unwrap())
+                        .collect::<String>();
+                    let mut pages = self.pages.lock().unwrap();
+                    if !pages.iter().any(|(seen, _)| seen == &id) {
+                        pages.push((id, quote));
+                    }
+                }
+            }
+            let read = payloads
+                .iter()
+                .rev()
+                .find(|value| value["result"]["status"] == "read_pending_delivery");
+            let args = if let Some(read) = read {
+                read["result"]["read"]["next_cursor"]
+                    .as_str()
+                    .map(|cursor| json!({"wire_scope":scope,"cursor":cursor}))
+            } else {
+                Some(
+                    json!({"wire_scope":scope,"refs":[session["pack"]["read_dependencies"][0]["available_originals"][0]["evidence"]]}),
+                )
+            };
+            if let Some(args) = args {
+                return Ok(ChatTurn {
+                    content: "Keep reading the linked source; only delivered exact ranges count."
+                        .into(),
+                    finish_reason: "tool_calls".into(),
+                    usage: None,
+                    tool_calls: vec![knowledge::models::ChatToolCall {
+                        id: format!("long-read-{generation}"),
+                        name: "read_evidence".into(),
+                        arguments: args.to_string(),
+                    }],
+                });
+            }
+        }
+        self.submit.turn(config, bytes).await
+    }
+}
+
+#[tokio::test]
+async fn production_dependency_over_small_token_window_preserves_every_utf8_byte() {
+    use crate::analysis::source_manifest::*;
+    let text =
+        "条件😀：金额百分比和截止时间必须逐段保留。Use linked source synthetic-1.\n".repeat(700);
+    let mut input =
+        super::super::token_transport_validation::synthetic_input_with_text(text.clone(), 2);
+    input.document_relations.push(DocumentRelation {
+        id: "long-attachment".into(),
+        from: RelationEndpoint {
+            document_id: "synthetic-0".into(),
+            unit_id: None,
+        },
+        to: Some(RelationEndpoint {
+            document_id: "synthetic-1".into(),
+            unit_id: None,
+        }),
+        kind: DocumentRelationKind::ExplicitReference,
+        status: DocumentRelationStatus::Confirmed,
+        required: true,
+        basis: "Use linked source synthetic-1.".into(),
+        locator: json!({"unit_id":"section"}),
+    });
+    let mut config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.outline_run.reading_packs = Some(
+        crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        }),
+    );
+    state.outline_run.reading_packs.as_mut().unwrap().claim(2);
+    state
+        .outline_run
+        .discover_workers
+        .insert("pack-0".into(), Worker::default());
+    let journal = Durable {
+        state: Mutex::new(state.clone()),
+        stop_barrier: true,
+        crash_received: AtomicBool::new(false),
+        call_limit: 50,
+    };
+    let cancel = CancellationToken::new();
+    let mut probe_state = state.clone();
+    let mut probe = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut probe_state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let baseline = probe.prepare_inner("pack-0", false).await.unwrap();
+    config.limits.max_context_tokens =
+        baseline.input_reserve as usize + baseline.output_reserve as usize + 4096;
+    state.config_sha256 = digest(&config).unwrap();
+    *journal.state.lock().unwrap() = state;
+    let model = LongRelatedModel {
+        submit: Delayed::default(),
+        pages: Mutex::new(Vec::new()),
+    };
+    let outcome = super::super::run(&input, &config, &journal, &model, &cancel)
+        .await
+        .unwrap_err();
+    assert_eq!(outcome.code, "TEST_ALL_PACKS_BARRIER");
+    {
+        let pages = model.pages.lock().unwrap();
+        assert!(
+            pages.len() > 2,
+            "fixture must cross multiple token-admitted pages"
+        );
+        assert_eq!(
+            pages
+                .iter()
+                .map(|(_, quote)| quote.as_str())
+                .collect::<String>(),
+            text
+        );
+    }
+    let restored = journal.load().await.unwrap().unwrap();
+    assert!(
+        restored
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .complete()
+    );
+    assert!(
+        restored.outline_run.discover_workers["pack-0"]
+            .related_continuations
+            .is_empty()
+    );
+}
+
+#[test]
+fn related_read_credit_rejects_unknown_stale_foreign_and_modified_requests_atomically() {
+    use crate::outline::evidence::{EvidenceRef, input_digest};
+    let input = crate::outline::frozen::tests::related_native_input();
+    let mut state = super::super::retirement::checkpoint(&input);
+    let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    work.claim(2);
+    let id = "pack-0";
+    let identity = work.pack_wire_identity(id).unwrap();
+    let source = input
+        .source_units
+        .iter()
+        .find(|source| source.document_id == "pricing" && source.text.contains("15%"))
+        .unwrap();
+    let reference = EvidenceRef::Text {
+        input_digest: input_digest(&input).unwrap(),
+        unit_id: source.source_unit_revision_id.clone(),
+        start_byte: 0,
+        end_byte: source.text.len(),
+    };
+    let (page, options) = work.related_read(&input, id, &[reference]).unwrap();
+    let body = json!({"messages":[{"role":"tool","tool_call_id":"dependent-original","content":page.to_string()}]});
+    let request = Request {
+        scope: Scope {
+            run: identity["run"].as_str().unwrap().into(),
+            pack: id.into(),
+            revision: 1,
+            generation: 1,
+            request: "related-request".into(),
+        },
+        body: serde_json::to_vec(&body).unwrap(),
+        input_reserve: 1,
+        output_reserve: 1,
+    };
+    let response = json!({"content":"","finish_reason":"tool_calls","usage":null,"tool_calls":[{"id":"submit","name":"submit_pack","arguments":"{}"}]});
+    let frame = coordinator::RelatedReadFrame {
+        call_id: "dependent-original".into(),
+        pack_revision: 1,
+        input_digest: input_digest(&input).unwrap(),
+        options: options.clone(),
+        sealed_sha256: crate::outline::read_receipts::wire_hash(&body, "dependent-original")
+            .unwrap(),
+    };
+    state.outline_run.reading_packs = Some(work);
+    state.outline_run.discover_workers.insert(
+        id.into(),
+        Worker {
+            pending: Some(Pending::Received {
+                request: request.clone(),
+                response: response.clone(),
+            }),
+            related_read_frames: vec![frame],
+            ..Default::default()
+        },
+    );
+    for mode in [
+        "unknown",
+        "incomplete",
+        "modified",
+        "missing",
+        "run",
+        "revision",
+        "input",
+        "foreign",
+        "atomic",
+    ] {
+        let mut candidate = state.clone();
+        let mut req = request.clone();
+        match mode {
+            "unknown" => {
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut(id)
+                    .unwrap()
+                    .pending = Some(Pending::Sending {
+                    request: req.clone(),
+                })
+            }
+            "incomplete" => {
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut(id)
+                    .unwrap()
+                    .pending = Some(Pending::Received {
+                    request: req.clone(),
+                    response: json!({"content":"","finish_reason":"length","usage":null,"tool_calls":[]}),
+                })
+            }
+            "modified" | "missing" => {
+                let mut value = body.clone();
+                if mode == "modified" {
+                    value["messages"][0]["content"] = json!("changed");
+                } else {
+                    value["messages"] = json!([]);
+                }
+                req.body = serde_json::to_vec(&value).unwrap();
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut(id)
+                    .unwrap()
+                    .pending = Some(Pending::Received {
+                    request: req.clone(),
+                    response: response.clone(),
+                });
+            }
+            "run" | "revision" => {
+                if mode == "run" {
+                    req.scope.run.push('x');
+                } else {
+                    req.scope.revision += 1;
+                }
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut(id)
+                    .unwrap()
+                    .pending = Some(Pending::Received {
+                    request: req.clone(),
+                    response: response.clone(),
+                });
+            }
+            "input" => candidate
+                .outline_run
+                .discover_workers
+                .get_mut(id)
+                .unwrap()
+                .related_read_frames[0]
+                .input_digest
+                .push('x'),
+            "foreign" => {
+                req.scope.pack = "pack-1".into();
+                let mut worker = candidate.outline_run.discover_workers[id].clone();
+                worker.pending = Some(Pending::Received {
+                    request: req.clone(),
+                    response: response.clone(),
+                });
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .insert("pack-1".into(), worker);
+            }
+            "atomic" => {
+                let worker = candidate.outline_run.discover_workers.get_mut(id).unwrap();
+                let mut invalid = worker.related_read_frames[0].clone();
+                invalid.input_digest.push('x');
+                worker.related_read_frames.push(invalid);
+            }
+            _ => unreachable!(),
+        }
+        let before = json!(candidate.outline_run.reading_packs);
+        let result = confirm_worker_related_reads(&input, &mut candidate, &req);
+        assert_eq!(
+            json!(candidate.outline_run.reading_packs),
+            before,
+            "{mode}: unauthorized credit"
+        );
+        if !matches!(mode, "modified" | "missing") {
+            assert!(result.is_err(), "{mode}");
+        }
+    }
+    confirm_worker_related_reads(&input, &mut state, &request).unwrap();
+    assert!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .related_read_already_delivered(id, &options)
+    );
+    assert!(
+        state.outline_run.discover_workers[id]
+            .related_read_frames
+            .is_empty()
+    );
+    assert!(
+        !state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .related_read_already_delivered("pack-1", &options)
+    );
+    assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+}
+
+#[tokio::test]
+async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
+    let input = crate::outline::frozen::tests::related_native_input();
+    let config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    work.claim(2);
+    let identity = work.pack_wire_identity("pack-0").unwrap();
+    let source = input
+        .source_units
+        .iter()
+        .find(|source| source.document_id == "pricing" && !source.text.is_empty())
+        .unwrap();
+    let continuation = coordinator::RelatedContinuation {
+        run: identity["run"].as_str().unwrap().into(),
+        pack: "pack-0".into(),
+        pack_revision: 1,
+        input_digest: crate::outline::evidence::input_digest(&input).unwrap(),
+        refs: vec![crate::outline::evidence::EvidenceRef::Text {
+            input_digest: crate::outline::evidence::input_digest(&input).unwrap(),
+            unit_id: source.source_unit_revision_id.clone(),
+            start_byte: 0,
+            end_byte: source.text.len(),
+        }],
+    };
+    let cursor = format!(
+        "page_{}",
+        crate::outline::canonical_sha256(&continuation).unwrap()
+    );
+    state.outline_run.reading_packs = Some(work);
+    state.outline_run.discover_workers.insert(
+        "pack-0".into(),
+        Worker {
+            related_continuations: std::collections::BTreeMap::from([(
+                cursor.clone(),
+                continuation,
+            )]),
+            ..Default::default()
+        },
+    );
+    let request = Request {
+        scope: Scope {
+            run: identity["run"].as_str().unwrap().into(),
+            pack: "pack-0".into(),
+            revision: 1,
+            generation: 1,
+            request: "cursor-read".into(),
+        },
+        body: vec![],
+        input_reserve: 1,
+        output_reserve: 1,
+    };
+    let response = ChatTurn {
+        content: String::new(),
+        finish_reason: "tool_calls".into(),
+        usage: None,
+        tool_calls: vec![knowledge::models::ChatToolCall {
+            id: "cursor".into(),
+            name: "read_evidence".into(),
+            arguments: "{}".into(),
+        }],
+    };
+    let journal = Durable {
+        state: Mutex::new(state.clone()),
+        stop_barrier: false,
+        crash_received: AtomicBool::new(false),
+        call_limit: 0,
+    };
+    let cancel = CancellationToken::new();
+    for mode in ["tampered-key", "run", "worker", "revision", "input"] {
+        let mut candidate = state.clone();
+        let mut key = cursor.clone();
+        if mode == "tampered-key" {
+            key.push('x');
+        } else {
+            let saved = candidate
+                .outline_run
+                .discover_workers
+                .get_mut("pack-0")
+                .unwrap()
+                .related_continuations
+                .get_mut(&key)
+                .unwrap();
+            match mode {
+                "run" => saved.run.push('x'),
+                "worker" => saved.pack = "pack-1".into(),
+                "revision" => saved.pack_revision += 1,
+                "input" => saved.input_digest.push('x'),
+                _ => unreachable!(),
+            }
+        }
+        let before = json!(candidate.outline_run.discover_workers);
+        let mut host = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut candidate,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        assert!(
+            host.related_page(&request, &response, &json!({"cursor":key}))
+                .await
+                .is_err(),
+            "{mode}"
+        );
+        assert_eq!(json!(candidate.outline_run.discover_workers), before);
+    }
+}

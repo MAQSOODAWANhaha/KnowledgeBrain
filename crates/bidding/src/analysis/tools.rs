@@ -40,7 +40,9 @@ fn form<'a>(input: &'a FrozenInput, id: &str) -> Result<&'a Value, String> {
 }
 
 pub fn validate_input(input: &FrozenInput) -> Result<(), String> {
-    if input.schema_version != 2 || input.document_set_id.is_empty() {
+    if input.schema_version != crate::outline::frozen::FROZEN_SCHEMA_VERSION
+        || input.document_set_id.is_empty()
+    {
         return Err("invalid frozen analysis identity".into());
     }
     let ids: BTreeSet<_> = input
@@ -711,12 +713,12 @@ fn readable_relation_prose(value: &str, path: &str) -> Result<(), String> {
 pub fn reading_gaps(input: &FrozenInput, coverage: &Coverage) -> Vec<Value> {
     let mut gaps = Vec::new();
     for (kind, values) in [
-        ("documents", &input.documents),
-        ("document_relations", &input.document_relations),
-        ("decisions", &input.decisions),
+        ("documents", input.documents.len()),
+        ("document_relations", input.document_relations.len()),
+        ("decisions", input.decisions.len()),
     ] {
-        if !values.is_empty() && !contains(coverage.metadata.get(kind), 0, values.len()) {
-            gaps.push(json!({"kind":"unread_metadata","collection":kind,"total":values.len()}));
+        if values > 0 && !contains(coverage.metadata.get(kind), 0, values) {
+            gaps.push(json!({"kind":"unread_metadata","collection":kind,"total":values}));
         }
     }
     for s in &input.source_units {
@@ -1292,12 +1294,7 @@ fn execute(
         "collection_index" => {
             object(args, &["kind", "offset", "limit"])?;
             let kind = string(args, "kind")?;
-            let values = match kind {
-                "documents" => &input.documents,
-                "document_relations" => &input.document_relations,
-                "decisions" => &input.decisions,
-                _ => return Err("unknown collection".into()),
-            };
+            let values = input.metadata_collection(kind)?;
             let start = number(args, "offset")?;
             let limit = number(args, "limit")?.min(max_bytes);
             if start > values.len() || limit == 0 {

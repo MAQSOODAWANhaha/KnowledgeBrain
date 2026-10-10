@@ -23,7 +23,7 @@ const RETIRED: &[&str] = &[
 
 fn input() -> FrozenInput {
     FrozenInput {
-        schema_version: 2,
+        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
         project_id: "project".into(),
         document_set_id: "set".into(),
         documents: vec![],
@@ -302,7 +302,7 @@ fn span(end: usize) -> Span {
 /// A scanned outline whose old `finish_outline` would move phase to `check`.
 fn finishable_old_outline() -> (FrozenInput, Checkpoint) {
     let input = FrozenInput {
-        schema_version: 2,
+        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
         project_id: "p".into(),
         document_set_id: "d".into(),
         documents: vec![],

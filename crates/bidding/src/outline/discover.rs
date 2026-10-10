@@ -53,6 +53,8 @@ pub enum PackCarrier {
 #[serde(deny_unknown_fields)]
 pub struct PackAtom {
     pub id: String,
+    pub document_id: String,
+    pub source_unit_revision_id: String,
     pub section_id: String,
     pub heading_path: String,
     pub unit_ordinal: usize,
@@ -68,7 +70,7 @@ pub struct ParsePack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) condition_support_options: Vec<ConditionSupport>,
     pub id: String,
-    pub document_id: String,
+    pub document_ids: Vec<String>,
     pub input_digest: String,
     pub order: usize,
     pub pack_revision: u64,
@@ -161,10 +163,17 @@ struct WireBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConditionSupport {
-    pub source_requirement_id: String,
+    pub origin: ConditionSupportOrigin,
     pub review_version: String,
     pub evidence: Vec<EvidenceRef>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConditionSupportOrigin {
+    ReviewedRequirement { requirement_id: String },
+    ConfirmedRelation { relation_id: String },
+}
+
 fn support_key(pack: &ParsePack, support: &ConditionSupport) -> Result<String, String> {
     Ok(format!(
         "cs_{}",
@@ -222,6 +231,8 @@ pub struct PackSubmit {
     pub no_requirement_reason: Option<String>,
     pub inspected_atom_ids: Vec<String>,
 }
+
+const SUBMISSION_INSTRUCTION: &str = "Copy the current short claim_token and submission_operation_id exactly. They are opaque host-issued handles. A rejected submission is not committed. Read all owned atoms and extract actual response obligations. Only genuinely no obligations permits an empty requirements array, with a specific reason and every owned atom_key inspected; never invent a reason or inspection.";
 
 impl DiscoverWork {
     pub fn plan_with_budget(input: &FrozenInput, fits: &SessionFits<'_>) -> Self {
@@ -939,6 +950,136 @@ impl DiscoverWork {
             .collect();
         Ok(())
     }
+    /// Build read output without granting any credit. The host must confirm
+    /// exact response delivery in this worker's own completed request first.
+    pub(crate) fn related_read(
+        &self,
+        input: &FrozenInput,
+        pack_id: &str,
+        refs: &[EvidenceRef],
+    ) -> Result<(Value, Vec<ConditionSupport>), String> {
+        use crate::analysis::source_manifest::{DocumentRelationKind, DocumentRelationStatus};
+        input.validate_document_relations()?;
+        if refs.is_empty() || input_digest(input)? != self.input_digest {
+            return Err("related read needs current nonempty evidence".into());
+        }
+        let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
+        let excerpts = resolve_evidence(input, refs)?;
+        let mut grouped = BTreeMap::<String, Vec<EvidenceRef>>::new();
+        for reference in refs {
+            let unit_id = match reference {
+                EvidenceRef::Text { unit_id, .. } => unit_id.as_str(),
+                EvidenceRef::GridCell { table_id, .. } => input
+                    .structured_forms
+                    .iter()
+                    .find(|form| form["form_definition_revision_id"] == *table_id)
+                    .and_then(|form| form["source_unit_revision_id"].as_str())
+                    .ok_or("related table owner missing")?,
+                EvidenceRef::ImageRegion { .. } => {
+                    return Err("related image needs original pixel delivery".into());
+                }
+            };
+            let source = input
+                .source_units
+                .iter()
+                .find(|source| source.source_unit_revision_id == unit_id)
+                .ok_or("related source missing")?;
+            let relation = input
+                .document_relations
+                .iter()
+                .find(|relation| {
+                    relation.kind == DocumentRelationKind::ExplicitReference
+                        && relation.status == DocumentRelationStatus::Confirmed
+                        && pack.atoms.iter().any(|atom| {
+                            atom.document_id == relation.from.document_id
+                                && relation.from.unit_id.as_ref().is_none_or(|key| {
+                                    input.source_units.iter().any(|source| {
+                                        source.source_unit_revision_id
+                                            == atom.source_unit_revision_id
+                                            && source.locator["unit_id"] == *key
+                                    })
+                                })
+                        })
+                        && relation.to.as_ref().is_some_and(|target| {
+                            target.document_id == source.document_id
+                                && target
+                                    .unit_id
+                                    .as_ref()
+                                    .is_none_or(|key| source.locator["unit_id"] == *key)
+                        })
+                })
+                .ok_or("source is not an explicitly confirmed dependency of this pack")?;
+            grouped
+                .entry(relation.id.clone())
+                .or_default()
+                .push(reference.clone());
+        }
+        let options = grouped
+            .into_iter()
+            .map(|(relation_id, evidence)| {
+                Ok(ConditionSupport {
+                    review_version: super::canonical_sha256(&(
+                        &self.input_digest,
+                        &self.run_scope,
+                        pack_id,
+                        pack.pack_revision,
+                        &relation_id,
+                        &evidence,
+                    ))?,
+                    origin: ConditionSupportOrigin::ConfirmedRelation { relation_id },
+                    evidence,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let handles = options
+            .iter()
+            .map(|option| {
+                Ok(json!({"support_key":support_key(pack, option)?,"origin":option.origin}))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((
+            json!({"excerpts":excerpts,"condition_support_options":handles,"delivery_policy":"These options become usable only after this exact read output is delivered in a completed request for the same worker."}),
+            options,
+        ))
+    }
+
+    pub(crate) fn related_read_already_delivered(
+        &self,
+        pack_id: &str,
+        options: &[ConditionSupport],
+    ) -> bool {
+        self.packs.get(pack_id).is_some_and(|record| {
+            !options.is_empty()
+                && options
+                    .iter()
+                    .all(|option| record.pack.condition_support_options.contains(option))
+        })
+    }
+
+    pub(crate) fn confirm_related_read(
+        &mut self,
+        input: &FrozenInput,
+        pack_id: &str,
+        options: &[ConditionSupport],
+    ) -> Result<(), String> {
+        for option in options {
+            let (_, current) = self.related_read(input, pack_id, &option.evidence)?;
+            if !current.contains(option) {
+                return Err("stale related read scope".into());
+            }
+        }
+        let record = self.packs.get_mut(pack_id).ok_or("unknown pack")?;
+        if record.status != PackStatus::Running {
+            return Err("related reader is not running".into());
+        }
+        for option in options {
+            if !record.pack.condition_support_options.contains(option) {
+                record.pack.condition_support_options.push(option.clone());
+            }
+        }
+        Ok(())
+    }
+
     pub fn session(&self, input: &FrozenInput, pack_id: &str) -> Result<Value, String> {
         let record = self
             .packs
@@ -962,9 +1103,7 @@ impl DiscoverWork {
         let (claim, operation) = self.model_handles(pack_id)?;
         session["pack"]["claim_token"] = json!(claim);
         session["submission_operation_id"] = json!(operation);
-        session["submission_instruction"] = json!(
-            "Copy the current short claim_token and submission_operation_id exactly. They are opaque host-issued handles. A rejected submission is not committed. Read all owned atoms and extract actual response obligations. Only genuinely no obligations permits an empty requirements array, with a specific reason and every owned atom_key inspected; never invent a reason or inspection."
-        );
+        session["submission_instruction"] = json!(SUBMISSION_INSTRUCTION);
         Ok(session)
     }
     /// Recheck the caller's complete request token policy before transport.
@@ -1163,6 +1302,12 @@ fn claim_record(record: &mut PackRecord, repair: bool) {
     record.attempt += 1;
     if repair {
         record.pack.pack_revision += 1;
+        record.pack.condition_support_options.retain(|option| {
+            matches!(
+                option.origin,
+                ConditionSupportOrigin::ReviewedRequirement { .. }
+            )
+        });
     }
     record.pack.claim_token = claim_token(&record.pack, record.attempt, repair);
     record.status = PackStatus::Running;
@@ -1531,6 +1676,32 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
     for atom in &pack.atoms {
         let mut rendered = serde_json::to_value(atom).map_err(|e| e.to_string())?;
         rendered["atom_key"] = json!(atom_key(pack, atom)?);
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| {
+                source.source_unit_revision_id == atom.source_unit_revision_id
+                    && source.document_id == atom.document_id
+            })
+            .ok_or("pack atom source ownership mismatch")?;
+        let mut native = source.locator.clone();
+        if let Some(object) = native.as_object_mut() {
+            object.remove("cells");
+            object.remove("rendered_spans");
+            if let Some(physical) = object
+                .get_mut("physical_locator")
+                .and_then(Value::as_object_mut)
+            {
+                physical.remove("cells");
+            }
+        }
+        rendered["source_identity"] = json!({
+            "document_id":source.document_id,
+            "document_revision":source.locator["document_revision"],
+            "parser_version":source.locator["parser_version"],
+            "source_unit_revision_id":source.source_unit_revision_id,
+            "native_locator":native
+        });
         match &atom.carrier {
             PackCarrier::Text { .. } | PackCarrier::Image { .. } => {
                 if matches!(&atom.carrier, PackCarrier::Image { .. }) {
@@ -1571,9 +1742,33 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
         }
         atoms.push(rendered);
     }
-    let supports=pack.condition_support_options.iter().map(|option|Ok(json!({"support_key":support_key(pack,option)?,"type":"external_condition_support","source_requirement_id":option.source_requirement_id,"review_version":option.review_version,"excerpts":resolve_evidence(input,&option.evidence)?}))).collect::<Result<Vec<_>,String>>()?;
+    let supports = pack.condition_support_options.iter().map(|option| {
+        let mut value = json!({"support_key":support_key(pack,option)?,"type":"external_condition_support","origin":option.origin,"review_version":option.review_version});
+        match option.origin {
+            ConditionSupportOrigin::ReviewedRequirement { .. } => value["excerpts"] = json!(resolve_evidence(input,&option.evidence)?),
+            ConditionSupportOrigin::ConfirmedRelation { .. } => {
+                value["delivered_evidence"] = json!(option.evidence);
+                value["reading_status"] = json!("Original ranges were delivered to this worker; use read_evidence to reread as needed. These are not fresh Check receipts.");
+            }
+        }
+        Ok(value)
+    }).collect::<Result<Vec<_>,String>>()?;
+    let read_dependencies = input.document_relations.iter()
+        .filter(|relation| pack.document_ids.contains(&relation.from.document_id))
+        .map(|relation| json!({"relation":relation,
+            "target_in_pack":relation.to.as_ref().is_some_and(|target| pack.document_ids.contains(&target.document_id)),
+            "available_originals": if relation.kind == crate::analysis::source_manifest::DocumentRelationKind::ExplicitReference
+                && relation.status == crate::analysis::source_manifest::DocumentRelationStatus::Confirmed {
+                input.source_units.iter().filter(|source| !source.text.is_empty() && relation.to.as_ref().is_some_and(|target|
+                    source.document_id == target.document_id && target.unit_id.as_ref().is_none_or(|key| source.locator["unit_id"] == *key)))
+                    .map(|source| json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
+                        "evidence":EvidenceRef::Text { input_digest:pack.input_digest.clone(), unit_id:source.source_unit_revision_id.clone(), start_byte:0, end_byte:source.text.len() }}))
+                    .collect::<Vec<_>>()
+            } else { vec![] },
+            "read_policy":"Read original target atoms in their own planned packs when not present here. Relation metadata grants no source-reading or semantic-review credit."}))
+        .collect::<Vec<_>>();
     Ok(
-        json!({"condition_support_options":supports,"id":pack.id,"document_id":pack.document_id,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
+        json!({"read_dependencies":read_dependencies,"condition_support_options":supports,"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
     )
 }
 
@@ -1719,7 +1914,7 @@ mod tests {
     }
     fn input(sources: Vec<Source>, forms: Vec<Value>) -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "set".into(),
             documents: vec![],
@@ -1846,7 +2041,13 @@ mod tests {
                 json!({"source_unit_revision_id":"t","form_definition_revision_id":"table","definition":{"row_count":1,"column_count":1,"cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":original}]}}),
             ],
         );
-        let mut work = DiscoverWork::plan(&input, 2048);
+        let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+            // The planner must budget the same instruction that the claimed session sends.
+            for session in sessions {
+                assert_eq!(session["submission_instruction"], SUBMISSION_INSTRUCTION);
+            }
+            test_sessions_fit(sessions, 2048)
+        });
         let packs = work.claim(100);
         let mut covered = String::new();
         for (n, pack) in packs.iter().enumerate() {
@@ -2237,12 +2438,12 @@ mod tests {
         second.document_id = "a-document".into();
         let mut input = input(vec![second, first], vec![]);
         input.documents = vec![
-            json!({"document_id":"z-document"}),
-            json!({"document_id":"a-document"}),
+            crate::analysis::FrozenDocument::fixture("z-document"),
+            crate::analysis::FrozenDocument::fixture("a-document"),
         ];
         let packs = plan_packs(&input, 8192).unwrap();
-        assert_eq!(packs[0].document_id, "z-document");
-        assert_eq!(packs[1].document_id, "a-document");
+        assert_eq!(packs[0].document_ids, vec!["z-document"]);
+        assert_eq!(packs[1].document_ids, vec!["a-document"]);
     }
     #[test]
     fn oversized_requirement_is_preserved_for_runtime_continuation() {

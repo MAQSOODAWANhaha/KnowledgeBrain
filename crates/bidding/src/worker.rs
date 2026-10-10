@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn registration_sha_accepts_only_the_canonical_digest() {
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: Uuid::from_u128(0x2222).to_string(),
             document_set_id: String::new(),
             documents: vec![],

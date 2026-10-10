@@ -382,7 +382,7 @@ fn condition_support_keys_are_separate_from_owned_evidence_and_revision_bound() 
     let external=text_ref(&input,"b",0,"外部条件".len());
     pack.atoms.retain(|atom| !atom_scope(atom,&pack.input_digest,true).contains(&external));
     let before=pack_scope(&pack,true);
-    let option=ConditionSupport{source_requirement_id:"pack-0:0".into(),review_version:"checked-version".into(),evidence:vec![external.clone()]};
+    let option=ConditionSupport{origin:ConditionSupportOrigin::ReviewedRequirement{requirement_id:"pack-0:0".into()},review_version:"checked-version".into(),evidence:vec![external.clone()]};
     pack.condition_support_options.push(option.clone());let key=support_key(&pack,&option).unwrap();
     let selected_atom=atom_key(&pack,&pack.atoms[0]).unwrap();
     let make=|key:&str|json!({"requirements":[{"source_section_id":{"atom_key":selected_atom},"evidence":[],"condition_support":[{"support_key":key}]}]});

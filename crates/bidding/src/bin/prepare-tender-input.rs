@@ -17,13 +17,14 @@ struct Manifest {
     project_id: Uuid,
     document_set_id: String,
     documents: Vec<Document>,
-    document_relations: Vec<Value>,
+    document_relations: Vec<bidding::analysis::DocumentRelation>,
     decisions: Vec<Value>,
     parser_contract_version: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
+    role: bidding::analysis::DocumentRole,
     document_id: String,
     file_path: PathBuf,
 }
@@ -68,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("source filename must be UTF-8")?
             .to_string();
         documents.push(RawTenderDocument {
+            role: document.role,
             document_id: document.document_id,
             file_name,
             bytes,

@@ -286,14 +286,17 @@ fn validate_prepared_manifest(
         required.insert("frozen-json".into());
     }
     for document in &input.documents {
-        let id = document["document_id"]
-            .as_str()
-            .ok_or("frozen document has no identity")?;
+        let id = document.document_id.as_str();
+        if id.trim().is_empty() {
+            return Err("frozen document has no identity".into());
+        }
         let occurrence = source_occurrence(id);
         if objects.get(&occurrence).is_none_or(|object| {
-            document["document_revision"].as_str() != Some(object.digest.as_str())
-                || document["source_contract"]["document_revision"].as_str()
-                    != Some(object.digest.as_str())
+            document.document_revision != object.digest
+                || document
+                    .source_contract
+                    .as_ref()
+                    .is_none_or(|contract| contract.document_revision != object.digest)
         }) {
             return Err("frozen document revision differs from staged source bytes".into());
         }
@@ -372,11 +375,18 @@ mod prepared_manifest_tests {
         let expected = platform::sha256_hex(expected_bytes);
         let different = platform::sha256_hex(different_bytes);
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: Uuid::new_v4().to_string(),
             document_set_id: "set".into(),
-            documents: vec![json!({"document_id":"doc","document_revision":expected,
-                "source_contract":{"document_revision":expected}})],
+            documents: vec![{
+                let mut document = crate::outline::frozen::tests::python_fixture_input(0)
+                    .documents
+                    .remove(0);
+                document.document_id = "doc".into();
+                document.document_revision = expected.clone();
+                document.source_contract.as_mut().unwrap().document_revision = expected.clone();
+                document
+            }],
             document_relations: vec![],
             source_units: vec![],
             structured_forms: vec![],
@@ -405,7 +415,11 @@ mod prepared_manifest_tests {
         object.byte_length = expected_bytes.len() as i64;
         assert!(validate_prepared_manifest(&input, &objects).is_ok());
         let mut forged = input;
-        forged.documents[0]["source_contract"]["document_revision"] = json!("0".repeat(64));
+        forged.documents[0]
+            .source_contract
+            .as_mut()
+            .unwrap()
+            .document_revision = "0".repeat(64);
         assert!(validate_prepared_manifest(&forged, &objects).is_err());
     }
 }

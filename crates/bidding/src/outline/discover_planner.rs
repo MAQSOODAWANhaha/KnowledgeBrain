@@ -49,7 +49,8 @@ fn grid_carrier(def: &Value, table: &str) -> Result<PackCarrier, String> {
 fn source_units(input: &FrozenInput, digest: &str) -> Result<Vec<Unit>, String> {
     let mut document_order = BTreeMap::new();
     for document in &input.documents {
-        if let Some(id) = document["document_id"].as_str() {
+        if !document.document_id.is_empty() {
+            let id = &document.document_id;
             let index = document_order.len();
             document_order.entry(id.to_string()).or_insert(index);
         }
@@ -115,6 +116,8 @@ fn source_units(input: &FrozenInput, digest: &str) -> Result<Vec<Unit>, String> 
             atoms: carriers
                 .into_iter()
                 .map(|carrier| PackAtom {
+                    document_id: source.document_id.clone(),
+                    source_unit_revision_id: source.source_unit_revision_id.clone(),
                     id: String::new(),
                     section_id: section_id(source),
                     heading_path: source.locator["heading_path"].as_str().unwrap_or("").into(),
@@ -149,11 +152,17 @@ fn assign_links(units: &mut [Unit]) {
     }
 }
 
-fn pack(document: &str, digest: &str, order: usize, atoms: Vec<PackAtom>) -> ParsePack {
+fn pack(digest: &str, order: usize, atoms: Vec<PackAtom>) -> ParsePack {
+    let mut document_ids = Vec::new();
+    for atom in &atoms {
+        if !document_ids.contains(&atom.document_id) {
+            document_ids.push(atom.document_id.clone());
+        }
+    }
     ParsePack {
         condition_support_options: Vec::new(),
         id: format!("pack-{order}"),
-        document_id: document.into(),
+        document_ids,
         input_digest: digest.into(),
         order,
         pack_revision: 1,
@@ -172,6 +181,7 @@ fn fits_pack(
     running.claim_token = claim_token(&running, 1, false);
     let mut session = json!({"duty":"discover","pack":materialize_pack(input,&running)?,"status":"running","feedback":null,"no_requirement_reason":null});
     add_submission_identity(&mut session, &running, None)?;
+    session["submission_instruction"] = json!(SUBMISSION_INSTRUCTION);
     fits(std::slice::from_ref(&session))
 }
 
@@ -325,6 +335,7 @@ pub fn plan_packs_with_budget(
     input: &FrozenInput,
     fits: &SessionFits<'_>,
 ) -> Result<Vec<ParsePack>, String> {
+    input.validate_document_relations()?;
     let digest = input_digest(input)?;
     let mut units = source_units(input, &digest)?;
     'replan: loop {
@@ -356,21 +367,23 @@ pub fn plan_packs_with_budget(
                 .collect::<Vec<_>>();
             let mut candidate = current
                 .clone()
-                .filter(|pack| &pack.document_id == document)
+                .filter(|pack| {
+                    pack.document_ids
+                        .iter()
+                        .any(|id| input.related_documents(id, document))
+                })
                 .unwrap_or_else(|| {
-                    pack(
-                        document,
-                        &digest,
-                        out.len() + usize::from(current.is_some()),
-                        vec![],
-                    )
+                    pack(&digest, out.len() + usize::from(current.is_some()), vec![])
                 });
             candidate.atoms.extend(atoms.clone());
+            candidate = pack(&digest, candidate.order, candidate.atoms);
             if fits_pack(input, &candidate, fits)? {
-                if current
-                    .as_ref()
-                    .is_some_and(|pack| &pack.document_id != document)
-                {
+                if current.as_ref().is_some_and(|pack| {
+                    !pack
+                        .document_ids
+                        .iter()
+                        .any(|id| input.related_documents(id, document))
+                }) {
                     out.push(current.take().unwrap());
                 }
                 current = Some(candidate);
@@ -379,7 +392,7 @@ pub fn plan_packs_with_budget(
             if let Some(previous) = current.take() {
                 out.push(previous);
             }
-            let whole = pack(document, &digest, out.len(), atoms);
+            let whole = pack(&digest, out.len(), atoms);
             if fits_pack(input, &whole, fits)? {
                 current = Some(whole);
                 continue;
@@ -388,8 +401,9 @@ pub fn plan_packs_with_budget(
                 let atom = units[unit_index].atoms[atom_index].clone();
                 let mut candidate = current
                     .clone()
-                    .unwrap_or_else(|| pack(document, &digest, out.len(), vec![]));
+                    .unwrap_or_else(|| pack(&digest, out.len(), vec![]));
                 candidate.atoms.push(atom.clone());
+                candidate = pack(&digest, candidate.order, candidate.atoms);
                 if fits_pack(input, &candidate, fits)? {
                     current = Some(candidate);
                     continue;
@@ -397,7 +411,7 @@ pub fn plan_packs_with_budget(
                 if let Some(previous) = current.take() {
                     out.push(previous);
                 }
-                let single = pack(document, &digest, out.len(), vec![atom.clone()]);
+                let single = pack(&digest, out.len(), vec![atom.clone()]);
                 if fits_pack(input, &single, fits)? {
                     current = Some(single);
                     continue;

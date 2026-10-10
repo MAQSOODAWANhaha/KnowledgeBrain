@@ -35,6 +35,7 @@ pub fn valid_text_input(project_id: &str, text: &str) -> bidding::analysis::Froz
             project_id: project_id.into(),
             document_set_id: "set".into(),
             documents: vec![ParsedDocument {
+                role: bidding::analysis::DocumentRole::Unspecified,
                 document_id: "document".into(),
                 parsed,
             }],

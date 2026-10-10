@@ -149,6 +149,7 @@ fn private_input() -> FrozenInput {
                 .unwrap_or_else(|_| panic!("invalid private source bytes"));
             assert!(contract.document_revision == hex::encode(Sha256::digest(source)));
             ParsedDocument {
+                role: crate::analysis::DocumentRole::Unspecified,
                 document_id: format!("document-{index}"),
                 parsed,
             }
@@ -229,9 +230,14 @@ fn sizeable_synthetic_input() -> FrozenInput {
     synthetic_input(1500, 2)
 }
 pub(super) fn synthetic_input(repeats: usize, documents_count: usize) -> FrozenInput {
+    synthetic_input_with_text(
+        "Synthetic source sentence for transport admission testing.\n".repeat(repeats),
+        documents_count,
+    )
+}
+pub(super) fn synthetic_input_with_text(text: String, documents_count: usize) -> FrozenInput {
     use crate::outline::frozen::{FrozenBuildInput, ParsedDocument, build_frozen_input};
     use sha2::{Digest, Sha256};
-    let text = "Synthetic source sentence for transport admission testing.\n".repeat(repeats);
     let locator = docparser::StructuredSourceLocator::Document {
         section_ordinal: 0,
         table_ordinal: None,
@@ -249,6 +255,7 @@ pub(super) fn synthetic_input(repeats: usize, documents_count: usize) -> FrozenI
         "completeness":"complete","reasons":[],"table_id":null,"header_cells":[]}]});
     let documents = (0..documents_count)
         .map(|index| ParsedDocument {
+            role: crate::analysis::DocumentRole::Unspecified,
             document_id: format!("synthetic-{index}"),
             parsed: docparser::ReadResult {
                 markdown: text.clone(),

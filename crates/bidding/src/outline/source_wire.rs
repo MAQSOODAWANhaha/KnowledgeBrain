@@ -60,19 +60,22 @@ pub fn request(state: &Checkpoint, body: &mut Value) -> Result<Keys, String> {
     }
     Ok(keys)
 }
-pub fn resolve(state: &Checkpoint, name: &str, mut args: Value) -> Result<Value, String> {
+pub fn resolve(state: &Checkpoint, name: &str, args: Value) -> Result<Value, String> {
+    resolve_with_keys(state, name, args, &state.outline_run.tool_draft.source_keys)
+}
+pub(crate) fn resolve_with_keys(
+    state: &Checkpoint,
+    name: &str,
+    mut args: Value,
+    keys: &Keys,
+) -> Result<Value, String> {
     super::agent::validate_arguments(name, &args)?;
-    fn walk(state: &Checkpoint, value: &mut Value) -> Result<(), String> {
+    fn walk(state: &Checkpoint, value: &mut Value, keys: &Keys) -> Result<(), String> {
         if let Some(id) = value.get("source_key").and_then(Value::as_str) {
             if value.as_object().is_none_or(|m| m.len() != 1) {
                 return Err("source_key must be the only field".into());
             }
-            let reference = state
-                .outline_run
-                .tool_draft
-                .source_keys
-                .get(id)
-                .ok_or("source key was not issued")?;
+            let reference = keys.get(id).ok_or("source key was not issued")?;
             if key(state, reference)? != id {
                 return Err("source key scope or epoch is stale".into());
             }
@@ -82,19 +85,19 @@ pub fn resolve(state: &Checkpoint, name: &str, mut args: Value) -> Result<Value,
         match value {
             Value::Object(map) => {
                 for v in map.values_mut() {
-                    walk(state, v)?
+                    walk(state, v, keys)?
                 }
             }
             Value::Array(items) => {
                 for v in items {
-                    walk(state, v)?
+                    walk(state, v, keys)?
                 }
             }
             _ => {}
         }
         Ok(())
     }
-    walk(state, &mut args)?;
+    walk(state, &mut args, keys)?;
 
     Ok(args)
 }

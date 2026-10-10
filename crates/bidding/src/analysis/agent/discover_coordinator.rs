@@ -35,6 +35,26 @@ pub(crate) enum Pending {
     Committed { request: Request, receipt: Value },
     Failed { request: Request, code: String },
 }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelatedReadFrame {
+    pub call_id: String,
+    pub pack_revision: u64,
+    pub input_digest: String,
+    pub options: Vec<crate::outline::discover::ConditionSupport>,
+    pub sealed_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelatedContinuation {
+    pub run: String,
+    pub pack: String,
+    pub pack_revision: u64,
+    pub input_digest: String,
+    pub refs: Vec<crate::outline::evidence::EvidenceRef>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Worker {
@@ -44,6 +64,9 @@ pub(crate) struct Worker {
     pub registry: crate::outline::model_wire::Registry,
     pub rejected_turns: usize,
     pub images: Vec<(String, String)>,
+    pub source_keys: crate::outline::source_wire::Keys,
+    pub related_read_frames: Vec<RelatedReadFrame>,
+    pub related_continuations: std::collections::BTreeMap<String, RelatedContinuation>,
 }
 #[async_trait]
 pub(super) trait Host: Send {

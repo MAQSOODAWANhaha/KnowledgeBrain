@@ -70,10 +70,10 @@ mod tests {
 
     fn input(units: Vec<Source>) -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "s".into(),
-            documents: vec![json!({"id": "d"})],
+            documents: vec![crate::analysis::FrozenDocument::fixture("d")],
             document_relations: vec![],
             source_units: units,
             structured_forms: vec![],

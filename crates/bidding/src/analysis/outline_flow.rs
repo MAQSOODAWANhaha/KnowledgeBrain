@@ -340,20 +340,19 @@ pub fn source_scanned(input: &FrozenInput, state: &OutlineState, id: &str) -> bo
 
 pub fn scan_complete(input: &FrozenInput, state: &OutlineState) -> bool {
     !input.source_units.is_empty()
-        && input.documents.iter().all(|document| {
-            !document
-                .get("disposition")
-                .and_then(Value::as_str)
-                .is_some_and(|value| matches!(value, "failed" | "pending" | "unresolved"))
-        })
+        && input
+            .documents
+            .iter()
+            .all(|document| document.availability == super::DocumentAvailability::Available)
+        && input.required_relations_ready()
         && [
-            ("documents", &input.documents),
-            ("document_relations", &input.document_relations),
-            ("decisions", &input.decisions),
+            ("documents", input.documents.len()),
+            ("document_relations", input.document_relations.len()),
+            ("decisions", input.decisions.len()),
         ]
         .iter()
         .all(|(kind, values)| {
-            values.is_empty() || tools::contains(state.scanned.metadata.get(*kind), 0, values.len())
+            *values == 0 || tools::contains(state.scanned.metadata.get(*kind), 0, *values)
         })
         && input
             .source_units
@@ -2774,7 +2773,7 @@ mod tests {
     #[test]
     fn a08_content_only_unresolved_reference_does_not_block() {
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -2816,7 +2815,7 @@ mod tests {
     #[test]
     fn a08_missing_qualification_attachment_blocks_unmapped() {
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -2854,7 +2853,7 @@ mod tests {
     #[test]
     fn a08_missing_pricing_format_blocks() {
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -2892,7 +2891,7 @@ mod tests {
     #[test]
     fn check_phase_rejects_rescans_and_reads_saved_fragments() {
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -3026,7 +3025,7 @@ mod tests {
     #[test]
     fn checked_requires_all_packets_current() {
         let input = FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -3054,7 +3053,7 @@ mod tests {
     }
     fn review_input() -> FrozenInput {
         FrozenInput {
-            schema_version: 2,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -3201,9 +3200,9 @@ mod tests {
     fn failed_document_cannot_become_complete_by_reading_metadata() {
         let mut input = review_input();
         let mut state = checked_state(&input);
-        input
-            .documents
-            .push(json!({"document_id":"missing","disposition":"failed"}));
+        let mut missing = crate::analysis::FrozenDocument::fixture("missing");
+        missing.availability = crate::analysis::DocumentAvailability::Failed;
+        input.documents.push(missing);
         state
             .analysis
             .outline

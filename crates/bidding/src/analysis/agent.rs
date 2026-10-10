@@ -1596,21 +1596,7 @@ async fn read_evidence_in_context(
     evidence::resolve_evidence(input, &refs)?;
     let mut selected = refs.clone();
     loop {
-        let mut tail = refs[selected.len()..].to_vec();
-        let original = &refs[selected.len() - 1];
-        let last = selected.last().unwrap();
-        if let (Some((_, end)), Some((_, full_end))) = (last.range(), original.range())
-            && end < full_end
-        {
-            let mut rest = original.clone();
-            match &mut rest {
-                EvidenceRef::Text { start_byte, .. } | EvidenceRef::GridCell { start_byte, .. } => {
-                    *start_byte = end
-                }
-                _ => {}
-            }
-            tail.insert(0, rest);
-        }
+        let tail = evidence::selection_tail(&refs, &selected);
         let continuation = json!({"identity":identity,"refs":tail,"requirement_id":claim.as_ref().map(|c|&c.requirement_id)});
         let next = if tail.is_empty() {
             None
@@ -1681,35 +1667,7 @@ async fn read_evidence_in_context(
             Err(e) if e.code != "AGENT_TURN_BUDGET_EXCEEDED" => return Err(e.message),
             _ => {}
         }
-        if selected.len() > 1 {
-            selected.truncate(selected.len().div_ceil(2));
-            continue;
-        }
-        let quote = evidence::resolve_evidence(input, &selected)?
-            .remove(0)
-            .quote;
-        let boundaries = quote
-            .char_indices()
-            .map(|(i, _)| i)
-            .filter(|i| *i > 0)
-            .collect::<Vec<_>>();
-        if boundaries.is_empty() {
-            return Err("remaining request token budget cannot fit source metadata plus one UTF-8 character; finish the current comparison or release redundant history, then retry the same cursor".into());
-        }
-        let cut = boundaries[boundaries.len() / 2];
-        match &mut selected[0] {
-            EvidenceRef::Text {
-                start_byte,
-                end_byte,
-                ..
-            }
-            | EvidenceRef::GridCell {
-                start_byte,
-                end_byte,
-                ..
-            } => *end_byte = *start_byte + cut,
-            _ => return Err("image evidence requires original view delivery".into()),
-        }
+        evidence::shrink_selection(input, &mut selected)?;
     }
 }
 

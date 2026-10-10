@@ -873,7 +873,7 @@ fn over_budget_eviction_drops_only_committed_pack_turns() {
         ordinal,
     };
     let input = FrozenInput {
-        schema_version: 2,
+        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
         project_id: "project".into(),
         document_set_id: "set".into(),
         documents: vec![],
@@ -1054,7 +1054,7 @@ fn outline_checkpoint() -> Checkpoint {
 
 fn pack_input(count: usize, text: &str) -> FrozenInput {
     FrozenInput {
-        schema_version: 2,
+        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
         project_id: "project".into(),
         document_set_id: "set".into(),
         documents: vec![],
@@ -1369,6 +1369,22 @@ async fn discovery_planning_includes_post_plan_progress_at_the_token_boundary() 
     );
     let mut body: Value = serde_json::from_slice(&bytes).unwrap();
     let actual_tokens = crate::analysis::tests::request_tokens(&body, &config);
+    // This is the full transported request, including tools and provider overhead.
+    let mut brief: Value =
+        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let sessions = brief["reading_packs"].as_array_mut().unwrap();
+    assert!(!sessions.is_empty());
+    for session in sessions {
+        assert!(
+            session
+                .as_object_mut()
+                .unwrap()
+                .remove("submission_instruction")
+                .is_some()
+        );
+    }
+    body["messages"][1]["content"] = json!(brief.to_string());
+    assert!(crate::analysis::tests::request_tokens(&body, &config) < actual_tokens);
     let host_message = body["messages"].as_array_mut().unwrap().last_mut().unwrap();
     let mut host: Value = serde_json::from_str(host_message["content"].as_str().unwrap()).unwrap();
     for key in [
@@ -1384,8 +1400,8 @@ async fn discovery_planning_includes_post_plan_progress_at_the_token_boundary() 
     let pre_plan_tokens = crate::analysis::tests::request_tokens(&body, &config);
     assert!(pre_plan_tokens < actual_tokens);
 
-    // This exact boundary admitted the entire chapter before planning, then
-    // rejected its real request once the five progress fields were introduced.
+    // Omitting the submission instruction and post-plan progress admits a pack
+    // whose complete request exceeds this boundary. The real planner must split.
     let mut constrained = config.clone();
     constrained.limits.max_context_tokens =
         pre_plan_tokens + constrained.provider.output_token_reserve as usize;

@@ -135,7 +135,7 @@ pub(crate) fn queue(state: &mut Checkpoint, before: &Draft, call_id: &str, check
         sealed_sha256: None,
     });
 }
-fn wire_hash(body: &Value, call_id: &str) -> Result<Option<String>, String> {
+pub(crate) fn wire_hash(body: &Value, call_id: &str) -> Result<Option<String>, String> {
     let found = body["messages"]
         .as_array()
         .into_iter()

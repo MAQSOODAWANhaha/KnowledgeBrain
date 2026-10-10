@@ -169,12 +169,12 @@ impl extraction::Journal for Local {
             .input
             .documents
             .iter()
-            .find(|d| d["document_id"] == source.document_id)
+            .find(|d| d.document_id == source.document_id)
             .ok_or_else(|| err("source document missing"))?;
-        let revision = document["document_revision"]
-            .as_str()
-            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .ok_or_else(|| err("source document has no strict revision digest"))?;
+        let revision = document.document_revision.as_str();
+        if revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(err("source document has no strict revision digest"));
+        }
         let mut view: ta::views::SourceView =
             read(self.views.join(revision).join(format!("page-{page}.json")))?;
         if view.identity.page_ordinal as u64 != page || revision != view.identity.original_sha256 {
@@ -583,7 +583,7 @@ mod tests {
             root: directory.clone(),
             views: directory.clone(),
             input: ta::FrozenInput {
-                schema_version: 2,
+                schema_version: bidding::outline::frozen::FROZEN_SCHEMA_VERSION,
                 project_id: String::new(),
                 document_set_id: String::new(),
                 documents: vec![],
