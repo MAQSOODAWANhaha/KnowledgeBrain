@@ -4,14 +4,16 @@ use crate::agent_error::AgentError;
 use knowledge::models::ChatTurn;
 use serde::{Deserialize, Serialize};
 
+pub mod budget;
 pub(crate) mod chat;
+pub use chat::{TokenEncoding, TokenizerCalibration, TokenizerProfile};
 mod driver;
 pub mod progress;
 mod session;
 pub(crate) use driver::{Driver, Status, drive};
 
 /// Versioned persistence contract, independent of provider and business rules.
-pub const CHECKPOINT_CONTRACT_VERSION: u32 = 14;
+pub const CHECKPOINT_CONTRACT_VERSION: u32 = 23;
 /// Freeze the SDK/adapter separately from the Journal's persistence format.
 pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/4";
 
@@ -61,6 +63,8 @@ impl TokenUsage {
 #[serde(deny_unknown_fields)]
 pub struct TurnJournal {
     pub sequence: usize,
+    pub accounting: budget::ModelAccounting,
+    pub publication_receipt: Option<PublicationReceipt>,
     pub pending: Option<PendingTurn>,
     pub session: Option<session::Session>,
     /// Survives `session = None`. Absent on older checkpoints.
@@ -68,9 +72,19 @@ pub struct TurnJournal {
     pub usage: TokenUsage,
 }
 
+/// Frozen host projection prepared before terminal publication. SQL compares
+/// the exact artifact byte digest and binding JSON under the same fenced lock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationReceipt {
+    pub artifact_sha256: String,
+    pub bindings: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingTurn {
+    pub physical_attempts: usize,
     pub turn: usize,
     pub role: String,
     /// Exact JCS request bytes represented as UTF-8, not a second serialization.
@@ -83,25 +97,39 @@ fn invalid(message: &str) -> AgentError {
 }
 
 impl TurnJournal {
+    #[cfg(test)]
+    pub(crate) fn fixture_sdk_tools(
+        &mut self,
+        body: &[u8],
+        response: &ChatTurn,
+    ) -> Result<std::collections::BTreeMap<String, String>, AgentError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| invalid("SDK session missing"))?
+            .tools(body, response)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_sdk_finish(
+        &mut self,
+        results: Vec<serde_json::Value>,
+    ) -> Result<(), AgentError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| invalid("SDK session missing"))?
+            .finish(results)
+    }
+
     pub(crate) fn prepare_session(
         &mut self,
         body: &[u8],
         prefix: usize,
         suffix: usize,
-        remaining_turns: usize,
         max_bytes: usize,
     ) -> Result<(), AgentError> {
         if self.pending.is_some() {
             return Err(invalid("cannot replace a pending SDK session"));
         }
-        session::Session::prepare(
-            &mut self.session,
-            body,
-            prefix,
-            suffix,
-            remaining_turns,
-            max_bytes,
-        )
+        session::Session::prepare(&mut self.session, body, prefix, suffix, max_bytes)
     }
     fn advance(&mut self) -> Result<(), AgentError> {
         self.sequence = self
@@ -118,6 +146,7 @@ impl TurnJournal {
         let body = String::from_utf8(body.to_vec()).map_err(|_| invalid("request is not UTF-8"))?;
         self.advance()?;
         self.pending = Some(PendingTurn {
+            physical_attempts: 0,
             turn,
             role: role.into(),
             body,
@@ -233,7 +262,7 @@ mod tests {
 
     fn prepared(journal: &mut TurnJournal) {
         let body = br#"{"messages":[{"content":"test","role":"system"}]}"#;
-        journal.prepare_session(body, 1, 0, 4, 4096).unwrap();
+        journal.prepare_session(body, 1, 0, 4096).unwrap();
         journal.prepare(0, "main", body).unwrap();
     }
 

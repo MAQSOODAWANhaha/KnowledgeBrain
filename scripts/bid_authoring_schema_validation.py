@@ -11,9 +11,8 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "crates/bidding/schemas"
 LIVE = {
-    "outline-tools-v1.schema.json",
+    "outline-tools-v2.schema.json",
     "response-tools-v1.schema.json",
-    "tender-analysis-tools-v1.schema.json",
 }
 
 

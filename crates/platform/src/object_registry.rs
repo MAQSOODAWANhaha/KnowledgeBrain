@@ -52,6 +52,21 @@ pub async fn abandon_object_upload(
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
+/// End an explicitly abandoned producer lease without dropping its durable
+/// staging identity. Queue delivery and physical retention happen afterwards.
+pub async fn request_object_upload_expiry(
+    pool: &PgPool,
+    staging_id: Uuid,
+    actor_identity: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_object_upload_request_expiry($1,$2::kb_actor_identity)")
+        .bind(staging_id)
+        .bind(actor_identity)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn schedule_object_upload_cleanup(staging_id: Uuid) -> Result<(), String> {
     crate::enqueue_object_upload_expire(staging_id)
         .await?
@@ -80,12 +95,14 @@ pub async fn dispatch_object_deletion(
 /// cancelled work; expiry is only a fallback for process crashes.
 #[derive(Clone)]
 pub struct StagedObjectCleanupTracker {
+    pool: PgPool,
     staging_ids: std::sync::Arc<std::sync::Mutex<Vec<Uuid>>>,
 }
 
 impl StagedObjectCleanupTracker {
-    pub fn new(_pool: &PgPool) -> Self {
+    pub fn new(pool: &PgPool) -> Self {
         Self {
+            pool: pool.clone(),
             staging_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
@@ -124,6 +141,14 @@ impl StagedObjectCleanupTracker {
             let Some(staging_id) = staging_id else {
                 return Ok(());
             };
+            // The supervisor calls this only after its producer has stopped.
+            // Persist cancellation before queue handoff; failure or cancellation
+            // keeps the staging row eligible for the independent expiry sweep.
+            request_object_upload_expiry(&self.pool, staging_id, None)
+                .await
+                .map_err(|error| {
+                    format!("staged object expiry request failed for {staging_id}: {error}")
+                })?;
             schedule_object_upload_cleanup(staging_id)
                 .await
                 .map_err(|error| {

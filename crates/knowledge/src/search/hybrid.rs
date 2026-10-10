@@ -71,9 +71,7 @@ pub async fn hybrid_search_pg(
     expand_wiki: bool,
     limit: i64,
 ) -> Result<Vec<PgSearchHit>, sqlx::Error> {
-    let (vector_on, keyword_on) = version_indexing_flags(pool, version_id)
-        .await
-        .unwrap_or((true, true));
+    let (vector_on, keyword_on) = version_indexing_flags(pool, version_id).await?;
     if !vector_on && !keyword_on {
         return Ok(Vec::new());
     }
@@ -87,7 +85,7 @@ pub async fn hybrid_search_pg(
                 pv.id AS version_id, pv.label AS version_label,
                 (p.current_version_id = pv.id) AS is_current,
                 COALESCE(1.0 - (e.embedding <=> CAST($2 AS vector)), 0.0) AS vec_score,
-                COALESCE(ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)), 0.0) AS kw_score,
+                COALESCE(ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)), 0.0)::double precision AS kw_score,
                 COALESCE(
                     (SELECT array_agg(dt.tag_id) FROM document_tags dt WHERE dt.document_id = d.id),
                     '{}'::uuid[]
@@ -105,7 +103,10 @@ pub async fn hybrid_search_pg(
          WHERE e.product_version_id = $1
            AND d.enable_status = 'enabled'
            AND d.deleted_at IS NULL
+           AND c.generation=d.active_generation
+           AND d.parse_status NOT IN ('deleting', 'deleted', 'cancelled')
            AND ($7 OR d.index_ready)
+           AND c.chunk_type <> 'image_ocr_partial'
            AND ($4 OR c.chunk_type <> 'wiki_page')
            AND (
                 cardinality($5::uuid[]) = 0
@@ -123,7 +124,7 @@ pub async fn hybrid_search_pg(
                 pv.id AS version_id, pv.label AS version_label,
                 (p.current_version_id = pv.id) AS is_current,
                 COALESCE(1.0 - (e.embedding <=> CAST($2 AS vector)), 0.0) AS vec_score,
-                COALESCE(ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)), 0.0) AS kw_score,
+                COALESCE(ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)), 0.0)::double precision AS kw_score,
                 COALESCE(
                     (SELECT array_agg(dt.tag_id) FROM document_tags dt WHERE dt.document_id = d.id),
                     '{}'::uuid[]
@@ -141,7 +142,10 @@ pub async fn hybrid_search_pg(
          WHERE e.product_version_id = $1
            AND d.enable_status = 'enabled'
            AND d.deleted_at IS NULL
+           AND c.generation=d.active_generation
+           AND d.parse_status NOT IN ('deleting', 'deleted', 'cancelled')
            AND ($7 OR d.index_ready)
+           AND c.chunk_type <> 'image_ocr_partial'
            AND ($4 OR c.chunk_type <> 'wiki_page')
            AND (
                 cardinality($5::uuid[]) = 0

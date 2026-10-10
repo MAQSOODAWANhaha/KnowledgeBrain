@@ -68,7 +68,7 @@ def test_connection_requires_current_env_and_matching_startup_snapshot(tmp_path)
                    "KB_AUTHORING_MAX_OUTPUT_TOKENS=4096\nKB_AUTHORING_TIMEOUT_MS=90000\n")
     config = {"provider": {"model_id": "from-file", "base_url": "https://configured.invalid/v1",
                           "protocol": "openai_chat_completions_sse", "max_tokens": 4096, "timeout_ms": 90000},
-              "limits": {"max_turns": 10}}
+              "limits": {"max_context_tokens": 131072}}
     value = {"origin": "http://127.0.0.1:1234", "token": "private-auth", "startup": {
         "env_file_sha256": flow.digest(env.read_bytes()), "runtime": {"analysis": config}}}
     ticket = tmp_path / "connection.json"
@@ -217,3 +217,19 @@ def test_outline_publication_handoff_does_not_start_another_composer(tmp_path):
     flow.run(driver, source, dict(origin="http://127.0.0.1:1234", token="private"), 1, 0.01)
     assert driver.state["stage"] == "outline_published"
     assert (tmp_path / "generated.docx").read_bytes() == docx
+
+
+def test_connection_uses_shared_defaults_without_internal_env_knobs(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("LLM_MODEL=from-file\nLLM_API_KEY=synthetic\nLLM_BASE_URL=https://configured.invalid/v1\n")
+    provider = {"model_id":"from-file", "base_url":"https://configured.invalid/v1", "protocol":"openai_chat_completions_sse", **flow.effective_provider_tuning({})}
+    value = {"origin":"http://127.0.0.1:1234", "token":"synthetic", "startup":{"env_file_sha256":flow.digest(env.read_bytes()), "runtime":{"analysis":{"provider":provider, "limits":{"max_context_tokens":131072}}}}}
+    ticket = tmp_path / "connection.json"
+    flow.private_write(ticket, flow.json_bytes(value))
+    assert flow.read_connection(ticket, env) == value
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "18446744073709551616"])
+def test_shared_provider_tuning_rejects_invalid_overrides(value):
+    with pytest.raises(ValueError, match="positive integer"):
+        flow.effective_provider_tuning({"KB_AUTHORING_MAX_OUTPUT_TOKENS":value})

@@ -83,6 +83,7 @@ CREATE TABLE documents (
     index_ready boolean NOT NULL DEFAULT false,
     description text NOT NULL DEFAULT '',
     attempt integer NOT NULL DEFAULT 1,
+    active_generation integer NOT NULL DEFAULT 1,
     file_name text NOT NULL,
     file_size bigint NOT NULL CHECK (file_size >= 0),
     file_hash text NOT NULL CHECK (file_hash ~ '^[0-9a-f]{64}$'),
@@ -155,6 +156,7 @@ CREATE TABLE chunks (
     id uuid PRIMARY KEY,
     product_version_id uuid NOT NULL REFERENCES product_versions (id),
     document_id uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    generation integer NOT NULL DEFAULT 1,
     chunk_type text NOT NULL,
     content text NOT NULL,
     context_header text NOT NULL DEFAULT '',
@@ -1547,6 +1549,8 @@ BEGIN
        AND document.product_version_id=chunk.product_version_id
      WHERE chunk.product_version_id=p_product_version_id
        AND document.deleted_at IS NULL
+     AND document.parse_status NOT IN ('deleting','deleted','cancelled')
+     AND chunk.generation=document.active_generation
        AND document.enable_status='enabled'
        AND document.index_ready
        AND chunk.chunk_type=ANY(ARRAY[
@@ -1594,6 +1598,8 @@ BEGIN
            AND document.product_version_id=chunk.product_version_id
          WHERE chunk.product_version_id=p_product_version_id
            AND document.deleted_at IS NULL
+     AND document.parse_status NOT IN ('deleting','deleted','cancelled')
+     AND chunk.generation=document.active_generation
            AND document.enable_status='enabled'
            AND document.index_ready
            AND chunk.chunk_type=ANY(ARRAY[
@@ -1657,6 +1663,8 @@ AS $$
      AND document.product_version_id=chunk.product_version_id
    WHERE chunk.product_version_id=p_product_version_id
      AND document.deleted_at IS NULL
+     AND document.parse_status NOT IN ('deleting','deleted','cancelled')
+     AND chunk.generation=document.active_generation
      AND document.enable_status='enabled'
      AND document.index_ready
      AND chunk.chunk_type=ANY(ARRAY[
@@ -1678,6 +1686,7 @@ AS $$
            SELECT 1 FROM public.documents document
             WHERE document.product_version_id=p_product_version_id
               AND document.deleted_at IS NULL
+     AND document.parse_status NOT IN ('deleting','deleted','cancelled')
               AND (document.parse_status IN ('pending','processing','finalizing')
                    OR document.pending_subtasks_count<>0
                    OR document.summary_status IN ('pending','processing')))
@@ -1935,6 +1944,8 @@ BEGIN
          AND keyword_index.tokenizer_version='v1'
        WHERE chunk.product_version_id=p_product_version_id
          AND document.deleted_at IS NULL
+     AND document.parse_status NOT IN ('deleting','deleted','cancelled')
+     AND chunk.generation=document.active_generation
          AND document.enable_status='enabled'
          AND document.index_ready
          AND chunk.chunk_type=ANY(ARRAY[
@@ -2700,17 +2711,19 @@ REVOKE ALL ON FUNCTION kb_knowledge_verify_attested_image_hit_v3(uuid,text,uuid,
 CREATE TABLE graph_nodes (
     product_version_id uuid NOT NULL REFERENCES product_versions (id),
     document_id uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    generation integer NOT NULL DEFAULT 1,
     name text NOT NULL,
     chunk_ids uuid[] NOT NULL DEFAULT '{}',
-    PRIMARY KEY (product_version_id, document_id, name)
+    PRIMARY KEY (product_version_id, document_id, name, generation)
 );
 CREATE TABLE graph_relations (
     product_version_id uuid NOT NULL REFERENCES product_versions (id),
     document_id uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    generation integer NOT NULL DEFAULT 1,
     node1 text NOT NULL,
     node2 text NOT NULL,
     rel_type text NOT NULL,
-    PRIMARY KEY (product_version_id, document_id, node1, node2, rel_type)
+    PRIMARY KEY (product_version_id, document_id, node1, node2, rel_type, generation)
 );
 
 CREATE TABLE wiki_pages (
@@ -2981,3 +2994,122 @@ GRANT EXECUTE ON FUNCTION kb_knowledge_attest_matching_scope_v2(jsonb),
     kb_knowledge_verify_attested_text_hit_v2(uuid,text,uuid,jsonb),
     kb_knowledge_verify_attested_image_hit_v3(uuid,text,uuid,jsonb)
 TO kb_runtime_worker;
+
+-- Document attempts are isolated index generations. Readers select only the
+-- published generation; workers publish with an expected-attempt row lock.
+CREATE INDEX chunks_document_generation_idx ON chunks(document_id,generation);
+CREATE FUNCTION kb_assign_chunk_generation() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+  SELECT attempt INTO NEW.generation FROM documents WHERE id=NEW.document_id;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER chunks_generation BEFORE INSERT ON chunks
+FOR EACH ROW EXECUTE FUNCTION kb_assign_chunk_generation();
+
+CREATE TABLE knowledge_job_outbox (
+  document_id uuid NOT NULL REFERENCES documents(id),
+  product_version_id uuid NOT NULL REFERENCES product_versions(id),
+  attempt integer NOT NULL,
+  job_key text NOT NULL,
+  payload jsonb NOT NULL,
+  is_derived boolean NOT NULL DEFAULT false,
+  state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','published','complete','failed')),
+  deliveries integer NOT NULL DEFAULT 0,
+  revision bigint NOT NULL DEFAULT 1,
+  next_delivery_at timestamptz NOT NULL DEFAULT now(),
+  last_error text,
+  PRIMARY KEY(document_id,attempt,job_key)
+);
+CREATE INDEX knowledge_job_outbox_delivery_idx ON knowledge_job_outbox(next_delivery_at)
+WHERE state IN ('pending','published');
+CREATE TABLE knowledge_job_receipts (
+  document_id uuid NOT NULL REFERENCES documents(id),
+  attempt integer NOT NULL,
+  job_key text NOT NULL,
+  completed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(document_id,attempt,job_key)
+);
+-- A source-set change always carries a durable reconcile obligation, including
+-- tombstones with Wiki disabled. PendingDerived remains outstanding work.
+CREATE FUNCTION kb_document_source_changed() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+  IF ROW(NEW.deleted_at,NEW.enable_status,NEW.index_ready,NEW.parse_status,NEW.summary_status,NEW.active_generation)
+     IS DISTINCT FROM ROW(OLD.deleted_at,OLD.enable_status,OLD.index_ready,OLD.parse_status,OLD.summary_status,OLD.active_generation) THEN
+    INSERT INTO knowledge_job_outbox(document_id,product_version_id,attempt,job_key,payload)
+    VALUES(NEW.id,NEW.product_version_id,NEW.attempt,'reconcile','{"kind":"reconcile"}')
+    ON CONFLICT(document_id,attempt,job_key) DO UPDATE SET state='pending',deliveries=0,revision=knowledge_job_outbox.revision+1,next_delivery_at=now(),last_error=NULL;
+  END IF;
+  IF NEW.attempt<>OLD.attempt OR NEW.parse_status IN ('cancelled','deleting','deleted') THEN
+    UPDATE knowledge_job_outbox SET state='complete'
+      WHERE document_id=NEW.id AND job_key<>'reconcile'
+        AND (attempt<>NEW.attempt OR NEW.parse_status IN ('cancelled','deleting','deleted'));
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER documents_source_changed AFTER UPDATE ON documents
+FOR EACH ROW EXECUTE FUNCTION kb_document_source_changed();
+GRANT SELECT,INSERT,UPDATE,DELETE ON knowledge_job_outbox,knowledge_job_receipts
+TO kb_runtime_api,kb_runtime_worker;
+
+-- Initial ingestion and every new attempt also retain their enqueue obligation.
+CREATE FUNCTION kb_document_convert_obligation() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+ IF NEW.parse_status='pending' AND (TG_OP='INSERT' OR NEW.attempt<>OLD.attempt) THEN
+   INSERT INTO knowledge_job_outbox(document_id,product_version_id,attempt,job_key,payload)
+   VALUES(NEW.id,NEW.product_version_id,NEW.attempt,'convert',
+     jsonb_build_object('kind','convert','manual',NEW.type='manual','passages',CASE WHEN jsonb_typeof(NEW.source_passages)='array' THEN NEW.source_passages ELSE '[]'::jsonb END))
+   ON CONFLICT DO NOTHING;
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER documents_convert_obligation AFTER INSERT OR UPDATE ON documents
+FOR EACH ROW EXECUTE FUNCTION kb_document_convert_obligation();
+
+CREATE FUNCTION kb_guard_document_span_generation() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM documents WHERE id=NEW.document_id AND attempt=NEW.attempt
+               AND deleted_at IS NULL AND parse_status NOT IN ('cancelled','deleting','deleted')) THEN
+   RETURN NULL;
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER document_spans_generation_guard BEFORE INSERT OR UPDATE ON document_processing_spans
+FOR EACH ROW EXECUTE FUNCTION kb_guard_document_span_generation();
+
+CREATE TRIGGER graph_nodes_generation BEFORE INSERT ON graph_nodes
+FOR EACH ROW EXECUTE FUNCTION kb_assign_chunk_generation();
+CREATE TRIGGER graph_relations_generation BEFORE INSERT ON graph_relations
+FOR EACH ROW EXECUTE FUNCTION kb_assign_chunk_generation();
+
+ALTER TABLE documents ADD COLUMN derived_status text GENERATED ALWAYS AS (
+ CASE WHEN summary_status='failed' OR (parse_status='failed' AND pending_subtasks_count>0) THEN 'failed'
+      WHEN pending_subtasks_count>0 OR summary_status IN ('pending','processing') THEN 'pending'
+      WHEN parse_status='completed' THEN 'ready' ELSE 'none' END) STORED;
+ALTER TABLE documents ADD COLUMN index_status text GENERATED ALWAYS AS (
+ CASE WHEN parse_status IN ('deleting','deleted','cancelled') THEN 'unavailable'
+      WHEN parse_status='failed' THEN 'failed'
+      WHEN index_ready AND active_generation=attempt THEN 'ready' ELSE 'building' END) STORED;
+
+-- Wiki aggregates depend on every source, not on their arbitrary storage-host
+-- document. Invalidate affected searchable projections in the tombstone/reparse
+-- transaction, even when Wiki processing is disabled or its queue is offline.
+CREATE FUNCTION kb_invalidate_wiki_source_generation() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+ IF NEW.attempt<>OLD.attempt OR
+    (NEW.parse_status IN ('cancelled','deleting','deleted') AND NEW.parse_status IS DISTINCT FROM OLD.parse_status) THEN
+   DELETE FROM chunks chunk USING wiki_pages page
+    WHERE chunk.product_version_id=NEW.product_version_id AND chunk.chunk_type='wiki_page'
+      AND page.product_version_id=chunk.product_version_id AND page.slug=chunk.context_header
+      AND (page.source_refs @> jsonb_build_array(NEW.id::text) OR page.source_refs='[]'::jsonb);
+   UPDATE wiki_pages SET status='draft',updated_at=now()
+    WHERE product_version_id=NEW.product_version_id AND (source_refs @> jsonb_build_array(NEW.id::text) OR source_refs='[]'::jsonb);
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER documents_invalidate_wiki_source AFTER UPDATE ON documents
+FOR EACH ROW EXECUTE FUNCTION kb_invalidate_wiki_source_generation();

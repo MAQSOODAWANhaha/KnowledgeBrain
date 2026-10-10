@@ -172,6 +172,30 @@ async fn cleanup_native_duplicates_protect_references_and_retry_failed_blob_dele
     }
     let blob = platform::write_blob_async(&digest, &bytes).await.unwrap();
     let storage = platform::oxana_connect().unwrap();
+    // A normal, still-active lease is not an abandoned upload. Even a
+    // premature expiry invocation must preserve it and the shared bytes.
+    assert!(
+        platform::expire_one_object_upload(&pool, first)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM object_upload_staging WHERE id=$1 AND expires_at>clock_timestamp())",
+    ).bind(first).fetch_one(&pool).await.unwrap();
+    assert!(active, "valid producer lease must remain usable");
+    assert!(
+        platform::request_object_upload_expiry(
+            &pool,
+            first,
+            Some(&format!("user:{}", Uuid::new_v4()))
+        )
+        .await
+        .is_err()
+    );
+    platform::request_object_upload_expiry(&pool, first, None)
+        .await
+        .unwrap();
     let first_job = storage
         .enqueue(
             platform::RetentionQueue,
@@ -238,6 +262,9 @@ async fn cleanup_native_duplicates_protect_references_and_retry_failed_blob_dele
     let saved = blob.with_extension("retry-bytes");
     std::fs::rename(&blob, &saved).unwrap();
     std::fs::create_dir(&blob).unwrap();
+    platform::request_object_upload_expiry(&pool, remaining_owner, None)
+        .await
+        .unwrap();
     let retry_job = storage
         .enqueue(
             platform::RetentionQueue,
@@ -343,6 +370,11 @@ async fn cleanup_native_duplicates_protect_references_and_retry_failed_blob_dele
         'cleanup_test_owner',$4,'payload',NULL)")
         .bind(&live_ref).bind(&live_digest).bind(live_bytes.len() as i64).bind(owner)
         .execute(&pool).await.unwrap();
+    // Release only this upload lease; the independent business owner still
+    // protects the physical bytes from retention.
+    platform::request_object_upload_expiry(&pool, live_staging, None)
+        .await
+        .unwrap();
     let live_job = storage
         .enqueue(
             platform::RetentionQueue,
@@ -641,6 +673,13 @@ async fn cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker() {
             ),
             _ => panic!("unknown handoff fixture mode"),
         }
+        let durable_expiry: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM object_upload_staging WHERE id=$1 AND expires_at<=clock_timestamp())",
+        ).bind(ids[0]).fetch_one(&pool).await.unwrap();
+        assert!(
+            durable_expiry,
+            "cancelled producer retains durable cleanup work even without queue ACK"
+        );
         assert_eq!(
             tracker.pending_staging_ids(),
             ids,

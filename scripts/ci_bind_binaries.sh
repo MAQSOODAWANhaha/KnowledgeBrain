@@ -18,6 +18,7 @@ fi
 : "${CI_SCHEMA_VERIFIER_BIN:?}"
 : "${CI_API_BIN:?}"
 : "${CI_WORKER_BIN:?}"
+: "${CI_TENDER_PREPARE_BIN:?}"
 : "${CI_DOCREADER_TEST_BIN:?}"
 {
   printf 'CI_BIN_ROOT=%s\n' "$base"
@@ -25,6 +26,7 @@ fi
   printf 'KB_SCHEMA_VERIFIER_BIN=%s\n' "$base/bins/$CI_SCHEMA_VERIFIER_BIN"
   printf 'KB_API_BIN=%s\n' "$base/bins/$CI_API_BIN"
   printf 'KB_WORKER_BIN=%s\n' "$base/bins/$CI_WORKER_BIN"
+  printf 'KB_TENDER_PREPARE_BIN=%s\n' "$base/bins/$CI_TENDER_PREPARE_BIN"
   printf 'KB_DOCREADER_REPLAY_BIN=%s\n' "$base/tests/$CI_DOCREADER_TEST_BIN"
 } >> "${GITHUB_ENV:?}"
 chmod +x "$base/bins/"* "$base/tests/"*

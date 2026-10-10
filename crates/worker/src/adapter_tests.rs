@@ -208,6 +208,7 @@ fn wiki_ingest_retry_delay_is_lock_retry() {
         shutdown: CancellationToken::new(),
     };
     let job = WikiIngestJob {
+        attempt: 1,
         product_version_id: Uuid::new_v4(),
         document_id: Uuid::new_v4(),
         operation: knowledge::wiki::OP_INGEST.into(),
@@ -346,6 +347,7 @@ async fn persist_blank_chunks_completes_without_postprocess() {
         &pool,
         did,
         seeded.library_version_id,
+        1,
         &[blank],
         true,
         true,
@@ -445,6 +447,7 @@ async fn persist_indexed_chunks_keeps_rows_when_embed_fails() {
         &pool,
         did,
         seeded.library_version_id,
+        1,
         &[ch],
         true,
         true,
@@ -1090,10 +1093,10 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     )
     .await
     .unwrap();
-    if let Err(error) = process_wiki_ingest(&pool, vid, did, knowledge::wiki::OP_INGEST).await {
+    if let Err(error) = process_wiki_ingest(&pool, vid, did, knowledge::wiki::OP_INGEST, 1).await {
         assert!(error.contains("Oxana Redis is not configured"), "{error}");
     }
-    process_wiki_finalize(&pool, vid, did).await.unwrap();
+    process_wiki_finalize(&pool, vid, did, 1).await.unwrap();
     let postgres_queue_tables: bool = sqlx::query_scalar(
         "SELECT to_regclass('public.task_pending_ops') IS NOT NULL
                  OR to_regclass('public.task_dead_letters') IS NOT NULL",
@@ -1197,8 +1200,8 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     let left = concurrent_ids[0];
     let right = concurrent_ids[1];
     let (left_result, right_result) = tokio::join!(
-        process_wiki_ingest(&left_pool, vid, left, knowledge::wiki::OP_INGEST),
-        process_wiki_ingest(&right_pool, vid, right, knowledge::wiki::OP_INGEST),
+        process_wiki_ingest(&left_pool, vid, left, knowledge::wiki::OP_INGEST, 1),
+        process_wiki_ingest(&right_pool, vid, right, knowledge::wiki::OP_INGEST, 1),
     );
     for result in [left_result, right_result] {
         if let Err(error) = result {
@@ -1231,7 +1234,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         "a second document job must not rewrite an unrelated page"
     );
 
-    process_wiki_ingest(&pool, vid, left, knowledge::wiki::OP_RETRACT)
+    process_wiki_ingest(&pool, vid, left, knowledge::wiki::OP_RETRACT, 1)
         .await
         .unwrap_or_else(|error| {
             assert!(error.contains("Oxana Redis is not configured"), "{error}");
@@ -1314,6 +1317,8 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
             &[],
             &[],
             &[],
+            &[(left, 1), (right, 1)],
+            None,
         )
         .await
         .is_err()
@@ -1368,6 +1373,7 @@ async fn wiki_disabled_skips_without_error() {
         seeded.library_version_id,
         Uuid::new_v4(),
         knowledge::wiki::OP_INGEST,
+        1,
     )
     .await
     .unwrap();
@@ -1527,7 +1533,7 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
     )
     .await
     .unwrap();
-    if let Err(error) = process_post_process(&pool, did, seeded.library_version_id, true).await {
+    if let Err(error) = process_post_process(&pool, did, seeded.library_version_id, true, 1).await {
         assert!(error.contains("Oxana Redis is not configured"), "{error}");
     }
     let status: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
@@ -1644,7 +1650,7 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
         assert!(image.is_err(), "no VLM must not stub OCR chunks");
     }
 
-    process_post_process(&pool, did, seeded.library_version_id, false)
+    process_post_process(&pool, did, seeded.library_version_id, false, 1)
         .await
         .unwrap();
     let _ = process_summary_pg(&pool, did, 1, false).await;

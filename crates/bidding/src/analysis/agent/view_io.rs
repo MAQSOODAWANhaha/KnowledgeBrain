@@ -8,6 +8,12 @@ pub(super) async fn read_source_view<J: Journal>(
     args: &Value,
     cancel: &CancellationToken,
 ) -> Result<Value, AgentError> {
+    if !config.limits.vision_enabled {
+        return Err(error(
+            "AGENT_VISION_NOT_CONFIGURED",
+            "original-image review requires vision_enabled=true and an image-capable configured authoring model; no alternative provider was selected",
+        ));
+    }
     let source_id = args["source_id"]
         .as_str()
         .ok_or_else(|| invalid("source_id required"))?;
@@ -21,11 +27,7 @@ pub(super) async fn read_source_view<J: Journal>(
             "source view must name a source in this frozen collection",
         ));
     }
-    let coverage = if state.role == Role::Main {
-        &mut state.analysis.coverage
-    } else {
-        &mut state.reviewer_coverage
-    };
+    let coverage = &mut state.analysis.coverage;
     coverage
         .view_failures
         .insert(source_id.into(), "SOURCE_VIEW_NOT_DELIVERED".into());
@@ -36,6 +38,20 @@ pub(super) async fn read_source_view<J: Journal>(
         .cloned();
     let result = match cached {
         Some(view) => Ok(view),
+        None if input.source_units.iter().any(|source| {
+            source.source_unit_revision_id == source_id && source.locator["image_available"] == true
+        }) =>
+        {
+            crate::outline::visual::load_frozen_image_view(
+                input,
+                source_id,
+                config.limits.max_source_view_edge,
+                config.limits.max_source_view_bytes,
+                cancel,
+            )
+            .await
+            .map_err(|message| error("SOURCE_VIEW_UNAVAILABLE", message))
+        }
         None => tokio::select! {
             biased;
             _=cancel.cancelled()=>return Err(error("INTERNAL","source view cancelled")),
@@ -45,11 +61,7 @@ pub(super) async fn read_source_view<J: Journal>(
     let view = match result {
         Ok(view) => view,
         Err(e) => {
-            let coverage = if state.role == Role::Main {
-                &mut state.analysis.coverage
-            } else {
-                &mut state.reviewer_coverage
-            };
+            let coverage = &mut state.analysis.coverage;
             coverage
                 .view_failures
                 .insert(source_id.into(), e.code.clone());
@@ -65,29 +77,8 @@ pub(super) async fn read_source_view<J: Journal>(
     let id = view.id().map_err(invalid)?;
     let out = json!({"view_id":id,"identity":view.identity,"citation":{"source_id":source_id,"start":0,"end":0,"view_id":id},
         "note":"The original image follows as a separate image message. It does not count as reading parsed text or grid cells."});
-    let bytes = view
-        .jpeg_base64
-        .len()
-        .checked_add(serde_json::to_vec(&out).map_err(invalid)?.len())
-        .ok_or_else(|| invalid("source view budget overflow"))?;
-    if bytes > config.limits.max_context_bytes
-        || (!super::one_shot_outline(state)
-            && state.read_bytes.saturating_add(bytes) > config.limits.max_read_bytes)
-    {
-        return Err(error(
-            "AGENT_TURN_BUDGET_EXCEEDED",
-            "source view exceeds remaining input budget",
-        ));
-    }
-    if serde_json::to_vec(&out).map_err(invalid)?.len() > config.limits.max_tool_result_bytes {
-        return Err(invalid("source view metadata exceeds tool budget"));
-    }
     state.read_bytes += view.jpeg_base64.len();
-    let coverage = if state.role == Role::Main {
-        &mut state.analysis.coverage
-    } else {
-        &mut state.reviewer_coverage
-    };
+    let coverage = &mut state.analysis.coverage;
     coverage.view_failures.remove(source_id);
     coverage.views.insert(id.clone(), view.identity.clone());
     state.source_views.insert(id, view);

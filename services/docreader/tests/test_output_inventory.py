@@ -459,7 +459,7 @@ def test_fill_inventory_carries_unequal_widths_and_repeated_header():
 
 
 def test_project_cover_multiline_system_bookmark_survives_inventory():
-    title = "南自华盾2024-2025年广域网防火墙框架采购\n\n投标文件\n\n投标人：________（盖单位章）\n\n______年______月______日"
+    title = "合成示例项目甲\n\n投标文件\n\n投标人：________（盖单位章）\n\n______年______月______日"
     doc = Document()
     paragraph = doc.add_paragraph(title)
     name = "kb_note_" + hashlib.sha256(title.encode()).hexdigest()[:32]

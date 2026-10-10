@@ -230,6 +230,16 @@ class SpreadsheetCell(BaseModel):
     row: int = Field(ge=1)
     column: int = Field(ge=1)
     text: str
+    raw_value: str = ""
+    value_type: str = "unknown"
+    number_format: str = "General"
+    display_text: Optional[str] = None
+    display_complete: bool = False
+    display_incomplete_reason: Optional[str] = None
+    formula: Optional[str] = None
+    formula_references: List[str] = Field(default_factory=list)
+    cached_value: Optional[str] = None
+    cached_value_type: Optional[str] = None
 
 
 class SpreadsheetRange(BaseModel):
@@ -346,6 +356,13 @@ class StructuredSourceUnit(BaseModel):
     text: str = ""
     locator: SourceLocator
     grid: Optional[TableGrid] = None
+    # Internal producer data; the versioned source_contract sidecar transports
+    # it without conflating section ownership with physical evidence location.
+    physical_locator: Optional[SourceLocator] = None
+    physical_path: Optional[str] = None
+    source_section_id: Optional[str] = None
+    source_issues: List[str] = Field(default_factory=list)
+    header_cells: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Document(BaseModel):

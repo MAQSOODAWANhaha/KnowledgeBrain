@@ -1,6 +1,22 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Conservative request defaults, not claims about a provider's native maximum.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestDefaults {
+    pub output_token_reserve: u32,
+    pub timeout_ms: u64,
+}
+
+pub fn request_defaults() -> &'static RequestDefaults {
+    static DEFAULTS: std::sync::OnceLock<RequestDefaults> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        serde_json::from_str(include_str!("../config/request-defaults.json"))
+            .expect("checked-in request defaults")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthoringRuntimeContractV1 {
@@ -11,7 +27,7 @@ pub struct AuthoringRuntimeContractV1 {
     pub model_id: String,
     pub credential_ref: String,
     pub stream: bool,
-    pub max_tokens: u32,
+    pub output_token_reserve: u32,
     pub timeout_ms: u64,
     pub response_mode: String,
     pub transport_retries: u32,
@@ -83,8 +99,16 @@ impl AuthoringRuntimeContractV1 {
             model_id,
             credential_ref: credential_ref.into(),
             stream: true,
-            max_tokens: positive_setting(&read, "KB_AUTHORING_MAX_OUTPUT_TOKENS")?,
-            timeout_ms: positive_setting(&read, "KB_AUTHORING_TIMEOUT_MS")?,
+            output_token_reserve: positive_setting(
+                &read,
+                "KB_AUTHORING_OUTPUT_TOKEN_RESERVE",
+                request_defaults().output_token_reserve,
+            )?,
+            timeout_ms: positive_setting(
+                &read,
+                "KB_AUTHORING_TIMEOUT_MS",
+                request_defaults().timeout_ms,
+            )?,
             response_mode: "strict_json_schema".into(),
             transport_retries: 0,
             temperature: None,
@@ -104,7 +128,7 @@ impl AuthoringRuntimeContractV1 {
                 "env:KNOWLEDGEBRAIN_CHAT_API_KEY" | "env:LLM_API_KEY"
             )
             || !self.stream
-            || self.max_tokens == 0
+            || self.output_token_reserve == 0
             || self.timeout_ms == 0
             || !matches!(
                 self.response_mode.as_str(),
@@ -168,12 +192,23 @@ fn alias(
     Ok(a.or(b))
 }
 
-fn positive_setting<T>(read: &impl Fn(&str) -> Option<String>, name: &str) -> Result<T, String>
+fn positive_setting<T>(
+    read: &impl Fn(&str) -> Option<String>,
+    name: &str,
+    fallback: T,
+) -> Result<T, String>
 where
     T: std::str::FromStr + Default + PartialOrd,
 {
-    read(name)
-        .and_then(|value| value.parse::<T>().ok())
+    let Some(raw) = read(name) else {
+        return Ok(fallback);
+    };
+    if raw.trim().is_empty() {
+        return Ok(fallback);
+    }
+    raw.trim()
+        .parse::<T>()
+        .ok()
         .filter(|value| *value > T::default())
         .ok_or_else(|| format!("AGENT_PROVIDER_UNAVAILABLE: {name} must be a positive integer"))
 }
@@ -191,7 +226,7 @@ mod tests {
             model_id: "frozen-model".into(),
             credential_ref: "env:KNOWLEDGEBRAIN_CHAT_API_KEY".into(),
             stream: true,
-            max_tokens: 8192,
+            output_token_reserve: 8192,
             timeout_ms: 180_000,
             response_mode: "strict_json_schema".into(),
             transport_retries: 0,
@@ -211,7 +246,7 @@ mod tests {
         );
         let mut drift = fixture();
         drift.reasoning_effort = Some("high".into());
-        drift.max_tokens = 4096;
+        drift.output_token_reserve = 4096;
         drift.timeout_ms = 90000;
         assert!(drift.validate().is_ok());
         assert_ne!(sha, drift.canonical_bytes_and_sha256().unwrap().1);
@@ -225,7 +260,7 @@ mod tests {
             ("LLM_BASE_URL", "https://llm.example/v1"),
             ("LLM_MODEL", "configured-model"),
             ("LLM_API_KEY", "test-key"),
-            ("KB_AUTHORING_MAX_OUTPUT_TOKENS", "4096"),
+            ("KB_AUTHORING_OUTPUT_TOKEN_RESERVE", "4096"),
             ("KB_AUTHORING_TIMEOUT_MS", "90000"),
         ]
         .into_iter()
@@ -234,19 +269,31 @@ mod tests {
     }
 
     #[test]
-    fn environment_parameters_are_required_and_reasoning_is_optional() {
+    fn optional_environment_parameters_override_safe_defaults() {
         let mut env = environment();
         let runtime = AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).unwrap();
         assert_eq!(runtime.model_id, "configured-model");
-        assert_eq!(runtime.max_tokens, 4096);
+        assert_eq!(runtime.output_token_reserve, 4096);
         assert_eq!(runtime.timeout_ms, 90000);
         assert_eq!(runtime.reasoning_effort, None);
         env.insert("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT".into(), "high".into());
         let runtime = AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).unwrap();
         assert_eq!(runtime.reasoning_effort.as_deref(), Some("high"));
-        for key in ["KB_AUTHORING_MAX_OUTPUT_TOKENS", "KB_AUTHORING_TIMEOUT_MS"] {
+        for key in [
+            "KB_AUTHORING_OUTPUT_TOKEN_RESERVE",
+            "KB_AUTHORING_TIMEOUT_MS",
+        ] {
+            let mut defaults = env.clone();
+            defaults.remove("KB_AUTHORING_OUTPUT_TOKEN_RESERVE");
+            defaults.remove("KB_AUTHORING_TIMEOUT_MS");
+            let runtime =
+                AuthoringRuntimeContractV1::resolve_with(|k| defaults.get(k).cloned()).unwrap();
+            assert_eq!(
+                runtime.output_token_reserve,
+                request_defaults().output_token_reserve
+            );
+            assert_eq!(runtime.timeout_ms, request_defaults().timeout_ms);
             for value in [
-                None,
                 Some("0"),
                 Some("-1"),
                 Some("1.5"),

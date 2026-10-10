@@ -53,6 +53,11 @@ class BaseParser(ABC):
             len(content),
         )
         document = self.parse_into_text(content)
+        from docreader.parser.source_contract import attach_source_contract
+        document = attach_source_contract(
+            document, content, self.file_type,
+            render=self.__class__.__name__ in {"DocxParser", "Docx2Parser", "DocParser", "PDFParser", "PDFScannedParser", "ExcelParser", "ImageParser"},
+        )
         logger.info(
             "Extracted %d characters from %s",
             len(document.content),

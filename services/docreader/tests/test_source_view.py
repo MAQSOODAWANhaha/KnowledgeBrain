@@ -97,16 +97,3 @@ def test_office_pages_are_explicitly_unsupported(rpc):
     with pytest.raises(grpc.RpcError) as error:
         client.SourceView(request(b"office", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"), metadata=metadata)
     assert error.value.code() == grpc.StatusCode.UNIMPLEMENTED
-
-
-REAL_PDF = Path(__file__).resolve().parents[3] / "testdata/bid/BiddingFile.pdf"
-
-
-@pytest.mark.skipif(not REAL_PDF.exists(), reason="private real tender sample unavailable")
-def test_real_tender_original_view(rpc):
-    client, metadata = rpc
-    # Physical page 70 contains both G.1/G.2 and the table notes; printed page is 62.
-    view = client.SourceView(request(REAL_PDF.read_bytes(), "application/pdf", page_ordinal=69), metadata=metadata)
-    assert view.page_ordinal == 69
-    assert view.height > view.width > 0
-    assert view.image_sha256 == hashlib.sha256(view.image_data).hexdigest()

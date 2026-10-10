@@ -9,6 +9,8 @@ import logging
 import os
 import re
 import zipfile
+from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from collections import defaultdict
 from io import BytesIO
 from typing import List
@@ -225,15 +227,68 @@ def _range_model(a1_range: str) -> SpreadsheetRange:
     )
 
 
-def _cell_model(cell) -> SpreadsheetCell | None:
+def _display_value(value: object, number_format: str) -> tuple[str | None, str | None]:
+    # Render only known exact formats; preserve unsupported ones as incomplete.
+    if isinstance(value, (date, datetime)):
+        if number_format.lower() == "yyyy-mm-dd":
+            return value.strftime("%Y-%m-%d"), None
+        return None, "unsupported_date_format"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE", None
+    if number_format == "General":
+        if isinstance(value, (int, float)):
+            return None, "general_numeric_display_not_rendered"
+        return str(value), None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        match = re.fullmatch(r'(0|#,##0)(\.0+)?(%)?(?:"([^"\n]*)")?', number_format)
+        if match:
+            places = max(len(match.group(2) or "") - 1, 0)
+            scaled = Decimal(str(value)) * (100 if match.group(3) else 1)
+            if places > 64 or not scaled.is_finite() or abs(scaled.adjusted()) > 308:
+                return None, "numeric_display_out_of_supported_range"
+            with localcontext() as context:
+                context.prec = 400
+                rounded = scaled.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+            grouping = "," if match.group(1) == "#,##0" else ""
+            return format(rounded, f"{grouping}.{places}f") + (match.group(3) or "") + (match.group(4) or ""), None
+    return None, "unsupported_number_format"
+
+
+def _cell_model(cell, cached_value=None, cached_type=None) -> SpreadsheetCell | None:
+    from openpyxl.formula.tokenizer import Tokenizer, TokenizerError
+
     value = cell.value
     if value is None or _is_image_function(value):
         return None
+    formula = str(value) if cell.data_type == "f" else None
+    raw = value.isoformat() if isinstance(value, (date, datetime)) else str(value)
+    value_type = ("formula" if formula else "date" if isinstance(value, (date, datetime))
+                  else "boolean" if isinstance(value, bool) else "number" if isinstance(value, (int, float))
+                  else "error" if cell.data_type == "e" else "string")
+    references = []
+    formula_error = None
+    if formula:
+        try:
+            references = list(dict.fromkeys(token.value for token in Tokenizer(formula).items
+                                            if token.type == "OPERAND" and token.subtype == "RANGE"))
+        except TokenizerError:
+            formula_error = "formula_reference_parse_incomplete"
+    display, reason = _display_value(cached_value if formula else value, cell.number_format)
+    if formula and cached_value is None:
+        display, reason = None, "formula_cached_value_missing"
+    if formula and cached_type == "e":
+        display, reason = None, "formula_cached_error"
+    if formula_error:
+        display, reason = None, formula_error
     return SpreadsheetCell(
-        address=cell.coordinate,
-        row=cell.row,
-        column=cell.column,
-        text=str(value),
+        address=cell.coordinate, row=cell.row, column=cell.column,
+        text=display if display is not None else raw,
+        raw_value=raw, value_type=value_type, number_format=cell.number_format,
+        display_text=display, display_complete=reason is None,
+        display_incomplete_reason=reason, formula=formula,
+        formula_references=references,
+        cached_value=str(cached_value) if formula and cached_value is not None else None,
+        cached_value_type=cached_type if formula and cached_value is not None else None,
     )
 
 
@@ -461,6 +516,11 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
     repaired = repair_xlsx_bytes(content)
     source = repaired if repaired is not None else content
     workbook = load_workbook(BytesIO(source), data_only=False, read_only=False)
+    try:
+        cached_workbook = load_workbook(BytesIO(source), data_only=True, read_only=False)
+    except Exception:
+        workbook.close()
+        raise
     units: List[StructuredSourceUnit] = []
     total_text_bytes = 0
     total_cell_payload_bytes = 0
@@ -488,16 +548,16 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
         locator = unit.locator
         if isinstance(locator, SpreadsheetLocator):
             total_cell_payload_bytes += sum(
-                len(cell.address.encode("utf-8")) + len(cell.text.encode("utf-8"))
+                len(cell.model_dump_json().encode("utf-8"))
                 for cell in locator.cells
             )
         if unit.grid is not None:
             total_cell_payload_bytes += sum(len(cell.text.encode("utf-8")) for cell in unit.grid.cells)
-            _limit(
-                "cell_payload_bytes",
-                total_cell_payload_bytes,
-                XLSX_MAX_CELL_PAYLOAD_BYTES,
-            )
+        _limit(
+            "cell_payload_bytes",
+            total_cell_payload_bytes,
+            XLSX_MAX_CELL_PAYLOAD_BYTES,
+        )
         units.append(unit)
 
     try:
@@ -519,7 +579,8 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 (
                     model
                     for cell in raw_cells.values()
-                    if (model := _cell_model(cell)) is not None
+                    if (model := _cell_model(cell, cached_workbook.worksheets[sheet_ordinal].cell(cell.row, cell.column).value,
+                                             cached_workbook.worksheets[sheet_ordinal].cell(cell.row, cell.column).data_type)) is not None
                 ),
                 key=lambda cell: (cell.row, cell.column, cell.address),
             )
@@ -558,11 +619,13 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 XLSX_MAX_TABLE_CELL_SCANS,
             )
             tables: List[tuple[SpreadsheetTableIdentity, SpreadsheetRange]] = []
+            header_rows = {}
             for raw_table in raw_tables:
                 region = _range_model(raw_table.ref)
                 _limit("table_end_row", region.end_row, XLSX_MAX_LOGICAL_ROW)
                 _limit("table_end_column", region.end_column, XLSX_MAX_LOGICAL_COLUMN)
                 range_area(region, "table")
+                header_rows[raw_table.name] = raw_table.headerRowCount or 0
                 tables.append(
                     (
                         SpreadsheetTableIdentity(
@@ -643,6 +706,7 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 table_merges = [
                     region for region in merged if contains(table_region, region)
                 ]
+                grid = _listobject_grid(table_region, table_cells, table_merges)
                 emit(
                     StructuredSourceUnit(
                         key=f"sheet:{sheet_ordinal}:table:{table.name}",
@@ -653,11 +717,14 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                             sheet_ordinal=sheet_ordinal,
                             sheet_name=sheet.title,
                             region=table_region,
-                            cells=[],
-                            merged_ranges=[],
+                            cells=table_cells,
+                            merged_ranges=table_merges,
                             defined_tables=[table],
                         ),
-                        grid=_listobject_grid(table_region, table_cells, table_merges),
+                        grid=grid,
+                        header_cells=[{"row": cell.row, "column": cell.column, "role": "column_header"}
+                                      for cell in grid.cells
+                                      if cell.row < header_rows[table.name]],
                     )
                 )
             if not tables and all_cells:
@@ -674,8 +741,8 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                             sheet_ordinal=sheet_ordinal,
                             sheet_name=sheet.title,
                             region=used,
-                            cells=[],
-                            merged_ranges=[],
+                            cells=all_cells,
+                            merged_ranges=used_merges,
                             defined_tables=[],
                         ),
                         grid=_listobject_grid(used, all_cells, used_merges),
@@ -683,6 +750,7 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 )
     finally:
         workbook.close()
+        cached_workbook.close()
     return units
 
 

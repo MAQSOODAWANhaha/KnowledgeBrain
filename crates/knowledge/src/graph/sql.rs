@@ -11,11 +11,25 @@ pub async fn persist_graph_maps(
     >,
     document_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    persist_graph_maps_tx(&mut tx, graph, relations, document_id).await?;
+    tx.commit().await
+}
+
+pub(crate) async fn persist_graph_maps_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    graph: &std::collections::HashMap<(Uuid, Uuid, String), crate::GraphNode>,
+    relations: &std::collections::HashMap<
+        (Uuid, Uuid, String, String, String),
+        crate::GraphRelation,
+    >,
+    document_id: Uuid,
+) -> Result<(), sqlx::Error> {
     for n in graph.values().filter(|n| n.document_id == document_id) {
         sqlx::query(
             "INSERT INTO graph_nodes (product_version_id, document_id, name, chunk_ids)
              VALUES ($1,$2,$3,$4)
-             ON CONFLICT (product_version_id, document_id, name)
+             ON CONFLICT (product_version_id, document_id, name, generation)
              DO UPDATE SET chunk_ids = (
                  SELECT ARRAY(SELECT DISTINCT x FROM unnest(graph_nodes.chunk_ids || EXCLUDED.chunk_ids) AS x)
              )",
@@ -24,7 +38,7 @@ pub async fn persist_graph_maps(
         .bind(n.document_id)
         .bind(&n.name)
         .bind(&n.chunk_ids)
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     }
     for r in relations.values().filter(|r| r.document_id == document_id) {
@@ -39,7 +53,7 @@ pub async fn persist_graph_maps(
         .bind(&r.node1)
         .bind(&r.node2)
         .bind(&r.rel_type)
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     }
     Ok(())
@@ -49,11 +63,11 @@ pub async fn delete_graph_for_document(
     pool: &PgPool,
     document_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM graph_relations WHERE document_id = $1")
+    sqlx::query("DELETE FROM graph_relations WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)")
         .bind(document_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM graph_nodes WHERE document_id = $1")
+    sqlx::query("DELETE FROM graph_nodes WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)")
         .bind(document_id)
         .execute(pool)
         .await?;
@@ -115,7 +129,7 @@ pub async fn graph_hits_pg(
             LIMIT 1
          ) c ON true
          WHERE n.product_version_id = $1
-           AND d.deleted_at IS NULL
+           AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND n.generation=d.active_generation
            AND (
                 n.name ILIKE '%' || $2 || '%'
                 OR $2 ILIKE '%' || n.name || '%'
@@ -170,7 +184,7 @@ pub async fn load_graph_for_document(
     let mut graph = std::collections::HashMap::new();
     let nodes = sqlx::query(
         "SELECT product_version_id, document_id, name, chunk_ids
-         FROM graph_nodes WHERE document_id = $1",
+         FROM graph_nodes WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)",
     )
     .bind(document_id)
     .fetch_all(pool)
@@ -193,7 +207,7 @@ pub async fn load_graph_for_document(
     let mut relations = std::collections::HashMap::new();
     let rows = sqlx::query(
         "SELECT product_version_id, document_id, node1, node2, rel_type
-         FROM graph_relations WHERE document_id = $1",
+         FROM graph_relations WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)",
     )
     .bind(document_id)
     .fetch_all(pool)

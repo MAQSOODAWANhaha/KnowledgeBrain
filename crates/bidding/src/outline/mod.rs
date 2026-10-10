@@ -13,23 +13,37 @@
 
 pub mod agent;
 pub mod chapters;
+pub mod claim_review;
 pub mod discover;
+pub mod evidence;
+pub mod frozen;
+pub(crate) mod metadata_fragments;
+pub(crate) mod model_wire;
 pub mod parse;
+pub(crate) mod read_receipts;
+pub mod source_review;
+pub(crate) mod source_wire;
 pub mod store;
 mod template;
+pub mod template_review;
 pub mod tools;
+pub mod visual;
 
 #[cfg(test)]
 mod acceptance;
 #[cfg(test)]
+pub(crate) use acceptance::discovered as fixture_discovered;
+#[cfg(test)]
+pub(crate) use acceptance::organized as fixture_organized;
+#[cfg(test)]
 mod tests;
 
-pub use template::{COVER_CHAPTER_ID, ProjectedOutline, project, project_draft};
+pub use template::{COVER_CHAPTER_ID, ProjectedOutline, project_draft, validate_publication};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,11 +86,58 @@ pub struct TemplateContent {
     pub slot_id: String,
     pub chapter_id: String,
     pub kind: SlotKind,
-    /// Prescribed tender wording. Empty when the response package may fill it.
+    pub content: TemplateBody,
+    /// Host-projected tender wording. Empty when the response package may fill it.
     pub text: String,
     pub response_required: bool,
     /// Knowledge-base query. Empty unless `response_required`.
     pub match_query: String,
+}
+
+/// The model chooses a source or editable position; the host owns fixed text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TemplateBody {
+    SourceCopy {
+        refs: Vec<evidence::EvidenceRef>,
+    },
+    EditableBlank,
+    GeneratedExplanation {
+        supporting_refs: Vec<evidence::EvidenceRef>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TargetRef {
+    TextSlot {
+        slot_id: String,
+    },
+    FormBinding {
+        form_id: String,
+    },
+    ManualTask {
+        task_id: String,
+        description: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fulfillment {
+    pub requirement_id: String,
+    pub primary_response_chapter_id: String,
+    pub target_refs: Vec<TargetRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewIssue {
+    pub id: String,
+    pub code: String,
+    pub description: String,
+    pub requirement_ids: Vec<String>,
+    pub evidence: Vec<evidence::EvidenceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +157,13 @@ pub struct OutlineArtifact {
     pub project_id: String,
     pub frozen_input_sha256: String,
     pub chapters: Vec<ChapterOutline>,
+    pub required_requirement_ids: std::collections::BTreeSet<String>,
+    pub requirements: std::collections::BTreeMap<String, discover::RequirementRecord>,
+    pub fulfillments: Vec<Fulfillment>,
+    pub review_issues: Vec<ReviewIssue>,
+    pub needs_review: bool,
+    pub semantic_review_complete: bool,
+    pub review_proof: template_review::Proof,
     pub templates: Vec<TemplateContent>,
     pub open_issues: Vec<OpenIssue>,
 }
@@ -127,11 +195,17 @@ pub(crate) fn validate_artifact(artifact: &OutlineArtifact) -> Result<(), String
         if !chapter_ids.insert(chapter.id.as_str()) {
             return Err(format!("duplicate chapter {}", chapter.id));
         }
+        if chapter.purpose == ChapterPurpose::Group && !chapter.requirement_ids.is_empty() {
+            return Err(format!(
+                "group chapter {} cannot own requirements",
+                chapter.id
+            ));
+        }
         if chapter.purpose == ChapterPurpose::Group
             && artifact
                 .templates
                 .iter()
-                .any(|slot| slot.chapter_id == chapter.id && slot.response_required)
+                .any(|slot| slot.chapter_id == chapter.id)
         {
             return Err(format!(
                 "group chapter {} cannot carry a knowledge response",
@@ -151,6 +225,20 @@ pub(crate) fn validate_artifact(artifact: &OutlineArtifact) -> Result<(), String
                 "template slot {} is not on a published chapter",
                 slot.slot_id
             ));
+        }
+        match (&slot.content, slot.kind) {
+            (TemplateBody::EditableBlank, SlotKind::BidderBlank | SlotKind::Signature) => {}
+            (
+                TemplateBody::SourceCopy { refs },
+                SlotKind::FixedText | SlotKind::TenderValue | SlotKind::Preserved,
+            ) if !refs.is_empty() => {}
+            (TemplateBody::GeneratedExplanation { .. }, SlotKind::Instruction) => {}
+            _ => {
+                return Err(format!(
+                    "template slot {} content disagrees with its role",
+                    slot.slot_id
+                ));
+            }
         }
         if slot.response_required != slot.kind.accepts_knowledge_response() {
             return Err(format!(

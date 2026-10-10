@@ -181,9 +181,16 @@ def _structured_unit_to_proto(unit: ModelStructuredSourceUnit) -> ProtoStructure
         proto.spreadsheet.sheet_name = locator.sheet_name
         _range_to_proto(locator.region, proto.spreadsheet.region)
         for cell in locator.cells:
-            proto.spreadsheet.cells.add(
-                address=cell.address, row=cell.row, column=cell.column, text=cell.text
+            target = proto.spreadsheet.cells.add(
+                address=cell.address, row=cell.row, column=cell.column, text=cell.text,
+                raw_value=cell.raw_value, value_type=cell.value_type,
+                number_format=cell.number_format, display_complete=cell.display_complete,
+                formula_references=cell.formula_references,
             )
+            for name in ("display_text", "display_incomplete_reason", "formula", "cached_value", "cached_value_type"):
+                value = getattr(cell, name)
+                if value is not None:
+                    setattr(target, name, value)
         for merged in locator.merged_ranges:
             _range_to_proto(merged, proto.spreadsheet.merged_ranges.add())
         for table in locator.defined_tables:

@@ -29,6 +29,7 @@ pub mod knowledge_index_v2;
 pub mod knowledge_retrieval;
 pub mod knowledge_retrieval_pg;
 pub mod pipeline;
+pub mod workflow;
 pub use knowledge_retrieval_pg::PostgresKnowledgeRetrievalAdapter;
 
 pub use catalog::{
@@ -40,7 +41,7 @@ pub use catalog::{
     delete_graph_for_document, delete_image_chunks, delete_member, delete_product, delete_tag,
     document_chunk_count, document_file_meta, document_image_object_refs, document_parse_status,
     document_tag_ids, document_workspace_id, embedding_models_for_versions,
-    embeddings_schema_ready, ensure_company_workspace, finalize_subtask, find_api_key_by_hash,
+    embeddings_schema_ready, ensure_company_workspace, find_api_key_by_hash,
     find_duplicate_document, find_user_by_email, find_user_by_id, finish_span,
     freeze_version_embedding_model, graph_hits_pg, housekeep_documents, hybrid_search_pg,
     insert_api_key, insert_document, insert_document_chunks, insert_document_tags,

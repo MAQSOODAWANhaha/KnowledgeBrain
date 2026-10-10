@@ -9,6 +9,7 @@ mod http_engine;
 mod images;
 mod output_inventory;
 mod simple;
+mod source_contract;
 mod table_grid;
 mod types;
 
@@ -21,9 +22,12 @@ pub use convert::{
     convert, convert_tender_source, convert_to_markdown, convert_with, convert_with_cancel,
     resolve_engine,
 };
-pub use engines::{EngineCatalog, EngineInfo, list_all_engines, local_engines, merge_engines};
+pub use engines::{
+    EffectiveEngineConfig, EngineCatalog, EngineInfo, list_all_engines, local_engines,
+    merge_engines, resolve_effective_engine_config,
+};
 pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr, source_view};
-pub use images::{rewrite_images, rewrite_inline};
+pub use images::{rewrite_images, rewrite_images_with_contract, rewrite_inline};
 pub use output_inventory::{
     OUTPUT_INVENTORY_PROFILE, OutputInventoryEntry, OutputInventoryManifest, OutputInventoryRead,
     OutputTableLayout, read_output_inventory, validate_output_inventory,
@@ -40,3 +44,9 @@ pub use types::{
 pub mod proto {
     tonic::include_proto!("docreader");
 }
+
+pub use source_contract::{
+    GlyphNormalization, RenderedSpan, SourceCompleteness, SourceContract, SourcePage,
+    SourceUnitIdentity, TableHeaderCell, parse_source_contract, physical_page, table_grid_digest,
+    validate_glyph_normalizations,
+};

@@ -335,7 +335,21 @@ pub async fn assembly_pg(
             message: "more than 20 target versions".into(),
         });
     }
-    let models = crate::embedding_models_for_versions(pool, &targets)
+    // Resolve branches before touching the vector model/provider. A keyword-only
+    // version remains usable when no embedding service is configured.
+    let mut vector_targets = Vec::new();
+    for version_id in &targets {
+        let (vector_on, _) = crate::version_indexing_flags(pool, *version_id)
+            .await
+            .map_err(|e| SearchError {
+                code: "INTERNAL",
+                message: e.to_string(),
+            })?;
+        if vector_on {
+            vector_targets.push(*version_id);
+        }
+    }
+    let models = crate::embedding_models_for_versions(pool, &vector_targets)
         .await
         .map_err(|e| SearchError {
             code: "INTERNAL",
@@ -354,16 +368,11 @@ pub async fn assembly_pg(
             _ => {}
         }
     }
-    let model = seen.unwrap_or_default();
-    crate::index::query_embedding_model_id(&model).map_err(|e| SearchError {
-        code: "EMBEDDING_MISMATCH",
-        message: e,
-    })?;
-    let qv = embed_index(&query).map_err(|e| SearchError {
-        code: "UPSTREAM",
-        message: e,
-    })?;
-    let qv = crate::vector_literal(&qv);
+    let qv = query_vector_if_enabled(
+        !vector_targets.is_empty(),
+        seen.as_deref().unwrap_or(""),
+        &query,
+    )?;
     let limit = per_target_limit(req.match_count, targets.len()) as i64;
     let (vth, kth) = crate::workspace_thresholds_for_product(pool, product_id)
         .await
@@ -909,10 +918,9 @@ async fn matching_company_pg(
         let mut all = Vec::new();
         for (pid, vid, emb) in &versions {
             let _ = pid;
-            if let Ok(mut hits) = pg_version_hits(pool, *vid, emb, &r.text, req, &r.tag_ids).await {
-                hits.retain(|h| h.chunk_type != "wiki_page" && h.match_type != "graph");
-                all.append(&mut hits);
-            }
+            let mut hits = pg_version_hits(pool, *vid, emb, &r.text, req, &r.tag_ids).await?;
+            hits.retain(|h| h.chunk_type != "wiki_page" && h.match_type != "graph");
+            all.append(&mut hits);
         }
         all.sort_by(|a, b| {
             b.score
@@ -955,6 +963,33 @@ async fn matching_company_pg(
     })
 }
 
+fn query_vector_if_enabled(
+    vector_on: bool,
+    model_id: &str,
+    query: &str,
+) -> Result<String, SearchError> {
+    query_vector_with(vector_on, || {
+        crate::index::query_embedding_model_id(model_id).map_err(|e| SearchError {
+            code: "EMBEDDING_MISMATCH",
+            message: e,
+        })?;
+        embed_index(query).map_err(|e| SearchError {
+            code: "UPSTREAM",
+            message: e,
+        })
+    })
+}
+fn query_vector_with(
+    vector_on: bool,
+    build: impl FnOnce() -> Result<Vec<f32>, SearchError>,
+) -> Result<String, SearchError> {
+    if vector_on {
+        build().map(|vector| crate::vector_literal(&vector))
+    } else {
+        Ok(crate::vector_literal(&[]))
+    }
+}
+
 async fn pg_version_hits(
     pool: &sqlx::PgPool,
     version_id: Uuid,
@@ -963,15 +998,13 @@ async fn pg_version_hits(
     req: &SearchRequest,
     tag_ids: &[Uuid],
 ) -> Result<Vec<Hit>, SearchError> {
-    crate::index::query_embedding_model_id(model_id).map_err(|e| SearchError {
-        code: "EMBEDDING_MISMATCH",
-        message: e,
-    })?;
-    let qv = embed_index(query).map_err(|e| SearchError {
-        code: "UPSTREAM",
-        message: e,
-    })?;
-    let qv = crate::vector_literal(&qv);
+    let (vector_on, _) = crate::version_indexing_flags(pool, version_id)
+        .await
+        .map_err(|e| SearchError {
+            code: "INTERNAL",
+            message: e.to_string(),
+        })?;
+    let qv = query_vector_if_enabled(vector_on, model_id, query)?;
     let rows = crate::hybrid_search_pg(
         pool,
         version_id,
@@ -1001,6 +1034,16 @@ async fn pg_version_hits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_only_query_never_validates_or_embeds() {
+        assert!(
+            query_vector_with(false, || panic!(
+                "keyword search must not validate a model or call its provider"
+            ))
+            .is_ok()
+        );
+    }
 
     async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {
         let database_url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {

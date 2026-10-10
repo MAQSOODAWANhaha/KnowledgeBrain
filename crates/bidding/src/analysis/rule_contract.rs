@@ -184,7 +184,7 @@ fn has_source_limitation(input: &FrozenInput, analysis: &Analysis, check: &Globa
     input
         .documents
         .iter()
-        .any(|d| d["disposition"].as_str().is_some_and(|s| s != "ready"))
+        .any(|d| d.availability != super::DocumentAvailability::Available)
         || check.grounds.iter().any(|span| {
             analysis
                 .dispositions
@@ -228,7 +228,7 @@ pub fn validate_evidence(
         let frozen_missing = input
             .documents
             .iter()
-            .any(|d| d["disposition"].as_str().is_some_and(|s| s != "ready"));
+            .any(|d| d.availability != super::DocumentAvailability::Available);
         if (!input.source_units.is_empty() || !analysis.records.is_empty())
             && check.key != "collection_consistency"
             && !(check.conclusion == GlobalCheckConclusion::SourceLimited && frozen_missing)

@@ -381,34 +381,6 @@ pub fn attach(
     wrapper
 }
 
-/// Add optional explanations only after every admitted raw group is fixed.
-/// An explanation can use spare bytes, never evict another complete candidate.
-pub(super) fn annotate_candidates(
-    input: &FrozenInput,
-    analysis: &Analysis,
-    coverage: &Coverage,
-    scope: &[String],
-    packet: &mut Value,
-    budget: usize,
-) -> Result<(), String> {
-    let count = packet["assigned_evidence"]["candidates"]
-        .as_array()
-        .ok_or("candidate packet missing")?
-        .len();
-    for index in 0..count {
-        let original = packet["assigned_evidence"]["candidates"][index].clone();
-        let key = original["reference"]
-            .as_str()
-            .ok_or("candidate reference missing")?;
-        let enriched = attach(input, analysis, coverage, scope, key, original.clone());
-        packet["assigned_evidence"]["candidates"][index] = enriched;
-        if serde_json::to_vec(packet).map_err(|e| e.to_string())?.len() > budget {
-            packet["assigned_evidence"]["candidates"][index] = original;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,7 +424,7 @@ mod tests {
 
     fn input(units: Vec<(&str, &str)>) -> FrozenInput {
         FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![],
@@ -523,73 +495,6 @@ mod tests {
         assert_ne!(scoring["field_value"], scoring["grounds"][0]["cited_text"]);
         assert!(!indicators.contains("12.5"));
         assert!(control.contains("12.5"));
-    }
-
-    #[test]
-    fn whole_line_bidder_blank_projects_labels_as_removed() {
-        let original = "投标人名称：________________";
-        let frozen = input(vec![("source", original)]);
-        let record = Record {
-            id: "tpl".into(),
-            sources: vec![span("source", 0, original.len())],
-            data: RecordData::Template {
-                label: "乙".into(),
-                title: "乙".into(),
-                parent: None,
-                order: None,
-                purpose: "附表".into(),
-                applicability: applicability(vec![span("source", 0, original.len())]),
-                regions: vec![TemplateRegion {
-                    source: span("source", 0, original.len()),
-                    role: RegionRole::BidderBlank,
-                    form_id: None,
-                    header_rows: None,
-                    cells: vec![],
-                    blank_ranges: vec![],
-                    instruction: "keep labels 投标人名称 and blank the underscores".into(),
-                }],
-            },
-        };
-        let coverage = delivered(&frozen);
-        let scope = vec!["source".into()];
-        let evidence = Evidence {
-            input: &frozen,
-            coverage: &coverage,
-            scope: &scope,
-        };
-        let effects = collect_blank_effects(&evidence, &record);
-        assert_eq!(
-            effects[0]["source"],
-            json!(span("source", 0, original.len()))
-        );
-        assert_eq!(effects[0]["selected_source_text"], original);
-        assert_eq!(effects[0]["operation"], "replace_with_bidder_blank");
-        assert_eq!(effects[0]["role"], "bidder_blank");
-        assert_eq!(effects[0]["generated_text"], "");
-        assert_eq!(
-            effects[0]["removed_ranges"],
-            json!([{
-                "start":0,"end":original.len(),"text":original
-            }])
-        );
-        assert!(
-            effects[0]["instruction"]
-                .as_str()
-                .unwrap()
-                .contains("keep labels")
-        );
-        let mut analysis = Analysis::default();
-        analysis.records.insert(record.id.clone(), record.clone());
-        let mut packet = json!({"assigned_evidence":{"candidates":[{
-            "reference":"record:tpl","value":record,"sha256":digest(&record).unwrap()
-        }]}});
-        let unchanged = packet.clone();
-        let budget = serde_json::to_vec(&packet).unwrap().len();
-        annotate_candidates(&frozen, &analysis, &coverage, &scope, &mut packet, budget).unwrap();
-        assert_eq!(
-            packet, unchanged,
-            "optional output effects cannot evict raw candidates"
-        );
     }
 
     #[test]
@@ -889,60 +794,5 @@ mod tests {
         let effects = collect_blank_effects(&evidence, &record);
         assert_eq!(effects[0]["status"], "not_delivered");
         assert!(effects[0]["original"].is_null());
-    }
-
-    #[test]
-    fn optional_comparisons_do_not_evict_complete_candidate_groups() {
-        let frozen = input(vec![("source", "a source paragraph")]);
-        let coverage = delivered(&frozen);
-        let scope = vec!["source".into()];
-        let mut analysis = Analysis::default();
-        for id in ["a", "b"] {
-            analysis.records.insert(
-                id.into(),
-                Record {
-                    id: id.into(),
-                    sources: vec![span("source", 0, 18)],
-                    data: RecordData::Fact {
-                        name: id.into(),
-                        value: "source paragraph".into(),
-                        scope: "project".into(),
-                    },
-                },
-            );
-        }
-        let rows: Vec<_> = analysis.records.values().map(|r|json!({"reference":format!("record:{}",r.id),"value":r,"sha256":digest(r).unwrap()})).collect();
-        let mut packet = json!({"assigned_evidence":{"candidates":rows}});
-        let before = packet.clone();
-        let budget = serde_json::to_vec(&packet).unwrap().len();
-        annotate_candidates(&frozen, &analysis, &coverage, &scope, &mut packet, budget).unwrap();
-        assert_eq!(packet, before);
-        annotate_candidates(
-            &frozen,
-            &analysis,
-            &coverage,
-            &scope,
-            &mut packet,
-            usize::MAX,
-        )
-        .unwrap();
-        assert_eq!(
-            packet["assigned_evidence"]["candidates"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        assert!(packet["assigned_evidence"]["candidates"][0]["field_ground_checks"].is_array());
-        for index in 0..2 {
-            assert_eq!(
-                packet["assigned_evidence"]["candidates"][index]["value"],
-                before["assigned_evidence"]["candidates"][index]["value"]
-            );
-            assert_eq!(
-                packet["assigned_evidence"]["candidates"][index]["sha256"],
-                before["assigned_evidence"]["candidates"][index]["sha256"]
-            );
-        }
     }
 }

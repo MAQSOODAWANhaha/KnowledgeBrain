@@ -157,7 +157,7 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
 fn legacy_v1_publication_projection_retains_its_own_contract() {
     use bidding::analysis::{Analysis, AnalysisResult, Review};
     let input = FrozenInput {
-        schema_version: 1,
+        schema_version: bidding::outline::frozen::FROZEN_SCHEMA_VERSION,
         project_id: Uuid::new_v4().to_string(),
         document_set_id: Uuid::new_v4().to_string(),
         documents: vec![],

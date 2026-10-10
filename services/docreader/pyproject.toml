@@ -15,6 +15,7 @@ dependencies = [
     "grpcio-health-checking>=1.83.0",
     "grpcio-tools>=1.83.0",
     "lxml>=6.1.1",
+    "fonttools>=4.61.0",
     "markdownify>=1.2.3",
     "markitdown[docx,pdf,xls,xlsx]>=0.1.7",
     "numpy>=2.0.0",

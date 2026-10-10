@@ -9,7 +9,7 @@ import re
 from typing import Optional
 
 _ZH_CHAPTER = re.compile(
-    r"^第[ \t]*[0-9一二三四五六七八九十百千零〇]+[ \t]*(章|节|節|篇|部分)(?:[ \t]*[:：.．]?.*)?$"
+    r"^第[ \t]*[0-9一二三四五六七八九十百千零〇]+[ \t]*(卷|章|节|節|篇|部分)(?:[ \t]*[:：.．]?.*)?$"
 )
 _EN_CHAPTER = re.compile(
     r"^(Chapter|Part|Section|Kapitel|Teil|Abschnitt)[ \t]+(?:[0-9]+|[IVX]{1,5})"
@@ -24,6 +24,38 @@ _CN_PAREN = re.compile(r"^[（(][一二三四五六七八九十百千0-9]+[）)]
 _HEADING_PUNCT = "。.!！?？,，;；:："
 
 
+# Leader width is layout-dependent, not semantic; long TOC rows are common.
+_INDEX_ENTRY = re.compile(r"(?:[.．…·⋅‐‑―─][ \t]*){2,}(?:[0-9]{1,5}|[ivxlcdmIVXLCDM]+)[ \t]*$")
+_INDEX_PREFIX = re.compile(r"(?:[.．…·⋅‐‑―─][ \t]*){2,}$")
+
+
+def is_index_entry(title: str) -> bool:
+    return bool(_INDEX_ENTRY.search(title.strip()))
+
+
+def is_index_entry_prefix(title: str) -> bool:
+    return bool(_INDEX_PREFIX.search(title.strip()))
+
+
+def explicit_heading_kind(title: str) -> Optional[str]:
+    if is_index_entry(title):
+        return None
+    if zh := _ZH_CHAPTER.match(title.strip()):
+        label = zh.group(1)
+        return "volume" if label in {"卷", "篇", "部分"} else "chapter" if label == "章" else "section"
+    if en := _EN_CHAPTER.match(title.strip()):
+        label = en.group(1).lower()
+        return "volume" if label in {"part", "teil"} else "chapter" if label in {"chapter", "kapitel"} else "section"
+    return None
+
+
+def subordinate_heading_level(title: str, level: int) -> int:
+    """Relative depth below an explicit chapter (Chinese lists start at 2)."""
+    if _CN_ENUM.match(title) or _CN_PAREN.match(title):
+        return max(1, level - 1)
+    return level
+
+
 def structural_heading(
     line: str,
     allow_numbered: bool = True,
@@ -31,7 +63,7 @@ def structural_heading(
 ) -> Optional[tuple[int, str]]:
     """Return ``(level, title)`` when this line opens a chapter or clause."""
     raw = line.strip()
-    if not raw or raw.startswith("#"):
+    if not raw or raw.startswith("#") or is_index_entry(raw) or is_index_entry_prefix(raw):
         return None
     if raw[-1] in _HEADING_PUNCT:
         return None
@@ -64,7 +96,7 @@ def outline_flags(texts: list[str]) -> tuple[bool, bool]:
     for text in texts:
         for line in text.splitlines():
             raw = line.strip()
-            if not raw:
+            if not raw or is_index_entry(raw) or is_index_entry_prefix(raw):
                 continue
             nonempty += 1
             if raw[-1] in _HEADING_PUNCT or not _NUMBERED_TITLE.match(raw):

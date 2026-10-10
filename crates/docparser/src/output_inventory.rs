@@ -53,6 +53,7 @@ pub struct OutputInventoryManifest {
     pub parser: String,
     pub config: Value,
     pub page_count: Option<u32>,
+    pub page_manifest: Vec<crate::SourcePage>,
     pub image_sha256: BTreeMap<String, String>,
     pub units: Vec<OutputInventoryEntry>,
 }
@@ -154,7 +155,28 @@ pub fn validate_output_inventory(
         return Err(invalid("image bytes differ from inventory receipt"));
     }
     let mut keys = BTreeSet::new();
-    let mut pages = BTreeSet::new();
+    let source_contract = crate::parse_source_contract(parsed)?;
+    if file_type == "pdf"
+        && source_contract.as_ref().is_none_or(|contract| {
+            contract.page_manifest != manifest.page_manifest
+                || contract.document_revision != expected_sha256
+        })
+    {
+        return Err(invalid(
+            "PDF source/page manifest receipt missing or inconsistent",
+        ));
+    }
+    if source_contract
+        .as_ref()
+        .is_some_and(|contract| contract.document_revision != expected_sha256)
+    {
+        return Err(invalid("source contract file identity mismatch"));
+    }
+    let pages: BTreeSet<u32> = manifest
+        .page_manifest
+        .iter()
+        .map(|page| page.page_ordinal)
+        .collect();
     let mut page_images = BTreeSet::new();
     for (ordinal, (entry, unit)) in manifest
         .units
@@ -201,20 +223,15 @@ pub fn validate_output_inventory(
             return Err(invalid("unit mapping or explicit coverage status invalid"));
         }
         if file_type == "pdf" {
-            let page = match unit.locator {
-                StructuredSourceLocator::Page { page_ordinal, .. }
-                | StructuredSourceLocator::PageTable { page_ordinal, .. } => page_ordinal,
-                StructuredSourceLocator::Image {
-                    page_ordinal: Some(page),
-                    ..
-                } => page,
-                _ => return Err(invalid("PDF unit has no physical page")),
-            };
+            let physical = source_contract
+                .as_ref()
+                .and_then(|contract| contract.unit(&unit.key))
+                .and_then(|identity| identity.physical_locator.as_ref())
+                .ok_or_else(|| invalid("PDF unit has no physical page"))?;
+            let page = crate::physical_page(physical)
+                .ok_or_else(|| invalid("PDF unit has no physical page"))?;
             if entry.part != format!("pdf:page:{}", page + 1) {
                 return Err(invalid("PDF sidecar page mismatch"));
-            }
-            if matches!(unit.locator, StructuredSourceLocator::Page { .. }) {
-                pages.insert(page);
             }
             if let StructuredSourceLocator::Image {
                 ref original_ref,
@@ -258,7 +275,7 @@ mod tests {
                 locator: StructuredSourceLocator::Page { page_ordinal: 0, left: None, top: None, right: None, bottom: None }, grid: None,
             }],
             metadata: HashMap::from([("output_inventory_manifest".into(), serde_json::json!({
-                "schema_version":1,"profile":OUTPUT_INVENTORY_PROFILE,"file_sha256":"immutable",
+                "schema_version":1,"profile":OUTPUT_INVENTORY_PROFILE,"file_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "parser":"profile/implementation/sha/pdfium/version","page_count":1,"image_sha256":{},
                 "config":{"profile":OUTPUT_INVENTORY_PROFILE,"preserve_all_pages":true,"preserve_page_images":true,"text_cleaning":false,"settings":{}},
                 "units":[{"unit_key":"page:0:section:0","part":"pdf:page:1","ordinal":0,
@@ -303,6 +320,59 @@ mod tests {
         parsed
             .metadata
             .insert("output_inventory_manifest".into(), receipt.to_string());
+        let page = crate::SourcePage {
+            page_ordinal: 0,
+            classification: "blank".into(),
+            unit_ids: parsed
+                .structured_source_units
+                .iter()
+                .map(|unit| unit.key.clone())
+                .collect(),
+            image_unit_ids: vec!["page:0:image:0".into()],
+        };
+        let identities = parsed
+            .structured_source_units
+            .iter()
+            .map(|unit| crate::SourceUnitIdentity {
+                unit_id: unit.key.clone(),
+                ordinal: unit.ordinal,
+                kind: unit.kind.clone(),
+                text_sha256: hex::encode(Sha256::digest(unit.text.as_bytes())),
+                grid_sha256: None,
+                section_id: None,
+                parent_section_id: None,
+                heading_level: None,
+                heading_path: String::new(),
+                physical_locator: Some(unit.locator.clone()),
+                physical_path: None,
+                physical_locator_unavailable_reason: None,
+                rendered_spans: vec![],
+                completeness: crate::SourceCompleteness::Complete,
+                reasons: vec![],
+                table_id: None,
+                header_cells: vec![],
+            })
+            .collect();
+        let contract = crate::SourceContract {
+            schema_version: 2,
+            document_revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            parser_version: "fixture-v2".into(),
+            markdown_sha256: hex::encode(Sha256::digest(b"")),
+            units: identities,
+            page_manifest: vec![page.clone()],
+            glyph_normalizations: vec![],
+        };
+        parsed.metadata.insert(
+            "source_contract".into(),
+            serde_json::to_string(&contract).unwrap(),
+        );
+        let mut receipt: Value =
+            serde_json::from_str(&parsed.metadata["output_inventory_manifest"]).unwrap();
+        receipt["page_manifest"] = serde_json::json!([page]);
+        parsed
+            .metadata
+            .insert("output_inventory_manifest".into(), receipt.to_string());
         parsed
     }
 
@@ -311,20 +381,38 @@ mod tests {
         let parsed = blank_pdf();
         assert!(parsed.markdown.is_empty());
         assert_eq!(
-            validate_output_inventory(&parsed, "immutable", "pdf")
-                .unwrap()
-                .page_count,
+            validate_output_inventory(
+                &parsed,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pdf"
+            )
+            .unwrap()
+            .page_count,
             Some(1)
         );
     }
 
     #[test]
     fn old_service_wrong_source_and_incomplete_pages_fail_closed() {
-        assert!(validate_output_inventory(&ReadResult::default(), "immutable", "pdf").is_err());
+        assert!(
+            validate_output_inventory(
+                &ReadResult::default(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pdf"
+            )
+            .is_err()
+        );
         let mut parsed = blank_pdf();
         assert!(validate_output_inventory(&parsed, "different", "pdf").is_err());
         parsed.structured_source_units[0].key = "orphan".into();
-        assert!(validate_output_inventory(&parsed, "immutable", "pdf").is_err());
+        assert!(
+            validate_output_inventory(
+                &parsed,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pdf"
+            )
+            .is_err()
+        );
         let mut parsed = blank_pdf();
         parsed.structured_source_units[0].locator = StructuredSourceLocator::Page {
             page_ordinal: 1,
@@ -333,19 +421,35 @@ mod tests {
             right: None,
             bottom: None,
         };
-        assert!(validate_output_inventory(&parsed, "immutable", "pdf").is_err());
+        assert!(
+            validate_output_inventory(
+                &parsed,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pdf"
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn unreceipted_or_changed_image_payload_cannot_enter_frozen_inventory() {
         let mut parsed = blank_pdf();
-        validate_output_inventory(&parsed, "immutable", "pdf").unwrap();
+        validate_output_inventory(
+            &parsed,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pdf",
+        )
+        .unwrap();
         parsed.images[0].data[0] = 9;
         assert!(
-            validate_output_inventory(&parsed, "immutable", "pdf")
-                .unwrap_err()
-                .0
-                .contains("image bytes differ")
+            validate_output_inventory(
+                &parsed,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pdf"
+            )
+            .unwrap_err()
+            .0
+            .contains("image bytes differ")
         );
         let mut parsed = blank_pdf();
         let mut receipt: Value =
@@ -355,6 +459,13 @@ mod tests {
         parsed
             .metadata
             .insert("output_inventory_manifest".into(), receipt.to_string());
-        assert!(validate_output_inventory(&parsed, "immutable", "pdf").is_err());
+        assert!(
+            validate_output_inventory(
+                &parsed,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pdf"
+            )
+            .is_err()
+        );
     }
 }

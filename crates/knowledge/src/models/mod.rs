@@ -5,12 +5,13 @@ mod sse;
 
 pub use http::{
     AGENT_HTTP_ATTEMPTS, AGENT_TURN_TIMEOUT, CHAT_TIMEOUT, ChatTransportError, EMBED_TIMEOUT,
-    HTTP_ATTEMPTS, chat_sse, chat_sse_turn, chat_sse_turn_once, chat_sse_turn_once_async,
-    chat_sse_turn_once_async_bytes, is_retryable, json_sse, post_llm,
+    HTTP_ATTEMPTS, chat_complete_text_once, chat_complete_text_once_async, chat_sse, chat_sse_turn,
+    chat_sse_turn_once, chat_sse_turn_once_async, chat_sse_turn_once_async_bytes, is_retryable,
+    json_sse, post_llm,
 };
 pub use sse::{
-    ChatToolCall, ChatTurn, ChatUsage, collect_chat_content, collect_chat_turn, last_json_value,
-    looks_like_sse,
+    ChatToolCall, ChatTurn, ChatUsage, CompletionResult, collect_chat_content, collect_chat_turn,
+    collect_completion, last_json_value, looks_like_sse,
 };
 
 use serde::{Deserialize, Serialize};

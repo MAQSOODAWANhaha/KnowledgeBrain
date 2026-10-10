@@ -118,6 +118,6 @@ HTTP 契约新增真实 GET 计数：替身以 `POST /test/mode {cache_available
 
 复用既有不可删除的 `idempotency_requests` 完成记录和不可变 `bid_docx_version_artifacts`；仅在 fresh baseline 增加只读领域函数及 API grant，无新增表、列或 migration 文件。函数先验证所有者，再核对请求范围和发布产物；worker 不获此查询权限。历史回执不依赖活动会话，不能证明对象此刻仍可下载，实际下载继续校验对象 bytes。
 
-验证与源码摘要见 [save-receipt/verification.json](../../artifacts/bid-full-sample/save-receipt/verification.json)。新增前端反例先失败、修复后整组 **33/33**，build/定向 ESLint 通过；真实本地 PG/Redis、生产路由和签名 HTTP 替身契约 **1/1**，覆盖 pending/写盘失败无回执、成功回执身份、随机 ID、非所有者、同所有者跨项目、worker 权限、新轮后历史回执不变及无额外下载/幂等写入。baseline **17/17**。首次测试编译因断言插入作用域错误失败，修正后重跑通过；两次专属环境均清理成功。服务替身不构成真实 ONLYOFFICE 或整本 Agent 样稿验收。
+历史项目专属证据已移至授权私有验收档案。公开验证使用合成输入；本段不声明真实模型语义验收通过。
 
 本项是 O1 保存反馈修复及 O2-S 的前置条件；尚未实现冻结导出请求、同 DOCX 转 PDF 或独立整稿报告。

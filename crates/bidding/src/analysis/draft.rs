@@ -11,7 +11,6 @@ pub enum DraftStage {
     #[default]
     None,
     Outline,
-    Fill,
     Published,
 }
 
@@ -204,43 +203,6 @@ pub fn bind_source_ids(
     hits.sort();
     hits.dedup();
     Ok(hits.into_iter().map(|(_, _, id)| id).collect())
-}
-
-fn specialize_pending_windows(input: &FrozenInput, plan: &mut [DraftPlanItem]) {
-    for item in plan
-        .iter_mut()
-        .filter(|item| item.status == DraftStatus::Pending)
-    {
-        if item.omit_reason.is_some() || !item.source_ids.is_empty() {
-            continue;
-        }
-        let mut from_grounds: Vec<String> = item
-            .grounds
-            .iter()
-            .map(|span| span.source_id.clone())
-            .collect();
-        from_grounds.sort();
-        from_grounds.dedup();
-        if !from_grounds.is_empty() {
-            item.source_ids = from_grounds;
-            item.windows = vec![item.source_ids.clone()];
-            item.omit_reason = None;
-            continue;
-        }
-        item.windows.clear();
-        item.window_index = 0;
-        match bind_source_ids(input, &item.title, &[]) {
-            Ok(hits) => {
-                item.source_ids = hits;
-                item.windows = vec![item.source_ids.clone()];
-                item.omit_reason = None;
-            }
-            Err(reason) => {
-                item.source_ids.clear();
-                item.omit_reason = Some(reason);
-            }
-        }
-    }
 }
 
 fn form_titles(input: &FrozenInput, source_id: &str) -> Vec<String> {
@@ -493,61 +455,11 @@ pub(super) fn refresh_outline_basis(
     Ok(())
 }
 
-pub fn assign_next_chapter(input: &FrozenInput, state: &mut super::agent::Checkpoint) -> bool {
-    specialize_pending_windows(input, &mut state.analysis.draft_plan);
-    let next = state
-        .analysis
-        .draft_plan
-        .iter()
-        .filter(|item| {
-            item.status == DraftStatus::Pending
-                && item.omit_reason.is_none()
-                && !item.source_ids.is_empty()
-        })
-        // Group nodes are structural only. Response parents with children still
-        // carry their own body and must be filled; leaves always remain eligible.
-        .filter(|item| item.purpose != ChapterPurpose::Group)
-        .filter(|item| {
-            item.parent.as_ref().is_none_or(|parent| {
-                state
-                    .analysis
-                    .draft_plan
-                    .iter()
-                    .any(|node| node.id == *parent)
-            })
-        })
-        .min_by_key(|item| (if item.parent.is_some() { 0 } else { 1 }, item.order))
-        .map(|item| item.id.clone());
-    let Some(id) = next else {
-        state.draft_active_id = None;
-        return false;
-    };
-    state.draft_active_id = Some(id.clone());
-    // 整份填充要轮转很多章，停滞保护必须是 Job 级账本：只有「本章回合数」这个
-    // 计时器随换章清零，累计的无进展轮次与 replan/blocked 状态留着。否则每换一
-    // 章就把全局保护清零，一个卡住的 Job 可以把预算烧到底。
-    state.main_progress.watch.focus_turns = 0;
-    if let Some(item) = state.analysis.draft_plan.iter().find(|item| item.id == id) {
-        let window = current_window(item).to_vec();
-        state.main_work = Some(super::agent::WorkState {
-            source_scope: window,
-            deferred_sources: vec![],
-            objective: format!("填写章节 {}", item.title),
-            focus: Default::default(),
-            output_refs: vec![],
-            pending_refs: vec![],
-            status: super::agent::context::WorkStatus::Active,
-            note: String::new(),
-        });
-    }
-    true
-}
-
 pub fn after_batch(
     input: &FrozenInput,
     state: &mut super::agent::Checkpoint,
     batch_failed: bool,
-    stop: bool,
+    _stop: bool,
 ) -> Result<(), String> {
     if batch_failed {
         return Ok(());
@@ -569,27 +481,11 @@ pub fn after_batch(
                 // first discovery hands off with a fresh conversation.
                 // Clears only after every pack is committed.
                 if state.analysis.outline.checks.is_empty() {
-                    state.transcript.clear();
+                    crate::outline::read_receipts::handoff_history(state);
                 }
             }
             let sha = super::digest(input)?;
             if crate::outline::project_draft(input, &sha, &state.outline_run.tool_draft).is_ok() {
-                state.draft_stage = DraftStage::Published;
-                state.done = true;
-            }
-        }
-        DraftStage::Fill => {
-            let active_done = state.draft_active_id.as_ref().is_none_or(|id| {
-                state.analysis.draft_plan.iter().any(|item| {
-                    item.id == *id
-                        && (matches!(item.status, DraftStatus::Filled | DraftStatus::Omitted)
-                            || item.omit_reason.is_some())
-                })
-            });
-            // 用户要停：当前章收尾后就不再派下一章，走正常收尾编译出稿。剩下的
-            // 章仍是 Pending，在稿子里是空 heading，下一次填章接着往下写。
-            if active_done && (stop || !assign_next_chapter(input, state)) {
-                state.draft_stopped = stop;
                 state.draft_stage = DraftStage::Published;
                 state.done = true;
             }
