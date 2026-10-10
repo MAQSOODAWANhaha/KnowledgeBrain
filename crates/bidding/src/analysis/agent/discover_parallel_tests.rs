@@ -540,6 +540,23 @@ impl Model for CycleModel {
             .filter_map(|e| e.get("review_evidence_key"))
             .map(|key| json!({"review_evidence_key":key}))
             .collect::<Vec<_>>();
+        // Every identity/version/receipt below comes from the actual local mock
+        // request. This model has no reference to the host checkpoint or Draft.
+        let source_dispositions = packs.iter().map(|pack| {
+            let rows: Vec<_> = pack_rows.iter().filter(|r| r["pack_id"] == **pack).collect();
+            let source_refs: Vec<_> = rows.iter().filter_map(|r| r.get("evidence")).collect();
+            let keys: Vec<_> = results.iter().filter_map(|r| r["excerpts"].as_array()).flatten()
+                .filter(|e| source_refs.contains(&&e["evidence"]))
+                .filter_map(|e| e.get("review_evidence_key"))
+                .map(|key|json!({"review_evidence_key":key})).collect();
+            let linked: Vec<_> = host["requirements"]["items"].as_array().into_iter().flatten()
+                .filter(|r| r["requirement"]["evidence"].as_array().into_iter().flatten()
+                    .any(|reference|source_refs.contains(&reference)))
+                .map(|r|r["requirement_id"].clone()).collect();
+            json!({"pack_id":pack,"version":rows[0]["source_review_version"],"evidence":keys,
+                "verdict":if linked.is_empty(){"no_response_obligation"}else{"contains_obligations"},
+                "requirement_ids":linked,"reason":"Local synthetic source review, not semantic model acceptance"})
+        }).collect::<Vec<_>>();
         let step = self.step.fetch_add(1, Ordering::SeqCst);
         let (name, mut args) = if self.automatic {
             let id = ids
@@ -592,7 +609,11 @@ impl Model for CycleModel {
                 }
                 8 => (
                     "submit_review",
-                    json!({"requirement_ids":[id],"pack_ids":packs,"inspected_evidence":review_keys,"issues":[]}),
+                    json!({"requirement_ids":[id],"pack_ids":packs,"inspected_evidence":review_keys,"issues":[],
+                        "source_dispositions":source_dispositions,
+                        "template_reviews":[{"requirement_id":id,"version":host["check_work"]["template_review_version"],
+                            "claims":[{"claim_handle":"requirement","verdict":"template_ready",
+                                "reason":"Synthetic visible empty response field", "fields":[{"type":"slot","slot_id":"blank","label":"Synthetic response"}]}]}]}),
                 ),
                 9 => ("finish_outline", json!({})),
                 _ => panic!("bounded automatic wire cycle exceeded"),
@@ -611,7 +632,7 @@ impl Model for CycleModel {
                 3 => ("read_evidence", json!({"refs":refs})),
                 4 => (
                     "submit_review",
-                    json!({"requirement_ids":[],"pack_ids":packs,"inspected_evidence":review_keys,"issues":[]}),
+                    json!({"requirement_ids":[],"pack_ids":packs,"inspected_evidence":review_keys,"issues":[],"source_dispositions":source_dispositions,"template_reviews":[]}),
                 ),
                 5 => ("finish_outline", json!({})),
                 _ => panic!("bounded synthetic wire cycle exceeded"),
@@ -673,6 +694,7 @@ async fn production_parallel_organize_check_reopen_fresh_check_persist_reload() 
             .evidence
             .is_empty()
     );
+    restored.transcript.clear();
     journal.save(&restored, &json!({})).await.unwrap();
     journal.stop_check.store(false, Ordering::SeqCst);
     model.step.store(0, Ordering::SeqCst);
@@ -680,7 +702,15 @@ async fn production_parallel_organize_check_reopen_fresh_check_persist_reload() 
         .await
         .unwrap();
     let final_state = journal.load().await.unwrap().unwrap();
+    assert!(final_state.done);
     assert!(final_state.outline_run.tool_draft.finished);
+    assert!(
+        !final_state
+            .outline_run
+            .tool_draft
+            .source_dispositions
+            .is_empty()
+    );
     assert_eq!(
         final_state.outline_run.tool_draft.reviewed_pack_ids.len(),
         2
@@ -740,7 +770,7 @@ async fn production_claim_comparison_automatically_reopens_and_finishes_fresh_ch
         .await
         .unwrap_err();
     assert_eq!(err.code, "TEST_AUTO_REPAIR_RELOAD");
-    let restored = journal.load().await.unwrap().unwrap();
+    let mut restored = journal.load().await.unwrap().unwrap();
     assert_eq!(restored.outline_run.repair_events.len(), 1);
     assert_eq!(restored.outline_run.repair_events[0]["status"], "reopened");
     assert!(restored.outline_run.tool_draft.chapters.is_empty());
@@ -756,13 +786,23 @@ async fn production_claim_comparison_automatically_reopens_and_finishes_fresh_ch
         crate::outline::agent::current(&input, &restored),
         crate::outline::agent::Duty::Discover
     );
+    restored.transcript.clear();
     journal.stop_repair.store(false, Ordering::SeqCst);
+    journal.save(&restored, &json!({})).await.unwrap();
     model.step.store(0, Ordering::SeqCst);
     super::super::run(&input, &config, &journal, &model, &CancellationToken::new())
         .await
         .unwrap();
     let final_state = journal.load().await.unwrap().unwrap();
+    assert!(final_state.done);
     assert!(final_state.outline_run.tool_draft.finished);
+    assert!(
+        !final_state
+            .outline_run
+            .tool_draft
+            .source_dispositions
+            .is_empty()
+    );
     assert_eq!(final_state.outline_run.repair_events.len(), 1);
     assert_eq!(model.discover.calls.lock().unwrap().len(), 3);
     assert_eq!(model.discover.peak.load(Ordering::SeqCst), 2);

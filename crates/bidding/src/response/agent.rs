@@ -171,6 +171,7 @@ mod tests {
             review_issues: vec![],
             needs_review: false,
             semantic_review_complete: true,
+            review_proof: Default::default(),
         };
         let read = apply(&artifact, "read_outline", &json!({})).unwrap();
         assert_eq!(read["slots"][0]["slot_id"], json!("bidder"));

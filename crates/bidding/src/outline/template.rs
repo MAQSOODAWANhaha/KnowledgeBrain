@@ -23,14 +23,9 @@ pub fn project_draft(
     if !draft.finished {
         return Err("outline draft is not finished".into());
     }
-    super::tools::validate_final_outline(input, &draft.required_requirement_ids, draft)?;
+    super::tools::template_ready(input, draft)?;
     if frozen_input_sha256 != super::evidence::input_digest(input)? {
         return Err("outline frozen input digest does not match".into());
-    }
-    let semantic_review_complete = draft.reviewed_requirement_ids == draft.required_requirement_ids
-        && draft.reviewed_pack_ids == draft.required_pack_ids;
-    if !semantic_review_complete {
-        return Err("outline semantic review is incomplete".into());
     }
     let artifact = OutlineArtifact {
         schema_version: SCHEMA_VERSION,
@@ -42,7 +37,8 @@ pub fn project_draft(
         fulfillments: draft.fulfillments.clone(),
         review_issues: draft.review_issues.clone(),
         needs_review: super::tools::needs_semantic_review(draft),
-        semantic_review_complete,
+        semantic_review_complete: true,
+        review_proof: super::template_review::Proof::from_draft(draft),
         templates: draft
             .slots
             .iter()
@@ -83,7 +79,7 @@ pub fn validate_publication(
     if !artifact.semantic_review_complete {
         return Err("published outline semantic review is incomplete".into());
     }
-    let draft = Draft {
+    let mut draft = Draft {
         chapters: artifact.chapters.clone(),
         bindings: bindings.to_vec(),
         slots: artifact.templates.clone(),
@@ -95,19 +91,15 @@ pub fn validate_publication(
         finished: true,
         ..Draft::default()
     };
-    super::tools::validate_final_outline(input, &artifact.required_requirement_ids, &draft)?;
+    artifact.review_proof.restore(&mut draft);
+    super::tools::template_ready(input, &draft)?;
     for issue in &artifact.review_issues {
         if issue.evidence.is_empty() {
             return Err("review issue has no source evidence".into());
         }
         super::evidence::resolve_evidence(input, &issue.evidence)?;
     }
-    let needs_review = !artifact.review_issues.is_empty()
-        || artifact.fulfillments.iter().any(|f| {
-            f.target_refs
-                .iter()
-                .any(|t| matches!(t, super::TargetRef::ManualTask { .. }))
-        });
+    let needs_review = super::tools::needs_semantic_review(&draft);
     if artifact.needs_review != needs_review {
         return Err("published outline review status is inconsistent".into());
     }

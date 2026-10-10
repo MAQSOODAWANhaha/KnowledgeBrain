@@ -1081,8 +1081,9 @@ fn one_shot_progress_marker(state: &Checkpoint) -> Result<Option<String>, String
         "chapters":draft.chapters,"bindings":draft.bindings,"slots":draft.slots,
         "slots_submitted":draft.slots_submitted,"fulfillments":draft.fulfillments,
         "reviewed_requirements":draft.reviewed_requirement_ids,
-        "reviewed_packs":draft.reviewed_pack_ids,"reviewed_pack_evidence":draft.reviewed_pack_evidence,
-        "review_issues":draft.review_issues,"claim_comparisons":draft.claim_comparisons,"finished":draft.finished
+        "reviewed_packs":draft.reviewed_pack_ids,"source_dispositions":draft.source_dispositions,
+        "review_issues":draft.review_issues,"claim_comparisons":draft.claim_comparisons,
+        "template_reviews":draft.template_reviews,"finished":draft.finished
     }))?))
 }
 

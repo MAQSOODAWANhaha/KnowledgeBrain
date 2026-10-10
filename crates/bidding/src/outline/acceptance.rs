@@ -30,6 +30,39 @@ fn apply(
     let duty = current(input, state);
     let mut args = args.clone();
     if name == "submit_review" {
+        if args.get("source_dispositions").is_none() {
+            let draft = &state.outline_run.tool_draft;
+            args["source_dispositions"] = json!(args["pack_ids"].as_array().unwrap().iter().map(|id| {
+                let pack = id.as_str().unwrap();
+                let scope = &draft.source_scopes[pack];
+                let refs: Vec<evidence::EvidenceRef> = args["inspected_evidence"].as_array().unwrap().iter()
+                    .filter_map(|r| serde_json::from_value(r.clone()).ok())
+                    .filter(|r| evidence::covered_by_union(r,&scope.evidence)).collect();
+                let ids: Vec<_> = draft.requirements.iter().filter(|(_,record)| record.evidence.iter().any(|r|
+                    refs.iter().any(|read| read.same_carrier(r)))).map(|(id,_)|id.clone()).collect();
+                json!({"pack_id":pack,"version":source_review::version(input,draft,pack,scope).unwrap(),
+                    "evidence":refs,"verdict":if ids.is_empty(){"no_response_obligation"}else{"contains_obligations"},
+                    "requirement_ids":ids,"reason":"Synthetic source judgment for protocol fixture; not semantic acceptance"})
+            }).collect::<Vec<_>>());
+        }
+        if let Some(dispositions) = args["source_dispositions"].as_array_mut() {
+            for disposition in dispositions {
+                for v in disposition["evidence"].as_array_mut().unwrap() {
+                    if let Ok(reference) =
+                        serde_json::from_value::<evidence::EvidenceRef>(v.clone())
+                    {
+                        *v = json!({"review_evidence_key":agent::review_evidence_key(state,&reference)?});
+                    }
+                }
+            }
+        }
+        // Legacy domain fixtures use scripted judgments, not a semantic oracle.
+        // Dedicated contract tests pass explicit payloads or call agent::apply.
+        if args.get("template_reviews").is_none() {
+            args["template_reviews"] =
+                scripted_template_reviews(input, state, &args["requirement_ids"]);
+        }
+
         for pointer in ["/inspected_evidence"] {
             if let Some(values) = args
                 .pointer_mut(pointer)
@@ -315,6 +348,31 @@ fn deterministic_claim_comparisons(input: &FrozenInput, state: &mut Checkpoint) 
     }
 }
 
+fn scripted_template_reviews(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    ids: &serde_json::Value,
+) -> serde_json::Value {
+    let draft = &state.outline_run.tool_draft;
+    json!(ids.as_array().unwrap().iter().filter_map(|id| {
+        let id = id.as_str().unwrap();
+        let comparison = draft.claim_comparisons.get(id)?;
+        let fulfillment = draft.fulfillments.iter().find(|f| f.requirement_id == id)?;
+        let fields: Vec<_> = fulfillment.target_refs.iter().filter_map(|target| {
+            if let TargetRef::TextSlot { slot_id } = target {
+                let slot = draft.slots.iter().find(|s| s.slot_id == *slot_id)?;
+                let label = if slot.match_query.is_empty() { &slot.text } else { &slot.match_query };
+                Some(json!({"type":"slot","slot_id":slot_id,"label":label}))
+            } else { None }
+        }).collect();
+        Some(json!({"requirement_id":id,"version":template_review::version(input,draft,id).unwrap(),
+            "claims":comparison.declared_claims.iter().map(|claim| json!({
+                "claim_handle":claim.claim_handle,"verdict":"template_ready",
+                "reason":"Synthetic protocol fixture judgment, not model acceptance", "fields":fields
+            })).collect::<Vec<_>>()}))
+    }).collect::<Vec<_>>())
+}
+
 #[test]
 fn discovery_transcript_is_not_needed_for_exact_source_copy_and_publication() {
     let (input, mut state, pack, refs) = organized(false);
@@ -365,12 +423,10 @@ fn empty_extraction_is_reviewed_again_and_evidence_backed_issues_survive() {
     assert!(sources["items"][0]["no_requirement_reason"].is_string());
     fresh_check_reads(&input, &mut state, &refs);
     apply(&input,&mut state,"submit_review",&json!({"requirement_ids":[],"pack_ids":[pack],"inspected_evidence":refs,"issues":[{"id":"missed","code":"possible_missing_obligation","description":"源中有资格义务，空提取需人工核实","requirement_ids":[],"evidence":refs}]})).unwrap();
-    apply(&input, &mut state, "finish_outline", &json!({})).unwrap();
-    let artifact = project_draft(&input, &state.input_sha256, &state.outline_run.tool_draft)
-        .unwrap()
-        .artifact;
-    assert!(artifact.needs_review);
-    assert_eq!(artifact.review_issues.len(), 1);
+    assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+    assert!(!state.outline_run.tool_draft.finished);
+    assert_eq!(state.outline_run.tool_draft.review_issues.len(), 1);
+    assert!(project_draft(&input, &state.input_sha256, &state.outline_run.tool_draft).is_err());
 }
 
 #[test]
@@ -643,10 +699,11 @@ fn check_cannot_reuse_organize_receipts_after_transcript_clear() {
             .contains("not-yet-delivered review evidence key")
     );
     state.deliver_fixture_reads();
+    deterministic_claim_comparisons(&input, &mut state);
     assert!(
         apply(&input, &mut state, "submit_review", &review)
             .unwrap_err()
-            .contains("slot body")
+            .contains("slot read")
     );
     fresh_check_reads(&input, &mut state, &refs);
     apply(&input, &mut state, "submit_review", &review).unwrap();
@@ -904,14 +961,10 @@ fn full_duty_chain_never_marks_uncertain_or_contradicted_claim_ready() {
             json!([])
         };
         apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":issues})).unwrap();
-        let finished = apply(&input, &mut state, "finish_outline", &json!({})).unwrap();
-        assert_eq!(finished["needs_review"], true);
-        assert_eq!(finished["semantic_ready"], false);
-        let artifact = project_draft(&input, &state.input_sha256, &state.outline_run.tool_draft)
-            .unwrap()
-            .artifact;
-        assert!(artifact.needs_review);
-        assert!(!artifact.review_issues.is_empty());
+        assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+        assert!(!state.outline_run.tool_draft.finished);
+        assert!(!state.outline_run.tool_draft.review_issues.is_empty());
+        assert!(project_draft(&input, &state.input_sha256, &state.outline_run.tool_draft).is_err());
     }
 }
 
@@ -1416,4 +1469,294 @@ fn private_claim_projection_error_grants_no_receipts() {
         found,
         "fixture must exercise post-decoration failure after source projection"
     );
+}
+
+#[test]
+fn template_ready_rejects_review_without_per_claim_target_coverage() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let ids = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_ids();
+    let before = state.outline_run.tool_draft.clone();
+    let keys: Vec<_> = refs
+        .iter()
+        .map(|r| json!({"review_evidence_key":agent::review_evidence_key(&state,r).unwrap()}))
+        .collect();
+    let result = agent::apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":keys,"issues":[]}),
+    );
+    assert!(
+        result.is_err(),
+        "read receipts and a whole requirement review cannot prove template field coverage"
+    );
+    assert_eq!(
+        state.outline_run.tool_draft, before,
+        "rejected review cannot grant completion credit"
+    );
+}
+
+#[test]
+fn template_contract_rejects_stale_cross_target_missing_claim_and_unread_field_atomically() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let ids = json!(state.outline_run.tool_draft.required_requirement_ids);
+    let reviews = scripted_template_reviews(&input, &state, &ids);
+    for case in ["stale", "cross_target", "missing_claim", "unread"] {
+        let mut probe = state.clone();
+        let mut changed = reviews.clone();
+        match case {
+            "stale" => changed[0]["version"] = json!("old"),
+            "cross_target" => changed[0]["claims"][0]["fields"][0]["slot_id"] = json!("unrelated"),
+            "missing_claim" => changed[0]["claims"] = json!([]),
+            "unread" => probe.outline_run.tool_draft.check_reads.slot_ranges.clear(),
+            _ => unreachable!(),
+        }
+        let before = probe.outline_run.tool_draft.clone();
+        let result = apply(
+            &input,
+            &mut probe,
+            "submit_review",
+            &json!({
+                "requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,
+                "issues":[],"template_reviews":changed
+            }),
+        );
+        assert!(result.is_err(), "accepted {case}");
+        assert_eq!(
+            probe.outline_run.tool_draft, before,
+            "partial write for {case}"
+        );
+    }
+}
+
+#[test]
+fn blank_template_review_survives_reload_and_direct_publication_rechecks_the_gate() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let ids = json!(state.outline_run.tool_draft.required_requirement_ids);
+    let reviews = scripted_template_reviews(&input, &state, &ids);
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({
+            "requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,
+            "issues":[],"template_reviews":reviews
+        }),
+    )
+    .unwrap();
+    state.transcript.clear();
+    let mut reloaded: Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    assert_eq!(
+        reloaded.outline_run.tool_draft.template_reviews,
+        state.outline_run.tool_draft.template_reviews
+    );
+    assert!(
+        reloaded
+            .outline_run
+            .tool_draft
+            .slots
+            .iter()
+            .find(|s| s.slot_id == "blank")
+            .unwrap()
+            .text
+            .is_empty()
+    );
+    apply(&input, &mut reloaded, "finish_outline", &json!({})).unwrap();
+    let projected = project_draft(
+        &input,
+        &state.input_sha256,
+        &reloaded.outline_run.tool_draft,
+    )
+    .unwrap();
+    validate_publication(&input, &projected.artifact, &projected.bindings).unwrap();
+    for case in ["missing", "stale", "unread", "unresolved"] {
+        let mut artifact = projected.artifact.clone();
+        match case {
+            "missing" => artifact.review_proof.template_reviews.clear(),
+            "stale" => artifact.review_proof.read_epoch += 1,
+            "unread" => artifact.review_proof.check_reads.slot_ranges.clear(),
+            "unresolved" => {
+                artifact
+                    .review_proof
+                    .template_reviews
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .claims[0]
+                    .verdict = template_review::Verdict::Unresolved
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            validate_publication(&input, &artifact, &projected.bindings).is_err(),
+            "direct publish accepted {case}"
+        );
+    }
+}
+
+#[test]
+fn two_claim_fields_in_one_form_cannot_be_replaced_by_one_form_id_or_one_field() {
+    // Contract fixture: the reviewer declares two independent obligations. The
+    // host checks both judgments and exact ranges; it does not infer semantics.
+    let (mut input, mut state, _, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let old_digest = evidence::input_digest(&input).unwrap();
+    input
+        .structured_forms
+        .push(json!({"form_definition_revision_id":"response-form",
+        "source_unit_revision_id":"response-form", "definition":{"row_count":2,"column_count":2,
+        "completeness":"complete","cells":[
+            {"row":0,"column":0,"text":"Field A","row_span":1,"col_span":1},
+            {"row":0,"column":1,"text":"","row_span":1,"col_span":1},
+            {"row":1,"column":0,"text":"Field B","row_span":1,"col_span":1},
+            {"row":1,"column":1,"text":"","row_span":1,"col_span":1}]}}));
+    let digest = evidence::input_digest(&input).unwrap();
+    let mut draft: tools::Draft = serde_json::from_str(
+        &serde_json::to_string(&state.outline_run.tool_draft)
+            .unwrap()
+            .replace(&old_digest, &digest),
+    )
+    .unwrap();
+    let id = draft
+        .required_requirement_ids
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    draft.fulfillments[0].target_refs = vec![TargetRef::FormBinding {
+        form_id: "response-form".into(),
+    }];
+    let unit = claim_review::build(&input, &id, &draft.requirements[&id]).unwrap();
+    let comparison = draft.claim_comparisons.get_mut(&id).unwrap();
+    comparison.version = unit.version;
+    let mut second = comparison.declared_claims[0].clone();
+    second.claim_handle = "second-field".into();
+    comparison.declared_claims.push(second);
+    let mut second_decision = comparison.decisions[0].clone();
+    second_decision.claim_handle = "second-field".into();
+    comparison.decisions.push(second_decision);
+    for row in 0..2 {
+        draft
+            .check_reads
+            .evidence
+            .push(evidence::EvidenceRef::GridCell {
+                input_digest: digest.clone(),
+                table_id: "response-form".into(),
+                anchor_row: row,
+                anchor_column: 0,
+                start_byte: 0,
+                end_byte: 7,
+            });
+    }
+    let mut review: template_review::Review = serde_json::from_value(json!({
+        "requirement_id":id,"version":template_review::version(&input,&draft,&id).unwrap(),
+        "claims":[
+            {"claim_handle":"requirement","verdict":"template_ready","reason":"First obligation has a labelled empty field",
+                "fields":[{"type":"form_range","form_id":"response-form","start_row":0,"end_row":0,"start_column":0,"end_column":1,"label":"Field A"}]},
+            {"claim_handle":"second-field","verdict":"template_ready","reason":"Second obligation has its own labelled empty field",
+                "fields":[{"type":"form_range","form_id":"response-form","start_row":1,"end_row":1,"start_column":0,"end_column":1,"label":"Field B"}]}]
+    })).unwrap();
+    assert!(template_review::validate(&input, &draft, &review).unwrap());
+    let complete = review.clone();
+    review.claims[1].fields.clear();
+    assert!(template_review::validate(&input, &draft, &review).is_err());
+    review = complete.clone();
+    review.claims.pop();
+    assert!(template_review::validate(&input, &draft, &review).is_err());
+    review = complete;
+    if let template_review::Field::FormRange { end_row, .. } = &mut review.claims[1].fields[0] {
+        *end_row = 99;
+    }
+    assert!(template_review::validate(&input, &draft, &review).is_err());
+    assert!(
+        serde_json::from_value::<template_review::Field>(
+            json!({"type":"form_range","form_id":"response-form"})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn zero_requirements_need_explicit_source_dispositions_after_real_reads_and_reload() {
+    let (input, mut state, pack, refs) = organized(true);
+    fresh_check_reads(&input, &mut state, &refs);
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":[],"pack_ids":[pack],
+        "inspected_evidence":refs,"issues":[],"template_reviews":[],"source_dispositions":[]}),
+    )
+    .unwrap();
+    assert!(
+        !state
+            .outline_run
+            .tool_draft
+            .reviewed_pack_ids
+            .contains(&pack)
+    );
+    assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+    let scope = state.outline_run.tool_draft.source_scopes[&pack].clone();
+    let version =
+        source_review::version(&input, &state.outline_run.tool_draft, &pack, &scope).unwrap();
+    let disposition = json!({"pack_id":pack,"version":version,"evidence":refs,
+        "verdict":"no_response_obligation","requirement_ids":[],
+        "reason":"Synthetic reviewer judgment only; this test checks protocol coverage, not semantic recall"});
+    for case in ["missing_read", "empty_reason", "stale", "cross_scope"] {
+        let mut probe = state.clone();
+        let mut row = disposition.clone();
+        match case {
+            "missing_read" => probe.outline_run.tool_draft.check_reads.evidence.clear(),
+            "empty_reason" => row["reason"] = json!(""),
+            "stale" => row["version"] = json!("old-version"),
+            "cross_scope" => row["pack_id"] = json!("other-pack"),
+            _ => unreachable!(),
+        }
+        let before = probe.outline_run.tool_draft.clone();
+        assert!(apply(&input,&mut probe,"submit_review",&json!({"requirement_ids":[],"pack_ids":[pack],
+            "inspected_evidence":refs,"issues":[],"template_reviews":[],"source_dispositions":[row]})).is_err());
+        assert_eq!(probe.outline_run.tool_draft, before);
+    }
+    apply(&input,&mut state,"submit_review",&json!({"requirement_ids":[],"pack_ids":[pack],
+        "inspected_evidence":refs,"issues":[],"template_reviews":[],"source_dispositions":[disposition]})).unwrap();
+    state.transcript.clear();
+    state = serde_json::from_value(json!(state)).unwrap();
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .reviewed_pack_ids
+            .contains(&pack)
+    );
+    apply(&input, &mut state, "finish_outline", &json!({})).unwrap();
+}
+
+#[test]
+fn no_obligation_disposition_cannot_erase_existing_requirement_evidence() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let draft = &state.outline_run.tool_draft;
+    let version =
+        source_review::version(&input, draft, &pack, &draft.source_scopes[&pack]).unwrap();
+    let before = draft.clone();
+    let error = apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":[],"pack_ids":[pack],
+        "inspected_evidence":refs,"issues":[],"template_reviews":[],"source_dispositions":[{
+            "pack_id":pack,"version":version,"evidence":refs,"verdict":"no_response_obligation",
+            "requirement_ids":[],"reason":"Attempted false clearance"}]}),
+    )
+    .unwrap_err();
+    assert!(error.contains("conflicts with an existing requirement"));
+    assert_eq!(state.outline_run.tool_draft, before);
 }

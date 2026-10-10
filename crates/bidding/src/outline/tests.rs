@@ -194,14 +194,9 @@ fn manual_work_is_visible_and_requires_review_status() {
             description: "核验原件资格证明".into(),
         }],
     }];
-    let artifact = project_draft(&input, &evidence::input_digest(&input).unwrap(), &draft)
-        .unwrap()
-        .artifact;
-    assert!(artifact.needs_review);
-    assert!(validate_publication(&input, &artifact, &[]).is_ok());
-    let mut false_status = artifact;
-    false_status.needs_review = false;
-    assert!(validate_publication(&input, &false_status, &[]).is_err());
+    assert!(super::tools::needs_semantic_review(&draft));
+    assert!(project_draft(&input, &evidence::input_digest(&input).unwrap(), &draft).is_err());
+    assert_eq!(draft.fulfillments[0].target_refs.len(), 1);
 }
 
 #[test]

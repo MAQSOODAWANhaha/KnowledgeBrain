@@ -50,6 +50,7 @@ pub struct Draft {
     pub evidence_continuations: std::collections::BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub claim_comparisons: std::collections::BTreeMap<String, super::claim_review::Comparison>,
+    pub template_reviews: std::collections::BTreeMap<String, super::template_review::Review>,
     #[serde(default)]
     pub check_reads: CheckReads,
     #[serde(default)]
@@ -76,9 +77,8 @@ pub struct Draft {
     pub reviewed_requirement_ids: BTreeSet<String>,
     #[serde(default)]
     pub reviewed_pack_ids: BTreeSet<String>,
-    #[serde(default)]
-    pub reviewed_pack_evidence:
-        std::collections::BTreeMap<String, Vec<super::evidence::EvidenceRef>>,
+    pub source_scopes: std::collections::BTreeMap<String, super::source_review::Scope>,
+    pub source_dispositions: std::collections::BTreeMap<String, super::source_review::Disposition>,
     #[serde(default)]
     pub review_issues: Vec<ReviewIssue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -547,9 +547,16 @@ fn upsert_slots(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<
 fn finish(
     input: &FrozenInput,
     draft: &mut Draft,
-    requirements: &BTreeSet<String>,
+    _requirements: &BTreeSet<String>,
 ) -> Result<Value, String> {
-    validate_final_outline(input, requirements, draft)?;
+    template_ready(input, draft)?;
+    draft.finished = true;
+    Ok(view(input, draft))
+}
+
+/// The same completion contract guards tool finish, projection and direct publication.
+pub(crate) fn template_ready(input: &FrozenInput, draft: &Draft) -> Result<(), String> {
+    validate_final_outline(input, &draft.required_requirement_ids, draft)?;
     if draft.reviewed_requirement_ids != draft.required_requirement_ids
         || draft.reviewed_pack_ids != draft.required_pack_ids
     {
@@ -576,8 +583,12 @@ fn finish(
             "semantic claim comparisons must cover every requirement before finishing".into(),
         );
     }
-    draft.finished = true;
-    Ok(view(input, draft))
+    super::source_review::ready(input, draft)?;
+    super::template_review::ready(input, draft)?;
+    if needs_semantic_review(draft) {
+        return Err("template readiness is blocked by unresolved review issues".into());
+    }
+    Ok(())
 }
 
 fn invalidate_review(draft: &mut Draft) {
@@ -589,9 +600,10 @@ fn invalidate_review(draft: &mut Draft) {
     draft.finished = false;
     draft.check_reads = CheckReads::default();
     draft.claim_comparisons.clear();
+    draft.template_reviews.clear();
     draft.reviewed_requirement_ids.clear();
     draft.reviewed_pack_ids.clear();
-    draft.reviewed_pack_evidence.clear();
+    draft.source_dispositions.clear();
     draft.review_issues.clear();
 }
 
@@ -952,7 +964,7 @@ pub fn bounded_page(
 }
 
 /// Independent of structural readiness: unresolved source judgments and
-/// manual targets can never be presented as semantically ready.
+/// missing/insufficient target judgments cannot be presented as ready.
 pub(crate) fn needs_semantic_review(draft: &Draft) -> bool {
     !draft.review_issues.is_empty()
         || draft.requirements.values().any(|r| {
@@ -960,11 +972,18 @@ pub(crate) fn needs_semantic_review(draft: &Draft) -> bool {
                 || r.kind == "unknown"
                 || r.obligation_strength == "unknown"
         })
-        || draft.fulfillments.iter().any(|f| {
-            f.target_refs
-                .iter()
-                .any(|t| matches!(t, TargetRef::ManualTask { .. }))
+        || draft.required_requirement_ids.iter().any(|id| {
+            draft.template_reviews.get(id).is_none_or(|review| {
+                review
+                    .claims
+                    .iter()
+                    .any(|claim| claim.verdict != super::template_review::Verdict::TemplateReady)
+            })
         })
+        || draft
+            .source_dispositions
+            .values()
+            .any(|review| review.verdict == super::source_review::Verdict::Unresolved)
 }
 
 fn view(input: &FrozenInput, draft: &Draft) -> Value {

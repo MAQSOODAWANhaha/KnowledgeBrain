@@ -3324,7 +3324,8 @@ fn check_task_retains_target_body_until_read_and_reviewed_after_reload() {
     state = serde_json::from_value(json!(&state)).unwrap();
     let after = host(&state);
     assert_eq!(after["check_work"]["requirement_id"], id);
-    assert_eq!(after["check_work"]["stage"], "read_target_body");
+    assert_eq!(after["check_work"]["stage"], "review_sources");
+    assert_eq!(after["check_work"]["next_unread_slot"]["slot_id"], slot);
     let target = state
         .outline_run
         .tool_draft
@@ -3347,6 +3348,55 @@ fn check_task_retains_target_body_until_read_and_reviewed_after_reload() {
             .tool_draft
             .reviewed_requirement_ids
             .is_empty()
+    );
+    assert!(!state.done);
+}
+
+#[test]
+fn serial_check_selects_unreviewed_source_after_reload_without_history() {
+    let (input, mut state, pack_id, refs) = crate::outline::fixture_organized(true);
+    state.transcript.clear();
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    let packet = crate::outline::agent::host_packet(&input, &state, 0, json!({}), json!({}), None);
+    assert_eq!(packet["check_work"]["source_scope"]["pack_id"], pack_id);
+    assert_eq!(
+        packet["check_work"]["source_scope"]["next_evidence"],
+        json!(refs[0])
+    );
+    // Delivery alone does not discharge source review, including empty extraction.
+    state.outline_run.tool_draft.check_reads.evidence = refs.clone();
+    let after_read =
+        crate::outline::agent::host_packet(&input, &state, 0, json!({}), json!({}), None);
+    assert_eq!(
+        packet["check_work"]["source_scope"],
+        after_read["check_work"]["source_scope"]
+    );
+    // A persisted bounded review advances the scope even with no transcript.
+    let draft = &mut state.outline_run.tool_draft;
+    let disposition = crate::outline::source_review::Disposition {
+        pack_id: pack_id.clone(),
+        version: crate::outline::source_review::version(
+            &input,
+            draft,
+            &pack_id,
+            &draft.source_scopes[&pack_id],
+        )
+        .unwrap(),
+        evidence: vec![refs[0].clone()],
+        verdict: crate::outline::source_review::Verdict::NoResponseObligation,
+        requirement_ids: Default::default(),
+        reason: "Synthetic bounded review".into(),
+    };
+    draft.source_dispositions.insert(
+        crate::outline::source_review::key(&disposition).unwrap(),
+        disposition,
+    );
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    let after_review =
+        crate::outline::agent::host_packet(&input, &state, 0, json!({}), json!({}), None);
+    assert_ne!(
+        packet["check_work"]["source_scope"]["next_evidence"],
+        after_review["check_work"]["source_scope"]["next_evidence"]
     );
     assert!(!state.done);
 }

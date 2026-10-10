@@ -787,7 +787,7 @@
     "type": "function",
     "function": {
       "name": "submit_review",
-      "description": "Submit a bounded independent review of source obligations, condition/negation/numeric fidelity and actual response adequacy. Every issue requires source evidence. Re-read source before reviewing.",
+      "description": "Submit a bounded independent review of source obligations, condition/negation/numeric fidelity and actual response adequacy. Every issue requires source evidence. Re-read source before reviewing. Submit one version-bound template review per requirement, judging each declared claim against concrete visible fields. Empty bidder blanks are allowed. For pack-only review submit template_reviews=[]. Source review requires explicit version-bound dispositions, including zero-requirement scopes. Dispositions reference RequirementRecord identities; unresolved blocks completion.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -884,13 +884,239 @@
               ]
             },
             "maxItems": 128
+          },
+          "template_reviews": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "requirement_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "claims": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "claim_handle": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "verdict": {
+                        "enum": [
+                          "template_ready",
+                          "insufficient",
+                          "unresolved"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "fields": {
+                        "type": "array",
+                        "items": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "slot"
+                                },
+                                "slot_id": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "slot_id",
+                                "label"
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "form_range"
+                                },
+                                "form_id": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                },
+                                "start_row": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "end_row": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "start_column": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "end_column": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "form_id",
+                                "start_row",
+                                "end_row",
+                                "start_column",
+                                "end_column",
+                                "label"
+                              ]
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "type": {
+                                  "const": "manual_task"
+                                },
+                                "task_id": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4096
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "task_id",
+                                "label"
+                              ]
+                            }
+                          ]
+                        },
+                        "maxItems": 128
+                      }
+                    },
+                    "required": [
+                      "claim_handle",
+                      "verdict",
+                      "reason",
+                      "fields"
+                    ]
+                  },
+                  "maxItems": 128
+                }
+              },
+              "required": [
+                "requirement_id",
+                "version",
+                "claims"
+              ]
+            },
+            "maxItems": 128
+          },
+          "source_dispositions": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "pack_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "review_evidence_key"
+                    ],
+                    "properties": {
+                      "review_evidence_key": {
+                        "type": "string",
+                        "pattern": "^rv_[0-9a-f]{24}$"
+                      }
+                    }
+                  },
+                  "maxItems": 128
+                },
+                "verdict": {
+                  "enum": [
+                    "contains_obligations",
+                    "no_response_obligation",
+                    "unresolved"
+                  ]
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "maxItems": 128
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "pack_id",
+                "version",
+                "evidence",
+                "verdict",
+                "requirement_ids",
+                "reason"
+              ]
+            }
           }
         },
         "required": [
           "requirement_ids",
           "pack_ids",
           "inspected_evidence",
-          "issues"
+          "issues",
+          "template_reviews",
+          "source_dispositions"
         ]
       }
     }

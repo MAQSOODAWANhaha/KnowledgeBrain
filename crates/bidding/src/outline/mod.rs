@@ -21,9 +21,11 @@ pub(crate) mod metadata_fragments;
 pub(crate) mod model_wire;
 pub mod parse;
 pub(crate) mod read_receipts;
+pub mod source_review;
 pub(crate) mod source_wire;
 pub mod store;
 mod template;
+pub mod template_review;
 pub mod tools;
 pub mod visual;
 
@@ -161,6 +163,7 @@ pub struct OutlineArtifact {
     pub review_issues: Vec<ReviewIssue>,
     pub needs_review: bool,
     pub semantic_review_complete: bool,
+    pub review_proof: template_review::Proof,
     pub templates: Vec<TemplateContent>,
     pub open_issues: Vec<OpenIssue>,
 }

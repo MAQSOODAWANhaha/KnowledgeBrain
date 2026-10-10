@@ -42,7 +42,7 @@ fn kind(field: &str) -> Option<char> {
         "cursor" | "next_cursor" => 'u',
         "review_evidence_key" | "structural_receipt_id" => 'v',
         "quote_handle" | "evidence_handles" | "primary_handles" | "support_handles" => 'q',
-        "version" | "review_version" => 'z',
+        "version" | "review_version" | "template_review_version" | "source_review_version" => 'z',
         "source_id" | "image_id" | "source_unit_revision_id" => 'i',
         _ => return None,
     })
@@ -322,6 +322,25 @@ mod tests {
         let saved = serde_json::to_vec(&registry).unwrap();
         let restored: Registry = serde_json::from_slice(&saved).unwrap();
         assert_eq!(restored.decode(encoded, false).unwrap(), original);
+    }
+    #[test]
+    fn template_review_version_is_issued_and_roundtrips_inside_review_batch() {
+        let input = super::super::tests::input();
+        let state = super::super::acceptance::checkpoint(&input);
+        let mut wire = body();
+        wire["messages"][0]["content"] = json!(
+            json!({
+                "requirement_id":"req", "template_review_version":"template-version",
+            "pack_id":"pack", "source_review_version":"source-version"
+            })
+            .to_string()
+        );
+        let registry = project(&state, &mut wire).unwrap();
+        assert!(!wire.to_string().contains("template-version"));
+        let args = json!({"template_reviews":[{"requirement_id":"req","version":"template-version","claims":[]}],
+            "source_dispositions":[{"pack_id":"pack","version":"source-version"}]});
+        let encoded = registry.fixture_encode(args.clone()).unwrap();
+        assert_eq!(registry.decode(encoded, false).unwrap(), args);
     }
     #[test]
     fn stale_unknown_raw_and_wrong_namespace_never_authorize() {

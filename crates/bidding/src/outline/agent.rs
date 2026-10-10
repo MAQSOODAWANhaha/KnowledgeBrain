@@ -325,13 +325,39 @@ pub fn host_packet(
                 _ => None,
             })
             .find(|slot| !super::tools::check_read_slot_complete(draft, slot));
-        packet["check_work"] = json!({"requirement_id":next,
+        // Derive one bounded source obligation from durable review results.
+        // Delivered reads deliberately do not retire this work, and no second
+        // task lifecycle is stored beside the canonical pack review receipts.
+        let source_scope = draft
+            .required_pack_ids
+            .difference(&draft.reviewed_pack_ids)
+            .next()
+            .map(|id| {
+                let reviewed = super::source_review::reviewed_evidence(&draft.source_dispositions, id);
+                match state.outline_run.reading_packs.as_ref() {
+                    Some(work) => match work.pack_evidence(input, id) {
+                        Ok(scope) => json!({
+                            "pack_id":id,
+                            "source_review_version":draft.source_scopes.get(id).and_then(|scope|super::source_review::version(input,draft,id,scope).ok()),
+                            "next_evidence":scope.iter().find(|reference|
+                                !super::evidence::covered_by_union(reference, &reviewed)),
+                            "source_ranges_reviewed":scope.iter().all(|reference|
+                                super::evidence::covered_by_union(reference, &reviewed)),
+                            "instruction":"独立核对本范围未提取义务和条件，读取不等于复核。使用当前工具返回的引用提交本pack的有界submit_review；没有next_evidence仅表示正文范围已提交，仍须完成该包结构复核。不得把空提取包直接判为无义务。"
+                        }),
+                        Err(error) => json!({"pack_id":id,"blocked":error}),
+                    },
+                    None => json!({"pack_id":id,"blocked":"discovered source scope missing"}),
+                }
+            });
+        packet["check_work"] = json!({"requirement_id":next,"source_scope":source_scope,
             "remaining_comparisons":draft.required_requirement_ids.iter().filter(|id|!draft.claim_comparisons.contains_key(*id)).count(),
-            "stage":if next.is_some_and(|id| !draft.claim_comparisons.contains_key(id)) {"compare_claims"} else if unread_slot.is_some() {"read_target_body"} else if next.is_some() {"review_requirement"} else {"review_sources"},
+            "stage":if source_scope.is_some() {"review_sources"} else if next.is_some_and(|id| !draft.claim_comparisons.contains_key(id)) {"compare_claims"} else if unread_slot.is_some() {"read_target_body"} else if next.is_some() {"review_requirement"} else {"review_sources"},
             "target_refs":fulfillment.map(|f| &f.target_refs),
+            "template_review_version":next.and_then(|id| super::template_review::version(input, draft, id).ok()),
             "next_unread_slot":unread_slot.map(|slot|json!({"slot_id":slot.slot_id,"chapter_id":slot.chapter_id,"text_bytes":slot.text.len(),"tool":"read_outline","args":{"mode":"slot_body","slot_id":slot.slot_id}})),
             "remaining_unreviewed_packs":draft.required_pack_ids.difference(&draft.reviewed_pack_ids).count(),
-            "instruction":"本项来自持久检查进度，不是已完成的语义判断。优先read_claim_evidence读取该要求的全部主张证据；已完整读取后提交submit_claim_comparison，再读取实际目标正文并submit_review。next_unread_slot给出具体slot_id；用其args加当前wire_scope读取，续页使用实际返回的next_cursor，直到selection_complete。已读目录不能替代目标正文、表格材料或人工任务的充分性判断；目标缺少响应内容应如实提交问题。当前要求未复核前不跳到下一条。不要在requirements与packs目录之间反复重启。来源包的未提取义务仍须独立检查，不能以要求比较替代来源覆盖。"});
+            "instruction":"本项来自持久检查进度，不是已完成的语义判断。先对source_scope的未处置范围读取并提交明确来源判断；来源处置完成后read_claim_evidence读取该要求的全部主张证据；已完整读取后提交submit_claim_comparison，再读取实际目标正文并submit_review。next_unread_slot给出具体slot_id；用其args加当前wire_scope读取，续页使用实际返回的next_cursor，直到selection_complete。已读目录不能替代目标字段、格式和空位说明的充分性判断；具体义务绑定的空位允许保持空，不能因未填投标人材料报错。泛化说明或具体目标覆盖不足应如实提交问题。当前要求未复核前不跳到下一条。不要在requirements与packs目录之间反复重启。来源包的未提取义务仍须独立检查，不能以要求比较替代来源覆盖。"});
         let revision = state.outline_run.reading_packs.as_ref().map(|w| w.revision);
         let continuations: Vec<Value> = draft
             .evidence_continuations
@@ -470,6 +496,20 @@ fn apply_for_duty_staged(
         state.outline_run.tool_draft.required_requirement_ids = work.requirement_ids();
         state.outline_run.tool_draft.requirements = work.requirement_records().clone();
         state.outline_run.tool_draft.required_pack_ids = work.pack_ids();
+        state.outline_run.tool_draft.source_scopes = work
+            .pack_ids()
+            .into_iter()
+            .map(|id| {
+                let scope = super::source_review::Scope {
+                    evidence: work.pack_evidence(input, &id)?,
+                    structure_keys: review_structure_rows(&id, &work.canonical_session(&id)?)
+                        .iter()
+                        .filter_map(|r| r["structural_receipt_id"].as_str().map(str::to_owned))
+                        .collect(),
+                };
+                Ok((id, scope))
+            })
+            .collect::<Result<_, String>>()?;
     }
     match handler {
         ToolHandler::Requirements | ToolHandler::ClaimRead => {
@@ -1000,15 +1040,27 @@ fn requirement_page(
             }
             let session = work.canonical_session(&id)?;
             let refs = work.pack_evidence(input, &id)?;
+            let source_version = super::source_review::version(
+                input,
+                &state.outline_run.tool_draft,
+                &id,
+                state
+                    .outline_run
+                    .tool_draft
+                    .source_scopes
+                    .get(&id)
+                    .ok_or("source scope missing")?,
+            )?;
             let mut structures = review_structure_rows(&id, &session);
             for row in &mut structures {
+                row["source_review_version"] = json!(source_version);
                 if let Some(image_id) = row["image_id"].as_str() {
                     row["visual_evidence_delivered"]=json!(state.outline_run.tool_draft.check_reads.evidence.iter().any(|reference|matches!(reference,super::evidence::EvidenceRef::ImageRegion{image_id:delivered,..} if delivered==image_id)));
                 }
             }
             rows.extend(structures);
             for evidence in refs {
-                rows.push(json!({"pack_id":id,"evidence":evidence,"reviewed":state.outline_run.tool_draft.reviewed_pack_evidence.get(&id).is_some_and(|reviewed|super::evidence::covered_by_union(&evidence,reviewed)),"no_requirement_reason":session["no_requirement_reason"]}));
+                rows.push(json!({"pack_id":id,"source_review_version":source_version,"evidence":evidence,"reviewed":super::evidence::covered_by_union(&evidence,&super::source_review::reviewed_evidence(&state.outline_run.tool_draft.source_dispositions,&id)),"no_requirement_reason":session["no_requirement_reason"]}));
             }
         }
         return super::tools::bounded_page(&rows, cursor, max, &version);
@@ -1164,6 +1216,12 @@ fn submit_review(
     {
         resolve_review_evidence(state, &mut issue["evidence"])?;
     }
+    for disposition in resolved["source_dispositions"]
+        .as_array_mut()
+        .ok_or("source_dispositions array missing")?
+    {
+        resolve_review_evidence(state, &mut disposition["evidence"])?;
+    }
     let args = &resolved;
     let requirement_ids: std::collections::BTreeSet<String> =
         serde_json::from_value(args["requirement_ids"].clone()).map_err(|e| e.to_string())?;
@@ -1173,6 +1231,10 @@ fn submit_review(
         serde_json::from_value(args["inspected_evidence"].clone()).map_err(|e| e.to_string())?;
     let mut issues: Vec<super::ReviewIssue> =
         serde_json::from_value(args["issues"].clone()).map_err(|e| e.to_string())?;
+    let source_dispositions: Vec<super::source_review::Disposition> =
+        serde_json::from_value(args["source_dispositions"].clone()).map_err(|e| e.to_string())?;
+    let template_reviews: Vec<super::template_review::Review> =
+        serde_json::from_value(args["template_reviews"].clone()).map_err(|e| e.to_string())?;
     let work = state
         .outline_run
         .reading_packs
@@ -1183,6 +1245,16 @@ fn submit_review(
         || !pack_ids.is_subset(&draft.required_pack_ids)
     {
         return Err("review names unknown requirements or packs".into());
+    }
+    let reviewed_ids: std::collections::BTreeSet<_> = template_reviews
+        .iter()
+        .map(|review| review.requirement_id.clone())
+        .collect();
+    if reviewed_ids != requirement_ids || reviewed_ids.len() != template_reviews.len() {
+        return Err("template reviews must cover this requirement batch exactly once".into());
+    }
+    for review in &template_reviews {
+        super::template_review::validate(input, draft, review)?;
     }
     if requirement_ids.is_empty() && pack_ids.is_empty() {
         return Err("review must identify its bounded source scope".into());
@@ -1240,29 +1312,24 @@ fn submit_review(
             }
         }
     }
-    let mut pack_progress = draft.reviewed_pack_evidence.clone();
+    let mut proposed = draft.clone();
+    for review in source_dispositions {
+        if !pack_ids.contains(&review.pack_id) {
+            return Err("source disposition pack outside batch".into());
+        }
+        let scope = draft
+            .source_scopes
+            .get(&review.pack_id)
+            .ok_or("source scope missing")?;
+        super::source_review::validate(input, draft, scope, &review)?;
+        super::evidence::validate_evidence(&review.evidence, input, &evidence)?;
+        proposed
+            .source_dispositions
+            .insert(super::source_review::key(&review)?, review);
+    }
     let mut completed_packs = std::collections::BTreeSet::new();
     for id in &pack_ids {
-        let scope = work.pack_evidence(input, id)?;
-        let structure = review_structure_rows(id, &work.canonical_session(id)?);
-        let structure_complete = structure.iter().all(|row| {
-            row["structural_receipt_id"]
-                .as_str()
-                .is_some_and(|key| draft.check_reads.structure_keys.contains(key))
-        });
-        let reviewed = pack_progress.entry(id.clone()).or_default();
-        for reference in &evidence {
-            if scope.iter().any(|owned| owned.same_carrier(reference))
-                && !reviewed.contains(reference)
-            {
-                reviewed.push(reference.clone());
-            }
-        }
-        if structure_complete
-            && scope
-                .iter()
-                .all(|reference| super::evidence::covered_by_union(reference, reviewed))
-        {
+        if super::source_review::complete(input, &proposed, id)? {
             completed_packs.insert(id.clone());
         }
     }
@@ -1297,9 +1364,15 @@ fn submit_review(
         super::evidence::validate_evidence(&issue.evidence, input, &evidence)?;
     }
     let draft = &mut state.outline_run.tool_draft;
+    for review in template_reviews {
+        draft
+            .template_reviews
+            .insert(review.requirement_id.clone(), review);
+    }
     draft.reviewed_requirement_ids.extend(requirement_ids);
+    draft.reviewed_pack_ids.retain(|id| !pack_ids.contains(id));
     draft.reviewed_pack_ids.extend(completed_packs);
-    draft.reviewed_pack_evidence = pack_progress;
+    draft.source_dispositions = proposed.source_dispositions;
     for issue in issues {
         draft.review_issues.retain(|old| old.id != issue.id);
         draft.review_issues.push(issue);
