@@ -1584,6 +1584,59 @@ fn feedback(id: &str, submit: &PackSubmit, errors: Vec<FieldError>) -> PackFeedb
     }
 }
 
+fn dependency_originals(
+    input: &FrozenInput,
+    pack: &ParsePack,
+    relation: &crate::analysis::DocumentRelation,
+) -> Result<Vec<Value>, String> {
+    let mut originals = Vec::new();
+    for source in input.source_units.iter().filter(|source| {
+        relation.to.as_ref().is_some_and(|target| {
+            source.document_id == target.document_id
+                && target
+                    .unit_id
+                    .as_ref()
+                    .is_none_or(|key| source.locator["unit_id"] == *key)
+        })
+    }) {
+        let forms = input
+            .structured_forms
+            .iter()
+            .filter(|form| form["source_unit_revision_id"] == source.source_unit_revision_id)
+            .collect::<Vec<_>>();
+        if !forms.is_empty() {
+            for form in forms {
+                let table = form["form_definition_revision_id"]
+                    .as_str()
+                    .ok_or("related grid identity missing")?;
+                for cell in form["definition"]["cells"]
+                    .as_array()
+                    .ok_or("related grid cells missing")?
+                {
+                    let text = cell["text"]
+                        .as_str()
+                        .ok_or("related grid cell text missing")?;
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let row = cell["row"].as_u64().ok_or("related grid row missing")? as usize;
+                    let column = cell["column"]
+                        .as_u64()
+                        .ok_or("related grid column missing")?
+                        as usize;
+                    originals.push(json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
+                        "anchor_row":row,"anchor_column":column,
+                        "evidence":EvidenceRef::GridCell { input_digest:pack.input_digest.clone(),table_id:table.into(),anchor_row:row,anchor_column:column,start_byte:0,end_byte:text.len() }}));
+                }
+            }
+        } else if !source.text.is_empty() {
+            originals.push(json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
+                "evidence":EvidenceRef::Text { input_digest:pack.input_digest.clone(),unit_id:source.source_unit_revision_id.clone(),start_byte:0,end_byte:source.text.len() }}));
+        }
+    }
+    Ok(originals)
+}
+
 fn grid_reference(digest: &str, table: &str, cell: &GridFragment) -> EvidenceRef {
     EvidenceRef::GridCell {
         input_digest: digest.into(),
@@ -1755,18 +1808,14 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
     }).collect::<Result<Vec<_>,String>>()?;
     let read_dependencies = input.document_relations.iter()
         .filter(|relation| pack.document_ids.contains(&relation.from.document_id))
-        .map(|relation| json!({"relation":relation,
+        .map(|relation| Ok(json!({"relation":relation,
             "target_in_pack":relation.to.as_ref().is_some_and(|target| pack.document_ids.contains(&target.document_id)),
             "available_originals": if relation.kind == crate::analysis::source_manifest::DocumentRelationKind::ExplicitReference
                 && relation.status == crate::analysis::source_manifest::DocumentRelationStatus::Confirmed {
-                input.source_units.iter().filter(|source| !source.text.is_empty() && relation.to.as_ref().is_some_and(|target|
-                    source.document_id == target.document_id && target.unit_id.as_ref().is_none_or(|key| source.locator["unit_id"] == *key)))
-                    .map(|source| json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
-                        "evidence":EvidenceRef::Text { input_digest:pack.input_digest.clone(), unit_id:source.source_unit_revision_id.clone(), start_byte:0, end_byte:source.text.len() }}))
-                    .collect::<Vec<_>>()
+                dependency_originals(input, pack, relation)?
             } else { vec![] },
-            "read_policy":"Read original target atoms in their own planned packs when not present here. Relation metadata grants no source-reading or semantic-review credit."}))
-        .collect::<Vec<_>>();
+            "read_policy":"Read original target atoms in their own planned packs when not present here. Relation metadata grants no source-reading or semantic-review credit."})))
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(
         json!({"read_dependencies":read_dependencies,"condition_support_options":supports,"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
     )

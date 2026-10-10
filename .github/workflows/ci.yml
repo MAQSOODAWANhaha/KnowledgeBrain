@@ -364,7 +364,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run pytest ${CI_DOCREADER_PYTEST_PATHS:?}
-          PYTHONPATH=${CI_DOCREADER_PYTHONPATH:?} uv run pytest ${CI_SAMPLE_SOURCE_PYTEST:?}
+          PYTHONPATH=${CI_DOCREADER_PYTHONPATH:?} uv run pytest ${CI_SOURCE_CAPTIONS_PYTEST:?}
 
   docreader-replay:
     needs: rust-build

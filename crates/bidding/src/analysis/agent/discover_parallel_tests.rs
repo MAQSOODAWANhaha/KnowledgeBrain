@@ -1060,35 +1060,74 @@ impl Model for RelatedCycleModel {
                 }
                 let read = &read.unwrap()["result"]["read"];
                 let excerpts = read["excerpts"].as_array().unwrap();
-                let numeric = excerpts.iter().any(|excerpt| {
-                    excerpt["quote"]
-                        .as_str()
-                        .is_some_and(|text| text.contains("15%") && text.contains("1,234.50元"))
-                });
-                let formula = excerpts.iter().any(|excerpt| {
-                    excerpt["locator"]["cells"].as_array().is_some_and(|cells| {
-                        cells.iter().any(|cell| {
-                            cell["formula"] == "=C1*(1+A1)"
-                                && cell["display_incomplete_reason"]
-                                    == "formula_cached_value_missing"
+                let observations = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| message["role"] == "assistant")
+                    .map(|message| message["content"].to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let percentage = observations.contains("Observed percentage: 15%")
+                    || excerpts
+                        .iter()
+                        .any(|e| e["quote"].as_str().is_some_and(|q| q.contains("15%")));
+                let currency = observations.contains("Observed currency: 1,234.50元")
+                    || excerpts.iter().any(|e| {
+                        e["quote"]
+                            .as_str()
+                            .is_some_and(|q| q.contains("1,234.50元"))
+                    });
+                let formula = observations.contains("Observed formula cache explicitly missing")
+                    || payloads
+                        .iter()
+                        .flat_map(|payload| {
+                            payload["table_structures"].as_array().into_iter().flatten()
                         })
-                    })
-                });
-                if numeric && formula {
+                        .filter(|table| {
+                            excerpts
+                                .iter()
+                                .any(|excerpt| excerpt["locator"]["table_id"] == table["table_id"])
+                        })
+                        .any(|table| {
+                            table["physical_locator"]["cells"]
+                                .as_array()
+                                .is_some_and(|cells| {
+                                    cells.iter().any(|cell| {
+                                        cell["formula"] == "=C1*(1+A1)"
+                                            && cell["display_incomplete_reason"]
+                                                == "formula_cached_value_missing"
+                                    })
+                                })
+                        });
+                if percentage && currency && formula {
                     self.saw_attachment.store(true, Ordering::SeqCst);
                 }
-                let note = if numeric && formula {
-                    "Observed attachment: 15%, 1,234.50元; formula cache explicitly missing."
-                } else {
-                    "Continue the current dependency selection."
-                };
+                let note = [
+                    if percentage {
+                        "Observed percentage: 15%."
+                    } else {
+                        ""
+                    },
+                    if currency {
+                        "Observed currency: 1,234.50元."
+                    } else {
+                        ""
+                    },
+                    if formula {
+                        "Observed formula cache explicitly missing."
+                    } else {
+                        ""
+                    },
+                ]
+                .join(" ");
                 if let Some(cursor) = read["next_cursor"].as_str() {
                     let generation = payloads
                         .iter()
                         .find_map(|value| value["generation"].as_u64())
                         .unwrap();
                     return Ok(ChatTurn {
-                        content: note.into(),
+                        content: note,
                         finish_reason: "tool_calls".into(),
                         usage: None,
                         tool_calls: vec![knowledge::models::ChatToolCall {
@@ -1100,16 +1139,8 @@ impl Model for RelatedCycleModel {
                 }
                 assert_eq!(read["selection_complete"], true);
                 assert!(
-                    numeric && formula
-                        || body["messages"].as_array().unwrap().iter().any(
-                            |message| message["role"] == "assistant"
-                                && message["content"]
-                                    .to_string()
-                                    .contains("Observed attachment: 15%")
-                                && message["content"]
-                                    .to_string()
-                                    .contains("formula cache explicitly missing")
-                        )
+                    percentage && currency && formula,
+                    "percentage={percentage} currency={currency} formula={formula}; read={read}; observations={observations}"
                 );
                 let supports = session["pack"]["condition_support_options"]
                     .as_array()
@@ -1430,17 +1461,11 @@ fn related_read_credit_rejects_unknown_stale_foreign_and_modified_requests_atomi
     work.claim(2);
     let id = "pack-0";
     let identity = work.pack_wire_identity(id).unwrap();
-    let source = input
-        .source_units
-        .iter()
-        .find(|source| source.document_id == "pricing" && source.text.contains("15%"))
-        .unwrap();
-    let reference = EvidenceRef::Text {
-        input_digest: input_digest(&input).unwrap(),
-        unit_id: source.source_unit_revision_id.clone(),
-        start_byte: 0,
-        end_byte: source.text.len(),
-    };
+    let session = work.session(&input, id).unwrap();
+    let reference: EvidenceRef = serde_json::from_value(
+        session["pack"]["read_dependencies"][0]["available_originals"][0]["evidence"].clone(),
+    )
+    .unwrap();
     let (page, options) = work.related_read(&input, id, &[reference]).unwrap();
     let body = json!({"messages":[{"role":"tool","tool_call_id":"dependent-original","content":page.to_string()}]});
     let request = Request {
@@ -1720,4 +1745,196 @@ async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
         );
         assert_eq!(json!(candidate.outline_run.discover_workers), before);
     }
+}
+
+#[tokio::test]
+async fn related_read_issued_keys_survive_peer_commit_but_not_input_change() {
+    let input = crate::outline::frozen::tests::related_native_input();
+    let config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.config_sha256 = digest(&config).unwrap();
+    state.outline_run.reading_packs = Some(
+        crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        }),
+    );
+    state.outline_run.reading_packs.as_mut().unwrap().claim(2);
+    for id in ["pack-0", "pack-1"] {
+        state
+            .outline_run
+            .discover_workers
+            .insert(id.into(), Worker::default());
+    }
+    let journal = Durable {
+        state: Mutex::new(state.clone()),
+        stop_barrier: false,
+        crash_received: AtomicBool::new(false),
+        call_limit: 99,
+    };
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let a = host.prepare_inner("pack-0", false).await.unwrap();
+    let b = host.prepare_inner("pack-1", false).await.unwrap();
+    host.reserve(&a).await.unwrap();
+    host.reserve(&b).await.unwrap();
+    let reader = RelatedCycleModel {
+        cycle: CycleModel {
+            discover: Delayed::default(),
+            step: AtomicUsize::new(0),
+            automatic: true,
+            saw_repair_wire: AtomicBool::new(true),
+        },
+        saw_attachment: AtomicBool::new(false),
+        form_step: AtomicUsize::new(0),
+    };
+    let response_a = reader.turn(&config, &a.body).await.unwrap();
+    assert_eq!(response_a.tool_calls[0].name, "read_evidence");
+    let response_b = Delayed::default().turn(&config, &b.body).await.unwrap();
+    let old_revision = host
+        .state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .revision;
+    host.received(&b, &response_b).await.unwrap();
+    host.commit(&b, response_b).await.unwrap();
+    assert!(
+        host.state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .revision
+            > old_revision
+    );
+    host.received(&a, &response_a).await.unwrap();
+    let mut changed = host.state.clone();
+    host.commit(&a, response_a.clone()).await.unwrap();
+    let worker = &host.state.outline_run.discover_workers["pack-0"];
+    assert!(worker.pending.is_none(), "{:?}", worker.pending);
+    assert!(!worker.related_read_frames.is_empty());
+    assert_eq!(worker.rejected_turns, 0);
+    for dependency_change in ["source", "relation"] {
+        let mut changed_input = input.clone();
+        if dependency_change == "source" {
+            let form = changed_input
+                .structured_forms
+                .iter_mut()
+                .find(|form| {
+                    form["definition"]["cells"]
+                        .as_array()
+                        .is_some_and(|cells| !cells.is_empty())
+                })
+                .unwrap();
+            form["definition"]["cells"][0]["text"] = json!("different dependency source");
+        } else {
+            changed_input.document_relations[0].status =
+                crate::analysis::source_manifest::DocumentRelationStatus::Unconfirmed;
+        }
+        let mut candidate = changed.clone();
+        let mut stale = PackHost {
+            input: &changed_input,
+            config: &config,
+            state: &mut candidate,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        stale.commit(&a, response_a.clone()).await.unwrap();
+        assert!(
+            matches!(
+                stale.state.outline_run.discover_workers["pack-0"].pending,
+                Some(Pending::Failed { .. })
+            ),
+            "{dependency_change}"
+        );
+        assert!(
+            stale.state.outline_run.discover_workers["pack-0"]
+                .related_read_frames
+                .is_empty()
+        );
+    }
+    let mut reopened = changed.clone();
+    let submission = Delayed::default().turn(&config, &a.body).await.unwrap();
+    reopened
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap()
+        .pending = Some(Pending::Received {
+        request: a.clone(),
+        response: serde_json::to_value(&submission).unwrap(),
+    });
+    {
+        let mut owner = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut reopened,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        owner.commit(&a, submission).await.unwrap();
+    }
+    reopened
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .reopen_committed(
+            &input,
+            "pack-0",
+            a.scope.revision,
+            "reopen-owned-source-key",
+        )
+        .unwrap();
+    reopened
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap()
+        .pending = Some(Pending::Received {
+        request: a.clone(),
+        response: serde_json::to_value(&response_a).unwrap(),
+    });
+    {
+        let mut owner = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut reopened,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        owner.commit(&a, response_a.clone()).await.unwrap();
+        assert!(matches!(
+            owner.state.outline_run.discover_workers["pack-0"].pending,
+            Some(Pending::Failed { .. })
+        ));
+    }
+    changed.input_sha256.push('x');
+    let mut stale_host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut changed,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    stale_host.commit(&a, response_a).await.unwrap();
+    assert!(matches!(
+        stale_host.state.outline_run.discover_workers["pack-0"].pending,
+        Some(Pending::Failed { .. })
+    ));
+    assert!(
+        stale_host.state.outline_run.discover_workers["pack-0"]
+            .related_read_frames
+            .is_empty()
+    );
 }

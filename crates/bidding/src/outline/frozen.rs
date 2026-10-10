@@ -937,14 +937,29 @@ pub(crate) mod tests {
         }
         let frozen = build(parsed, vec![]).unwrap();
         validate_frozen_input_contract(&frozen).unwrap();
-        let cells = frozen
+        let native_grid = frozen
             .source_units
             .iter()
-            .filter_map(|source| source.locator["cells"].as_array())
-            .flatten()
-            .collect::<Vec<_>>();
+            .find(|source| source.locator["unit_id"] == "sheet:0:used")
+            .unwrap();
+        assert!(native_grid.text.is_empty());
+        let cells = native_grid.locator["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 8);
+        assert_eq!(
+            native_grid.locator["cells"],
+            native_grid.locator["physical_locator"]["cells"]
+        );
+        let form = frozen
+            .structured_forms
+            .iter()
+            .find(|form| form["source_unit_revision_id"] == native_grid.source_unit_revision_id)
+            .unwrap();
+        assert_eq!(
+            form["definition"]["physical_locator"]["cells"],
+            native_grid.locator["cells"]
+        );
         let cell = |address: &str| {
-            *cells
+            cells
                 .iter()
                 .find(|cell| cell["address"] == address)
                 .unwrap()
@@ -1013,7 +1028,7 @@ pub(crate) mod tests {
                     },
                     to: Some(RelationEndpoint {
                         document_id: "pricing".into(),
-                        unit_id: None,
+                        unit_id: Some("sheet:0:used".into()),
                     }),
                     kind: DocumentRelationKind::ExplicitReference,
                     status: DocumentRelationStatus::Confirmed,
@@ -1087,6 +1102,27 @@ pub(crate) mod tests {
             session["pack"]["read_dependencies"][0]["target_in_pack"],
             false
         );
+        let target = input
+            .source_units
+            .iter()
+            .find(|source| {
+                source.document_id == "pricing" && source.locator["unit_id"] == "sheet:0:used"
+            })
+            .unwrap();
+        assert!(target.text.is_empty());
+        let originals = session["pack"]["read_dependencies"][0]["available_originals"]
+            .as_array()
+            .unwrap();
+        assert!(!originals.is_empty());
+        assert!(originals.iter().all(|value| {
+            matches!(
+                serde_json::from_value::<crate::outline::evidence::EvidenceRef>(
+                    value["evidence"].clone()
+                )
+                .unwrap(),
+                crate::outline::evidence::EvidenceRef::GridCell { .. }
+            )
+        }));
     }
 
     #[test]

@@ -7,7 +7,7 @@
     "markdown": "# 第一章 资格要求\n表前正文😀\n\n| 资格材料 |  |\n| --- | --- |\n| 必须提交营业执照<br>10&#9;20 | 有效期内 |\n\n表后正文😀",
     "metadata": {
       "document_tree": "{\"kind\":\"document\",\"key\":\"\",\"keys\":[],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"section\",\"key\":\"\",\"keys\":[\"section:0\",\"section:1\"],\"section_ordinal\":0,\"heading_path\":\"第一章 资格要求\",\"title\":\"第一章 资格要求\",\"children\":[{\"kind\":\"table\",\"key\":\"table:0\",\"keys\":[\"table:0\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"\",\"children\":[]}]}]}",
-      "source_contract": "{\"schema_version\":2,\"document_revision\":\"4a62f9337ce968dbb1f317b9a129571cc637ce3b8f58df1ec2e67f96f47831bb\",\"parser_version\":\"docreader-source-v2/c04677fc512bca9f87579131846751bf47854f31a4e262cf6f4d5b94b540a9dd\",\"markdown_sha256\":\"ab61158a4681c131c74568feaecea226df3616c482162fb44b66a8d12b12c056\",\"units\":[{\"unit_id\":\"section:0\",\"ordinal\":0,\"kind\":\"section\",\"text_sha256\":\"01546e9fb5f6c65afab6dff0812cd7386ebe1ca2279a3d142fc36c1ef6fd6544\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"第一章 资格要求\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":0,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"第一章 资格要求\"},\"physical_path\":\"/word/document.xml/body/*[1];/word/document.xml/body/*[2]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":41}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"table:0\",\"ordinal\":1,\"kind\":\"table_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":\"452722a9c32aeb5ba027118b609c866b6c31ec361c5a99683eb355996326828a\",\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"第一章 资格要求\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":0,\"table_ordinal\":0,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"第一章 资格要求\"},\"physical_path\":\"/word/document.xml/body/*[3]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":43,\"end_byte\":132}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":\"table:0\",\"header_cells\":[{\"row\":0,\"column\":0,\"role\":\"column_header\"}]},{\"unit_id\":\"section:1\",\"ordinal\":2,\"kind\":\"section\",\"text_sha256\":\"7b488541103c426535cfa1a5c546a51aa8a9ad44452034afe408447633a96366\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"第一章 资格要求\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":1,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"第一章 资格要求\"},\"physical_path\":\"/word/document.xml/body/*[4]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":134,\"end_byte\":150}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]}],\"page_manifest\":[]}"
+      "source_contract": "{\"schema_version\":2,\"document_revision\":\"4a62f9337ce968dbb1f317b9a129571cc637ce3b8f58df1ec2e67f96f47831bb\",\"parser_version\":\"docreader-source-v2/60aa397c26a2a2b6357f6219f6e8eaf16e3a59c0c6037f6de75ee4352e9b3588\",\"markdown_sha256\":\"ab61158a4681c131c74568feaecea226df3616c482162fb44b66a8d12b12c056\",\"units\":[{\"unit_id\":\"section:0\",\"ordinal\":0,\"kind\":\"section\",\"text_sha256\":\"01546e9fb5f6c65afab6dff0812cd7386ebe1ca2279a3d142fc36c1ef6fd6544\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"第一章 资格要求\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":0,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"第一章 资格要求\"},\"physical_path\":\"/word/document.xml/body/*[1];/word/document.xml/body/*[2]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":41}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"table:0\",\"ordinal\":1,\"kind\":\"table_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":\"452722a9c32aeb5ba027118b609c866b6c31ec361c5a99683eb355996326828a\",\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"第一章 资格要求\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":0,\"table_ordinal\":0,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"第一章 资格要求\"},\"physical_path\":\"/word/document.xml/body/*[3]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":43,\"end_byte\":132}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":\"table:0\",\"header_cells\":[{\"row\":0,\"column\":0,\"role\":\"column_header\"}]},{\"unit_id\":\"section:1\",\"ordinal\":2,\"kind\":\"section\",\"text_sha256\":\"7b488541103c426535cfa1a5c546a51aa8a9ad44452034afe408447633a96366\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"第一章 资格要求\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":1,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"第一章 资格要求\"},\"physical_path\":\"/word/document.xml/body/*[4]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":134,\"end_byte\":150}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]}],\"page_manifest\":[],\"glyph_normalizations\":[]}"
     },
     "structured_source_units": [
       {
@@ -96,7 +96,7 @@
     "markdown": "资格条件 | 证明文件\n\n必须提交营业执照 | 有效期内\n\n多行\n中文😀 | 10\t20\n\n合并单元格",
     "metadata": {
       "document_tree": "{\"kind\":\"document\",\"key\":\"\",\"keys\":[],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"sheet\",\"key\":\"sheet:0\",\"keys\":[\"sheet:0\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"资格材料\",\"children\":[{\"kind\":\"row\",\"key\":\"sheet:0:row:1\",\"keys\":[\"sheet:0:row:1\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"A1:B1\",\"children\":[]},{\"kind\":\"row\",\"key\":\"sheet:0:row:2\",\"keys\":[\"sheet:0:row:2\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"A2:B2\",\"children\":[]},{\"kind\":\"row\",\"key\":\"sheet:0:row:3\",\"keys\":[\"sheet:0:row:3\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"A3:B3\",\"children\":[]},{\"kind\":\"row\",\"key\":\"sheet:0:row:4\",\"keys\":[\"sheet:0:row:4\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"A4:A4\",\"children\":[]},{\"kind\":\"table\",\"key\":\"sheet:0:used\",\"keys\":[\"sheet:0:used\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"A1:B4\",\"children\":[]}]},{\"kind\":\"sheet\",\"key\":\"sheet:1\",\"keys\":[\"sheet:1\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"空白附表\",\"children\":[]}]}",
-      "source_contract": "{\"schema_version\":2,\"document_revision\":\"6e98ca822708fe8fe62eba766f2dfebbf75d85a8f2f91e2a3431443801288055\",\"parser_version\":\"docreader-source-v2/c04677fc512bca9f87579131846751bf47854f31a4e262cf6f4d5b94b540a9dd\",\"markdown_sha256\":\"36e0c8176afb7ebc295e781ddd91dd7f7f6115e1ccc4a640fa42d64a7ca0a86f\",\"units\":[{\"unit_id\":\"sheet:0\",\"ordinal\":0,\"kind\":\"section\",\"text_sha256\":\"48c39f6128cec6e2be4237a64fcb837977d5d86b641533681e38e2dad0bd7f03\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A1:B4\",\"start_row\":1,\"start_column\":1,\"end_row\":4,\"end_column\":2},\"cells\":[],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:1\",\"ordinal\":1,\"kind\":\"table_row\",\"text_sha256\":\"90f479db052d1c9cbf967aa6e28dea0e33b5495f4b4e6b8ab5f02e51b92f1be5\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A1:B1\",\"start_row\":1,\"start_column\":1,\"end_row\":1,\"end_column\":2},\"cells\":[{\"address\":\"A1\",\"row\":1,\"column\":1,\"text\":\"资格条件\"},{\"address\":\"B1\",\"row\":1,\"column\":2,\"text\":\"证明文件\"}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":27}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:2\",\"ordinal\":2,\"kind\":\"table_row\",\"text_sha256\":\"b507ec1b07da844e7b087ce9341b0dfdcdc347407c620fa299f72526e05d2543\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A2:B2\",\"start_row\":2,\"start_column\":1,\"end_row\":2,\"end_column\":2},\"cells\":[{\"address\":\"A2\",\"row\":2,\"column\":1,\"text\":\"必须提交营业执照\"},{\"address\":\"B2\",\"row\":2,\"column\":2,\"text\":\"有效期内\"}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":29,\"end_byte\":68}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:3\",\"ordinal\":3,\"kind\":\"table_row\",\"text_sha256\":\"05caa355f10405173dca438f86b1d20090aea27ac9bc95b9126a2726a271bc2e\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A3:B3\",\"start_row\":3,\"start_column\":1,\"end_row\":3,\"end_column\":2},\"cells\":[{\"address\":\"A3\",\"row\":3,\"column\":1,\"text\":\"多行\\n中文😀\"},{\"address\":\"B3\",\"row\":3,\"column\":2,\"text\":\"10\\t20\"}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":70,\"end_byte\":95}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:4\",\"ordinal\":4,\"kind\":\"table_row\",\"text_sha256\":\"846b46da77023683eef495c266f8c94c51d19f38b1f772ac201d8254ddde4ebf\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A4:A4\",\"start_row\":4,\"start_column\":1,\"end_row\":4,\"end_column\":1},\"cells\":[{\"address\":\"A4\",\"row\":4,\"column\":1,\"text\":\"合并单元格\"}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":97,\"end_byte\":112}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:used\",\"ordinal\":5,\"kind\":\"table_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":\"ce762ae4bc031c17a07d28fe0f3c1d18a1388b918848044b2599921109a1578d\",\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A1:B4\",\"start_row\":1,\"start_column\":1,\"end_row\":4,\"end_column\":2},\"cells\":[],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":27},{\"start_byte\":29,\"end_byte\":68},{\"start_byte\":70,\"end_byte\":95},{\"start_byte\":97,\"end_byte\":112}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":\"sheet:0:used\",\"header_cells\":[]},{\"unit_id\":\"sheet:1\",\"ordinal\":6,\"kind\":\"section\",\"text_sha256\":\"f940b098490975eaf3eda783e3948971d24305631f78bdccc95e268b76c9547e\",\"grid_sha256\":null,\"section_id\":\"sheet:1\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"空白附表\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":1,\"sheet_name\":\"空白附表\",\"region\":{\"a1_range\":\"A1:A1\",\"start_row\":1,\"start_column\":1,\"end_row\":1,\"end_column\":1},\"cells\":[],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]}],\"page_manifest\":[]}"
+      "source_contract": "{\"schema_version\":2,\"document_revision\":\"6e98ca822708fe8fe62eba766f2dfebbf75d85a8f2f91e2a3431443801288055\",\"parser_version\":\"docreader-source-v2/60aa397c26a2a2b6357f6219f6e8eaf16e3a59c0c6037f6de75ee4352e9b3588\",\"markdown_sha256\":\"36e0c8176afb7ebc295e781ddd91dd7f7f6115e1ccc4a640fa42d64a7ca0a86f\",\"units\":[{\"unit_id\":\"sheet:0\",\"ordinal\":0,\"kind\":\"section\",\"text_sha256\":\"48c39f6128cec6e2be4237a64fcb837977d5d86b641533681e38e2dad0bd7f03\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A1:B4\",\"start_row\":1,\"start_column\":1,\"end_row\":4,\"end_column\":2},\"cells\":[],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:1\",\"ordinal\":1,\"kind\":\"table_row\",\"text_sha256\":\"90f479db052d1c9cbf967aa6e28dea0e33b5495f4b4e6b8ab5f02e51b92f1be5\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A1:B1\",\"start_row\":1,\"start_column\":1,\"end_row\":1,\"end_column\":2},\"cells\":[{\"address\":\"A1\",\"row\":1,\"column\":1,\"text\":\"资格条件\",\"raw_value\":\"资格条件\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"资格条件\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"B1\",\"row\":1,\"column\":2,\"text\":\"证明文件\",\"raw_value\":\"证明文件\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"证明文件\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":27}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:2\",\"ordinal\":2,\"kind\":\"table_row\",\"text_sha256\":\"b507ec1b07da844e7b087ce9341b0dfdcdc347407c620fa299f72526e05d2543\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A2:B2\",\"start_row\":2,\"start_column\":1,\"end_row\":2,\"end_column\":2},\"cells\":[{\"address\":\"A2\",\"row\":2,\"column\":1,\"text\":\"必须提交营业执照\",\"raw_value\":\"必须提交营业执照\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"必须提交营业执照\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"B2\",\"row\":2,\"column\":2,\"text\":\"有效期内\",\"raw_value\":\"有效期内\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"有效期内\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":29,\"end_byte\":68}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:3\",\"ordinal\":3,\"kind\":\"table_row\",\"text_sha256\":\"05caa355f10405173dca438f86b1d20090aea27ac9bc95b9126a2726a271bc2e\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A3:B3\",\"start_row\":3,\"start_column\":1,\"end_row\":3,\"end_column\":2},\"cells\":[{\"address\":\"A3\",\"row\":3,\"column\":1,\"text\":\"多行\\n中文😀\",\"raw_value\":\"多行\\n中文😀\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"多行\\n中文😀\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"B3\",\"row\":3,\"column\":2,\"text\":\"10\\t20\",\"raw_value\":\"10\\t20\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"10\\t20\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":70,\"end_byte\":95}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:row:4\",\"ordinal\":4,\"kind\":\"table_row\",\"text_sha256\":\"846b46da77023683eef495c266f8c94c51d19f38b1f772ac201d8254ddde4ebf\",\"grid_sha256\":null,\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A4:A4\",\"start_row\":4,\"start_column\":1,\"end_row\":4,\"end_column\":1},\"cells\":[{\"address\":\"A4\",\"row\":4,\"column\":1,\"text\":\"合并单元格\",\"raw_value\":\"合并单元格\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"合并单元格\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null}],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":97,\"end_byte\":112}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"sheet:0:used\",\"ordinal\":5,\"kind\":\"table_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":\"ce762ae4bc031c17a07d28fe0f3c1d18a1388b918848044b2599921109a1578d\",\"section_id\":\"sheet:0\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"资格材料\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":0,\"sheet_name\":\"资格材料\",\"region\":{\"a1_range\":\"A1:B4\",\"start_row\":1,\"start_column\":1,\"end_row\":4,\"end_column\":2},\"cells\":[{\"address\":\"A1\",\"row\":1,\"column\":1,\"text\":\"资格条件\",\"raw_value\":\"资格条件\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"资格条件\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"B1\",\"row\":1,\"column\":2,\"text\":\"证明文件\",\"raw_value\":\"证明文件\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"证明文件\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"A2\",\"row\":2,\"column\":1,\"text\":\"必须提交营业执照\",\"raw_value\":\"必须提交营业执照\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"必须提交营业执照\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"B2\",\"row\":2,\"column\":2,\"text\":\"有效期内\",\"raw_value\":\"有效期内\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"有效期内\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"A3\",\"row\":3,\"column\":1,\"text\":\"多行\\n中文😀\",\"raw_value\":\"多行\\n中文😀\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"多行\\n中文😀\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"B3\",\"row\":3,\"column\":2,\"text\":\"10\\t20\",\"raw_value\":\"10\\t20\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"10\\t20\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null},{\"address\":\"A4\",\"row\":4,\"column\":1,\"text\":\"合并单元格\",\"raw_value\":\"合并单元格\",\"value_type\":\"string\",\"number_format\":\"General\",\"display_text\":\"合并单元格\",\"display_complete\":true,\"display_incomplete_reason\":null,\"formula\":null,\"formula_references\":[],\"cached_value\":null,\"cached_value_type\":null}],\"merged_ranges\":[{\"a1_range\":\"A4:B4\",\"start_row\":4,\"start_column\":1,\"end_row\":4,\"end_column\":2}],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":27},{\"start_byte\":29,\"end_byte\":68},{\"start_byte\":70,\"end_byte\":95},{\"start_byte\":97,\"end_byte\":112}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":\"sheet:0:used\",\"header_cells\":[]},{\"unit_id\":\"sheet:1\",\"ordinal\":6,\"kind\":\"section\",\"text_sha256\":\"f940b098490975eaf3eda783e3948971d24305631f78bdccc95e268b76c9547e\",\"grid_sha256\":null,\"section_id\":\"sheet:1\",\"parent_section_id\":null,\"heading_level\":1,\"heading_path\":\"空白附表\",\"physical_locator\":{\"locator_kind\":\"spreadsheet\",\"sheet_ordinal\":1,\"sheet_name\":\"空白附表\",\"region\":{\"a1_range\":\"A1:A1\",\"start_row\":1,\"start_column\":1,\"end_row\":1,\"end_column\":1},\"cells\":[],\"merged_ranges\":[],\"defined_tables\":[]},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]}],\"page_manifest\":[],\"glyph_normalizations\":[]}"
     },
     "structured_source_units": [
       {
@@ -142,13 +142,33 @@
               "address": "A1",
               "row": 1,
               "column": 1,
-              "text": "资格条件"
+              "text": "资格条件",
+              "raw_value": "资格条件",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "资格条件",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             },
             {
               "address": "B1",
               "row": 1,
               "column": 2,
-              "text": "证明文件"
+              "text": "证明文件",
+              "raw_value": "证明文件",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "证明文件",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             }
           ],
           "merged_ranges": [],
@@ -177,13 +197,33 @@
               "address": "A2",
               "row": 2,
               "column": 1,
-              "text": "必须提交营业执照"
+              "text": "必须提交营业执照",
+              "raw_value": "必须提交营业执照",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "必须提交营业执照",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             },
             {
               "address": "B2",
               "row": 2,
               "column": 2,
-              "text": "有效期内"
+              "text": "有效期内",
+              "raw_value": "有效期内",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "有效期内",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             }
           ],
           "merged_ranges": [],
@@ -212,13 +252,33 @@
               "address": "A3",
               "row": 3,
               "column": 1,
-              "text": "多行\n中文😀"
+              "text": "多行\n中文😀",
+              "raw_value": "多行\n中文😀",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "多行\n中文😀",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             },
             {
               "address": "B3",
               "row": 3,
               "column": 2,
-              "text": "10\t20"
+              "text": "10\t20",
+              "raw_value": "10\t20",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "10\t20",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             }
           ],
           "merged_ranges": [],
@@ -247,7 +307,17 @@
               "address": "A4",
               "row": 4,
               "column": 1,
-              "text": "合并单元格"
+              "text": "合并单元格",
+              "raw_value": "合并单元格",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "合并单元格",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
             }
           ],
           "merged_ranges": [],
@@ -271,8 +341,129 @@
             "end_row": 4,
             "end_column": 2
           },
-          "cells": [],
-          "merged_ranges": [],
+          "cells": [
+            {
+              "address": "A1",
+              "row": 1,
+              "column": 1,
+              "text": "资格条件",
+              "raw_value": "资格条件",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "资格条件",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            },
+            {
+              "address": "B1",
+              "row": 1,
+              "column": 2,
+              "text": "证明文件",
+              "raw_value": "证明文件",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "证明文件",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            },
+            {
+              "address": "A2",
+              "row": 2,
+              "column": 1,
+              "text": "必须提交营业执照",
+              "raw_value": "必须提交营业执照",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "必须提交营业执照",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            },
+            {
+              "address": "B2",
+              "row": 2,
+              "column": 2,
+              "text": "有效期内",
+              "raw_value": "有效期内",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "有效期内",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            },
+            {
+              "address": "A3",
+              "row": 3,
+              "column": 1,
+              "text": "多行\n中文😀",
+              "raw_value": "多行\n中文😀",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "多行\n中文😀",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            },
+            {
+              "address": "B3",
+              "row": 3,
+              "column": 2,
+              "text": "10\t20",
+              "raw_value": "10\t20",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "10\t20",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            },
+            {
+              "address": "A4",
+              "row": 4,
+              "column": 1,
+              "text": "合并单元格",
+              "raw_value": "合并单元格",
+              "value_type": "string",
+              "number_format": "General",
+              "display_text": "合并单元格",
+              "display_complete": true,
+              "display_incomplete_reason": null,
+              "formula": null,
+              "formula_references": [],
+              "cached_value": null,
+              "cached_value_type": null
+            }
+          ],
+          "merged_ranges": [
+            {
+              "a1_range": "A4:B4",
+              "start_row": 4,
+              "start_column": 1,
+              "end_row": 4,
+              "end_column": 2
+            }
+          ],
           "defined_tables": []
         },
         "grid": {

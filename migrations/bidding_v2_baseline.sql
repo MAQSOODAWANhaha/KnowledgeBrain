@@ -289,7 +289,7 @@ BEGIN
     RAISE EXCEPTION 'frozen bytes digest mismatch' USING ERRCODE='23514';
   END IF;
   frozen := convert_from(p_input_bytes,'UTF8')::jsonb;
-  IF frozen->>'schema_version' IS DISTINCT FROM '2'
+  IF frozen->>'schema_version' IS DISTINCT FROM '3'
       OR frozen->>'project_id' IS DISTINCT FROM p_project_id::text
       OR frozen->>'document_set_id' IS DISTINCT FROM p_document_set_id
       OR jsonb_typeof(frozen->'documents') IS DISTINCT FROM 'array'

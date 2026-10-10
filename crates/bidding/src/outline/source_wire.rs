@@ -9,15 +9,19 @@ pub type Keys = BTreeMap<String, EvidenceRef>;
 fn scope(state: &Checkpoint) -> Value {
     json!({"input":state.input_sha256,"revision":state.outline_run.reading_packs.as_ref().map(|w|w.revision),"epoch":state.outline_run.tool_draft.read_epoch})
 }
+#[cfg(test)]
 fn key(state: &Checkpoint, reference: &EvidenceRef) -> Result<String, String> {
+    scoped_key(&scope(state), reference)
+}
+fn scoped_key(scope: &Value, reference: &EvidenceRef) -> Result<String, String> {
     Ok(format!(
         "src_{}",
-        super::canonical_sha256(&(scope(state), reference))?
+        super::canonical_sha256(&(scope, reference))?
     ))
 }
-fn project(state: &Checkpoint, value: &mut Value, keys: &mut Keys) -> Result<(), String> {
+fn project(scope: &Value, value: &mut Value, keys: &mut Keys) -> Result<(), String> {
     if let Ok(reference) = serde_json::from_value::<EvidenceRef>(value.clone()) {
-        let id = key(state, &reference)?;
+        let id = scoped_key(scope, &reference)?;
         if keys.get(&id).is_some_and(|prior| prior != &reference) {
             return Err("source key collision".into());
         }
@@ -30,12 +34,12 @@ fn project(state: &Checkpoint, value: &mut Value, keys: &mut Keys) -> Result<(),
             map.remove("atom_ref");
             map.remove("evidence_index");
             for v in map.values_mut() {
-                project(state, v, keys)?;
+                project(scope, v, keys)?;
             }
         }
         Value::Array(items) => {
             for v in items {
-                project(state, v, keys)?;
+                project(scope, v, keys)?;
             }
         }
         _ => {}
@@ -44,7 +48,18 @@ fn project(state: &Checkpoint, value: &mut Value, keys: &mut Keys) -> Result<(),
 }
 /// Same projection for planner probes and the final admitted transport body.
 pub fn request(state: &Checkpoint, body: &mut Value) -> Result<Keys, String> {
-    let mut keys = state.outline_run.tool_draft.source_keys.clone();
+    request_in_scope(
+        &scope(state),
+        &state.outline_run.tool_draft.source_keys,
+        body,
+    )
+}
+pub(crate) fn request_in_scope(
+    scope: &Value,
+    issued: &Keys,
+    body: &mut Value,
+) -> Result<Keys, String> {
+    let mut keys = issued.clone();
     for message in body["messages"]
         .as_array_mut()
         .ok_or("request messages missing")?
@@ -53,7 +68,7 @@ pub fn request(state: &Checkpoint, body: &mut Value) -> Result<Keys, String> {
             .as_str()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
         {
-            project(state, &mut payload, &mut keys)?;
+            project(scope, &mut payload, &mut keys)?;
             discover_wire::compact(&mut payload)?;
             message["content"] = json!(payload.to_string());
         }
@@ -61,22 +76,27 @@ pub fn request(state: &Checkpoint, body: &mut Value) -> Result<Keys, String> {
     Ok(keys)
 }
 pub fn resolve(state: &Checkpoint, name: &str, args: Value) -> Result<Value, String> {
-    resolve_with_keys(state, name, args, &state.outline_run.tool_draft.source_keys)
+    resolve_in_scope(
+        &scope(state),
+        name,
+        args,
+        &state.outline_run.tool_draft.source_keys,
+    )
 }
-pub(crate) fn resolve_with_keys(
-    state: &Checkpoint,
+pub(crate) fn resolve_in_scope(
+    scope: &Value,
     name: &str,
     mut args: Value,
     keys: &Keys,
 ) -> Result<Value, String> {
     super::agent::validate_arguments(name, &args)?;
-    fn walk(state: &Checkpoint, value: &mut Value, keys: &Keys) -> Result<(), String> {
+    fn walk(scope: &Value, value: &mut Value, keys: &Keys) -> Result<(), String> {
         if let Some(id) = value.get("source_key").and_then(Value::as_str) {
             if value.as_object().is_none_or(|m| m.len() != 1) {
                 return Err("source_key must be the only field".into());
             }
             let reference = keys.get(id).ok_or("source key was not issued")?;
-            if key(state, reference)? != id {
+            if scoped_key(scope, reference)? != id {
                 return Err("source key scope or epoch is stale".into());
             }
             *value = json!(reference);
@@ -85,19 +105,19 @@ pub(crate) fn resolve_with_keys(
         match value {
             Value::Object(map) => {
                 for v in map.values_mut() {
-                    walk(state, v, keys)?
+                    walk(scope, v, keys)?
                 }
             }
             Value::Array(items) => {
                 for v in items {
-                    walk(state, v, keys)?
+                    walk(scope, v, keys)?
                 }
             }
             _ => {}
         }
         Ok(())
     }
-    walk(state, &mut args, keys)?;
+    walk(scope, &mut args, keys)?;
 
     Ok(args)
 }

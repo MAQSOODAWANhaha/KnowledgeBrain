@@ -223,8 +223,12 @@ impl<J: Journal> PackHost<'_, J> {
             crate::agent_runtime::chat::prepare(&self.config.provider, messages, tools).await?;
         let mut body: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
         crate::outline::discover::compact_request(&mut body).map_err(invalid)?;
-        let source_keys =
-            crate::outline::source_wire::request(self.state, &mut body).map_err(invalid)?;
+        let source_keys = crate::outline::source_wire::request_in_scope(
+            &json!({"input":self.state.input_sha256,"worker":identity}),
+            &worker.source_keys,
+            &mut body,
+        )
+        .map_err(invalid)?;
         let registry = crate::outline::model_wire::project_scope(
             &worker.registry,
             &json!([identity, generation]),
@@ -463,8 +467,8 @@ impl<J: Journal> Host for PackHost<'_, J> {
             confirm_worker_related_reads(self.input, self.state, request)?;
             if call.name == "read_evidence" {
                 let keys = &self.state.outline_run.discover_workers[id].source_keys;
-                let args = crate::outline::source_wire::resolve_with_keys(
-                    self.state,
+                let args = crate::outline::source_wire::resolve_in_scope(
+                    &json!({"input":self.state.input_sha256,"worker":identity}),
                     "read_evidence",
                     args,
                     keys,

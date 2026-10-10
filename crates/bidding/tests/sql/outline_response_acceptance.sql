@@ -262,6 +262,9 @@ DECLARE
   v_source_sha kb_sha256 := encode(public.digest('raw tender','sha256'),'hex')::kb_sha256;
   v_image_sha kb_sha256 := encode(public.digest(v_image_stage::text,'sha256'),'hex')::kb_sha256;
   v_bytes bytea;
+  old_bytes bytea;
+  old_sha kb_sha256;
+  old_manifest jsonb;
   source_key text := 'source:' || encode(public.digest('doc1','sha256'),'hex');
   image_key text := 'image:' || encode(public.digest('4:doc16:image1','sha256'),'hex');
   manifest jsonb;
@@ -273,7 +276,7 @@ DECLARE
 BEGIN
   INSERT INTO users(id,email) VALUES(v_user,v_user::text||'@example.invalid');
   INSERT INTO bid_projects(id,owner_user_id,title,status) VALUES(v_project,v_user,'frozen object manifest','open');
-  v_bytes := convert_to(jsonb_build_object('schema_version',2,'project_id',v_project,'document_set_id','set',
+  v_bytes := convert_to(jsonb_build_object('schema_version',3,'project_id',v_project,'document_set_id','set',
     'documents',jsonb_build_array(jsonb_build_object('document_id','doc1','document_revision',v_source_sha,
       'source_contract',jsonb_build_object('document_revision',v_source_sha))),
     'source_units',jsonb_build_array(jsonb_build_object('document_id','doc1',
@@ -288,6 +291,17 @@ BEGIN
     jsonb_build_object('staging_id',v_image_stage,'occurrence',image_key,'object_ref','objects/'||v_image_sha,'digest',v_image_sha,'media_type','image/png','byte_length',200));
   -- Both objects have valid independent metadata, but the wrong original cannot
   -- be substituted for the parser's frozen document revision.
+  -- Schema 2 must fail before registration; no migration or prior evidence credit.
+  old_bytes := convert_to(jsonb_set(convert_from(v_bytes,'UTF8')::jsonb,'{schema_version}','2')::text,'UTF8');
+  old_sha := kb_bid_v2_sha256_bytes(old_bytes);
+  old_manifest := jsonb_set(manifest,'{0}',(manifest->0)||jsonb_build_object(
+    'digest',old_sha,'object_ref','objects/'||old_sha,'byte_length',octet_length(old_bytes)));
+  BEGIN
+    PERFORM kb_bid_v2_publish_frozen_input(v_project,old_sha,old_bytes,'set',gen_random_uuid(),old_manifest,NULL);
+    RAISE EXCEPTION 'old frozen schema 2 accepted';
+  EXCEPTION WHEN check_violation THEN
+    IF SQLERRM NOT LIKE '%frozen object identity mismatch%' THEN RAISE; END IF;
+  END;
   wrong_source := jsonb_set(manifest,'{1}',(manifest->2)||jsonb_build_object('occurrence',source_key));
   BEGIN
     PERFORM kb_bid_v2_publish_frozen_input(v_project,v_sha,v_bytes,'set',v_publication,wrong_source,NULL);
