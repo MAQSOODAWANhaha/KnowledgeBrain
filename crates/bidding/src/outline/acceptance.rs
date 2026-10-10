@@ -794,8 +794,11 @@ fn host_reopen_invalidates_downstream_once_and_is_not_an_llm_tool() {
     let claim =
         agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "authorized-reopen")
             .unwrap();
-    assert!(state.outline_run.tool_draft.is_empty());
+    assert!(!state.outline_run.tool_draft.chapters.is_empty());
+    assert!(state.outline_run.tool_draft.slots.is_empty());
+    assert!(state.outline_run.tool_draft.fulfillments.is_empty());
     assert_eq!(current(&input, &state), Duty::Discover);
+    let retained_chapters = state.outline_run.tool_draft.chapters.len();
     state
         .outline_run
         .tool_draft
@@ -805,7 +808,7 @@ fn host_reopen_invalidates_downstream_once_and_is_not_an_llm_tool() {
         agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "authorized-reopen")
             .unwrap();
     assert_eq!(claim, replay);
-    assert_eq!(state.outline_run.tool_draft.chapters.len(), 1);
+    assert_eq!(state.outline_run.tool_draft.chapters.len(), retained_chapters + 1);
     assert!(!agent::handles("reopen_discovery_pack"));
 }
 
@@ -1889,4 +1892,52 @@ fn unresolved_reviews_remain_actionable_after_reload_without_history() {
         version
     );
     assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+}
+
+#[test]
+fn local_repair_reload_requires_fresh_reads_and_completes_check() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let ids = state.outline_run.reading_packs.as_ref().unwrap().requirement_ids();
+    apply(&input, &mut state, "submit_review", &json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]})).unwrap();
+    apply(&input, &mut state, "finish_outline", &json!({})).unwrap();
+    let old_key = agent::review_evidence_key(&state, &refs[0]).unwrap();
+    let original = state.outline_run.reading_packs.as_ref().unwrap().requirement_records().values().next().unwrap().clone();
+    let revision = state.outline_run.reading_packs.as_ref().unwrap().session(&input, &pack).unwrap()["pack"]["pack_revision"].as_u64().unwrap();
+    let reopened = agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "repair-reload").unwrap();
+    assert!(state.outline_run.tool_draft.claim_comparisons.is_empty());
+    assert!(state.outline_run.tool_draft.template_reviews.is_empty());
+    assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+    assert!(state.outline_run.tool_draft.delivered_evidence.is_empty());
+    state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+    state.transcript.clear();
+    let before = state.outline_run.tool_draft.clone();
+    agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "repair-reload").unwrap();
+    assert_eq!(before, state.outline_run.tool_draft, "replay cannot clear newly rebuilt work");
+    state.outline_run.reading_packs.as_mut().unwrap().submit(&input, &pack, PackSubmit {
+        call_id: "repair-replacement".into(), claim_token: reopened.claim_token,
+        pack_revision: reopened.pack_revision,
+        requirements: vec![PackRequirement { description: original.description, kind: original.kind,
+            obligation_strength: original.obligation_strength, extraction_quality: original.extraction_quality,
+            source_section_id: original.source_section_id, evidence: original.evidence,
+            condition_support: original.condition_support }],
+        no_requirement_reason: None, inspected_atom_ids: vec![],
+    }).unwrap();
+    let ids = state.outline_run.reading_packs.as_ref().unwrap().requirement_ids().into_iter().collect::<Vec<_>>();
+    apply(&input,&mut state,"put_chapters",&json!({"mode":"replace","chapters":[{"id":"response","parent_id":null,"order":0,"title":"资格响应","purpose":"response","requirement_ids":ids}]})).unwrap();
+    assert!(apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[refs[0]]}}]})).is_err(), "old delivery cannot authorize fixed source copy");
+    apply(&input,&mut state,"read_evidence",&json!({"refs":refs,"max_bytes":4096})).unwrap();
+    state.deliver_fixture_reads();
+    apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[refs[0]]}},{"slot_id":"blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}]})).unwrap();
+    apply(&input,&mut state,"put_fulfillments",&json!({"fulfillments":[{"requirement_id":ids[0],"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"blank"},{"type":"text_slot","slot_id":"fixed"}]}]})).unwrap();
+    assert_eq!(current(&input,&state),Duty::Check);
+    assert!(apply(&input,&mut state,"finish_outline",&json!({})).is_err());
+    assert!(agent::apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":[{"review_evidence_key":old_key}],"issues":[]})).is_err());
+    state.transcript.clear();
+    fresh_check_reads(&input,&mut state,&refs);
+    apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]})).unwrap();
+    apply(&input,&mut state,"finish_outline",&json!({})).unwrap();
+    assert!(state.outline_run.tool_draft.finished);
+    let published = project_draft(&input,&state.input_sha256,&state.outline_run.tool_draft).unwrap();
+    validate_publication(&input,&published.artifact,&published.bindings).unwrap();
 }

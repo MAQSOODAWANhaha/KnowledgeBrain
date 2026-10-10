@@ -404,6 +404,7 @@ impl Journal for CycleJournal {
         Ok(Some(1))
     }
     async fn save(&self, state: &Checkpoint, _: &Value) -> Result<(), AgentError> {
+        let _profile = super::super::profile::enter("fixture_checkpoint_serialize_save");
         *self.state.lock().unwrap() =
             serde_json::from_slice(&serde_json::to_vec(state).unwrap()).unwrap();
         if self.stop_repair.load(Ordering::SeqCst)
@@ -557,6 +558,19 @@ impl Model for CycleModel {
                 "verdict":if linked.is_empty(){"no_response_obligation"}else{"contains_obligations"},
                 "requirement_ids":linked,"reason":"Local synthetic source review, not semantic model acceptance"})
         }).collect::<Vec<_>>();
+        // A repaired empty-obligation pack may preserve a complete independent
+        // response draft. Follow the advertised duty instead of replaying
+        // Organize mutations that are no longer legal in Check.
+        let advertised = wire["tools"].as_array().unwrap();
+        let allows = |name: &str| advertised.iter().any(|tool| tool["function"]["name"] == name);
+        if allows("submit_review") && !allows("put_chapters") {
+            let _ = self.step.compare_exchange(
+                0,
+                if self.automatic { 3 } else { 2 },
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
         let step = self.step.fetch_add(1, Ordering::SeqCst);
         let (name, mut args) = if self.automatic {
             let id = ids
@@ -673,6 +687,8 @@ async fn production_parallel_organize_check_reopen_fresh_check_persist_reload() 
     let mut restored = journal.load().await.unwrap().unwrap();
     assert_eq!(restored.outline_run.tool_draft.reviewed_pack_ids.len(), 2);
     assert!(restored.journal.pending.is_none());
+    let retained_chapters = restored.outline_run.tool_draft.chapters.clone();
+    let retained_slots = restored.outline_run.tool_draft.slots.clone();
     let work = restored.outline_run.reading_packs.as_ref().unwrap();
     let id = work.pack_ids().into_iter().next().unwrap();
     let revision = work.session(&input, &id).unwrap()["pack"]["pack_revision"]
@@ -703,6 +719,8 @@ async fn production_parallel_organize_check_reopen_fresh_check_persist_reload() 
         .unwrap();
     let final_state = journal.load().await.unwrap().unwrap();
     assert!(final_state.done);
+    assert_eq!(final_state.outline_run.tool_draft.chapters, retained_chapters);
+    assert_eq!(final_state.outline_run.tool_draft.slots, retained_slots);
     assert!(final_state.outline_run.tool_draft.finished);
     assert!(
         !final_state
@@ -773,7 +791,10 @@ async fn production_claim_comparison_automatically_reopens_and_finishes_fresh_ch
     let mut restored = journal.load().await.unwrap().unwrap();
     assert_eq!(restored.outline_run.repair_events.len(), 1);
     assert_eq!(restored.outline_run.repair_events[0]["status"], "reopened");
-    assert!(restored.outline_run.tool_draft.chapters.is_empty());
+    assert!(
+        !restored.outline_run.tool_draft.chapters.is_empty(),
+        "repair retains chapter structure while invalidating affected mappings"
+    );
     assert!(
         restored
             .outline_run

@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 /// with separate image allowance and request framing.
 /// Base64 is transport encoding, not text sent through the model tokenizer.
 pub(super) fn estimate_input_tokens(body: &Value, limits: &Limits) -> Result<usize, AgentError> {
+    #[cfg(test)]
+    let _profile = super::profile::enter("estimate_input_tokens");
     crate::agent_runtime::chat::estimate_input_tokens(
         body,
         &limits.tokenizer,

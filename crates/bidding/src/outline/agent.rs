@@ -288,6 +288,8 @@ pub fn host_packet(
     work: Value,
     preloaded_evidence: Option<&Value>,
 ) -> Value {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("host_packet");
     let duty = current(input, state);
     let mut packet = json!({
         "progress": progress,
@@ -503,7 +505,18 @@ fn apply_for_duty_staged(
             .as_ref()
             .is_some_and(|old| old != &revision)
         {
-            state.outline_run.tool_draft = super::tools::Draft::default();
+            let previous = &state.outline_run.tool_draft.requirements;
+            let changed = previous
+                .iter()
+                .filter(|(id, record)| work.requirement_records().get(*id) != Some(*record))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let sources = previous
+                .iter()
+                .filter(|(id, record)| work.requirement_records().get(*id) != Some(*record))
+                .flat_map(|(_, record)| record.evidence.iter().cloned())
+                .collect::<Vec<_>>();
+            super::repair::retain_independent(&mut state.outline_run.tool_draft, changed, &sources);
         }
         state.outline_run.tool_draft.discovery_revision = Some(revision);
         state.outline_run.tool_draft.required_requirement_ids = work.requirement_ids();
@@ -859,7 +872,7 @@ pub(crate) fn finish_check_repair_batch(
             );
             next.outline_run.repair_events.push(event.clone());
             next.transcript.clear();
-            next.transcript.push(json!({"role":"user","content":json!({"host_repair_request":event,"instruction":"Review the current reading pack and its host-authorized condition_support_options. Correct evidence-supported claims, retain valid obligations, and submit using current host keys. This is a full pack replacement. The prior response draft is invalidated; organize the repaired requirements and perform a fresh Check afterwards. Unresolved claims must remain reviewable."}).to_string()}));
+            next.transcript.push(json!({"role":"user","content":json!({"host_repair_request":event,"instruction":"Review the current reading pack and its host-authorized condition_support_options. Correct evidence-supported claims, retain valid obligations, and submit using current host keys. This is a full pack replacement. Independent response draft content is retained. Rebuild affected requirement mappings and targets using current requirements, then perform a fresh Check; prior reads and reviews grant no credit. Unresolved claims must remain reviewable."}).to_string()}));
             *state = next;
             Ok(true)
         }
@@ -904,6 +917,12 @@ pub fn reopen_discovery_pack(
             &state.outline_run.tool_draft.check_reads.evidence,
         )?);
     }
+    let affected = work
+        .requirement_ids()
+        .into_iter()
+        .filter(|id| id.starts_with(&format!("{pack_id}:")))
+        .collect();
+    let changed_sources = work.pack_evidence(input, pack_id)?;
     let outcome = state
         .outline_run
         .reading_packs
@@ -917,7 +936,11 @@ pub fn reopen_discovery_pack(
             .as_mut()
             .unwrap()
             .bind_condition_support(pack_id, support_options)?;
-        state.outline_run.tool_draft = super::tools::Draft::default();
+        super::repair::retain_independent(
+            &mut state.outline_run.tool_draft,
+            affected,
+            &changed_sources,
+        );
         state.outline_run.finish_rejected = false;
         state.outline_run.phase = Phase::Discover;
         state.analysis.outline.phase = Phase::Discover;
@@ -949,6 +972,8 @@ pub(crate) fn full_read_projection(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("full_read_projection");
     let mut query = args.clone();
     query["max_bytes"] = json!(usize::MAX);
     query["cursor"] = json!(0);

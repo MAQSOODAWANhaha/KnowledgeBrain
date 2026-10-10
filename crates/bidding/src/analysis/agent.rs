@@ -1,5 +1,7 @@
 pub(crate) mod discover_coordinator;
 mod discover_parallel;
+#[cfg(test)]
+pub(crate) mod profile;
 use super::*;
 use crate::agent_runtime::{Driver, Status, drive};
 pub(super) mod context;
@@ -540,6 +542,8 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
         &mut self.state.journal
     }
     async fn prepare_request(&mut self) -> Result<Vec<u8>, AgentError> {
+        #[cfg(test)]
+        let _profile = profile::enter("prepare_request");
         if crate::outline::agent::current(self.input, self.state)
             == crate::outline::agent::Duty::Discover
         {
@@ -1335,6 +1339,8 @@ async fn read_projection_in_context(
     views: &[String],
     duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    let _profile = profile::enter("read_projection_in_context");
     let tool = &remaining[0].name;
     let projection_started = std::time::Instant::now();
     if let Some(error) = crate::outline::agent::deny(duty, tool, false) {
@@ -1538,6 +1544,8 @@ async fn read_evidence_in_context(
     views: &[String],
     duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    let _profile = profile::enter("read_evidence_in_context");
     use crate::outline::evidence::{self, EvidenceRef};
     if let Some(error) = crate::outline::agent::deny(duty, &remaining[0].name, false) {
         return Err(error.into());
@@ -1720,6 +1728,8 @@ async fn fit_batch(
     remaining: &[knowledge::models::ChatToolCall],
     views: &[String],
 ) -> Result<(), AgentError> {
+    #[cfg(test)]
+    let _profile = profile::enter("fit_batch");
     // Request preparation may compact completed history. Keep the probe
     // isolated so temporary responses/views cannot be evicted from underneath
     // the caller, and so a rejected batch cannot change its source receipts.
@@ -1902,6 +1912,8 @@ async fn prepare_fitted_request(
     state: &mut Checkpoint,
     defer_images: bool,
 ) -> Result<Vec<u8>, AgentError> {
+    #[cfg(test)]
+    let _profile = profile::enter("prepare_fitted_request");
     context::annotate_delivered_source_lines(state, config.limits.context_wire_ceiling())
         .map_err(invalid)?;
     if state.execution().watch.needs_replan_context() {
@@ -2041,19 +2053,31 @@ async fn prepare_fitted_request(
             None,
         );
         messages.push(json!({"role":"user","content":host.to_string()}));
+        #[cfg(test)]
+        let wire_profile = profile::enter("sdk_prepare");
         let bytes = crate::agent_runtime::chat::prepare(
             &config.provider,
             messages,
             crate::outline::agent::schemas_for(turn_duty),
         )
         .await?;
+        #[cfg(test)]
+        drop(wire_profile);
+        #[cfg(test)]
+        let wire_profile = profile::enter("source_wire_projection");
         let mut body: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
         crate::outline::discover::compact_request(&mut body).map_err(invalid)?;
         let issued_keys =
             crate::outline::source_wire::request(state, &mut body).map_err(invalid)?;
+        #[cfg(test)]
+        drop(wire_profile);
         let canonical_body = body.clone();
+        #[cfg(test)]
+        let wire_profile = profile::enter("model_wire_projection");
         let issued_registry =
             crate::outline::model_wire::project(state, &mut body).map_err(invalid)?;
+        #[cfg(test)]
+        drop(wire_profile);
         let bytes = serde_json::to_vec(&body).map_err(invalid)?;
         if needs_discovery && state.outline_run.reading_packs.is_none() {
             // The initial reading plan is fitted to this complete real request
