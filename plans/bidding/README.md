@@ -8,7 +8,6 @@
 
 本目录只留还没做完的事和编辑器约束：
 
-- [大纲缺口与旧路径退役](outline-gaps.md)：缺口 1–3 已接通。106 页真实 PDF 已发布过一次成稿。还开着标题残留、应答填充、ONLYOFFICE 产品回路、真实 PDF 的 CI 门
-- [ONLYOFFICE 接入](onlyoffice-integration.md)：编辑器技术约束，不定义大纲工具或发布门
+历史项目专属证据已移至授权私有验收档案。公开验证使用合成输入；本段不声明真实模型语义验收通过。
 
 `product-two-phase.md` 已删除。`analysis/outline_flow.rs` 不是现行生成合同。历史运行记录在 [docs/bidding/archive](../../docs/bidding/archive/README.md)。

@@ -147,7 +147,10 @@ pub async fn convert_with_cancel(
             .await
         }
         "http-engine" => {
-            http_engine::convert_http(input.engine, input.file_name, input.bytes, cancel).await
+            let config =
+                crate::engines::resolve_effective_engine_config(input.engine, input.overrides)
+                    .map_err(ConvertError)?;
+            http_engine::convert_http(&config, input.file_name, input.bytes, cancel).await
         }
         other => Ok(ReadResult {
             error: format!("unknown convert engine {other}"),

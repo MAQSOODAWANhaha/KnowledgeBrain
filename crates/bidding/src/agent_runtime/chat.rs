@@ -15,7 +15,13 @@ use std::{
 };
 
 mod request;
-pub(crate) use request::{estimate_input_tokens, prepare, system_content};
+mod tokenization;
+pub(crate) use request::{prepare, system_content};
+pub use tokenization::{TokenEncoding, TokenizerCalibration, TokenizerProfile};
+#[cfg(test)]
+pub(crate) use tokenization::estimate_request_tokens;
+pub(crate) use tokenization::cache_counts;
+pub(crate) use tokenization::{estimate_input_tokens, estimate_request_tokens_with_reserve};
 
 fn invalid() -> AgentError {
     AgentError::new(
@@ -28,6 +34,73 @@ fn unavailable() -> AgentError {
     AgentError::new(
         "AGENT_PROVIDER_UNAVAILABLE",
         "configured provider unavailable",
+    )
+}
+
+// Never retain arbitrary Display text: transport causes may contain URLs,
+// credentials or proxy details. Preserve ordered cause categories and OS kind.
+fn safe_cause_chain(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        if chain.len() == 8 {
+            break;
+        }
+        let kind = if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            format!("io:{:?}", io.kind())
+        } else {
+            let lower = cause.to_string().to_ascii_lowercase();
+            [
+                ("dns", "dns"),
+                ("resolve", "dns"),
+                ("certificate", "tls_certificate"),
+                ("tls", "tls"),
+                ("timeout", "timeout"),
+                ("timed out", "timeout"),
+                ("connect", "connect"),
+                ("proxy", "proxy"),
+                ("closed", "connection_closed"),
+            ]
+            .into_iter()
+            .find(|(needle, _)| lower.contains(needle))
+            .map(|(_, label)| label)
+            .unwrap_or("transport")
+            .to_string()
+        };
+        chain.push(kind);
+        current = cause.source();
+    }
+    chain
+}
+
+fn safe_request_ids(headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
+    ["x-request-id", "request-id", "cf-ray"]
+        .into_iter()
+        .filter_map(|name| {
+            let value = headers.get(name)?.to_str().ok()?;
+            (!value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b)))
+            .then(|| (name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn transport_unavailable(error: reqwest::Error) -> AgentError {
+    let chain = safe_cause_chain(&error);
+    tracing::warn!(event="llm_transport_failure", timeout=error.is_timeout(),
+        connect=error.is_connect(), status=error.status().map(|s| s.as_u16()),
+        cause_chain=?chain);
+    AgentError::new(
+        "AGENT_PROVIDER_UNAVAILABLE",
+        format!(
+            "configured provider transport failed (timeout={}, connect={}, causes={})",
+            error.is_timeout(),
+            error.is_connect(),
+            chain.join(" -> ")
+        ),
     )
 }
 
@@ -218,9 +291,10 @@ async fn read_provider_events(
         .body(body)
         .send()
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(transport_unavailable)?;
     tracing::info!(
         event = "llm_response_headers",
+        request_ids = ?safe_request_ids(response.headers()),
         status = response.status().as_u16(),
         content_type = response_type(response.headers()),
         elapsed_ms = started.elapsed().as_millis() as u64
@@ -228,7 +302,11 @@ async fn read_provider_events(
     if !response.status().is_success() {
         return Err(AgentError::new(
             "AGENT_PROVIDER_UNAVAILABLE",
-            format!("configured provider returned HTTP {}", response.status()),
+            format!(
+                "configured provider returned HTTP {}; request_ids={:?}",
+                response.status().as_u16(),
+                safe_request_ids(response.headers())
+            ),
         ));
     }
     let stream = response.bytes_stream().map(move |chunk| {
@@ -240,6 +318,7 @@ async fn read_provider_events(
             tracing::warn!(
                 event = "llm_stream_failure",
                 stage = "http_body",
+                cause_chain = ?safe_cause_chain(&error),
                 timeout = error.is_timeout(),
                 decode = error.is_decode(),
                 body = error.is_body()
@@ -452,7 +531,7 @@ mod tests {
         let runtime = serde_json::from_value(json!({
             "schema_version":1,"base_url":endpoint.strip_suffix("/chat/completions").unwrap(),
             "endpoint":endpoint,"protocol":"openai_chat_completions_sse","model_id":"fixture-model",
-            "credential_ref":"env:LLM_API_KEY","stream":true,"max_tokens":8192,"timeout_ms":90000,
+            "credential_ref":"env:LLM_API_KEY","stream":true,"output_token_reserve":8192,"timeout_ms":90000,
             "response_mode":"tool_calls","transport_retries":0,"temperature":null,"reasoning_effort":null
         })).unwrap();
         let request = prepare(
@@ -738,5 +817,26 @@ mod tests {
             "abort must not wait for the unused send timeout"
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    #[test]
+    fn transport_diagnostics_never_echo_arbitrary_cause_text_or_headers() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "secret-key https://user:password@example.invalid/path?token=private",
+        );
+        assert_eq!(safe_cause_chain(&error), vec!["io:ConnectionRefused"]);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("cf-ray", "synthetic-ray-LAX".parse().unwrap());
+        headers.insert("x-request-id", "bad value secret".parse().unwrap());
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        assert_eq!(
+            safe_request_ids(&headers),
+            BTreeMap::from([("cf-ray".into(), "synthetic-ray-LAX".into())])
+        );
     }
 }

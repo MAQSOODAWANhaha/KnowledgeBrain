@@ -1,16 +1,8 @@
 //! Production knowledge jobs. Callers pass PgPool; jobs load SQL into DocJob/WikiJob.
 
-use crate::expected_subtasks;
+use crate::workflow::{self, Work};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-fn truncate_key(key: &str) -> &str {
-    let t = key.trim_start_matches("objects/").trim_start_matches('/');
-    match t.char_indices().nth(16) {
-        Some((i, _)) => &t[..i],
-        None => t,
-    }
-}
 
 pub async fn maybe_start_postprocess(
     pool: &PgPool,
@@ -34,7 +26,18 @@ pub async fn maybe_start_postprocess(
         None,
     )
     .await;
-    let _ = platform::enqueue_post_process(document_id, version_id, false).await;
+    if let Err(error) = workflow::put(
+        pool,
+        document_id,
+        version_id,
+        attempt,
+        Work::Postprocess { clone_keep: false },
+    )
+    .await
+    {
+        tracing::error!(%document_id,%error,"persist postprocess obligation failed");
+    }
+    let _ = workflow::dispatch(pool).await;
 }
 
 pub async fn schedule_semantic_index_v2_if_ready(
@@ -76,20 +79,6 @@ where
     }
 }
 
-/// Enqueue already returns `Ok(None)` for `DeclaredDisabled` lanes.
-/// Running generators here would re-enable those lanes in-process.
-fn allow_inline_fallback(task_type: &str) -> bool {
-    !matches!(
-        platform::launch_mode(task_type),
-        Ok(Some(platform::LaunchMode::DeclaredDisabled))
-    )
-}
-
-/// Invoke `inline` only when the registry does not declare the lane disabled.
-fn run_inline_if_allowed<T>(task_type: &str, inline: impl FnOnce() -> T) -> Option<T> {
-    allow_inline_fallback(task_type).then(inline)
-}
-
 #[tracing::instrument(
     name = "parse.postprocess",
     skip_all,
@@ -101,20 +90,16 @@ pub async fn run_post_process(
     document_id: Uuid,
     product_version_id: Uuid,
     clone_keep: bool,
+    attempt: i32,
 ) -> Result<(), String> {
+    if !workflow::pending(pool, document_id, attempt, "postprocess").await? {
+        return Ok(());
+    }
     tracing::info!(
         document_id = %document_id,
         clone_keep,
         "parse postprocess start"
     );
-    let attempt: i32 =
-        sqlx::query_scalar("SELECT COALESCE(attempt, 1) FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(1);
     let rows = crate::list_spans_attempt(pool, document_id, attempt)
         .await
         .unwrap_or_default();
@@ -152,10 +137,6 @@ pub async fn run_post_process(
     }
     if doc.parse_status != crate::ParseStatus::Processing {
         if doc.parse_status == crate::ParseStatus::Completed {
-            crate::set_document_progress(pool, document_id, "completed", 0)
-                .await
-                .map_err(|e| e.to_string())?;
-            let _ = crate::set_summary_status(pool, document_id, "none").await;
             finish_postprocess_spans(pool, document_id, attempt).await;
             return schedule_semantic_index_v2_if_ready(pool, product_version_id).await;
         }
@@ -165,193 +146,70 @@ pub async fn run_post_process(
     let text_count = job
         .chunks
         .values()
-        .filter(|c| c.document_id == document_id && c.chunk_type == "text")
+        .filter(|c| c.chunk_type == "text")
         .count();
-    let ocr_count = job
+    let source_count = job
         .chunks
         .values()
         .filter(|c| {
-            c.document_id == document_id
-                && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
+            matches!(
+                c.chunk_type.as_str(),
+                "text" | "image_ocr" | "image_caption"
+            )
         })
         .count();
-    let n = expected_subtasks(
-        text_count,
-        ocr_count,
-        version.question_enabled,
-        version.needs_embedding(),
-        version.wiki_enabled,
-        version.graph_enabled,
-        clone_keep,
-    );
-    if n == 0 {
-        crate::set_document_progress(pool, document_id, "completed", 0)
-            .await
-            .map_err(|e| e.to_string())?;
-        let _ = crate::set_summary_status(pool, document_id, "none").await;
-        finish_postprocess_spans(pool, document_id, attempt).await;
-        return schedule_semantic_index_v2_if_ready(pool, product_version_id).await;
+    let mut work = Vec::new();
+    if source_count > 0 && !clone_keep {
+        work.push(Work::Summary);
     }
-    if !crate::set_finalizing(pool, document_id, n as i32)
-        .await
-        .map_err(|e| e.to_string())?
+    if is_table_file(&doc.file_name) {
+        work.push(Work::Datatable);
+    }
+    if !clone_keep
+        && version.question_enabled
+        && version.needs_embedding()
+        && text_count > 0
+        && task_enabled(platform::TYPE_QUESTION)
     {
-        finish_postprocess_spans(pool, document_id, attempt).await;
-        return Ok(());
-    }
-    let enqueue_summary = text_count + ocr_count > 0 && !clone_keep;
-    if enqueue_summary {
-        let _ = crate::set_summary_status(pool, document_id, "pending").await;
-        match platform::enqueue_summary(document_id, attempt).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                let mut inline = job.clone();
-                let _ = crate::enrichment::generate_summary_on_job(&mut inline, attempt, false);
-                let _ = crate::persist_summary_maps(
-                    pool,
-                    &inline.chunks,
-                    &inline.embeddings,
-                    document_id,
-                )
-                .await;
-                let _ = crate::set_document_description(
-                    pool,
-                    document_id,
-                    &inline.document.description,
-                )
-                .await;
-                let st = match inline.document.summary_status {
-                    crate::SummaryStatus::Completed => "completed",
-                    crate::SummaryStatus::Failed => "failed",
-                    crate::SummaryStatus::Pending => "pending",
-                    crate::SummaryStatus::Processing => "processing",
-                    crate::SummaryStatus::None => "none",
-                };
-                let _ = crate::set_summary_status(pool, document_id, st).await;
-                let _ = crate::finalize_subtask(pool, document_id).await;
-            }
-            Err(_) => {
-                let _ = crate::finalize_subtask(pool, document_id).await;
-            }
-        }
-    }
-    if !clone_keep && version.question_enabled && version.needs_embedding() && text_count > 0 {
-        let mut ids: Vec<_> = job
+        let mut chunks: Vec<_> = job
             .chunks
             .values()
-            .filter(|c| c.document_id == document_id && c.chunk_type == "text")
-            .cloned()
+            .filter(|c| c.chunk_type == "text")
             .collect();
-        ids.sort_by_key(|c| c.start_at);
-        for (batch_i, batch) in ids.chunks(20).enumerate() {
-            let base = batch_i * 20;
-            let chunk_ids: Vec<Uuid> = batch.iter().map(|c| c.id).collect();
-            let prev_ids: Vec<Option<Uuid>> = (0..batch.len())
-                .map(|i| {
-                    if base + i == 0 {
-                        None
-                    } else {
-                        Some(ids[base + i - 1].id)
-                    }
-                })
-                .collect();
-            let next_ids: Vec<Option<Uuid>> = (0..batch.len())
-                .map(|i| ids.get(base + i + 1).map(|c| c.id))
-                .collect();
-            match platform::enqueue_question_neighbors(
-                document_id,
-                chunk_ids.clone(),
-                prev_ids.clone(),
-                next_ids.clone(),
-                attempt,
-                batch_i as u32,
-            )
-            .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    let mut inline = job.clone();
-                    if run_inline_if_allowed(platform::TYPE_QUESTION, || {
-                        crate::enrichment::generate_questions_on_job(
-                            &mut inline,
-                            &chunk_ids,
-                            &prev_ids,
-                            &next_ids,
-                            attempt,
-                        )
-                        .map(|_| ())
-                    })
-                    .is_some()
-                    {
-                        let _ = crate::persist_question_maps(
-                            pool,
-                            &inline.chunks,
-                            &inline.embeddings,
-                            document_id,
-                            &chunk_ids,
-                        )
-                        .await;
-                    }
-                    let _ = crate::finalize_subtask(pool, document_id).await;
-                }
-                Err(_) => {
-                    let _ = crate::finalize_subtask(pool, document_id).await;
-                }
-            }
+        chunks.sort_by_key(|c| c.start_at);
+        for (batch, items) in chunks.chunks(20).enumerate() {
+            let base = batch * 20;
+            work.push(Work::Questions {
+                chunk_ids: items.iter().map(|c| c.id).collect(),
+                prev_ids: (0..items.len())
+                    .map(|i| (base + i).checked_sub(1).map(|n| chunks[n].id))
+                    .collect(),
+                next_ids: (0..items.len())
+                    .map(|i| chunks.get(base + i + 1).map(|c| c.id))
+                    .collect(),
+                batch: batch as u32,
+            });
         }
     }
-    if version.graph_enabled {
-        let graph_ids: Vec<Uuid> = job
-            .chunks
-            .values()
-            .filter(|c| {
-                c.document_id == document_id
-                    && matches!(
+    if version.graph_enabled && task_enabled(platform::TYPE_CHUNK_EXTRACT) {
+        work.extend(
+            job.chunks
+                .values()
+                .filter(|c| {
+                    matches!(
                         c.chunk_type.as_str(),
                         "text" | "image_ocr" | "image_caption"
                     )
-            })
-            .map(|c| c.id)
-            .collect();
-        for cid in graph_ids {
-            match platform::enqueue_extract(cid, document_id, attempt).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    let mut inline = job.clone();
-                    if let Some(outcome) =
-                        run_inline_if_allowed(platform::TYPE_CHUNK_EXTRACT, || {
-                            crate::graph::extract_chunk_on_job(&mut inline, cid, attempt)
-                        })
-                    {
-                        outcome.map(|_| ())?;
-                        let _ = crate::persist_graph_maps(
-                            pool,
-                            &inline.graph,
-                            &inline.relations,
-                            document_id,
-                        )
-                        .await;
-                        let _ = crate::graph::sync_document_job(&inline);
-                    }
-                    let _ = crate::finalize_subtask(pool, document_id).await;
-                }
-                Err(_) => {
-                    let _ = crate::finalize_subtask(pool, document_id).await;
-                }
-            }
-        }
+                })
+                .map(|c| Work::Extract { chunk_id: c.id }),
+        );
     }
-    if version.wiki_enabled && text_count + ocr_count > 0 {
-        platform::enqueue_wiki_ingest(product_version_id, document_id, crate::wiki::OP_INGEST)
-            .await?
-            .ok_or_else(|| "Oxana Redis is not configured for Wiki ingest".to_string())?;
+    if version.wiki_enabled && source_count > 0 {
+        work.push(Work::Wiki);
     }
+    workflow::begin_postprocess(pool, document_id, product_version_id, attempt, &work).await?;
     finish_postprocess_spans(pool, document_id, attempt).await;
-    tracing::info!(
-        document_id = %document_id,
-        clone_keep,
-        "parse postprocess done"
-    );
+    workflow::dispatch(pool).await?;
     schedule_semantic_index_v2_if_ready(pool, product_version_id).await
 }
 
@@ -385,12 +243,8 @@ pub async fn run_image(
     enable_caption: bool,
     attempt: i32,
 ) -> Result<(), String> {
-    let current: Option<i32> = sqlx::query_scalar("SELECT attempt FROM documents WHERE id = $1")
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    if current.is_some_and(|n| n != attempt) {
+    let key = format!("image:{image_key}");
+    if !workflow::pending(pool, document_id, attempt, &key).await? {
         return Ok(());
     }
     let ws: Option<Uuid> = crate::document_workspace_id(pool, document_id)
@@ -410,99 +264,53 @@ pub async fn run_image(
     if job.document.parse_status == crate::ParseStatus::Pending {
         job.document.parse_status = crate::ParseStatus::Processing;
     }
-    if let Err(error) = crate::enrichment::process_image_on_job(
+    let outcome = crate::enrichment::process_image_on_job(
         &mut job,
         image_key,
         image_source_type,
         enable_ocr,
         enable_caption,
-    ) {
-        tracing::warn!(
-            document_id = %document_id,
-            image_key = truncate_key(image_key),
-            error = %error,
-            "parse image fail"
-        );
-        return Err(error);
-    }
-    tracing::info!(
-        document_id = %document_id,
-        image_key = truncate_key(image_key),
-        ocr = enable_ocr,
-        caption = enable_caption,
-        "parse image done"
     );
-    let image_chunks: Vec<_> = job
-        .chunks
-        .values()
-        .filter(|c| {
-            c.document_id == document_id
-                && c.context_header == image_key
-                && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
-        })
-        .cloned()
-        .collect();
-    let ids: std::collections::HashSet<_> = image_chunks.iter().map(|c| c.id).collect();
-    let embeddings: Vec<_> = job
-        .embeddings
-        .values()
-        .filter(|e| ids.contains(&e.chunk_id))
-        .cloned()
-        .collect();
-    crate::replace_image_chunks(pool, document_id, image_key, &image_chunks, &embeddings)
+    workflow::commit_chunks(
+        pool,
+        &job,
+        attempt,
+        &key,
+        &["image_ocr", "image_caption", "image_ocr_partial"],
+        Some(image_key),
+        &[],
+        outcome.is_ok(),
+    )
+    .await?;
+    outcome?;
+    let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=$2 AND payload->>'kind'='image' AND state<>'complete')")
+        .bind(document_id).bind(attempt).fetch_one(pool).await.map_err(|e|e.to_string())?;
+    if !waiting {
+        crate::finish_span(
+            pool,
+            document_id,
+            attempt,
+            crate::obs::SPAN_MULTIMODAL,
+            crate::obs::STATUS_DONE,
+            None,
+        )
         .await
         .map_err(|e| e.to_string())?;
-    if crate::enrichment::decr_pending_count(document_id)? {
-        let _ = crate::set_index_ready(pool, document_id, true).await;
-        let vid = job.document.product_version_id;
-        let tracked = crate::list_spans_attempt(pool, document_id, attempt)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .any(|r| r.name == crate::obs::SPAN_MULTIMODAL);
-        if tracked {
-            let _ = crate::finish_span(
-                pool,
-                document_id,
-                attempt,
-                crate::obs::SPAN_MULTIMODAL,
-                crate::obs::STATUS_DONE,
-                None,
-            )
-            .await;
-            maybe_start_postprocess(pool, document_id, vid, attempt).await;
-        } else {
-            let _ = platform::enqueue_post_process(document_id, vid, false).await;
-        }
+        maybe_start_postprocess(pool, document_id, job.document.product_version_id, attempt).await;
     }
     Ok(())
 }
 
 /// Last-retry DECR so a dead image cannot pin `multimodal:pending`.
 pub async fn finalize_multimodal(pool: &PgPool, document_id: Uuid, attempt: i32) {
-    let current: Option<i32> = sqlx::query_scalar("SELECT attempt FROM documents WHERE id = $1")
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    if current.is_some_and(|n| n != attempt) {
-        return;
-    }
-    if !crate::enrichment::decr_pending_count(document_id).unwrap_or(false) {
-        return;
-    }
-    let vid: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    let Some(vid) = vid else {
-        return;
-    };
-    maybe_start_postprocess(pool, document_id, vid, attempt).await;
+    let _ = workflow::update_status(
+        pool,
+        document_id,
+        attempt,
+        "failed",
+        "required image processing exhausted retries; incomplete evidence",
+    )
+    .await;
 }
 
 /// Execute one closed Wiki ingest/retract job. Oxana owns retries and dead jobs;
@@ -512,14 +320,20 @@ pub async fn run_wiki_ingest(
     version_id: Uuid,
     document_id: Uuid,
     operation: &str,
+    attempt: i32,
 ) -> Result<(), String> {
+    if operation == crate::wiki::OP_INGEST
+        && !workflow::pending(pool, document_id, attempt, "wiki").await?
+    {
+        return Ok(());
+    }
     let mut lock = pool.acquire().await.map_err(|error| error.to_string())?;
     sqlx::query("SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended($1,0))")
         .bind(format!("knowledge-wiki:{version_id}"))
         .execute(&mut *lock)
         .await
         .map_err(|error| error.to_string())?;
-    let result = run_wiki_ingest_locked(pool, version_id, document_id, operation).await;
+    let result = run_wiki_ingest_locked(pool, version_id, document_id, operation, attempt).await;
     let unlock =
         sqlx::query("SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1,0))")
             .bind(format!("knowledge-wiki:{version_id}"))
@@ -538,6 +352,7 @@ async fn run_wiki_ingest_locked(
     version_id: Uuid,
     document_id: Uuid,
     operation: &str,
+    attempt: i32,
 ) -> Result<(), String> {
     if !crate::version_wiki_enabled(pool, version_id)
         .await
@@ -545,9 +360,7 @@ async fn run_wiki_ingest_locked(
     {
         tracing::info!(%version_id, %document_id, "wiki ingest skipped: not enabled");
         if operation == crate::wiki::OP_INGEST {
-            crate::finalize_subtask(pool, document_id)
-                .await
-                .map_err(|error| error.to_string())?;
+            workflow::complete(pool, document_id, attempt, "wiki").await?;
         }
         return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
@@ -581,44 +394,37 @@ async fn run_wiki_ingest_locked(
     });
     let before_pages = job.wiki.clone();
     let before_folders = job.wiki_folders.clone();
+    if operation == crate::wiki::OP_INGEST && attempt > 1 {
+        crate::wiki::enqueue_retract_on_job(&mut job, version_id, document_id, "");
+        crate::wiki::process_ingest_on_job(&mut job, version_id)?;
+        crate::wiki::process_finalize_on_job(&mut job, version_id)?;
+        job.wiki_tombstones.remove(&(version_id, document_id));
+    }
     if operation == crate::wiki::OP_RETRACT {
         crate::wiki::enqueue_retract_on_job(&mut job, version_id, document_id, "");
     } else {
         crate::wiki::enqueue_ingest_on_job(&mut job, version_id, document_id);
     }
     crate::wiki::process_ingest_on_job(&mut job, version_id)?;
-    if operation == crate::wiki::OP_RETRACT {
-        // Retraction owns the complete reducer under the same version lock so
-        // surviving pages, folders and searchable chunks publish atomically.
-        crate::wiki::process_finalize_on_job(&mut job, version_id)?;
+    crate::wiki::process_finalize_on_job(&mut job, version_id)?;
+    if !job.wiki_ops.is_empty() {
+        return Err("Wiki reducer has unfinished work; retry required".into());
     }
     persist_wiki_job(
         pool,
         &job,
         version_id,
         document_id,
+        attempt,
+        if operation == crate::wiki::OP_INGEST {
+            "wiki"
+        } else {
+            "wiki-retract"
+        },
         &before_pages,
         &before_folders,
     )
     .await?;
-    if operation == crate::wiki::OP_INGEST {
-        crate::finalize_subtask(pool, document_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        crate::upsert_span(
-            pool,
-            document_id,
-            1,
-            "wiki.ingest",
-            "done",
-            Some(serde_json::json!({"version_id": version_id})),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        platform::enqueue_wiki_finalize(version_id, document_id)
-            .await?
-            .ok_or_else(|| "Oxana Redis is not configured for Wiki finalize".to_string())?;
-    }
     schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
@@ -627,6 +433,7 @@ pub async fn run_wiki_finalize(
     pool: &PgPool,
     version_id: Uuid,
     document_id: Uuid,
+    attempt: i32,
 ) -> Result<(), String> {
     let mut lock = pool.acquire().await.map_err(|error| error.to_string())?;
     sqlx::query("SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended($1,0))")
@@ -634,7 +441,7 @@ pub async fn run_wiki_finalize(
         .execute(&mut *lock)
         .await
         .map_err(|error| error.to_string())?;
-    let result = run_wiki_finalize_locked(pool, version_id, document_id).await;
+    let result = run_wiki_finalize_locked(pool, version_id, document_id, attempt).await;
     let unlock =
         sqlx::query("SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1,0))")
             .bind(format!("knowledge-wiki:{version_id}"))
@@ -652,6 +459,7 @@ async fn run_wiki_finalize_locked(
     pool: &PgPool,
     version_id: Uuid,
     document_id: Uuid,
+    attempt: i32,
 ) -> Result<(), String> {
     let frozen = crate::freeze_version_embedding_model(pool, version_id).await?;
     let mut job = crate::WikiJob::from_pool(pool, version_id)
@@ -694,6 +502,8 @@ async fn run_wiki_finalize_locked(
         &job,
         version_id,
         document_id,
+        attempt,
+        "wiki-finalize",
         &before_pages,
         &before_folders,
     )
@@ -701,11 +511,14 @@ async fn run_wiki_finalize_locked(
     schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
+#[allow(clippy::too_many_arguments)] // Version reducer plus generation receipt are one commit.
 async fn persist_wiki_job(
     pool: &PgPool,
     job: &crate::WikiJob,
     version_id: Uuid,
     document_id: Uuid,
+    attempt: i32,
+    receipt: &str,
     before_pages: &std::collections::HashMap<(Uuid, String), crate::WikiPage>,
     before_folders: &std::collections::HashMap<Uuid, crate::WikiFolder>,
 ) -> Result<(), String> {
@@ -797,6 +610,11 @@ async fn persist_wiki_job(
         &changed_slugs.into_iter().collect::<Vec<_>>(),
         &wiki_chunks,
         &wiki_embeddings,
+        &job.documents
+            .values()
+            .map(|document| (document.id, document.attempt))
+            .collect::<Vec<_>>(),
+        Some((document_id, attempt, receipt)),
     )
     .await
     .map_err(|error| error.to_string())
@@ -825,6 +643,9 @@ pub async fn run_summary(
     attempt: i32,
     fallback: bool,
 ) -> Result<(), String> {
+    if !workflow::pending(pool, document_id, attempt, "summary").await? {
+        return Ok(());
+    }
     if crate::document_parse_status(pool, document_id)
         .await
         .map_err(|error| error.to_string())?
@@ -845,21 +666,17 @@ pub async fn run_summary(
     if matches!(outcome, crate::enrichment::SummaryOutcome::Superseded) {
         return Ok(());
     }
-    crate::persist_summary_maps(pool, &job.chunks, &job.embeddings, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = crate::set_document_description(pool, document_id, &job.document.description).await;
-    let st = match job.document.summary_status {
-        crate::SummaryStatus::Completed => "completed",
-        crate::SummaryStatus::Failed => "failed",
-        crate::SummaryStatus::Pending => "pending",
-        crate::SummaryStatus::Processing => "processing",
-        crate::SummaryStatus::None => "none",
-    };
-    let _ = crate::set_summary_status(pool, document_id, st).await;
-    crate::finalize_subtask(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    workflow::commit_chunks(
+        pool,
+        &job,
+        attempt,
+        "summary",
+        &["summary"],
+        None,
+        &[],
+        true,
+    )
+    .await?;
     schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
@@ -871,6 +688,16 @@ pub async fn run_questions(
     next_ids: &[Option<Uuid>],
     attempt: i32,
 ) -> Result<(), String> {
+    if !workflow::pending(
+        pool,
+        document_id,
+        attempt,
+        &question_job_key(pool, document_id, attempt, chunk_ids).await?,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     if crate::document_parse_status(pool, document_id)
         .await
         .map_err(|error| error.to_string())?
@@ -893,12 +720,18 @@ pub async fn run_questions(
     if matches!(outcome, crate::enrichment::QuestionOutcome::Superseded) {
         return Ok(());
     }
-    crate::persist_question_maps(pool, &job.chunks, &job.embeddings, document_id, chunk_ids)
-        .await
-        .map_err(|e| e.to_string())?;
-    crate::finalize_subtask(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let key = question_job_key(pool, document_id, attempt, chunk_ids).await?;
+    workflow::commit_chunks(
+        pool,
+        &job,
+        attempt,
+        &key,
+        &["question"],
+        None,
+        chunk_ids,
+        true,
+    )
+    .await?;
     schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
@@ -908,6 +741,9 @@ pub async fn run_extract(
     document_id: Uuid,
     attempt: i32,
 ) -> Result<(), String> {
+    if !workflow::pending(pool, document_id, attempt, &format!("extract:{chunk_id}")).await? {
+        return Ok(());
+    }
     if crate::document_parse_status(pool, document_id)
         .await
         .map_err(|error| error.to_string())?
@@ -926,17 +762,17 @@ pub async fn run_extract(
     if matches!(outcome, crate::graph::ExtractOutcome::Superseded) {
         return Ok(());
     }
-    crate::persist_graph_maps(pool, &job.graph, &job.relations, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = crate::graph::sync_document_job(&job);
-    crate::finalize_subtask(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    workflow::commit_graph(pool, &job, attempt, &format!("extract:{chunk_id}")).await?;
     schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
 pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM documents WHERE id=$1")
+        .bind(document_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
     let status = crate::document_parse_status(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -953,15 +789,12 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
             .await
             .map_err(|e| e.to_string())?;
     if let Some(vid) = vid {
-        run_wiki_ingest(pool, vid, document_id, crate::wiki::OP_RETRACT).await?;
+        run_wiki_ingest(pool, vid, document_id, crate::wiki::OP_RETRACT, attempt).await?;
         crate::graph::delete_document(vid, document_id)?;
     }
     crate::purge_document_index(pool, document_id)
         .await
         .map_err(|error| error.to_string())?;
-    platform::enqueue_index_delete(document_id)
-        .await?
-        .ok_or_else(|| "Oxana Redis is not configured for index deletion".to_string())?;
     let deletion = platform::release_knowledge_document_object(
         pool,
         document_id,
@@ -983,10 +816,17 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
     .await
     .map_err(|e| e.to_string())?;
     let _ = ws;
+    workflow::dispatch(pool).await?;
     Ok(())
 }
 
-pub async fn run_datatable(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
+pub async fn run_datatable(pool: &PgPool, document_id: Uuid, attempt: i32) -> Result<(), String> {
+    if !workflow::current(pool, document_id, attempt)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
     let Some(doc) = crate::load_document(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
@@ -1002,12 +842,25 @@ pub async fn run_datatable(pool: &PgPool, document_id: Uuid) -> Result<(), Strin
     crate::resolve_process_config(&version, doc.process_overrides.as_ref()).apply_to(&mut version);
     version.embedding_model_id = crate::freeze_version_embedding_model(pool, version.id).await?;
     let (table, embeds) = datatable_chunks(&doc, &version)?;
-    crate::delete_chunks_by_types(pool, document_id, &["table_summary", "table_column"])
+    let Some(mut job) = crate::DocJob::from_pool(pool, document_id)
         .await
-        .map_err(|e| e.to_string())?;
-    crate::append_document_chunks(pool, &table, &embeds)
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    job.chunks = table.into_iter().map(|c| (c.id, c)).collect();
+    job.embeddings = embeds.into_iter().map(|e| (e.chunk_id, e)).collect();
+    workflow::commit_chunks(
+        pool,
+        &job,
+        attempt,
+        "datatable",
+        &["table_summary", "table_column"],
+        None,
+        &[],
+        true,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1192,7 +1045,7 @@ fn sample_rows_json(headers: &[String], rows: &[Vec<String>]) -> String {
 fn converted_markdown(doc: &crate::Document) -> String {
     // E1: Document.markdown was write-never (always empty); the converted
     // markdown now always comes from the {file_hash}.md blob.
-    platform::read_blob(&format!("{}.md", doc.file_hash))
+    platform::read_blob(&format!("{}.{}.{}.md", doc.file_hash, doc.id, doc.attempt))
         .ok()
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
@@ -1305,4 +1158,31 @@ fn parse_markdown_table(md: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
         })
         .collect();
     Some((headers, rows))
+}
+
+async fn question_job_key(
+    pool: &PgPool,
+    document_id: Uuid,
+    attempt: i32,
+    chunk_ids: &[Uuid],
+) -> Result<String, String> {
+    let key:Option<String>=sqlx::query_scalar("SELECT job_key FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=$2 AND payload->'chunk_ids'=$3")
+        .bind(document_id).bind(attempt).bind(serde_json::json!(chunk_ids)).fetch_optional(pool).await.map_err(|e|e.to_string())?;
+    Ok(key.unwrap_or_else(|| {
+        format!(
+            "questions:{}",
+            chunk_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }))
+}
+
+fn task_enabled(task_type: &str) -> bool {
+    !matches!(
+        platform::launch_mode(task_type),
+        Ok(Some(platform::LaunchMode::DeclaredDisabled))
+    )
 }

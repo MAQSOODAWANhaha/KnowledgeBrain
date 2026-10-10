@@ -558,11 +558,13 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 XLSX_MAX_TABLE_CELL_SCANS,
             )
             tables: List[tuple[SpreadsheetTableIdentity, SpreadsheetRange]] = []
+            header_rows = {}
             for raw_table in raw_tables:
                 region = _range_model(raw_table.ref)
                 _limit("table_end_row", region.end_row, XLSX_MAX_LOGICAL_ROW)
                 _limit("table_end_column", region.end_column, XLSX_MAX_LOGICAL_COLUMN)
                 range_area(region, "table")
+                header_rows[raw_table.name] = raw_table.headerRowCount or 0
                 tables.append(
                     (
                         SpreadsheetTableIdentity(
@@ -643,6 +645,7 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 table_merges = [
                     region for region in merged if contains(table_region, region)
                 ]
+                grid = _listobject_grid(table_region, table_cells, table_merges)
                 emit(
                     StructuredSourceUnit(
                         key=f"sheet:{sheet_ordinal}:table:{table.name}",
@@ -657,7 +660,10 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                             merged_ranges=[],
                             defined_tables=[table],
                         ),
-                        grid=_listobject_grid(table_region, table_cells, table_merges),
+                        grid=grid,
+                        header_cells=[{"row": cell.row, "column": cell.column, "role": "column_header"}
+                                      for cell in grid.cells
+                                      if cell.row < header_rows[table.name]],
                     )
                 )
             if not tables and all_cells:

@@ -346,6 +346,13 @@ class StructuredSourceUnit(BaseModel):
     text: str = ""
     locator: SourceLocator
     grid: Optional[TableGrid] = None
+    # Internal producer data; the versioned source_contract sidecar transports
+    # it without conflating section ownership with physical evidence location.
+    physical_locator: Optional[SourceLocator] = None
+    physical_path: Optional[str] = None
+    source_section_id: Optional[str] = None
+    source_issues: List[str] = Field(default_factory=list)
+    header_cells: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class Document(BaseModel):

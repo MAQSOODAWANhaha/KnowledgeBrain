@@ -6,7 +6,7 @@
 //!
 //! Chain wired by this module:
 //! - `bid:tender_document_process:v2`: frozen tender input ->
-//!   `outline::store::register_frozen_input` -> analysis agent ->
+//!   owned frozen-manifest verification -> analysis agent ->
 //!   `DbJournal::publish_outline` -> `outline::store::publish` ->
 //!   `bid_outline_runs.status = 'published'`
 //! - `bid:content_generate:v2`: latest published outline -> `match_queries` ->
@@ -32,8 +32,8 @@ use uuid::Uuid;
 /// Deterministic run id for a tender job, derived from the request identity.
 ///
 /// Retries and replays converge on the same `bid_outline_runs` row, which is
-/// what makes `kb_bid_v2_publish_outline`'s `ON CONFLICT DO NOTHING` /
-/// replay short-circuit idempotent.
+/// lets completed queue deliveries stop without repeating model work. Each
+/// incomplete delivery still acquires a new token and fencing epoch.
 pub fn tender_run_id(job: &TenderDocumentProcessJobV2) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"bid:tender_document_process:v2:");
@@ -53,11 +53,11 @@ pub fn tender_run_id(job: &TenderDocumentProcessJobV2) -> Uuid {
 /// Load and validate the frozen tender input.
 ///
 /// The freeze step (docreader parse -> canonical FrozenInput JSON) is
-/// upstream's responsibility: the API freezes the tender and stores the bytes
-/// in the blob store under `objects/{frozen_input_sha256}` before enqueueing.
+/// upstream's responsibility: the preparation command freezes the tender and
+/// publishes a durable source/image/JSON manifest before enqueueing.
 /// The worker loads that blob and checks the raw bytes against the request SHA.
 /// Publish cites [`crate::analysis::digest`] of the decoded input, so that
-/// canonical SHA is what [`register_established_frozen_input`] records.
+/// canonical SHA is what [`verify_established_frozen_input`] verifies.
 async fn load_frozen_input(frozen_input_sha256: &str) -> Result<FrozenInput, String> {
     if frozen_input_sha256.len() != 64
         || !frozen_input_sha256
@@ -75,8 +75,11 @@ async fn load_frozen_input(frozen_input_sha256: &str) -> Result<FrozenInput, Str
             "FROZEN_INPUT_DIGEST_MISMATCH: expected {frozen_input_sha256}, got {actual}"
         ));
     }
-    serde_json::from_slice::<FrozenInput>(&bytes)
-        .map_err(|error| format!("FROZEN_INPUT_INVALID: {error}"))
+    let input = serde_json::from_slice::<FrozenInput>(&bytes)
+        .map_err(|error| format!("FROZEN_INPUT_INVALID: {error}"))?;
+    outline::frozen::validate_frozen_input_contract(&input)
+        .map_err(|error| format!("FROZEN_INPUT_INVALID: {error}"))?;
+    Ok(input)
 }
 
 fn agent_error_message(error: &crate::agent_error::AgentError) -> String {
@@ -99,23 +102,43 @@ fn registration_sha(input: &FrozenInput, requested_sha256: &str) -> Result<Strin
     Ok(input_sha256)
 }
 
-/// Register the established frozen input before the agent publishes.
-///
-/// `kb_bid_v2_publish_outline` rejects an unknown SHA with
-/// `BID_FROZEN_INPUT_UNKNOWN`. Registration failure stops the job; publish is
-/// not attempted.
-pub async fn register_established_frozen_input(
+/// Verify producer-owned frozen input before the agent runs. The preparation
+/// command must publish source/image/JSON ownership atomically; a loose blob
+/// digest can no longer register itself as an established input.
+pub async fn verify_established_frozen_input(
     pool: &PgPool,
     project_id: Uuid,
     input: &FrozenInput,
     requested_sha256: &str,
 ) -> Result<(), String> {
+    outline::frozen::validate_frozen_input_contract(input)
+        .map_err(|error| format!("FROZEN_INPUT_INVALID: {error}"))?;
+    if input.project_id != project_id.to_string() {
+        return Err(
+            "FROZEN_INPUT_PROJECT_MISMATCH: registration project differs from frozen input".into(),
+        );
+    }
     let input_sha256 = registration_sha(input, requested_sha256)?;
     let document_set_id =
         (!input.document_set_id.is_empty()).then_some(input.document_set_id.as_str());
-    outline::store::register_frozen_input(pool, project_id, &input_sha256, document_set_id)
-        .await
-        .map_err(|error| format!("FROZEN_INPUT_REGISTER_FAILED: {error}"))?;
+    let established: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM bid_frozen_inputs input
+         JOIN bid_frozen_input_objects object ON object.project_id=input.project_id
+           AND object.input_sha256=input.input_sha256 AND object.occurrence='frozen-json'
+         JOIN available_object_registry available ON available.object_ref=object.object_ref
+           AND available.digest=input.input_sha256
+         WHERE input.project_id=$1 AND input.input_sha256=$2::kb_sha256
+           AND input.document_set_id IS NOT DISTINCT FROM $3 AND input.publication_id IS NOT NULL)",
+    )
+    .bind(project_id)
+    .bind(&input_sha256)
+    .bind(document_set_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("FROZEN_INPUT_REGISTRY_FAILED: {error}"))?;
+    if !established {
+        return Err("FROZEN_INPUT_NOT_PUBLISHED: prepare and publish the complete owned input manifest first".into());
+    }
     Ok(())
 }
 
@@ -139,7 +162,7 @@ pub async fn run_tender_document_process(
             job.project_id
         ));
     }
-    register_established_frozen_input(
+    verify_established_frozen_input(
         pool,
         job.project_id,
         &input,
@@ -148,14 +171,40 @@ pub async fn run_tender_document_process(
     .await?;
     let config =
         Config::from_environment_for(&input).map_err(|error| agent_error_message(&error))?;
-    let journal = DbJournal::new(pool.clone(), job.project_id, tender_run_id(job));
+    let Some(journal) = DbJournal::acquire(
+        pool.clone(),
+        job.project_id,
+        tender_run_id(job),
+        &input,
+        &job.request.frozen_input_sha256,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     let model = ConfiguredModel;
-    // `finalize_run` inside calls `journal.publish_outline`, which persists
-    // the artifact via `outline::store::publish`.
-    crate::analysis::agent::run(&input, &config, &journal, &model, cancel)
-        .await
-        .map_err(|error| agent_error_message(&error))?;
-    Ok(())
+    let run = crate::analysis::agent::run(&input, &config, &journal, &model, cancel);
+    tokio::pin!(run);
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut run => {
+                return match result {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        if let Err(release_error) = journal.release().await {
+                            tracing::warn!(%release_error, "outline lease retained until expiry");
+                        }
+                        Err(agent_error_message(&error))
+                    }
+                };
+            }
+            _ = heartbeat.tick() => journal.renew().await?,
+        }
+    }
 }
 
 /// Resolve the currently supported v2 retrieval policy.
@@ -329,7 +378,7 @@ mod tests {
     #[test]
     fn registration_sha_accepts_only_the_canonical_digest() {
         let input = FrozenInput {
-            schema_version: 1,
+            schema_version: 2,
             project_id: Uuid::from_u128(0x2222).to_string(),
             document_set_id: String::new(),
             documents: vec![],

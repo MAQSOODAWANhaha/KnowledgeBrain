@@ -603,7 +603,7 @@ async fn freeze_vector_index_snapshot_v2(
            JOIN public.documents document ON document.id=chunk.document_id
             AND document.product_version_id=chunk.product_version_id
           WHERE chunk.product_version_id=$1
-            AND document.deleted_at IS NULL
+            AND document.deleted_at IS NULL AND document.parse_status NOT IN ('deleting','deleted','cancelled') AND chunk.generation=document.active_generation
             AND document.enable_status='enabled'
             AND document.index_ready
             AND chunk.chunk_type=ANY($2::text[])

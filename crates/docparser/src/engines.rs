@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use crate::http_engine::{mineru_endpoint, paddle_endpoint};
 use crate::{anydoc, grpc};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -49,9 +48,6 @@ struct HttpEngineSpec {
     name: &'static str,
     description: &'static str,
     file_types: &'static [&'static str],
-    override_key: &'static str,
-    fallback: fn() -> String,
-    missing: &'static str,
 }
 
 const HTTP_ENGINES: &[HttpEngineSpec] = &[
@@ -59,33 +55,21 @@ const HTTP_ENGINES: &[HttpEngineSpec] = &[
         name: "mineru",
         description: "MinerU self-hosted service",
         file_types: MINERU_TYPES,
-        override_key: "mineru_endpoint",
-        fallback: mineru_endpoint,
-        missing: "MinerU service not configured",
     },
     HttpEngineSpec {
         name: "mineru_cloud",
         description: "MinerU Cloud API",
         file_types: MINERU_TYPES,
-        override_key: "mineru_api_key",
-        fallback: mineru_api_key,
-        missing: "MinerU API Key not configured",
     },
     HttpEngineSpec {
         name: "paddleocr_vl",
         description: "PaddleOCR-VL self-hosted service",
         file_types: PADDLE_TYPES,
-        override_key: "paddleocr_vl_endpoint",
-        fallback: paddle_endpoint,
-        missing: "PaddleOCR-VL service not configured",
     },
     HttpEngineSpec {
         name: "paddleocr_vl_cloud",
         description: "PaddleOCR-VL Cloud API",
         file_types: PADDLE_TYPES,
-        override_key: "paddleocr_vl_cloud_token",
-        fallback: paddleocr_vl_cloud_token,
-        missing: "PaddleOCR-VL Cloud Token not configured",
     },
 ];
 
@@ -142,18 +126,14 @@ pub fn local_engines(
         ),
     ];
     out.extend(HTTP_ENGINES.iter().map(|spec| {
-        engine(
-            spec.name,
-            spec.description,
-            spec.file_types,
-            configured(
-                first_nonempty(&[
-                    override_value(overrides, spec.override_key),
-                    (spec.fallback)(),
-                ]),
-                spec.missing,
-            ),
-        )
+        let resolved = resolve_effective_engine_config(spec.name, overrides);
+        EngineInfo {
+            name: spec.name.into(),
+            description: spec.description.into(),
+            file_types: spec.file_types.iter().map(|kind| (*kind).into()).collect(),
+            available: resolved.is_ok(),
+            unavailable_reason: resolved.err().unwrap_or_default(),
+        }
     }));
     out
 }
@@ -199,42 +179,85 @@ fn engine(name: &str, description: &str, file_types: &[&str], avail: Availabilit
     }
 }
 
-fn configured(value: String, missing: &'static str) -> Availability {
-    if value.trim().is_empty() {
-        Availability {
-            available: false,
-            reason: missing,
+/// The same immutable resolution is used by availability and the HTTP sender.
+/// Do not derive Debug/Serialize: bearer credentials must never enter logs.
+pub struct EffectiveEngineConfig {
+    pub engine: String,
+    pub endpoint: String,
+    pub bearer_token: Option<String>,
+}
+
+pub fn resolve_effective_engine_config(
+    engine: &str,
+    overrides: &HashMap<String, String>,
+) -> Result<EffectiveEngineConfig, String> {
+    resolve_with_env(engine, overrides, |key| std::env::var(key).ok())
+}
+
+fn resolve_with_env(
+    engine: &str,
+    overrides: &HashMap<String, String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<EffectiveEngineConfig, String> {
+    let (endpoint_key, endpoint_env, token_key, token_env) = match engine {
+        "mineru" => (
+            "mineru_endpoint",
+            ["KNOWLEDGEBRAIN_MINERU_ENDPOINT", "MINERU_ENDPOINT"],
+            "mineru_api_key",
+            ["KNOWLEDGEBRAIN_MINERU_API_KEY", "MINERU_API_KEY"],
+        ),
+        "paddleocr_vl" => (
+            "paddleocr_vl_endpoint",
+            ["KNOWLEDGEBRAIN_PADDLE_ENDPOINT", "PADDLEOCR_VL_ENDPOINT"],
+            "paddleocr_vl_token",
+            ["KNOWLEDGEBRAIN_PADDLE_TOKEN", "PADDLEOCR_VL_TOKEN"],
+        ),
+        "mineru_cloud" | "paddleocr_vl_cloud" => {
+            return Err(format!(
+                "unsupported parser engine: {engine}; cloud protocol is not implemented"
+            ));
         }
-    } else {
-        Availability {
-            available: true,
-            reason: "",
-        }
+        _ => return Err("unsupported HTTP parser engine".into()),
+    };
+    let value = |key: &str, fallback: [&str; 2]| -> Option<String> {
+        // An explicit empty override disables a global setting, rather than
+        // silently routing data to a different configured destination.
+        overrides
+            .get(key)
+            .cloned()
+            .or_else(|| {
+                fallback
+                    .into_iter()
+                    .find_map(|key| env(key).filter(|v| !v.trim().is_empty()))
+            })
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    let endpoint = value(endpoint_key, endpoint_env)
+        .ok_or_else(|| format!("{engine} service not configured"))?;
+    let url = reqwest::Url::parse(&endpoint).map_err(|_| "invalid parser endpoint".to_string())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "invalid parser endpoint: use HTTP(S) without credentials, query or fragment".into(),
+        );
     }
-}
-
-fn mineru_api_key() -> String {
-    env_value("MINERU_API_KEY")
-}
-
-fn paddleocr_vl_cloud_token() -> String {
-    env_value("PADDLEOCR_VL_CLOUD_TOKEN")
-}
-
-fn override_value(overrides: &HashMap<String, String>, key: &str) -> String {
-    overrides.get(key).cloned().unwrap_or_default()
-}
-
-fn env_value(key: &str) -> String {
-    std::env::var(key).unwrap_or_default()
-}
-
-fn first_nonempty(values: &[String]) -> String {
-    values
-        .iter()
-        .find(|v| !v.trim().is_empty())
-        .cloned()
-        .unwrap_or_default()
+    let bearer_token = value(token_key, token_env);
+    if bearer_token.as_ref().is_some_and(|token| {
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).is_err()
+    }) {
+        return Err("invalid parser authentication token".into());
+    }
+    Ok(EffectiveEngineConfig {
+        engine: engine.into(),
+        endpoint,
+        bearer_token,
+    })
 }
 
 #[cfg(test)]
@@ -322,5 +345,62 @@ mod tests {
                 .unwrap()
                 .available
         );
+    }
+    #[test]
+    fn effective_config_prefers_overrides_and_never_aliases_cloud() {
+        let overrides = HashMap::from([
+            (
+                "mineru_endpoint".into(),
+                "http://override.example/base".into(),
+            ),
+            ("mineru_api_key".into(), "override-token".into()),
+        ]);
+        let config = resolve_with_env("mineru", &overrides, |key| {
+            Some(if key.contains("ENDPOINT") {
+                "http://global.example".into()
+            } else {
+                "global-token".into()
+            })
+        })
+        .unwrap();
+        assert_eq!(config.endpoint, "http://override.example/base");
+        assert_eq!(config.bearer_token.as_deref(), Some("override-token"));
+        let cloud = HashMap::from([
+            ("mineru_api_key".into(), "cloud-secret".into()),
+            ("paddleocr_vl_cloud_token".into(), "cloud-secret".into()),
+        ]);
+        for engine in ["mineru_cloud", "paddleocr_vl_cloud"] {
+            let error = resolve_with_env(engine, &cloud, |_| Some("configured".into()))
+                .err()
+                .unwrap();
+            assert!(error.contains("unsupported"));
+            assert!(!error.contains("cloud-secret"));
+            assert!(
+                !local_engines(true, &cloud)
+                    .iter()
+                    .find(|item| item.name == engine)
+                    .unwrap()
+                    .available
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_empty_endpoint_disables_global_fallback_and_invalid_secrets_are_redacted() {
+        let overrides = HashMap::from([("mineru_endpoint".into(), " ".into())]);
+        assert!(
+            resolve_with_env("mineru", &overrides, |_| Some(
+                "https://global.example".into()
+            ))
+            .is_err()
+        );
+        let overrides = HashMap::from([(
+            "mineru_endpoint".into(),
+            "https://user:secret@host.example".into(),
+        )]);
+        let error = resolve_with_env("mineru", &overrides, |_| None)
+            .err()
+            .unwrap();
+        assert!(!error.contains("secret"));
     }
 }

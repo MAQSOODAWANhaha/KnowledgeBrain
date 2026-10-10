@@ -1,5 +1,5 @@
 //! SQL persistence split from persist.rs (behavior unchanged).
-use crate::{append_document_chunks, delete_chunks_by_types, delete_graph_for_document};
+use crate::{append_document_chunks, delete_chunks_by_types};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -489,10 +489,11 @@ pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<i32
             END,
             parse_status = 'pending',
             enable_status = 'disabled',
+            index_ready = false,
             pending_subtasks_count = 0,
             error_message = '',
             updated_at = now()
-         WHERE id = $1
+         WHERE id = $1 AND deleted_at IS NULL AND parse_status NOT IN ('deleting','deleted')
          RETURNING attempt",
     )
     .bind(document_id)
@@ -530,6 +531,7 @@ pub async fn housekeep_documents(pool: &PgPool, stale_secs: i64) -> Result<u64, 
              pending_subtasks_count = 0,
              updated_at = now()
          WHERE d.parse_status IN ('processing', 'finalizing')
+           AND NOT EXISTS(SELECT 1 FROM knowledge_job_outbox o WHERE o.document_id=d.id AND o.attempt=d.attempt AND o.state IN ('pending','published'))
            AND COALESCE(
                  (SELECT MAX(COALESCE(finished_at, started_at))
                     FROM document_processing_spans s
@@ -576,10 +578,11 @@ pub async fn bump_document_attempt(pool: &PgPool, document_id: Uuid) -> Result<i
             attempt = attempt + 1,
             parse_status = 'pending',
             enable_status = 'disabled',
+            index_ready = false,
             pending_subtasks_count = 0,
             error_message = '',
             updated_at = now()
-         WHERE id = $1
+         WHERE id = $1 AND deleted_at IS NULL AND parse_status NOT IN ('deleting','deleted')
          RETURNING attempt",
     )
     .bind(document_id)
@@ -588,20 +591,31 @@ pub async fn bump_document_attempt(pool: &PgPool, document_id: Uuid) -> Result<i
     Ok(n)
 }
 
+/// Tombstone-only cleanup. No queue envelope may turn this into a live
+/// document-wide purge; new attempts are protected by the locked status gate.
 pub async fn purge_document_index(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
-    delete_graph_for_document(pool, document_id).await?;
-    // D5: wiki_page chunks are version-level aggregates; their document_id is only a
-    // storage host (see persist_wiki_job). They must survive document deletion and
-    // are owned by the wiki retract path instead.
-    sqlx::query("DELETE FROM chunks WHERE document_id = $1 AND chunk_type <> 'wiki_page'")
+    let mut tx = pool.begin().await?;
+    let deleted:Option<Uuid>=sqlx::query_scalar("SELECT id FROM documents WHERE id=$1 AND parse_status IN ('deleting','deleted') FOR UPDATE").bind(document_id).fetch_optional(&mut *tx).await?;
+    if deleted.is_none() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM graph_relations WHERE document_id=$1")
         .bind(document_id)
-        .execute(pool)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM graph_nodes WHERE document_id=$1")
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM chunks WHERE document_id=$1 AND chunk_type<>'wiki_page'")
+        .bind(document_id)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM wiki_pages WHERE source_refs @> jsonb_build_array($1::text)")
         .bind(document_id.to_string())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(())
+    tx.commit().await
 }
 
 pub async fn copy_document_index(
@@ -610,26 +624,55 @@ pub async fn copy_document_index(
     target_document_id: Uuid,
     target_version_id: Uuid,
 ) -> Result<usize, sqlx::Error> {
-    // D7: the whole copy (chunks + embeddings + graph) runs in a single
-    // transaction; chunk inserts are batched (1000 rows per statement)
-    // instead of one INSERT per row, so a mid-copy crash leaves no half copy.
     let mut tx = pool.begin().await?;
-    let source_version_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
-            .bind(source_document_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some(source_version_id) = source_version_id else {
-        tx.commit().await?;
+    let copied = copy_document_index_tx(
+        &mut tx,
+        source_document_id,
+        target_document_id,
+        target_version_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(copied)
+}
+
+/// Share the clone initialization transaction so its index and follow-up
+/// obligation become visible together. Lock both generation selectors until
+/// every chunk, embedding and graph row has been copied.
+pub(crate) async fn copy_document_index_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_document_id: Uuid,
+    target_document_id: Uuid,
+    target_version_id: Uuid,
+) -> Result<usize, sqlx::Error> {
+    let source: Option<(Uuid, i32)> = sqlx::query_as(
+        "SELECT product_version_id, active_generation FROM documents
+         WHERE id = $1 AND deleted_at IS NULL
+           AND parse_status NOT IN ('cancelled','deleting','deleted') FOR SHARE",
+    )
+    .bind(source_document_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((source_version_id, source_generation)) = source else {
         return Ok(0);
     };
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM documents WHERE id = $1 AND product_version_id = $2
+         AND deleted_at IS NULL AND parse_status IN ('pending','processing') FOR UPDATE",
+    )
+    .bind(target_document_id)
+    .bind(target_version_id)
+    .fetch_one(&mut **tx)
+    .await?;
     let rows = sqlx::query(
         "SELECT id, chunk_type, content, context_header, start_at, end_at,
                 parent_chunk_id, generated_questions, source_locator
-         FROM chunks WHERE document_id = $1",
+         FROM chunks WHERE document_id = $1 AND generation = $2
+           AND chunk_type <> 'wiki_page'",
     )
     .bind(source_document_id)
-    .fetch_all(&mut *tx)
+    .bind(source_generation)
+    .fetch_all(&mut **tx)
     .await?;
 
     struct ChunkCopy {
@@ -685,7 +728,7 @@ pub async fn copy_document_index(
                 .push_bind(&c.generated_questions)
                 .push_bind(&c.source_locator);
         });
-        qb.build().execute(&mut *tx).await?;
+        qb.build().execute(&mut **tx).await?;
     }
     if !id_map.is_empty() {
         // Set-based embedding copy through the chunk id map: one statement.
@@ -703,17 +746,86 @@ pub async fn copy_document_index(
         .bind(target_document_id)
         .bind(&old_ids)
         .bind(&new_ids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
+        // OCR evidence belongs to a document/version-specific immutable media
+        // artifact. Preserve that mapping and its object owner with fresh target
+        // identities; copied chunks must not lose their retrievable evidence.
+        let media = sqlx::query(
+            "SELECT mapping.chunk_id, artifact.id, artifact.canonical_payload,
+                    artifact.object_ref, artifact.content_sha256, artifact.media_type,
+                    registry.byte_length
+             FROM knowledge_image_ocr_chunk_artifact_mappings mapping
+             JOIN knowledge_image_artifact_revisions artifact
+               ON artifact.id = mapping.image_artifact_revision_id
+             JOIN available_object_registry registry ON registry.object_ref = artifact.object_ref
+             WHERE mapping.chunk_id = ANY($1)",
+        )
+        .bind(&old_ids)
+        .fetch_all(&mut **tx)
+        .await?;
+        for artifact in media {
+            let artifact_id = Uuid::new_v4();
+            let old_artifact_id: Uuid = artifact.try_get("id")?;
+            let old_chunk_id: Uuid = artifact.try_get("chunk_id")?;
+            let payload: Vec<u8> = artifact.try_get("canonical_payload")?;
+            let mut payload: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            payload["image_artifact_revision_id"] = serde_json::json!(artifact_id);
+            payload["document_id"] = serde_json::json!(target_document_id);
+            payload["product_version_id"] = serde_json::json!(target_version_id);
+            let payload =
+                serde_json::to_vec(&payload).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            let artifact_sha = platform::sha256_hex(&payload);
+            sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
+                .bind(artifact_id)
+                .bind(artifact.try_get::<String, _>("object_ref")?)
+                .bind(artifact.try_get::<String, _>("content_sha256")?)
+                .bind(artifact.try_get::<String, _>("media_type")?)
+                .bind(artifact.try_get::<i64, _>("byte_length")?)
+                .execute(&mut **tx).await?;
+            sqlx::query(
+                "INSERT INTO knowledge_image_artifact_revisions(
+                    id,product_version_id,document_id,revision,object_ref,content_sha256,
+                    media_type,width,height,page_ordinal,bounding_region,source_image_key,
+                    canonical_payload,artifact_sha256)
+                 SELECT $1,$2,$3,revision,object_ref,content_sha256,media_type,width,height,
+                        page_ordinal,bounding_region,source_image_key,$4,$6
+                 FROM knowledge_image_artifact_revisions WHERE id=$5",
+            )
+            .bind(artifact_id)
+            .bind(target_version_id)
+            .bind(target_document_id)
+            .bind(payload)
+            .bind(old_artifact_id)
+            .bind(artifact_sha)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(
+                    chunk_id,product_version_id,document_id,image_artifact_revision_id,
+                    object_ref,content_sha256,media_type)
+                 SELECT $1,$2,$3,$4,object_ref,content_sha256,media_type
+                 FROM knowledge_image_ocr_chunk_artifact_mappings WHERE chunk_id=$5",
+            )
+            .bind(id_map[&old_chunk_id])
+            .bind(target_version_id)
+            .bind(target_document_id)
+            .bind(artifact_id)
+            .bind(old_chunk_id)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
     // D7: deep-copy the per-document graph, remapping chunk_ids to the new ids.
     let graph_nodes = sqlx::query(
         "SELECT name, chunk_ids FROM graph_nodes
-         WHERE product_version_id = $1 AND document_id = $2",
+         WHERE product_version_id = $1 AND document_id = $2 AND generation = $3",
     )
     .bind(source_version_id)
     .bind(source_document_id)
-    .fetch_all(&mut *tx)
+    .bind(source_generation)
+    .fetch_all(&mut **tx)
     .await?;
     let mut node_copies: Vec<(String, Vec<Uuid>)> = Vec::with_capacity(graph_nodes.len());
     for n in &graph_nodes {
@@ -723,7 +835,9 @@ pub async fn copy_document_index(
             .into_iter()
             .filter_map(|c| id_map.get(&c).copied())
             .collect();
-        node_copies.push((name, remapped));
+        if !remapped.is_empty() {
+            node_copies.push((name, remapped));
+        }
     }
     for batch in node_copies.chunks(1000) {
         let mut qb = sqlx::QueryBuilder::new(
@@ -736,22 +850,24 @@ pub async fn copy_document_index(
                 .push_bind(chunk_ids);
         });
         qb.push(" ON CONFLICT DO NOTHING");
-        qb.build().execute(&mut *tx).await?;
+        qb.build().execute(&mut **tx).await?;
     }
     sqlx::query(
         "INSERT INTO graph_relations
             (product_version_id, document_id, node1, node2, rel_type)
          SELECT $1, $2, node1, node2, rel_type FROM graph_relations
-         WHERE product_version_id = $3 AND document_id = $4
+         WHERE product_version_id = $3 AND document_id = $4 AND generation = $5
+           AND node1 = ANY($6::text[]) AND node2 = ANY($6::text[])
          ON CONFLICT DO NOTHING",
     )
     .bind(target_version_id)
     .bind(target_document_id)
     .bind(source_version_id)
     .bind(source_document_id)
-    .execute(&mut *tx)
+    .bind(source_generation)
+    .bind(node_copies.iter().map(|(name, _)| name).collect::<Vec<_>>())
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(rows.len())
 }
 

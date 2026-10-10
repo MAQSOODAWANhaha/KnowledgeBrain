@@ -146,3 +146,72 @@ fn outline_and_response_replace_the_authoring_machine() {
     assert!(SQL.contains("editor_key uuid"));
     assert!(SQL.contains("p_actor IS NOT NULL AND p_actor IS DISTINCT FROM"));
 }
+
+#[test]
+fn publication_is_fenced_and_runtime_cannot_write_around_it() {
+    let publish = SQL
+        .split("CREATE FUNCTION kb_bid_v2_publish_outline(")
+        .nth(1)
+        .unwrap()
+        .split("CREATE FUNCTION kb_bid_v2_publish_response(")
+        .next()
+        .unwrap();
+    let locked = publish.find("WHERE id = p_run_id FOR UPDATE").unwrap();
+    let fence = publish.find("BID_OUTLINE_LEASE_LOST").unwrap();
+    let artifact = publish.find("INSERT INTO bid_outline_artifacts").unwrap();
+    assert!(locked < fence && fence < artifact);
+    for invariant in [
+        "current_run.lease_token IS DISTINCT FROM p_lease_token",
+        "current_run.lease_epoch IS DISTINCT FROM p_lease_epoch",
+        "current_run.lease_until <= clock_timestamp()",
+        "current_run.outline_sha256 IS DISTINCT FROM digest",
+        "current_run.bindings_sha256 IS DISTINCT FROM binding_digest",
+        "current_run.published_by IS DISTINCT FROM p_actor",
+    ] {
+        assert!(publish.contains(invariant), "{invariant}");
+    }
+    assert!(!SQL.contains("GRANT SELECT, INSERT, UPDATE ON"));
+    assert!(SQL.contains("lease_epoch = lease_epoch + 1"));
+    assert!(SQL.contains("kb_bid_v2_outline_checkpoint"));
+}
+
+#[test]
+fn published_objects_have_checked_durable_owners() {
+    for function in [
+        "kb_bid_v2_publish_document",
+        "kb_bid_v2_put_docx_version",
+        "kb_bid_v2_publish_submission_export",
+    ] {
+        let body = SQL
+            .split(&format!("CREATE FUNCTION {function}("))
+            .nth(1)
+            .unwrap()
+            .split("END")
+            .next()
+            .unwrap();
+        // Check the full function, since IF blocks can precede publication.
+        let full = SQL
+            .split(&format!("CREATE FUNCTION {function}("))
+            .nth(1)
+            .unwrap()
+            .split("CREATE FUNCTION ")
+            .next()
+            .unwrap();
+        assert!(
+            full.contains("kb_object_publish_reference"),
+            "{function}: {body}"
+        );
+    }
+    assert!(SHARED_SQL.contains("staging.expires_at <= clock_timestamp()"));
+    assert!(SHARED_SQL.contains("IF NOT FOUND OR staging.expires_at > clock_timestamp()"));
+    let acquire = SHARED_SQL
+        .split("CREATE FUNCTION kb_object_publish_reference(")
+        .nth(1)
+        .unwrap()
+        .split("CREATE FUNCTION kb_object_upload_abandon(")
+        .next()
+        .unwrap();
+    assert!(acquire.contains("FOR UPDATE"));
+    assert!(acquire.contains("registry.state <> 'available'"));
+    assert!(!acquire.contains("INSERT INTO object_registry"));
+}

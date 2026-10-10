@@ -19,7 +19,6 @@ pub(crate) struct Status<'a> {
     pub turn: usize,
     pub role: &'static str,
     pub done: bool,
-    pub budget_exhausted: bool,
     pub execution_blocked: bool,
     pub max_context_bytes: usize,
 }
@@ -31,7 +30,10 @@ pub(crate) trait Driver: Send + Sync {
     async fn prepare_request(&mut self) -> Result<Vec<u8>, AgentError>;
     /// Persist the prepared checkpoint and reserve this exact body before
     /// returning the boundary attempt. Adapters retain their durable budgets.
-    async fn reserve(&self, body: &[u8], local_attempt: usize) -> Result<usize, AgentError>;
+    async fn admit(&mut self, _body: &[u8]) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn reserve(&mut self, body: &[u8], local_attempt: usize) -> Result<usize, AgentError>;
     async fn call_model(&self, body: &[u8]) -> Result<ChatTurn, AgentError>;
     /// Apply a fully saved response, including domain turn/role transitions.
     /// This does not save or advance the shared Journal boundary itself.
@@ -62,6 +64,7 @@ pub(crate) async fn drive<D: Driver>(
 ) -> Result<(), AgentError> {
     while !host.status().done {
         check_cancel(cancel)?;
+        let started = Instant::now();
         let recovered = host.status().journal.response().is_some();
         if recovered {
             // A received response already belongs to its saved reservation.
@@ -75,18 +78,14 @@ pub(crate) async fn drive<D: Driver>(
                     host.block_message(),
                 ));
             }
-            if host.status().budget_exhausted {
-                return Err(AgentError::new(
-                    "AGENT_TURN_BUDGET_EXCEEDED",
-                    "global Agent budget exhausted; checkpoint retained",
-                ));
+            if host.status().journal.pending.is_some() {
+                let status = host.status();
+                status.journal.validate(status.turn, status.role)?;
+            } else {
+                let body = host.prepare_request().await?;
+                let (turn, role) = (host.status().turn, host.status().role);
+                host.journal_mut().prepare(turn, role, &body)?;
             }
-        }
-        let started = Instant::now();
-        if host.status().journal.pending.is_none() {
-            let body = host.prepare_request().await?;
-            let (turn, role) = (host.status().turn, host.status().role);
-            host.journal_mut().prepare(turn, role, &body)?;
         }
         let body = host.status().journal.body()?.to_vec();
         tracing::info!(
@@ -105,6 +104,19 @@ pub(crate) async fn drive<D: Driver>(
                 check_cancel(cancel)?;
                 local_attempt += 1;
                 let started = Instant::now();
+                host.admit(&body).await?;
+                let pending = host
+                    .journal_mut()
+                    .pending
+                    .as_mut()
+                    .ok_or_else(|| super::invalid("pending request missing"))?;
+                if pending.physical_attempts >= 3 {
+                    return Err(AgentError::new(
+                        "AGENT_OUTPUT_INVALID",
+                        "pending request transport attempts exhausted; checkpoint retained",
+                    ));
+                }
+                pending.physical_attempts += 1;
                 let attempt = host.reserve(&body, local_attempt).await?;
                 let reserve_ms = started.elapsed().as_millis() as u64;
                 check_cancel(cancel)?;
@@ -168,13 +180,23 @@ pub(crate) async fn drive<D: Driver>(
         }
         check_cancel(cancel)?;
         let role = host.status().role;
+        // Session::tools advances the SDK run before domain execution. A
+        // paused/failed batch must retain the received boundary, not a SDK
+        // CallTools state that cannot replay the saved provider response.
+        let received_session = host.status().journal.session.clone();
         let suppressed = host
             .journal_mut()
             .session
             .as_mut()
             .ok_or_else(|| super::invalid("pending SDK session missing"))?
             .tools(&body, &response)?;
-        let results = host.execute(response, suppressed, cancel).await?;
+        let results = match host.execute(response, suppressed, cancel).await {
+            Ok(results) => results,
+            Err(error) => {
+                host.journal_mut().session = received_session;
+                return Err(error);
+            }
+        };
         let session = host
             .journal_mut()
             .session
@@ -229,7 +251,6 @@ mod tests {
                 turn: 0,
                 role: "main",
                 done: false,
-                budget_exhausted: false,
                 execution_blocked: false,
                 max_context_bytes: 4096,
             }
@@ -243,7 +264,7 @@ mod tests {
             Ok(br#"{"messages":[{"content":"synthetic","role":"system"}]}"#.to_vec())
         }
 
-        async fn reserve(&self, body: &[u8], _: usize) -> Result<usize, AgentError> {
+        async fn reserve(&mut self, body: &[u8], _: usize) -> Result<usize, AgentError> {
             assert_eq!(body, self.journal.body().unwrap());
             let mut reserved = self.reserved.lock().unwrap();
             assert!(
@@ -329,12 +350,12 @@ mod tests {
     }
 
     struct ScriptedHost {
+        operator_paused: bool,
         journal: TurnJournal,
         interrupt_call: Option<usize>,
         turn: usize,
         done: bool,
         complete_after: usize,
-        budget_exhausted: bool,
         execution_blocked: bool,
         reserved: Mutex<usize>,
         calls: Mutex<usize>,
@@ -345,12 +366,12 @@ mod tests {
     impl Default for ScriptedHost {
         fn default() -> Self {
             Self {
+                operator_paused: false,
                 journal: TurnJournal::default(),
                 interrupt_call: None,
                 turn: 0,
                 done: false,
                 complete_after: 2,
-                budget_exhausted: false,
                 execution_blocked: false,
                 reserved: Mutex::new(0),
                 calls: Mutex::new(0),
@@ -358,6 +379,49 @@ mod tests {
                 sdk_turns: Mutex::new(Vec::new()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn operator_pause_before_send_is_idempotent_and_unknown_send_stays_counted() {
+        let cancel = CancellationToken::new();
+        let mut host = ScriptedHost {
+            operator_paused: true,
+            complete_after: 1,
+            interrupt_call: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            drive(&mut host, &cancel).await.unwrap_err().code,
+            "AGENT_PAUSED_OPERATOR"
+        );
+        let prepared = serde_json::to_value(&host.journal).unwrap();
+        assert_eq!(host.journal.pending.as_ref().unwrap().physical_attempts, 0);
+        assert_eq!(host.journal.accounting.physical_calls, 0);
+        assert_eq!(
+            drive(&mut host, &cancel).await.unwrap_err().code,
+            "AGENT_PAUSED_OPERATOR"
+        );
+        assert_eq!(serde_json::to_value(&host.journal).unwrap(), prepared);
+        host.operator_paused = false;
+        assert_eq!(
+            drive(&mut host, &cancel).await.unwrap_err().code,
+            "AGENT_TRANSPORT_INTERRUPTED"
+        );
+        assert_eq!(*host.calls.lock().unwrap(), 1);
+        assert_eq!(host.journal.accounting.physical_calls, 1);
+        assert_eq!(host.journal.pending.as_ref().unwrap().physical_attempts, 1);
+        host.operator_paused = true;
+        let unknown = serde_json::to_value(&host.journal).unwrap();
+        assert_eq!(
+            drive(&mut host, &cancel).await.unwrap_err().code,
+            "AGENT_PAUSED_OPERATOR"
+        );
+        assert_eq!(serde_json::to_value(&host.journal).unwrap(), unknown);
+        host.operator_paused = false;
+        drive(&mut host, &cancel).await.unwrap();
+        assert_eq!(*host.calls.lock().unwrap(), 2);
+        assert_eq!(host.journal.accounting.physical_calls, 2);
+        assert_eq!(*host.executes.lock().unwrap(), 1);
     }
 
     fn tool_response(id: &str) -> ChatTurn {
@@ -385,13 +449,23 @@ mod tests {
 
     #[async_trait]
     impl Driver for ScriptedHost {
+        async fn admit(&mut self, _body: &[u8]) -> Result<(), AgentError> {
+            if self.operator_paused {
+                Err(AgentError::new(
+                    "AGENT_PAUSED_OPERATOR",
+                    "test pause before send",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
         fn status(&self) -> Status<'_> {
             Status {
                 journal: &self.journal,
                 turn: self.turn,
                 role: "main",
                 done: self.done,
-                budget_exhausted: self.budget_exhausted,
                 execution_blocked: self.execution_blocked,
                 max_context_bytes: 16384,
             }
@@ -412,7 +486,6 @@ mod tests {
                 &body,
                 crate::agent_runtime::SESSION_PREFIX,
                 crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-                4 - self.turn,
                 16384,
             )?;
             self.sdk_turns.lock().unwrap().push(
@@ -425,8 +498,13 @@ mod tests {
             Ok(body)
         }
 
-        async fn reserve(&self, body: &[u8], local_attempt: usize) -> Result<usize, AgentError> {
+        async fn reserve(
+            &mut self,
+            body: &[u8],
+            local_attempt: usize,
+        ) -> Result<usize, AgentError> {
             assert_eq!(body, self.journal.body().unwrap());
+            self.journal.accounting.record(10, 2, 1)?;
             *self.reserved.lock().unwrap() += 1;
             Ok(local_attempt)
         }
@@ -461,13 +539,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drive_commits_two_turns_and_reuses_the_sdk_session() {
+    async fn drive_commits_two_turns_with_request_scoped_sdk_and_cumulative_usage() {
         let mut host = ScriptedHost::default();
         drive(&mut host, &CancellationToken::new()).await.unwrap();
         assert_eq!(*host.calls.lock().unwrap(), 2);
         assert_eq!(*host.reserved.lock().unwrap(), 2);
         assert_eq!(*host.executes.lock().unwrap(), 2);
-        assert_eq!(*host.sdk_turns.lock().unwrap(), vec![1, 2]);
+        assert_eq!(*host.sdk_turns.lock().unwrap(), vec![1, 1]);
         assert!(host.journal.pending.is_none());
         assert!(host.done);
         assert!(host.journal.session.is_none());
@@ -516,9 +594,8 @@ mod tests {
         assert!(host.journal.pending.is_none());
     }
 
-    async fn stopped_boundary(received: bool, budget: bool, blocked: bool) -> ScriptedHost {
+    async fn stopped_boundary(received: bool, blocked: bool) -> ScriptedHost {
         let mut host = ScriptedHost {
-            budget_exhausted: budget,
             execution_blocked: blocked,
             ..Default::default()
         };
@@ -533,9 +610,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn received_response_finishes_before_next_call_budget_or_execution_gate() {
-        for (budget, blocked) in [(true, false), (false, true), (true, true)] {
-            let mut host = stopped_boundary(true, budget, blocked).await;
+    async fn received_response_finishes_before_next_call_execution_gate() {
+        for blocked in [false, true] {
+            let mut host = stopped_boundary(true, blocked).await;
             host.complete_after = 1;
             drive(&mut host, &CancellationToken::new()).await.unwrap();
             assert!(host.done);
@@ -550,8 +627,8 @@ mod tests {
 
     #[tokio::test]
     async fn received_replay_cannot_authorize_another_preparation_or_reservation() {
-        for (budget, blocked) in [(true, false), (false, true)] {
-            let mut host = stopped_boundary(true, budget, blocked).await;
+        for blocked in [true] {
+            let mut host = stopped_boundary(true, blocked).await;
             let error = drive(&mut host, &CancellationToken::new())
                 .await
                 .unwrap_err();
@@ -568,9 +645,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepared_boundary_still_obeys_next_call_budget_and_execution_gates() {
-        for (budget, blocked) in [(true, false), (false, true)] {
-            let mut host = stopped_boundary(false, budget, blocked).await;
+    async fn prepared_boundary_still_obeys_execution_gate() {
+        for blocked in [true] {
+            let mut host = stopped_boundary(false, blocked).await;
             let before = serde_json::to_value(&host.journal).unwrap();
             let error = drive(&mut host, &CancellationToken::new())
                 .await
@@ -586,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn received_replay_at_limit_keeps_cancellation_and_frozen_boundary_validation() {
-        let mut host = stopped_boundary(true, true, true).await;
+        let mut host = stopped_boundary(true, true).await;
         let cancel = CancellationToken::new();
         cancel.cancel();
         let error = drive(&mut host, &cancel).await.unwrap_err();
@@ -595,7 +672,7 @@ mod tests {
         assert!(host.journal.response().is_some());
 
         for corruption in ["role", "turn", "body", "response", "session"] {
-            let mut host = stopped_boundary(true, true, true).await;
+            let mut host = stopped_boundary(true, true).await;
             let pending = host.journal.pending.as_mut().unwrap();
             match corruption {
                 "role" => pending.role = "reviewer".into(),

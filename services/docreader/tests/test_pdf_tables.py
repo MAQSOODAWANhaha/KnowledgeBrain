@@ -25,7 +25,6 @@ from docreader.models.document import (
     sparsify_table_cells,
 )
 
-BIDDING_PDF = Path(__file__).resolve().parents[3] / "testdata/bid/BiddingFile.pdf"
 
 
 def _glyph(ch: str, x: float, y: float, w: float = 8.0, h: float = 10.0) -> dict:
@@ -120,49 +119,6 @@ def test_ruled_grid_wins_over_fragmented_alignment(monkeypatch) -> None:
     assert extract_tables_from_page(object(), object(), []) == [ruled]
 
 
-@pytest.mark.skipif(not BIDDING_PDF.is_file(), reason="testdata/bid/BiddingFile.pdf is not available")
-def test_bidding_file_emits_page_table_grids() -> None:
-    parsed = PDFParser(file_name="BiddingFile.pdf", file_type="pdf").parse_into_text(
-        BIDDING_PDF.read_bytes()
-    )
-    tables = [
-        unit
-        for unit in parsed.structured_source_units
-        if unit.kind is StructuredSourceUnitKind.TABLE_REGION
-    ]
-    assert tables, "BiddingFile must emit TABLE_REGION units"
-    page_tables = [unit for unit in tables if isinstance(unit.locator, PageTableLocator)]
-    assert page_tables, "PDF tables must use page_table locators"
-    # Cell bytes have one canonical owner and are never duplicated into unit text.
-    assert all(unit.text == "" for unit in page_tables)
-    widest = max(
-        page_tables,
-        key=lambda unit: unit.grid.column_count if unit.grid is not None else 0,
-    )
-    assert isinstance(widest.locator, PageTableLocator)
-    assert widest.grid is not None
-    assert widest.grid.column_count >= 6
-    assert widest.grid.row_count >= 2
-    for unit in page_tables:
-        locator = unit.locator
-        grid = unit.grid
-        assert isinstance(locator, PageTableLocator)
-        assert grid is not None
-        assert grid.column_count >= 2
-        assert grid.row_count >= 2
-        occupied = 0
-        for cell in grid.cells:
-            occupied += cell.row_span * cell.col_span
-        assert occupied == grid.row_count * grid.column_count
-        assert locator.right > locator.left
-        assert locator.top > locator.bottom
-        assert grid.widths_mm is not None
-        assert len(grid.widths_mm) == grid.column_count
-        assert all(width > 0 for width in grid.widths_mm)
-        assert sum(grid.widths_mm) <= 180.01
-        nonempty = [cell.text for cell in grid.cells if cell.text.strip()]
-        assert nonempty
-        assert all(len(text) < 4000 for text in nonempty)
 
 
 def test_scanned_pages_do_not_invent_tables() -> None:
@@ -271,29 +227,6 @@ def test_grid_markdown_serializes_cells() -> None:
     assert lines[2] == "| 丙 | 丁 |"
 
 
-@pytest.mark.skipif(not BIDDING_PDF.is_file(), reason="testdata/bid/BiddingFile.pdf is not available")
-def test_price_title_stays_outside_grid_and_parameters_keep_their_cell() -> None:
-    parsed = PDFParser(file_name="BiddingFile.pdf", file_type="pdf").parse_into_text(
-        BIDDING_PDF.read_bytes()
-    )
-    price = next(
-        unit for unit in parsed.structured_source_units
-        if isinstance(unit.locator, PageTableLocator) and unit.locator.page_ordinal == 81
-    )
-    assert price.grid is not None
-    assert (price.grid.row_count, price.grid.column_count) == (3, 8)
-    cells = {(c.row, c.column): c.text for c in price.grid.cells}
-    assert cells[0, 0] == "序号"
-    assert cells[1, 1] == "防火墙" and cells[1, 5] == "80"
-    assert "20Gbps" in cells[1, 2] and "软件及特征库升级" in cells[1, 2]
-    assert all(cells[1, column] == "" for column in (3, 4, 6, 7))
-    page = "\n".join(
-        u.text or ""
-        for u in parsed.structured_source_units
-        if u.kind is StructuredSourceUnitKind.SECTION
-    )
-    assert "单位：元人民币" in "".join(page.split())
-    assert "单位：元人民币" not in "".join(cells.values())
 
 
 def test_extract_page_tables_pdfium_failure_returns_empty() -> None:

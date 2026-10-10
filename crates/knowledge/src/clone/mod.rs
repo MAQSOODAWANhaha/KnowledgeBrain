@@ -1,4 +1,4 @@
-//! version:clone — Postgres + caller-enqueued follow-ups. No in-memory Store path.
+//! Atomic version cloning with durable follow-up obligations.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -10,7 +10,7 @@ pub struct CloneDiff {
     pub source_document_id: Option<Uuid>,
 }
 
-/// Jobs the caller (worker / runtime) must enqueue after the SQL commit.
+/// Immediate delivery hints; the SQL outbox durably retains every follow-up.
 #[derive(Debug, Clone)]
 pub struct FollowUp {
     pub task_type: &'static str,
@@ -27,46 +27,45 @@ pub async fn run_clone(
     diffs: &[CloneDiff],
     make_current: bool,
 ) -> Result<Vec<FollowUp>, String> {
-    let product_id: Uuid =
-        sqlx::query_scalar("SELECT product_id FROM product_versions WHERE id = $1")
-            .bind(target_version_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    sqlx::query("UPDATE product_versions SET status = 'cloning', updated_at = now() WHERE id = $1")
-        .bind(target_version_id)
-        .execute(pool)
+    let schema_ready = crate::embeddings_schema_ready(pool)
         .await
         .map_err(|e| e.to_string())?;
-
+    // No target document or enqueue obligation is visible until its source
+    // metadata, object ownership and complete index are initialized.
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let product_id: Uuid = sqlx::query_scalar(
+        "UPDATE product_versions SET status = 'cloning', updated_at = now()
+         WHERE id = $1 RETURNING product_id",
+    )
+    .bind(target_version_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     let src_emb: Option<String> =
         sqlx::query_scalar("SELECT embedding_model_id FROM product_versions WHERE id = $1")
             .bind(source_version_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
     let dst_emb: Option<String> =
         sqlx::query_scalar("SELECT embedding_model_id FROM product_versions WHERE id = $1")
             .bind(target_version_id)
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-    let same_embedding = src_emb.unwrap_or_default() == dst_emb.unwrap_or_default();
-    let schema_ready = crate::embeddings_schema_ready(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    let keep_copy = same_embedding && schema_ready;
+    let keep_copy = src_emb.unwrap_or_default() == dst_emb.unwrap_or_default() && schema_ready;
 
     let src_docs = sqlx::query(
         "SELECT id, title, file_name, file_size, file_hash, object_ref,
                 COALESCE(type, 'file') AS doc_type, source_passages,
                 COALESCE(description, '') AS description,
                 COALESCE(summary_status, 'none') AS summary_status
-         FROM documents WHERE product_version_id = $1 AND deleted_at IS NULL",
+         FROM documents WHERE product_version_id = $1 AND deleted_at IS NULL
+           AND parse_status NOT IN ('cancelled','deleting','deleted')
+         ORDER BY id FOR SHARE",
     )
     .bind(source_version_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -81,116 +80,127 @@ pub async fn run_clone(
     } else {
         diffs.to_vec()
     };
-
     let mut follow = Vec::new();
-    // D7: documents whose index was copied verbatim ("keep").
-    let mut kept_docs: Vec<Uuid> = Vec::new();
-
+    let mut kept_docs = Vec::new();
     for d in ops {
-        match d.op.as_str() {
-            "delete" => {}
-            "add" | "replace" | "keep" => {
-                let Some(sid) = d.source_document_id else {
-                    continue;
-                };
-                let Some(src) = src_docs.iter().find(|r| r.get::<Uuid, _>("id") == sid) else {
-                    continue;
-                };
-                let nid = Uuid::new_v4();
-                let title: String = src.try_get("title").unwrap_or_default();
-                let file_name: String = src.try_get("file_name").unwrap_or_default();
-                let file_size: i64 = src.try_get("file_size").unwrap_or(0);
-                let file_hash: String = src.try_get("file_hash").unwrap_or_default();
-                let object_ref: String = src.try_get("object_ref").unwrap_or_default();
-                crate::insert_document(
-                    pool,
-                    crate::NewDocument {
-                        id: nid,
-                        product_version_id: target_version_id,
-                        title: &title,
-                        file_name: &file_name,
-                        file_size,
-                        file_hash: &file_hash,
-                        object_ref: &object_ref,
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                let kind: String = src.try_get("doc_type").unwrap_or_else(|_| "file".into());
-                let passages: Vec<String> = src
-                    .try_get::<Option<serde_json::Value>, _>("source_passages")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                let _ = crate::set_document_source(pool, nid, &kind, &passages).await;
-                sqlx::query(
-                    "INSERT INTO document_tags (document_id, tag_id)
-                     SELECT $1, tag_id FROM document_tags WHERE document_id = $2",
-                )
-                .bind(nid)
-                .bind(sid)
-                .execute(pool)
-                .await
-                .map_err(|e| e.to_string())?;
-                let copy_keep = d.op == "keep" && keep_copy;
-                if copy_keep {
-                    kept_docs.push(nid);
-                    crate::copy_document_index(pool, sid, nid, target_version_id)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let desc: String = src.try_get("description").unwrap_or_default();
-                    let sum_st: String = src
-                        .try_get("summary_status")
-                        .unwrap_or_else(|_| "none".into());
-                    sqlx::query(
-                        "UPDATE documents SET parse_status = 'processing',
-                                enable_status = 'enabled',
-                                description = $2, summary_status = $3,
-                                updated_at = now()
-                         WHERE id = $1",
-                    )
-                    .bind(nid)
-                    .bind(&desc)
-                    .bind(&sum_st)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    follow.push(FollowUp {
-                        task_type: platform::TYPE_POST_PROCESS,
-                        queue: platform::QUEUE_POSTPROCESS,
-                        document_id: nid,
-                        product_version_id: target_version_id,
-                        clone_keep: true,
-                    });
-                } else {
-                    follow.push(FollowUp {
-                        task_type: platform::TYPE_DOCUMENT_PROCESS,
-                        queue: platform::QUEUE_DEFAULT,
-                        document_id: nid,
-                        product_version_id: target_version_id,
-                        clone_keep: false,
-                    });
-                }
-            }
-            _ => {}
+        if !matches!(d.op.as_str(), "add" | "replace" | "keep") {
+            continue;
         }
+        let Some(sid) = d.source_document_id else {
+            continue;
+        };
+        let Some(src) = src_docs.iter().find(|r| r.get::<Uuid, _>("id") == sid) else {
+            continue;
+        };
+        let nid = Uuid::new_v4();
+        let copy_keep = d.op == "keep" && keep_copy;
+        // Keep copies start processing, bypassing the automatic Convert
+        // obligation. Reparses start pending with their final source metadata
+        // so the trigger captures the correct manual passages at insertion.
+        sqlx::query(
+            "INSERT INTO documents (
+                id, product_version_id, title, parse_status, enable_status,
+                file_name, file_size, file_hash, object_ref, type, source_passages,
+                description, summary_status
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        )
+        .bind(nid)
+        .bind(target_version_id)
+        .bind(src.get::<String, _>("title"))
+        .bind(if copy_keep { "processing" } else { "pending" })
+        .bind(if copy_keep { "enabled" } else { "disabled" })
+        .bind(src.get::<String, _>("file_name"))
+        .bind(src.get::<i64, _>("file_size"))
+        .bind(src.get::<String, _>("file_hash"))
+        .bind(src.get::<String, _>("object_ref"))
+        .bind(src.get::<String, _>("doc_type"))
+        .bind(src.get::<Option<serde_json::Value>, _>("source_passages"))
+        .bind(if copy_keep {
+            src.get::<String, _>("description")
+        } else {
+            String::new()
+        })
+        .bind(if copy_keep {
+            src.get::<String, _>("summary_status")
+        } else {
+            "none".into()
+        })
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT kb_register_knowledge_document_object(
+                $1,'application/octet-stream',NULL::kb_actor_identity,$2,$3)",
+        )
+        .bind(nid)
+        .bind(format!("knowledge-document:{nid}"))
+        .bind(Uuid::new_v4())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "INSERT INTO document_tags (document_id, tag_id)
+             SELECT $1, tag_id FROM document_tags WHERE document_id = $2",
+        )
+        .bind(nid)
+        .bind(sid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if copy_keep {
+            crate::catalog::copy_document_index_tx(&mut tx, sid, nid, target_version_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            crate::workflow::put_tx(
+                &mut tx,
+                nid,
+                target_version_id,
+                1,
+                &crate::workflow::Work::Postprocess { clone_keep: true },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            kept_docs.push(nid);
+        }
+        follow.push(FollowUp {
+            task_type: if copy_keep {
+                platform::TYPE_POST_PROCESS
+            } else {
+                platform::TYPE_DOCUMENT_PROCESS
+            },
+            queue: if copy_keep {
+                platform::QUEUE_POSTPROCESS
+            } else {
+                platform::QUEUE_DEFAULT
+            },
+            document_id: nid,
+            product_version_id: target_version_id,
+            clone_keep: copy_keep,
+        });
     }
 
-    // D7: wiki is derived data — rebuild it for the new version instead of copying
-    // rows. Only kept documents need an explicit trigger here; reprocessed
-    // ("add"/"replace") documents re-enter the normal pipeline, which enqueues
-    // wiki ingest itself.
+    // Wiki is source-set-derived data: never copy its storage-host chunks.
+    // Rebuild it against the new target documents, with durable delivery in
+    // this same initialization transaction.
     if !kept_docs.is_empty() {
         let source_had_wiki: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE product_version_id = $1)",
         )
         .bind(source_version_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         if source_had_wiki {
             for document_id in kept_docs {
+                crate::workflow::put_tx(
+                    &mut tx,
+                    document_id,
+                    target_version_id,
+                    1,
+                    &crate::workflow::Work::Wiki,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
                 follow.push(FollowUp {
                     task_type: platform::TYPE_WIKI_INGEST,
                     queue: platform::QUEUE_WIKI,
@@ -201,20 +211,20 @@ pub async fn run_clone(
             }
         }
     }
-
     sqlx::query("UPDATE product_versions SET status = 'active', updated_at = now() WHERE id = $1")
         .bind(target_version_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
     if make_current {
         sqlx::query("UPDATE products SET current_version_id = $1 WHERE id = $2")
             .bind(target_version_id)
             .bind(product_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
     }
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(follow)
 }
 

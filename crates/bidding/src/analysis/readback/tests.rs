@@ -142,6 +142,7 @@ fn inventory(units: Vec<Unit>) -> (OutputInventoryManifest, Vec<StructuredSource
         parser: "docreader-output-inventory-v1/test".into(),
         config: json!({"profile":docparser::OUTPUT_INVENTORY_PROFILE}),
         page_count: None,
+        page_manifest: vec![],
         image_sha256: Default::default(),
         units: entries,
     };

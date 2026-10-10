@@ -60,7 +60,12 @@ pub(crate) async fn finish_knowledge_document_job(
             }
             Ok(())
         }
-        Err(error) => Err(JobErr(error)),
+        Err(error) => {
+            knowledge::ingest::fail_now(pool, document_id, attempt, &error)
+                .await
+                .map_err(JobErr)?;
+            Err(JobErr(error))
+        }
     }
 }
 

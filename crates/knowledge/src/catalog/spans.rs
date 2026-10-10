@@ -122,8 +122,8 @@ pub async fn start_span(
     .bind(input)
     .execute(pool)
     .await?;
-    sqlx::query("UPDATE documents SET updated_at = now() WHERE id = $1")
-        .bind(document_id)
+    sqlx::query("UPDATE documents SET updated_at = now() WHERE id = $1 AND attempt=$2 AND parse_status NOT IN ('cancelled','deleting','deleted')")
+        .bind(document_id).bind(attempt)
         .execute(pool)
         .await?;
     Ok(())
@@ -168,8 +168,8 @@ pub async fn finish_span(
     if n == 0 {
         upsert_span(pool, document_id, attempt, name, status, output).await?;
     }
-    sqlx::query("UPDATE documents SET updated_at = now() WHERE id = $1")
-        .bind(document_id)
+    sqlx::query("UPDATE documents SET updated_at = now() WHERE id = $1 AND attempt=$2 AND parse_status NOT IN ('cancelled','deleting','deleted')")
+        .bind(document_id).bind(attempt)
         .execute(pool)
         .await?;
     Ok(())
@@ -385,25 +385,4 @@ pub async fn list_spans_attempt(
         });
     }
     Ok(out)
-}
-
-pub async fn finalize_subtask(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE documents SET
-            pending_subtasks_count = GREATEST(pending_subtasks_count - 1, 0),
-            parse_status = CASE
-                WHEN parse_status = 'finalizing'
-                     AND pending_subtasks_count <= 1
-                     AND COALESCE(error_message, '') NOT LIKE '%ocr_error%'
-                     AND COALESCE(error_message, '') NOT LIKE '%caption_error%'
-                THEN 'completed'
-                ELSE parse_status
-            END,
-            updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(document_id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }

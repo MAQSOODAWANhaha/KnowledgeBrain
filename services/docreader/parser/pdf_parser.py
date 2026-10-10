@@ -29,6 +29,7 @@ from docreader.config import CONFIG
 from docreader.models.document import (
     Document,
     DocumentLocator,
+    PageLocator,
     ImageLocator,
     PageTableLocator,
     PdfTableCell,
@@ -40,7 +41,10 @@ from docreader.models.document import (
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.concurrency import parser_worker_limit
 from docreader.parser.image_identity import image_pixel_identity
-from docreader.parser.structure import outline_flags, promote_structural_headings
+from docreader.parser.structure import (
+    explicit_heading_kind, is_index_entry, is_index_entry_prefix, outline_flags,
+    promote_structural_headings, structural_heading, subordinate_heading_level,
+)
 from docreader.parser.pdf_tables import (
     PdfTableGrid,
     chars_outside_tables,
@@ -1578,26 +1582,12 @@ def _demote_banner_headings(texts: list, classes: list, repeating: set) -> list:
     return demoted
 
 
-_INDEX_ENTRY_RE = re.compile(r"[.…·‐‑―─]{2,}\s*\d{1,4}\s*$")
-_INDEX_ENTRY_PREFIX_RE = re.compile(r"[.…·‐‑―─]{2,}\s*$")
-
-
 def _looks_like_index_entry(title: str) -> bool:
-    """目录/索引短条目：短行 + 省略号引导线 + 页码。"""
-    title = title.strip()
-    if not title or len(title) > 80:
-        return False
-    return bool(_INDEX_ENTRY_RE.search(title))
+    return is_index_entry(title)
 
 
 def _looks_like_index_entry_prefix(title: str) -> bool:
-    """疑似跨页条目的上半部分：短行，以省略号引导线结尾但还没有页码。"""
-    title = title.strip()
-    if not title or len(title) > 80:
-        return False
-    if _INDEX_ENTRY_RE.search(title):
-        return False
-    return bool(_INDEX_ENTRY_PREFIX_RE.search(title))
+    return is_index_entry_prefix(title)
 
 
 def _merge_short_index_continuations(texts: list, classes: list) -> list:
@@ -1667,6 +1657,8 @@ def _sectionize_pages(
     next_ordinal = 0
     current: Optional[tuple[int, str]] = None
     buf: list[str] = []
+    volume_title: Optional[str] = None
+    chapter_title: Optional[str] = None
 
     def heading_path() -> str:
         return " > ".join(part for part in stack if part)
@@ -1695,16 +1687,45 @@ def _sectionize_pages(
         next_ordinal += 1
 
     for page, text in enumerate(promoted):
+        normalized = []
         for line in text.splitlines():
             atx = _atx_heading(line)
+            if atx is not None and (is_index_entry(atx[1]) or is_index_entry_prefix(atx[1])):
+                # Font-based ATX and already-demoted TOC rows share this final
+                # guard. Preserve text; never create section identity for it.
+                line, atx = atx[1], None
             if atx is not None:
+                level, title = atx
+                label = explicit_heading_kind(title)
+                if label == "volume":
+                    volume_title, chapter_title = title, None
+                    level = 1
+                elif label == "chapter":
+                    chapter_title = title
+                    stack = [volume_title] if volume_title else []
+                    level = len(stack) + 1
+                else:
+                    owners = ([volume_title] if volume_title else []) + ([chapter_title] if chapter_title else [])
+                    if owners:
+                        # Font sizes or decimal clauses cannot eject subsequent
+                        # text from an explicit volume/chapter ownership chain.
+                        stack = owners + stack[len(owners):]
+                        structural = structural_heading(title, allow_numbered, allow_deep)
+                        depth = subordinate_heading_level(title, structural[0]) if structural else max(1, level - len(owners))
+                        if label == "section":
+                            depth = 1
+                        level = len(owners) + depth
+                line = f"{'#' * min(level, 6)} {title}"
                 flush(page)
-                open_section(atx[0], atx[1])
+                open_section(level, title)
                 buf = [line]
+                normalized.append(line)
                 continue
             if line.strip() and current is None:
                 open_section(0, "")
             buf.append(line)
+            normalized.append(line)
+        promoted[page] = "\n".join(normalized)
         flush(page)
     return promoted, fragments
 
@@ -1899,14 +1920,20 @@ class PDFParser(BaseParser):
             # Pass 1: cheap text extraction + image-area classification.
             texts: list = []
             classes: list = []
+            page_classifications: list = []
+            page_symbols: list = []
             vector_clips: dict = {}
             page_tables: dict = {}
             for i in range(page_count):
                 page = pdf[i]
                 try:
                     plain = _extract_page_text(page)
+                    from docreader.parser.pdf_symbols import collect_page_symbols
+                    page_symbols.extend(collect_page_symbols(page, i, pdfium_r, {}))
                     ratio = _page_image_area_ratio(page, pdfium_r)
                     cls = _classify_page(ratio, len(plain.strip()))
+                    blank = not plain.strip() and not any(page.get_objects())
+                    page_classifications.append("blank" if blank else cls)
                     # Layout reconstruction only pays off (and is only spent) on
                     # native text pages; scanned pages are rendered, not read.
                     # Font-size headings are harvested even when the plain text
@@ -2042,6 +2069,7 @@ class PDFParser(BaseParser):
 
         metadata = {
             "page_count": page_count,
+            "page_classifications": page_classifications,
             "scanned_page_count": len(scanned_indices),
             "text_page_count": page_count - len(scanned_indices),
             "embedded_image_count": embedded_count,
@@ -2092,6 +2120,7 @@ class PDFParser(BaseParser):
                                         section_ordinal=section_ordinal,
                                         heading_path=heading_path,
                                     ),
+                                    physical_locator=PageLocator(page_ordinal=i),
                                 )
                             )
                             piece_ordinal += 1
@@ -2132,6 +2161,8 @@ class PDFParser(BaseParser):
                         bounds,
                     )
                 )
+        from docreader.parser.pdf_symbols import normalize_pdf_units
+        metadata["glyph_normalizations"] = normalize_pdf_units(structured_units, page_symbols)
         return Document(
             content=content_text,
             images=images,

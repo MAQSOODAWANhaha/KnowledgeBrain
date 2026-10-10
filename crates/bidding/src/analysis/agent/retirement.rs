@@ -23,7 +23,7 @@ const RETIRED: &[&str] = &[
 
 fn input() -> FrozenInput {
     FrozenInput {
-        schema_version: 1,
+        schema_version: 2,
         project_id: "project".into(),
         document_set_id: "set".into(),
         documents: vec![],
@@ -40,7 +40,7 @@ fn input() -> FrozenInput {
     }
 }
 
-fn checkpoint(input: &FrozenInput) -> Checkpoint {
+pub(super) fn checkpoint(input: &FrozenInput) -> Checkpoint {
     Checkpoint {
         journal: Default::default(),
         input_sha256: digest(input).unwrap(),
@@ -52,29 +52,18 @@ fn checkpoint(input: &FrozenInput) -> Checkpoint {
         role: Role::Main,
         analysis: Analysis::default(),
         review: None,
-        review_draft: BTreeMap::new(),
-        source_review: None,
-        repair: Default::default(),
-        dispatch: Default::default(),
-        reviewer_coverage: Default::default(),
         pending_coverage: None,
         transcript: vec![],
         main_progress: Default::default(),
-        reviewer_progress: Default::default(),
         main_work: None,
-        reviewer_work: None,
         done: false,
         source_views: BTreeMap::new(),
         draft_stage: crate::analysis::draft::DraftStage::Outline,
-        draft_active_id: None,
         draft_outline_gaps: None,
         draft_outline_stalls: 0,
         draft_outline_window: 0,
-        draft_stopped: false,
-        draft_compile_object_id: None,
-        draft_docx_base64: None,
         outline_config_sha256: None,
-        fill_config_sha256: None,
+
         outline_run: Default::default(),
     }
 }
@@ -88,10 +77,15 @@ fn committed_packs(input: &FrozenInput) -> DiscoverWork {
         }
         for pack in claimed {
             work.submit(
+                input,
                 &pack.id,
                 PackSubmit {
-                    call_id: "call".into(),
+                    call_id: format!("call:{}", pack.id),
+                    claim_token: pack.claim_token.clone(),
+                    pack_revision: pack.pack_revision,
                     requirements: vec![],
+                    no_requirement_reason: Some("No requirements in this fixture".into()),
+                    inspected_atom_ids: pack.atoms.iter().map(|atom| atom.id.clone()).collect(),
                 },
             )
             .unwrap();
@@ -120,12 +114,14 @@ fn finished_draft() -> Draft {
             slot_id: "letter:bidder".into(),
             chapter_id: "letter".into(),
             kind: SlotKind::BidderBlank,
+            content: crate::outline::TemplateBody::EditableBlank,
             text: String::new(),
             response_required: true,
             match_query: "投标人名称".into(),
         }],
         slots_submitted: true,
         finished: true,
+        ..Default::default()
     }
 }
 
@@ -173,7 +169,6 @@ impl Journal for RecordingJournal {
 #[test]
 fn production_constructor_uses_the_one_shot_contract() {
     let config = super::super::tests::config();
-    assert_eq!(config.limits.reviewer_reserve, 0);
     assert_eq!(
         config.tools_sha256,
         digest(&crate::outline::agent::schemas()).unwrap()
@@ -188,20 +183,19 @@ async fn product_requests_do_not_register_retired_outline_tools() {
     let discover_body = request_body(&input, &config, &mut discover).await;
     assert_eq!(
         tool_names(&discover_body),
-        vec!["submit_pack".to_string(), "read_outline".to_string()]
+        crate::outline::agent::schemas_for(crate::outline::agent::Duty::Discover)
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
     );
 
     let mut organize = checkpoint(&input);
     organize.outline_run.reading_packs = Some(committed_packs(&input));
     let organize_body = request_body(&input, &config, &mut organize).await;
-    let organize_tools = vec![
-        "put_chapters".to_string(),
-        "bind_forms".to_string(),
-        "bind_forms_append".to_string(),
-        "put_slots".to_string(),
-        "put_slots_append".to_string(),
-        "read_outline".to_string(),
-    ];
+    let organize_tools = crate::outline::agent::schemas_for(crate::outline::agent::Duty::Organize)
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
     assert_eq!(tool_names(&organize_body), organize_tools);
 
     let mut organize_with_chapters = organize.clone();
@@ -215,15 +209,19 @@ async fn product_requests_do_not_register_retired_outline_tools() {
     check.outline_run.tool_draft.slots = vec![TemplateContent {
         slot_id: "letter:fixed".into(),
         chapter_id: "letter".into(),
-        kind: SlotKind::FixedText,
-        text: "投标函".into(),
-        response_required: false,
-        match_query: String::new(),
+        kind: SlotKind::BidderBlank,
+        content: crate::outline::TemplateBody::EditableBlank,
+        text: String::new(),
+        response_required: true,
+        match_query: "投标函".into(),
     }];
     let check_body = request_body(&input, &config, &mut check).await;
     assert_eq!(
         tool_names(&check_body),
-        vec!["read_outline".to_string(), "finish_outline".to_string()]
+        crate::outline::agent::schemas_for(crate::outline::agent::Duty::Check)
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
     );
 
     for body in [
@@ -252,8 +250,7 @@ fn product_dispatch_rejects_retired_outline_tools_without_old_checks() {
     for name in RETIRED {
         let error = super::apply(&input, &config, &mut state, name, &json!({})).unwrap_err();
         assert!(
-            error
-                .contains("discover cannot write chapters, template slots, or knowledge responses"),
+            error.contains("tool is not allowed in the current outline duty"),
             "{name} reached outline_flow: {error}"
         );
     }
@@ -305,7 +302,7 @@ fn span(end: usize) -> Span {
 /// A scanned outline whose old `finish_outline` would move phase to `check`.
 fn finishable_old_outline() -> (FrozenInput, Checkpoint) {
     let input = FrozenInput {
-        schema_version: 1,
+        schema_version: 2,
         project_id: "p".into(),
         document_set_id: "d".into(),
         documents: vec![],

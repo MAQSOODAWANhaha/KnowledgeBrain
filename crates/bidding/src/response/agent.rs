@@ -144,7 +144,7 @@ mod tests {
         };
         use serde_json::json;
         let artifact = OutlineArtifact {
-            schema_version: 1,
+            schema_version: crate::outline::SCHEMA_VERSION,
             project_id: "project".into(),
             frozen_input_sha256: "ab".repeat(32),
             chapters: vec![ChapterOutline {
@@ -159,15 +159,22 @@ mod tests {
                 slot_id: "bidder".into(),
                 chapter_id: "letter".into(),
                 kind: SlotKind::BidderBlank,
+                content: crate::outline::TemplateBody::EditableBlank,
                 text: String::new(),
                 response_required: true,
                 match_query: "投标人".into(),
             }],
             open_issues: vec![],
+            required_requirement_ids: Default::default(),
+            requirements: Default::default(),
+            fulfillments: vec![],
+            review_issues: vec![],
+            needs_review: false,
+            semantic_review_complete: true,
         };
         let read = apply(&artifact, "read_outline", &json!({})).unwrap();
         assert_eq!(read["slots"][0]["slot_id"], json!("bidder"));
-        assert!(apply(&artifact, "put_chapters", &json!({})).is_err());
+        assert!(apply(&artifact, "put_chapters", &json!({"mode":"replace",})).is_err());
         let missing = apply(
             &artifact,
             "put_responses",

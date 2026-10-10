@@ -635,7 +635,13 @@ fn reduce_grouped(
             }
             continue;
         }
-        let existing = store.wiki.get(&(version_id, slug.clone())).cloned();
+        // Draft pages were invalidated by a source change. Their old prose and
+        // references are never inputs to a newly published generation.
+        let existing = store
+            .wiki
+            .get(&(version_id, slug.clone()))
+            .filter(|page| page.status == "published")
+            .cloned();
         let mut chunk_ids = Vec::new();
         for u in &updates {
             chunk_ids.extend(u.chunk_ids.iter().copied());
@@ -668,6 +674,7 @@ fn reduce_grouped(
                 .filter_map(|did| {
                     store.wiki.values().find(|p| {
                         p.product_version_id == version_id
+                            && p.status == "published"
                             && p.page_type == PAGE_SUMMARY
                             && p.source_refs.contains(did)
                     })
@@ -1089,40 +1096,21 @@ fn write_index_page(store: &mut WikiJob, version_id: Uuid) {
     let mut pages: Vec<_> = store
         .wiki
         .values()
-        .filter(|p| p.product_version_id == version_id && p.page_type != PAGE_INDEX)
+        .filter(|p| {
+            p.product_version_id == version_id
+                && p.status == "published"
+                && p.page_type != PAGE_INDEX
+        })
         .cloned()
         .collect();
     pages.sort_by(|a, b| a.page_type.cmp(&b.page_type).then(a.title.cmp(&b.title)));
     for p in pages {
         lines.push(format!("- [[{}|{}]] ({})", p.slug, p.title, p.page_type));
     }
-    let content = lines.join("\n");
-    let slug = PAGE_INDEX.to_string();
-    let page = WikiPage::published(
-        store
-            .wiki
-            .get(&(version_id, slug.clone()))
-            .map(|p| p.id)
-            .unwrap_or_else(Uuid::new_v4),
-        version_id,
-        slug.clone(),
-        "Index".into(),
-        content.clone(),
-        PAGE_INDEX.into(),
-        "Wiki index".into(),
-    );
-    store.wiki.insert((version_id, slug.clone()), page);
-    store
-        .chunks
-        .retain(|_, c| !(c.product_version_id == version_id && c.context_header == PAGE_INDEX));
-    index_wiki_page(
-        store,
-        version_id,
-        Uuid::nil(),
-        PAGE_INDEX,
-        "Index",
-        &content,
-    );
+    upsert_system_page(store, version_id, PAGE_INDEX, "Index", &lines.join("\n"));
+    if let Some(page) = store.wiki.get_mut(&(version_id, PAGE_INDEX.to_string())) {
+        page.summary = "Wiki index".into();
+    }
 }
 
 fn plan_and_apply_taxonomy(store: &mut WikiJob, version_id: Uuid, slugs: &[(String, String)]) {
@@ -1245,7 +1233,9 @@ fn write_log_page(store: &mut WikiJob, version_id: Uuid) {
     let mut pages: Vec<_> = store
         .wiki
         .values()
-        .filter(|p| p.product_version_id == version_id && p.page_type != PAGE_LOG)
+        .filter(|p| {
+            p.product_version_id == version_id && p.status == "published" && p.page_type != PAGE_LOG
+        })
         .cloned()
         .collect();
     pages.sort_by(|a, b| a.title.cmp(&b.title));
@@ -1262,7 +1252,11 @@ fn write_synthesis_pages(store: &mut WikiJob, version_id: Uuid) {
     let entities: Vec<_> = store
         .wiki
         .values()
-        .filter(|p| p.product_version_id == version_id && p.page_type == PAGE_ENTITY)
+        .filter(|p| {
+            p.product_version_id == version_id
+                && p.status == "published"
+                && p.page_type == PAGE_ENTITY
+        })
         .cloned()
         .collect();
     if entities.len() < 2 {
@@ -1309,18 +1303,28 @@ fn upsert_system_page(
         .get(&(version_id, slug.to_string()))
         .map(|p| p.id)
         .unwrap_or_else(Uuid::new_v4);
-    store.wiki.insert(
-        (version_id, slug.to_string()),
-        WikiPage::published(
-            id,
-            version_id,
-            slug.to_string(),
-            title.into(),
-            content.to_string(),
-            slug.to_string(),
-            content.chars().take(240).collect(),
-        ),
+    let mut page = WikiPage::published(
+        id,
+        version_id,
+        slug.to_string(),
+        title.into(),
+        content.to_string(),
+        slug.to_string(),
+        content.chars().take(240).collect(),
     );
+    // System pages also derive from document content. Preserve their source
+    // dependencies so tombstone/reparse invalidation covers syntheses and logs.
+    for source in store.wiki.values().filter(|page| {
+        page.product_version_id == version_id && page.status == "published" && page.slug != slug
+    }) {
+        page.source_refs.extend(source.source_refs.iter().copied());
+        page.chunk_refs.extend(source.chunk_refs.iter().copied());
+    }
+    page.source_refs.sort_unstable();
+    page.source_refs.dedup();
+    page.chunk_refs.sort_unstable();
+    page.chunk_refs.dedup();
+    store.wiki.insert((version_id, slug.to_string()), page);
     store
         .chunks
         .retain(|_, c| !(c.product_version_id == version_id && c.context_header == slug));
@@ -1990,6 +1994,39 @@ mod tests {
             !s.wiki
                 .values()
                 .any(|page| page.page_type == PAGE_ENTITY && page.title == "Alpha")
+        );
+    }
+
+    #[test]
+    fn invalidated_draft_prose_is_not_reused_by_a_new_reducer() {
+        let (mut store, version, document) = seed();
+        enqueue_ingest_on_job(&mut store, version, document);
+        process_ingest_on_job(&mut store, version).unwrap();
+        process_finalize_on_job(&mut store, version).unwrap();
+        for page in store.wiki.values_mut() {
+            page.status = "draft".into();
+            page.content = "INVALIDATED_SECRET_TEXT".into();
+            page.summary = "INVALIDATED_SECRET_TEXT".into();
+        }
+        enqueue_ingest_on_job(&mut store, version, document);
+        process_ingest_on_job(&mut store, version).unwrap();
+        process_finalize_on_job(&mut store, version).unwrap();
+        let published = store
+            .wiki
+            .values()
+            .filter(|page| page.status == "published")
+            .collect::<Vec<_>>();
+        assert!(!published.is_empty());
+        assert!(
+            published
+                .iter()
+                .all(|page| !page.content.contains("INVALIDATED_SECRET_TEXT"))
+        );
+        assert!(
+            published
+                .iter()
+                .filter(|page| matches!(page.page_type.as_str(), PAGE_LOG | PAGE_INDEX))
+                .all(|page| page.source_refs.contains(&document))
         );
     }
 

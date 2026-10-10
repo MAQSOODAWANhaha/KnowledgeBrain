@@ -566,7 +566,7 @@ pub(crate) async fn recall_in_snapshot(
             AND NOT EXISTS(
               SELECT 1 FROM documents pending_document
                WHERE pending_document.product_version_id=vector_generation.product_version_id
-                 AND pending_document.deleted_at IS NULL
+                 AND pending_document.deleted_at IS NULL AND pending_document.parse_status NOT IN ('deleting','deleted','cancelled')
                  AND (pending_document.parse_status IN ('pending','processing','finalizing')
                       OR pending_document.pending_subtasks_count<>0
                       OR pending_document.summary_status IN ('pending','processing')))
@@ -606,7 +606,7 @@ pub(crate) async fn recall_in_snapshot(
              AND v.product_version_id=c.product_version_id
              AND v.embedding_revision_sha256=$4
           WHERE c.product_version_id=ANY($1::uuid[]) AND d.product_version_id=c.product_version_id
-AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
+AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation AND d.enable_status='enabled' AND d.index_ready
 AND c.chunk_type=ANY($5::text[])
 AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
 ORDER BY c.id",
@@ -773,7 +773,7 @@ async fn load_signals(
            FROM chunks c JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
            JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id
            JOIN workspaces w ON w.id=p.workspace_id
-          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL
+          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($3::text[])
             AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))"
     ).bind(workspace_kind).bind(versions).bind(SIGNAL_TYPES.as_slice()).fetch_all(&mut **tx).await.map_err(db)?;
@@ -806,7 +806,7 @@ async fn load_sources(
         "SELECT c.id,c.product_version_id,c.document_id,c.chunk_type,c.content,c.context_header,c.parent_chunk_id,p.id AS product_id,d.file_name
            FROM chunks c JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
            JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
-          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
+          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation AND d.enable_status='enabled' AND d.index_ready
             AND c.chunk_type=ANY($3::text[])
             AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))"
     ).bind(workspace_kind).bind(versions).bind(["text","parent_text","image_ocr"].as_slice()).fetch_all(&mut **tx).await.map_err(db)?;
@@ -841,7 +841,7 @@ async fn keyword_ranks(
            FROM query_value q JOIN chunks c ON true JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
            JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
            JOIN chunk_keyword_indexes_v2 k ON k.chunk_id=c.id AND k.tokenizer=$4 AND k.tokenizer_version=$5
-          WHERE q.value IS NOT NULL AND w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL
+          WHERE q.value IS NOT NULL AND w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($8::text[])
 AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
 AND k.tsv @@ q.value),
@@ -876,7 +876,7 @@ async fn vector_ranks(
            JOIN chunk_vector_indexes_v2 v ON v.chunk_id=c.id
             AND v.product_version_id=c.product_version_id
             AND v.embedding_revision_sha256=$4
-          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL
+          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($5::text[])
             AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
             AND ((v.embedding <=> CAST($3 AS vector))::float8)::text IN ('NaN','Infinity','-Infinity')",
@@ -899,7 +899,7 @@ async fn vector_ranks(
            JOIN chunk_vector_indexes_v2 v ON v.chunk_id=c.id
             AND v.product_version_id=c.product_version_id
             AND v.embedding_revision_sha256=$4
-          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($7::text[])
+          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($7::text[])
 AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))),
          scored AS (SELECT *,floor(least(1.0::float8,greatest(0.0::float8,1.0-distance))*1000000)::bigint AS score FROM distances
                     WHERE distance::text NOT IN ('NaN','Infinity','-Infinity')),
@@ -936,7 +936,7 @@ async fn load_graph_refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows=sqlx::query("SELECT s.id,n.chunk_ids FROM chunks s JOIN graph_nodes n ON n.product_version_id=s.product_version_id AND n.document_id=s.document_id AND n.name=s.context_header WHERE s.id=ANY($1::uuid[]) AND s.content=n.name ORDER BY s.id")
+    let rows=sqlx::query("SELECT s.id,n.chunk_ids FROM chunks s JOIN graph_nodes n ON n.product_version_id=s.product_version_id AND n.document_id=s.document_id AND n.name=s.context_header AND n.generation=s.generation WHERE s.id=ANY($1::uuid[]) AND s.content=n.name ORDER BY s.id")
         .bind(&ids).fetch_all(&mut **tx).await.map_err(db)?;
     let mut refs = HashMap::new();
     for row in rows {

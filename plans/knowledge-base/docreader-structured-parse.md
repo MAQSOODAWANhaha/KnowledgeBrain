@@ -69,7 +69,7 @@ Agent `read_form` / 编制以 **`structured_forms.definition`** 为准。locator
 
 **列宽**
 
-- 有 `widths_mm` 即实测。PDF 写入现有 `pdf_tables.widths_mm`（已按可打印宽度缩放），避免 `BiddingFile` 编制触 cap。
+历史样本专属结果仅保留在私有档案；公开回归采用合成输入，不代表真实语义验收。
 - Word 仅 `tblGrid` 正宽度；Excel 仅非默认自定义列宽。禁止均分写入 form。
 - **编制必须改 `table_block_from_grid`（`compiler.rs` 与 `docx_template.rs` 共用）：** 接受 schema 3 稀疏锚点；由 `row_span`/`col_span` 推导覆盖与合并，**不要求** `merged_ranges`、**不要求** `cells.len()==rows*cols`、**不把 definition.cells 密铺回存**；有 `widths_mm` 时在函数内合成 edges 仅作局部校验；无 widths 仍 fail-closed。禁止「只合成边然后调用未改的旧 helper」。
 
@@ -117,7 +117,7 @@ sheet `SECTION` 只留标题+身份。有 ListObject：每个 Table 一份 `TABL
 
 | 阶段 | 内容 | 完成条件 |
 | --- | --- | --- |
-| S0 | 身份 locator（7–12 非空则拒绝）；PDF 发出稀疏 `unit.grid`；`p_units.grid`；SQL CHECK `(1,2,3)` 从 grid 插入；**改写** `table_block_from_grid`；密铺下标含 `validate_record`；图 parent 双接受（无 grid 仍认 ROW）；转换 v3 | **合并表 BiddingFile 编制仍通过**（稀疏 form，无 `merged_ranges`）；`read_form` 覆盖位 null；`put_record` 用密铺下标；FrozenInput locator 无 cells |
+历史样本专属结果仅保留在私有档案；公开回归采用合成输入，不代表真实语义验收。
 | S0b | 图 Y 轴 / MIME | 带图 PDF 不因 MIME/倒立坐标失败 |
 | S1 | DOCX OOXML grid；parent 只挂表；删 TABLE_ROW；附件非空 | 合成 DOCX 合并/空格/`read_form`；无 TABLE_ROW 时表内图 decode 通过 |
 | S2 | ListObject → form；无 Table 的 sheet 用 used range；1-based→0-based 行**和列** | 有 Table 或 used range 可 `read_form` |

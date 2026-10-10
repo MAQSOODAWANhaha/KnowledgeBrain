@@ -1,12 +1,8 @@
+pub(crate) mod discover_coordinator;
+mod discover_parallel;
 use super::*;
 use crate::agent_runtime::{Driver, Status, drive};
 pub(super) mod context;
-pub(super) mod evidence_delivery;
-pub(super) mod main_dispatch;
-pub(super) mod main_work;
-pub mod repair;
-pub(super) mod repair_recovery;
-pub(super) mod repair_task_host;
 #[cfg(test)]
 mod retirement;
 mod view_io;
@@ -17,76 +13,57 @@ pub use context::WorkState;
 use context::WorkStatus;
 use knowledge::models::ChatTurn;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use view_io::read_source_view;
 
-const REVIEWER: &str = include_str!("prompts/reviewer.txt");
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
+    /// Explicit capability declaration for the frozen authoring provider/model.
+    /// Images never switch to a different provider behind this contract.
+    pub vision_enabled: bool,
+    pub tokenizer: crate::agent_runtime::chat::TokenizerProfile,
     #[serde(default = "crate::agent_runtime::progress::default_no_progress_turns")]
     pub max_no_progress_turns: usize,
     #[serde(default = "crate::agent_runtime::progress::default_focus_turns")]
     pub max_focus_turns: usize,
     #[serde(default = "crate::agent_runtime::progress::default_focus_replans")]
     pub max_focus_replans: usize,
-    pub max_turns: usize,
-    pub max_tool_calls: usize,
-    pub max_read_bytes: usize,
-    pub max_context_bytes: usize,
-    /// Maximum retained delivered history, excluding the latest pending tool group.
-    pub max_history_bytes: usize,
     /// Application token budget, including estimated input and reserved output.
     pub max_context_tokens: usize,
     pub image_token_reserve: usize,
     pub token_safety_margin: usize,
-    pub max_tool_result_bytes: usize,
-    pub max_review_rounds: usize,
     pub max_source_view_bytes: usize,
     pub max_source_view_edge: u32,
-    /// Turns reserved for independent review. Main must EnterReview before spending these.
-    #[serde(default)]
-    pub reviewer_reserve: usize,
-    /// 1 keeps tests on one source per dispatch root. Production must set ≥6.
-    #[serde(default = "default_pack_max_units")]
-    pub pack_max_units: usize,
-    /// Discover reading window in bytes. Analysis packs treat 0 as no character
-    /// cap. Discover uses this value directly; production sets it in
-    /// `KB_TENDER_AGENT_LIMITS` (see `deploy/.env.example`).
-    #[serde(default)]
-    pub pack_max_chars: usize,
-    /// 0 keeps the existing per-root batch cap. Production packs use 3.
-    #[serde(default)]
-    pub pack_max_turns: usize,
     /// 可选组成绑定附加词；缺省只用 title 包含匹配，禁止代码内置行业词表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_bind_terms: Vec<String>,
 }
 
-fn default_pack_max_units() -> usize {
-    1
-}
-
 impl Limits {
+    /// Explicit ceiling for the currently admitted model profiles. Raising it
+    /// requires a newly verified profile contract, never a Limits override.
+    pub const PROFILE_CONTEXT_CEILING: usize = 131_072;
+    /// Allocation ceiling derived from the sole context-token allowance, not
+    /// an independent segmentation or admission policy. Actual requests are
+    /// admitted exclusively by tokenizer accounting plus output reservation.
+    pub fn context_wire_ceiling(&self) -> usize {
+        let text = self
+            .max_context_tokens
+            .saturating_mul(self.tokenizer.max_piece_bytes());
+        let images = self.max_context_tokens / self.image_token_reserve.max(1);
+        let encoded_image = (self.max_source_view_bytes.saturating_add(2) / 3).saturating_mul(4);
+        text.saturating_add(images.saturating_mul(encoded_image.saturating_add(32)))
+    }
+
     fn progress(&self) -> crate::agent_runtime::progress::ProgressLimits {
         crate::agent_runtime::progress::ProgressLimits {
             max_no_progress_turns: self.max_no_progress_turns,
             max_focus_turns: self.max_focus_turns,
             max_focus_replans: self.max_focus_replans,
         }
-    }
-
-    pub fn at_least_for(
-        mut self,
-        _input: &FrozenInput,
-    ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
-        // 一次成稿不从 `max_turns` 放大工具调用或读字节，也不把它们当停止条件。
-        // 这里只清掉复核预留：大纲运行不留独立复核回合。
-        // 没有阅读包的旧扫描仍使用调用方写明的 `max_turns`、`max_tool_calls`、`max_read_bytes`。
-        self.reviewer_reserve = 0;
-        Ok(self)
     }
 }
 
@@ -95,66 +72,103 @@ impl Limits {
 pub struct Config {
     pub checkpoint_contract_version: u32,
     pub runtime_adapter: String,
-    pub repair_task_policy: String,
-    pub main_dispatch_policy: String,
     pub provider: AuthoringRuntimeContractV1,
     pub limits: Limits,
     pub tools_sha256: String,
-    pub review_tools_sha256: String,
     pub main_prompt_sha256: String,
-    pub review_prompt_sha256: String,
-    pub fill_tools_sha256: String,
-    pub fill_prompt_sha256: String,
 }
 
 impl Config {
     pub fn from_environment() -> Result<Self, AgentError> {
-        Self::from_limits(Self::environment_limits()?)
+        let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()
+            .map_err(|e| error("AGENT_PROVIDER_UNAVAILABLE", e))?;
+        let limits = Self::environment_limits(&provider)?;
+        Self::with_provider(provider, limits)
     }
 
     pub fn from_environment_for(input: &FrozenInput) -> Result<Self, AgentError> {
-        let limits = Self::environment_limits()?
-            .at_least_for(input)
-            .map_err(|refused| {
-                error(
-                    "AGENT_PROVIDER_UNAVAILABLE",
-                    format!(
-                        "extraction turn estimate {} exceeds ceiling {}",
-                        refused.estimated_turns, refused.ceiling
-                    ),
-                )
-            })?;
-        Self::with_provider_for(
-            AuthoringRuntimeContractV1::resolve_tools_from_environment()
-                .map_err(|e| error("AGENT_PROVIDER_UNAVAILABLE", e))?,
-            limits,
-            Some(input),
+        let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()
+            .map_err(|e| error("AGENT_PROVIDER_UNAVAILABLE", e))?;
+        let limits = Self::environment_limits(&provider)?;
+        Self::with_provider_for(provider, limits, Some(input))
+    }
+
+    fn environment_limits(provider: &AuthoringRuntimeContractV1) -> Result<Limits, AgentError> {
+        Self::configured_limits(
+            provider,
+            std::env::var("KB_AUTHORING_TOKENIZER_PROFILE")
+                .ok()
+                .as_deref(),
+            std::env::var("KB_TENDER_AGENT_LIMITS").ok().as_deref(),
         )
     }
 
-    fn environment_limits() -> Result<Limits, AgentError> {
-        let raw = std::env::var("KB_TENDER_AGENT_LIMITS").map_err(|_| {
-            error(
-                "AGENT_PROVIDER_UNAVAILABLE",
-                "KB_TENDER_AGENT_LIMITS is required",
-            )
-        })?;
-        let limits: Limits = serde_json::from_str(&raw).map_err(invalid)?;
-        if limits.pack_max_units < 6 || limits.pack_max_chars < 1200 || limits.pack_max_turns < 3 {
-            return Err(error(
-                "AGENT_PROVIDER_UNAVAILABLE",
-                "KB_TENDER_AGENT_LIMITS must set pack_max_units>=6, pack_max_chars>=1200, pack_max_turns>=3",
-            ));
+    fn configured_limits(
+        provider: &AuthoringRuntimeContractV1,
+        profile: Option<&str>,
+        overrides: Option<&str>,
+    ) -> Result<Limits, AgentError> {
+        let tokenizer = match profile.filter(|v| !v.trim().is_empty()) {
+            Some(raw) => {
+                // Model identity comes from the selected provider, not a duplicate setting.
+                let mut value: Value = serde_json::from_str(raw).map_err(invalid)?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("tokenizer profile must be an object"))?;
+                if object.contains_key("model_id") {
+                    return Err(invalid(
+                        "tokenizer profile model_id is derived from configured provider",
+                    ));
+                }
+                object.insert("model_id".into(), json!(provider.model_id));
+                serde_json::from_value(value).map_err(invalid)?
+            }
+            None => {
+                crate::agent_runtime::TokenizerProfile::published_for_model(&provider.model_id)?
+            }
+        };
+        let mut limits = Self::default_limits(provider, tokenizer)?;
+        // Optional scalar tuning. The model-bound tokenizer and capabilities
+        // are independent of this object; no complete Limits JSON is required.
+        if let Some(raw) = overrides.filter(|v| !v.trim().is_empty()) {
+            let overrides: Value = serde_json::from_str(raw).map_err(invalid)?;
+            let object = overrides
+                .as_object()
+                .ok_or_else(|| invalid("optional limits must be an object"))?;
+            if object.contains_key("tokenizer") {
+                return Err(invalid(
+                    "use model-bound KB_AUTHORING_TOKENIZER_PROFILE instead of limits.tokenizer",
+                ));
+            }
+            let mut effective = serde_json::to_value(&limits).map_err(invalid)?;
+            for (key, value) in object {
+                effective[key] = value.clone();
+            }
+            limits = serde_json::from_value(effective).map_err(invalid)?;
         }
         Ok(limits)
     }
 
-    fn from_limits(limits: Limits) -> Result<Self, AgentError> {
-        Self::with_provider(
-            AuthoringRuntimeContractV1::resolve_tools_from_environment()
-                .map_err(|e| error("AGENT_PROVIDER_UNAVAILABLE", e))?,
-            limits,
-        )
+    fn default_limits(
+        provider: &AuthoringRuntimeContractV1,
+        tokenizer: crate::agent_runtime::TokenizerProfile,
+    ) -> Result<Limits, AgentError> {
+        tokenizer.validate_for_model(&provider.model_id)?;
+        let context = Limits::PROFILE_CONTEXT_CEILING;
+        Ok(Limits {
+            vision_enabled: false,
+            tokenizer,
+            max_no_progress_turns: crate::agent_runtime::progress::default_no_progress_turns(),
+            max_focus_turns: crate::agent_runtime::progress::default_focus_turns(),
+            max_focus_replans: crate::agent_runtime::progress::default_focus_replans(),
+            max_context_tokens: context,
+            image_token_reserve: 16384,
+            token_safety_margin: 4096,
+            // Image decode/resize safeguards; never a cumulative reading allowance.
+            max_source_view_bytes: 1_500_000,
+            max_source_view_edge: 1800,
+            draft_bind_terms: Vec::new(),
+        })
     }
 
     pub fn with_provider(
@@ -166,41 +180,21 @@ impl Config {
 
     pub fn with_provider_for(
         provider: AuthoringRuntimeContractV1,
-        mut limits: Limits,
-        input: Option<&FrozenInput>,
+        limits: Limits,
+        _input: Option<&FrozenInput>,
     ) -> Result<Self, AgentError> {
-        if let Some(input) = input {
-            limits = limits
-                .at_least_for(input)
-                .map_err(|e| invalid(format!("outline budget refused: {e:?}")))?;
-        }
-        let fill_tools_sha256 =
-            digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
-        let fill_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
-            crate::outline::agent::TEMPLATE_PROMPT,
-        ))
-        .map_err(invalid)?;
         let tools_sha256 = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
-        let review_tools_sha256 = digest(&tools::schemas_for(true, &limits)).map_err(invalid)?;
         let main_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
             crate::outline::agent::OUTLINE_PROMPT,
         ))
         .map_err(invalid)?;
-        let review_prompt_sha256 =
-            digest(&crate::agent_runtime::chat::system_content(REVIEWER)).map_err(invalid)?;
         let config = Self {
             checkpoint_contract_version: crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION,
             runtime_adapter: crate::agent_runtime::RUNTIME_ADAPTER_VERSION.into(),
-            repair_task_policy: repair_task_host::POLICY.into(),
-            main_dispatch_policy: main_dispatch::POLICY.into(),
             provider,
             limits,
             tools_sha256,
-            review_tools_sha256,
             main_prompt_sha256,
-            review_prompt_sha256,
-            fill_tools_sha256,
-            fill_prompt_sha256,
         };
         config.validate()?;
         Ok(config)
@@ -222,15 +216,6 @@ impl Config {
                 ),
             ));
         }
-        if self.repair_task_policy != repair_task_host::POLICY {
-            return Err(invalid("repair task policy changed"));
-        }
-        if self.main_dispatch_policy != main_dispatch::POLICY {
-            return Err(invalid("main dispatch policy changed"));
-        }
-        if let Err(message) = repair::tasks::limit(l) {
-            return Err(invalid(message));
-        }
         if self.runtime_adapter != crate::agent_runtime::RUNTIME_ADAPTER_VERSION {
             return Err(error(
                 "FROZEN_INPUT_DIGEST_MISMATCH",
@@ -244,29 +229,12 @@ impl Config {
         if self.provider.response_mode != "tool_calls" {
             return Err(invalid("response_mode must be tool_calls"));
         }
-        // `max_turns == 0` is unused on the one-shot path and means no turn cap.
-        if l.max_turns > 0 && l.reviewer_reserve >= l.max_turns {
-            return Err(invalid("reviewer_reserve must be smaller than max_turns"));
-        }
-        if l.max_tool_calls == 0 {
-            return Err(invalid("max_tool_calls must be positive"));
-        }
-        if l.max_read_bytes == 0 {
-            return Err(invalid("max_read_bytes must be positive"));
-        }
-        if l.max_tool_result_bytes < 1024 {
-            return Err(invalid("max_tool_result_bytes must be at least 1024"));
-        }
-        if l.max_context_bytes <= l.max_tool_result_bytes {
+        if l.max_context_tokens > Limits::PROFILE_CONTEXT_CEILING {
             return Err(invalid(
-                "max_context_bytes must be greater than max_tool_result_bytes",
+                "max_context_tokens exceeds the current model profile ceiling of 131072; a larger window requires a newly verified profile",
             ));
         }
-        if l.max_history_bytes == 0 || l.max_history_bytes >= l.max_context_bytes {
-            return Err(invalid(
-                "max_history_bytes must be positive and below max_context_bytes",
-            ));
-        }
+        l.tokenizer.validate_for_model(&self.provider.model_id)?;
         if l.image_token_reserve == 0 {
             return Err(invalid("image_token_reserve must be positive"));
         }
@@ -274,34 +242,21 @@ impl Config {
             return Err(invalid("token_safety_margin must be positive"));
         }
         if l.token_safety_margin
-            .checked_add(self.provider.max_tokens as usize)
+            .checked_add(self.provider.output_token_reserve as usize)
             .is_none_or(|reserved| reserved >= l.max_context_tokens)
         {
             return Err(invalid(
-                "token_safety_margin plus max_tokens must fit in max_context_tokens",
+                "token_safety_margin plus output_token_reserve must fit in max_context_tokens",
             ));
-        }
-        if l.max_review_rounds == 0 {
-            return Err(invalid("max_review_rounds must be positive"));
         }
         if l.max_source_view_bytes == 0 || l.max_source_view_edge == 0 {
             return Err(invalid("source view limits must be positive"));
         }
-        if l.reviewer_reserve != 0 {
-            return Err(invalid("reviewer_reserve must be 0"));
-        }
         let outline = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
-        let fill = digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
         if self.tools_sha256 != outline {
             return Err(error(
                 "FROZEN_INPUT_DIGEST_MISMATCH",
                 "outline tools digest changed",
-            ));
-        }
-        if self.fill_tools_sha256 != fill {
-            return Err(error(
-                "FROZEN_INPUT_DIGEST_MISMATCH",
-                "template tools digest changed",
             ));
         }
         if self.main_prompt_sha256
@@ -313,31 +268,6 @@ impl Config {
             return Err(error(
                 "FROZEN_INPUT_DIGEST_MISMATCH",
                 "outline prompt digest changed",
-            ));
-        }
-        if self.fill_prompt_sha256
-            != digest(&crate::agent_runtime::chat::system_content(
-                crate::outline::agent::TEMPLATE_PROMPT,
-            ))
-            .map_err(invalid)?
-        {
-            return Err(error(
-                "FROZEN_INPUT_DIGEST_MISMATCH",
-                "template prompt digest changed",
-            ));
-        }
-        if self.review_tools_sha256 != digest(&tools::schemas_for(true, l)).map_err(invalid)? {
-            return Err(error(
-                "FROZEN_INPUT_DIGEST_MISMATCH",
-                "review tools digest changed",
-            ));
-        }
-        if self.review_prompt_sha256
-            != digest(&crate::agent_runtime::chat::system_content(REVIEWER)).map_err(invalid)?
-        {
-            return Err(error(
-                "FROZEN_INPUT_DIGEST_MISMATCH",
-                "review prompt digest changed",
             ));
         }
         Ok(())
@@ -359,7 +289,6 @@ impl Config {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Main,
-    Reviewer,
 }
 
 fn no_stall(stalls: &usize) -> bool {
@@ -379,29 +308,17 @@ pub struct Checkpoint {
     pub role: Role,
     pub analysis: Analysis,
     pub review: Option<Review>,
-    pub review_draft: BTreeMap<String, Finding>,
-    pub source_review: Option<source_review::State>,
-    #[serde(default)]
-    pub repair: repair::State,
-    #[serde(default)]
-    pub dispatch: main_dispatch::State,
-    pub reviewer_coverage: Coverage,
     /// Coverage after pending read results, committed only after the next
     /// complete model response. Belongs to `role`, not to the other Agent.
     pub pending_coverage: Option<Coverage>,
     pub transcript: Vec<Value>,
     #[serde(default)]
     pub main_progress: Progress,
-    #[serde(default)]
-    pub reviewer_progress: Progress,
     pub main_work: Option<WorkState>,
-    pub reviewer_work: Option<WorkState>,
     pub done: bool,
     pub source_views: BTreeMap<String, views::SourceView>,
     #[serde(default)]
     pub draft_stage: crate::analysis::draft::DraftStage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft_active_id: Option<String>,
     /// 上一轮宿主完整性清单的缺口条数，用来判定修补轮是否还在减少缺口。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_outline_gaps: Option<usize>,
@@ -410,67 +327,29 @@ pub struct Checkpoint {
     #[serde(default, skip_serializing_if = "no_stall")]
     pub draft_outline_window: usize,
     /// 这次填章是用户叫停的，不是填完了。稿子照出，剩下的章仍空着。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub draft_stopped: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft_compile_object_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft_docx_base64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline_config_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fill_config_sha256: Option<String>,
     pub outline_run: crate::analysis::outline_flow::OutlineRun,
 }
 
 impl Checkpoint {
     // A prior draft is repair feedback, never a completed review. In normal
     // repair cycles the finalized report remains the authoritative feedback.
-    pub(super) fn findings_for_repair(&self) -> Vec<&Finding> {
-        self.review.as_ref().map_or_else(
-            || self.review_draft.values().collect(),
-            |review| review.findings.iter().collect(),
-        )
-    }
-
     pub(super) fn work(&self) -> Option<&WorkState> {
-        if self.role == Role::Main {
-            self.main_work.as_ref()
-        } else {
-            self.reviewer_work.as_ref()
-        }
+        self.main_work.as_ref()
     }
-
     fn execution(&self) -> &Progress {
-        if self.role == Role::Main {
-            &self.main_progress
-        } else {
-            &self.reviewer_progress
-        }
+        &self.main_progress
     }
-
     pub(super) fn coverage(&self) -> &Coverage {
-        if self.role == Role::Main {
-            &self.analysis.coverage
-        } else {
-            &self.reviewer_coverage
-        }
+        &self.analysis.coverage
     }
-
     pub(super) fn replace_coverage(&mut self, coverage: Coverage) -> Coverage {
-        if self.role == Role::Main {
-            std::mem::replace(&mut self.analysis.coverage, coverage)
-        } else {
-            std::mem::replace(&mut self.reviewer_coverage, coverage)
-        }
+        std::mem::replace(&mut self.analysis.coverage, coverage)
     }
 
     pub fn progress(&self, input: &FrozenInput) -> Value {
-        let coverage = if self.role == Role::Main {
-            &self.analysis.coverage
-        } else {
-            &self.reviewer_coverage
-        };
+        let coverage = &self.analysis.coverage;
         let product_outline =
             self.outline_run.reading_packs.is_some() || !self.outline_run.tool_draft.is_empty();
         let outline_chapters = if product_outline {
@@ -499,17 +378,13 @@ impl Checkpoint {
             "source_count":input.source_units.len(),"disposition_count":self.analysis.dispositions.len(),
             "source_views":coverage.views.len(),"source_view_failures":coverage.view_failures.len(),
             "review_findings":self.review.as_ref().map_or(0,|r|r.findings.len()),
-            "draft_review_findings":self.review_draft.len(),
-            "draft_active_id":self.draft_active_id,
+
             // 填章面板要显示「已填 N/M 章 + 当前章」，这三项是它唯一的数据来源。
             "draft_chapters":self.analysis.draft_plan.iter()
                 .filter(|item| item.status != crate::analysis::draft::DraftStatus::Omitted).count(),
             "draft_filled":self.analysis.draft_plan.iter()
                 .filter(|item| item.status == crate::analysis::draft::DraftStatus::Filled).count(),
-            "draft_active_title":self.draft_active_id.as_ref().and_then(|id|
-                self.analysis.draft_plan.iter().find(|item| &item.id == id).map(|item| item.title.clone())),
-            "draft_stopped":self.draft_stopped,
-            "execution_watch":self.execution().watch,"execution_blockers":self.main_progress.blockers.len()+self.reviewer_progress.blockers.len()});
+            "execution_watch":self.execution().watch,"execution_blockers":self.main_progress.blockers.len()});
         if let Some(work) = &self.outline_run.reading_packs {
             let counts = work.pack_counts();
             progress["outline_pack_total"] = json!(counts.total);
@@ -522,12 +397,50 @@ impl Checkpoint {
     }
 }
 
+fn tool_result_envelope(value: Value) -> Value {
+    if value.get("ok") == Some(&Value::Bool(false)) {
+        json!({"ok":false,"error":"BUSINESS_REJECTED","result":value})
+    } else {
+        json!({"ok":true,"result":value})
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn business_rejection_is_false_at_model_boundary() {
+    let value = json!({"ok":false,"feedback":{"code":"stale_claim"},"state_changed":false});
+    let output = tool_result_envelope(value.clone());
+    assert_eq!(output["ok"], false);
+    assert_eq!(output["result"], value);
+    assert_eq!(tool_result_envelope(json!({"ok":true}))["ok"], true);
+}
+
 #[async_trait]
 pub trait Journal: Send + Sync {
     async fn load(&self) -> Result<Option<Checkpoint>, AgentError>;
+    /// Read-only admission of projected accounting, before any durable reservation.
+    async fn admit(&self, _state: &Checkpoint, _body: &[u8]) -> Result<(), AgentError> {
+        Ok(())
+    }
     /// Reserve before HTTP; None means the attempt-independent boundary budget
     /// is exhausted. Persist the exact request bytes, including tool contracts.
     async fn reserve(&self, state: &Checkpoint, body: &[u8]) -> Result<Option<usize>, AgentError>;
+    /// The single Discover coordinator atomically persists all worker journals
+    /// and shared accounting under the same root lease, before dispatch.
+    async fn reserve_discover_worker(
+        &self,
+        state: &Checkpoint,
+        request_id: &str,
+        body: &[u8],
+    ) -> Result<(), AgentError> {
+        let valid=state.outline_run.discover_workers.values().any(|worker| matches!(&worker.pending,
+            Some(discover_coordinator::Pending::Sending{request}) if request.scope.request==request_id && request.body==body));
+        if !valid {
+            return Err(invalid("worker reservation identity mismatch"));
+        }
+        self.save(state, &serde_json::json!({"discover_request":request_id}))
+            .await
+    }
     async fn save(&self, state: &Checkpoint, progress: &Value) -> Result<(), AgentError>;
     async fn source_view(
         &self,
@@ -580,29 +493,6 @@ pub(in crate::analysis) fn outline_execution_blocked(state: &Checkpoint) -> bool
             || state.analysis.outline.phase == super::outline_flow::Phase::Discover)
 }
 
-/// Reading packs mean this checkpoint is the one-shot outline loop.
-/// That loop is not stopped by `max_turns`. Fill and the old scan path still are.
-pub(in crate::analysis) fn one_shot_outline(state: &Checkpoint) -> bool {
-    matches!(
-        state.draft_stage,
-        draft::DraftStage::None | draft::DraftStage::Outline
-    ) && state.outline_run.reading_packs.is_some()
-}
-
-pub(in crate::analysis) fn turn_limit_reached(state: &Checkpoint, max_turns: usize) -> bool {
-    // Zero is not a cap. The one-shot path ignores this value entirely.
-    !one_shot_outline(state) && max_turns > 0 && state.turn >= max_turns
-}
-
-/// Cumulative turn, tool-call, and read-byte totals. One-shot outline ignores
-/// all three. Per-response context fitting is separate and still applies.
-pub(in crate::analysis) fn run_budget_exhausted(state: &Checkpoint, limits: &Limits) -> bool {
-    turn_limit_reached(state, limits.max_turns)
-        || (!one_shot_outline(state)
-            && (state.tool_calls >= limits.max_tool_calls
-                || state.read_bytes >= limits.max_read_bytes))
-}
-
 /// Stall stop for the one-shot outline. Names the checkpoint phase.
 /// This is failed progress, not a turn budget.
 pub(in crate::analysis) fn outline_stall_message(state: &Checkpoint) -> String {
@@ -624,6 +514,7 @@ struct RunDriver<'a, J, M> {
     state: &'a mut Checkpoint,
     journal: &'a J,
     model: &'a M,
+    cancel: &'a CancellationToken,
 }
 
 #[async_trait]
@@ -632,7 +523,7 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
         let limits = &self.config.limits;
         Status {
             journal: &self.state.journal,
-            max_context_bytes: limits.max_context_bytes,
+            max_context_bytes: limits.context_wire_ceiling(),
             turn: self.state.turn,
             role: if self.state.role == Role::Main {
                 "main"
@@ -640,41 +531,90 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 "reviewer"
             },
             done: self.state.done,
-            execution_blocked: (self.state.role == Role::Reviewer
-                && repair_task_host::exhausted(self.state, limits))
-                || (self.state.role == Role::Main
-                    && self.state.draft_stage == draft::DraftStage::Outline
-                    && outline_execution_blocked(self.state)),
-            budget_exhausted: run_budget_exhausted(self.state, limits),
+            execution_blocked: (self.state.role == Role::Main
+                && self.state.draft_stage == draft::DraftStage::Outline
+                && outline_execution_blocked(self.state)),
         }
     }
     fn journal_mut(&mut self) -> &mut crate::agent_runtime::TurnJournal {
         &mut self.state.journal
     }
     async fn prepare_request(&mut self) -> Result<Vec<u8>, AgentError> {
+        if crate::outline::agent::current(self.input, self.state)
+            == crate::outline::agent::Duty::Discover
+        {
+            discover_parallel::run(
+                self.input,
+                self.config,
+                self.state,
+                self.journal,
+                self.model,
+                self.cancel,
+            )
+            .await?;
+        }
         let started = Instant::now();
         let body = request(self.input, self.config, self.state).await?;
-        let estimated_input_tokens = context::estimate_input_tokens(
+        let accounting = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
             &serde_json::from_slice(&body).map_err(invalid)?,
-            &self.config.limits,
+            &self.config.limits.tokenizer,
+            self.config.limits.image_token_reserve,
+            self.config.limits.token_safety_margin,
+            self.config.provider.output_token_reserve as usize,
         )?;
         tracing::info!(event="analysis_request_built",turn=self.state.turn,role=?self.state.role,
-            request_bytes=body.len(),estimated_input_tokens,reserved_output_tokens=self.config.provider.max_tokens,
+            request_bytes=body.len(),estimated_input_tokens=accounting.total_input_tokens,
+            context_tokens=accounting.total_context_tokens,
+            tokenizer=?accounting.encoding, calibrated=accounting.calibrated,
+            tokenizer_provenance=%accounting.provenance,
+            image_tokens=accounting.image_tokens, framing_tokens=accounting.framing_tokens,
+            reserved_output_tokens=self.config.provider.output_token_reserve,
             elapsed_ms=started.elapsed().as_millis() as u64);
         self.state.journal.prepare_session(
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            if one_shot_outline(self.state) {
-                usize::MAX
-            } else {
-                self.config.limits.max_turns.saturating_sub(self.state.turn)
-            },
-            self.config.limits.max_context_bytes,
+            self.config.limits.context_wire_ceiling(),
         )?;
         Ok(body)
     }
-    async fn reserve(&self, body: &[u8], _local_attempt: usize) -> Result<usize, AgentError> {
+    async fn admit(&mut self, body: &[u8]) -> Result<(), AgentError> {
+        let estimated = context::estimate_input_tokens(
+            &serde_json::from_slice(body).map_err(invalid)?,
+            &self.config.limits,
+        )?;
+        let mut projected = self.state.clone();
+        projected.journal.accounting.record(
+            estimated as u64,
+            self.config.provider.output_token_reserve as u64,
+            crate::agent_runtime::budget::unix_seconds(),
+        )?;
+        if let Err(error) = self.journal.admit(&projected, body).await {
+            self.journal
+                .save(self.state, &self.state.progress(self.input))
+                .await?;
+            return Err(error);
+        }
+        Ok(())
+    }
+    async fn reserve(&mut self, body: &[u8], _local_attempt: usize) -> Result<usize, AgentError> {
+        let estimated = context::estimate_input_tokens(
+            &serde_json::from_slice(body).map_err(invalid)?,
+            &self.config.limits,
+        )?;
+        if let Err(error) = self.state.journal.accounting.record(
+            estimated as u64,
+            self.config.provider.output_token_reserve as u64,
+            crate::agent_runtime::budget::unix_seconds(),
+        ) {
+            if let Some(pending) = self.state.journal.pending.as_mut() {
+                pending.physical_attempts = pending.physical_attempts.saturating_sub(1);
+            }
+            self.journal
+                .save(self.state, &self.state.progress(self.input))
+                .await?;
+            return Err(error);
+        }
         // A restored prepared request skips prepare_request. Received replay
         // skips reserve entirely and still commits its already saved response.
         self.journal
@@ -742,8 +682,20 @@ async fn run_seeded<J: Journal, M: Model>(
     model: &M,
     cancel: &CancellationToken,
 ) -> Result<AnalysisResult, AgentError> {
+    crate::outline::frozen::validate_frozen_input_contract(input).map_err(invalid)?;
     tools::validate_input(input).map_err(invalid)?;
     config.validate()?;
+    if !config.limits.vision_enabled
+        && input
+            .source_units
+            .iter()
+            .any(|source| source.locator["vision_required"] == true)
+    {
+        return Err(error(
+            "AGENT_VISION_NOT_CONFIGURED",
+            "this frozen tender requires original-image evidence; configure the same authoring provider with an image-capable model and vision_enabled=true before starting the run",
+        ));
+    }
     let started = Instant::now();
     let input_sha256 = digest(input).map_err(invalid)?;
     let config_sha256 = digest(config).map_err(invalid)?;
@@ -758,35 +710,29 @@ async fn run_seeded<J: Journal, M: Model>(
         role: Role::Main,
         analysis: Analysis::default(),
         review: None,
-        review_draft: BTreeMap::new(),
-        source_review: None,
-        repair: Default::default(),
-        dispatch: Default::default(),
-        reviewer_coverage: Coverage::default(),
         pending_coverage: None,
         transcript: vec![],
         main_progress: Progress::default(),
-        reviewer_progress: Progress::default(),
         main_work: None,
-        reviewer_work: None,
         done: false,
         source_views: BTreeMap::new(),
         draft_stage: Default::default(),
-        draft_active_id: None,
         draft_outline_gaps: None,
         draft_outline_stalls: 0,
         draft_outline_window: 0,
-        draft_stopped: false,
-        draft_compile_object_id: None,
-        draft_docx_base64: None,
         outline_config_sha256: None,
-        fill_config_sha256: None,
         outline_run: Default::default(),
     });
     if state.input_sha256 != input_sha256 || state.config_sha256 != config_sha256 {
         return Err(error(
             "FROZEN_INPUT_DIGEST_MISMATCH",
-            "checkpoint input or runtime changed",
+            "checkpoint input or runtime changed; old checkpoints cannot resume, reparse and create a new run",
+        ));
+    }
+    if state.role != Role::Main {
+        return Err(error(
+            "FROZEN_INPUT_DIGEST_MISMATCH",
+            "retired reviewer checkpoint; start the current Discover/Organize/Check runtime",
         ));
     }
     state.journal.validate(
@@ -804,7 +750,6 @@ async fn run_seeded<J: Journal, M: Model>(
         ));
     }
     state.outline_config_sha256 = Some(config.tools_sha256.clone());
-    state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
     if state.draft_stage == crate::analysis::draft::DraftStage::None {
         state.draft_stage = crate::analysis::draft::DraftStage::Outline;
     }
@@ -818,6 +763,7 @@ async fn run_seeded<J: Journal, M: Model>(
             state: &mut state,
             journal,
             model,
+            cancel,
         };
         drive(&mut driver, cancel).await
     };
@@ -845,7 +791,6 @@ async fn run_seeded<J: Journal, M: Model>(
                     item.status == crate::analysis::draft::DraftStatus::Filled
                 })
                 .count(),
-            stopped = state.draft_stopped,
         );
     }
     result
@@ -887,33 +832,13 @@ async fn finalize_run<J: Journal>(
     if state.journal.pending.is_some() {
         return Err(invalid("cannot finalize an uncommitted model turn"));
     }
-    if state.outline_run.tool_draft.finished {
-        let projected =
-            crate::outline::project_draft(input, &input_sha256, &state.outline_run.tool_draft)
-                .map_err(invalid)?;
-        journal
-            .publish_outline(&projected.artifact, &projected.bindings)
-            .await?;
-    }
-    if state.draft_docx_base64.is_some() && state.draft_compile_object_id.is_some() {
-        let review = state
-            .review
-            .clone()
-            .ok_or_else(|| invalid("compiled checkpoint lacks review"))?;
-        if !state.done || review.analysis_sha256 != digest(&state.analysis).map_err(invalid)? {
-            return Err(invalid("compiled checkpoint differs from analysis"));
-        }
-        return Ok(AnalysisResult {
-            schema_version: 2,
-            frozen_input_sha256: input_sha256,
-            analysis: state.analysis.clone(),
-            review,
-            quality: "needs_review".into(),
-            source_views: state.source_views.clone(),
-            usage: state.journal.usage.clone(),
-            outline: published_outline(state),
-        });
-    }
+    let publication = state
+        .outline_run
+        .tool_draft
+        .finished
+        .then(|| crate::outline::project_draft(input, &input_sha256, &state.outline_run.tool_draft))
+        .transpose()
+        .map_err(invalid)?;
     state.draft_stage = crate::analysis::draft::DraftStage::Published;
     state.done = true;
     let review = Review {
@@ -934,10 +859,95 @@ async fn finalize_run<J: Journal>(
         usage: state.journal.usage.clone(),
         outline: published_outline(state),
     };
+    if let Some(projected) = &publication {
+        state.journal.publication_receipt = Some(crate::agent_runtime::PublicationReceipt {
+            artifact_sha256: crate::outline::canonical_sha256(&projected.artifact)
+                .map_err(invalid)?,
+            bindings: serde_json::to_value(&projected.bindings).map_err(invalid)?,
+        });
+    }
     state.journal.finish()?;
     journal.save(state, &state.progress(input)).await?;
+    if let Some(projected) = &publication {
+        journal
+            .publish_outline(&projected.artifact, &projected.bindings)
+            .await?;
+    }
     result.analysis = state.analysis.clone();
     Ok(result)
+}
+
+/// Credit only pixels present in the exact saved request consumed by the
+/// complete provider response. A cached image or successful tool result alone
+/// never establishes visual evidence, and each Check phase has its own scope.
+fn validate_frozen_view(input: &FrozenInput, config: &Config, view: &views::SourceView) -> Result<(), String> {
+    view.validate(&view.identity.source_id, config.limits.max_source_view_edge, config.limits.max_source_view_bytes)?;
+    let source=input.source_units.iter().find(|source| source.source_unit_revision_id==view.identity.source_id && source.locator["image_available"]==true).ok_or("view has no frozen original source")?;
+    let original=source.locator["image_ref"].as_str().and_then(|value|value.strip_prefix("objects/"));
+    if original != Some(view.identity.original_sha256.as_str()) { return Err("delivered image original hash differs from frozen source".into()); }
+    Ok(())
+}
+
+fn confirm_outline_visual_delivery(
+    input: &FrozenInput,
+    config: &Config,
+    state: &mut Checkpoint,
+    body: &Value,
+) -> Result<(), String> {
+    let urls = body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .filter(|part| part["type"] == "image_url")
+        .filter_map(|part| part["image_url"]["url"].as_str())
+        .collect::<BTreeSet<_>>();
+    if urls.is_empty() {
+        return Ok(());
+    }
+    if !config.limits.vision_enabled {
+        return Err("image payload in a non-vision frozen runtime".into());
+    }
+    let duty = crate::outline::agent::current(input, state);
+    let mut delivered = Vec::new();
+    for view in state.source_views.values() {
+        let url = format!("data:image/jpeg;base64,{}", view.jpeg_base64);
+        if !urls.contains(url.as_str()) {
+            continue;
+        }
+        view.validate(
+            &view.identity.source_id,
+            config.limits.max_source_view_edge,
+            config.limits.max_source_view_bytes,
+        )?;
+        // Only frozen native-image carriers participate in the new outline
+        // image-evidence protocol; legacy page views retain their own scope.
+        if let Some(source) = input.source_units.iter().find(|source| {
+            source.source_unit_revision_id == view.identity.source_id
+                && source.locator["image_available"] == true
+        }) {
+            let original = source.locator["image_ref"]
+                .as_str()
+                .and_then(|value| value.strip_prefix("objects/"));
+            if original != Some(view.identity.original_sha256.as_str()) {
+                return Err(
+                    "delivered image original hash differs from the frozen source object".into(),
+                );
+            }
+            delivered.push((
+                view.identity.source_id.clone(),
+                view.identity.image_sha256.clone(),
+            ));
+        }
+    }
+    for (source_id, image_sha256) in delivered {
+        if let Some(work) = state.outline_run.reading_packs.as_mut() {
+            work.confirm_visual_delivery(input, &source_id, &image_sha256)?;
+        }
+        crate::outline::agent::note_visual_delivery(input, state, &source_id, duty)?;
+    }
+    Ok(())
 }
 
 pub(super) async fn execute_turn<J: Journal>(
@@ -949,34 +959,48 @@ pub(super) async fn execute_turn<J: Journal>(
     suppressed: BTreeMap<String, String>,
     cancel: &CancellationToken,
 ) -> Result<Vec<Value>, AgentError> {
-    let body = serde_json::from_slice(state.journal.body()?).map_err(invalid)?;
-    let estimated_input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
-    if !one_shot_outline(state)
-        && response.tool_calls.len() > config.limits.max_tool_calls - state.tool_calls
-    {
-        return Err(error(
-            "AGENT_TURN_BUDGET_EXCEEDED",
-            "tool batch exceeds remaining budget; checkpoint retained",
+    let mut staged = state.clone();
+    let result = execute_turn_staged(
+        input,
+        config,
+        &mut staged,
+        journal,
+        response,
+        suppressed,
+        cancel,
+    )
+    .await;
+    if result.is_ok() {
+        *state = staged;
+    }
+    result
+}
+
+async fn execute_turn_staged<J: Journal>(
+    input: &FrozenInput,
+    config: &Config,
+    state: &mut Checkpoint,
+    journal: &J,
+    response: ChatTurn,
+    suppressed: BTreeMap<String, String>,
+    cancel: &CancellationToken,
+) -> Result<Vec<Value>, AgentError> {
+    if state.journal.response() != Some(&response) {
+        return Err(invalid(
+            "execution requires the matching durably received response",
         ));
     }
+    let body = serde_json::from_slice(state.journal.body()?).map_err(invalid)?;
+    let estimated_input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
     let actual_input_tokens = response.usage.as_ref().and_then(|u| u.prompt_tokens);
-    evidence_delivery::confirm(input, config, state, &body)?;
+    crate::outline::read_receipts::confirm(state, &body).map_err(invalid)?;
+    confirm_outline_visual_delivery(input, config, state, &body).map_err(invalid)?;
     tracing::info!(event="analysis_token_usage",turn=state.turn,role=?state.role,
         estimated_input_tokens, actual_input_tokens,
         actual_output_tokens=response.usage.as_ref().and_then(|u|u.completion_tokens),
         cached_tokens=response.usage.as_ref().and_then(|u|u.cached_tokens),
         reasoning_tokens=response.usage.as_ref().and_then(|u|u.reasoning_tokens),
         estimate_exceeded=actual_input_tokens.map(|actual| actual > estimated_input_tokens as u64));
-    if state.role == Role::Main {
-        let messages = body["messages"]
-            .as_array()
-            .ok_or_else(|| invalid("completed request messages missing"))?;
-        let receipts = delivered_repair_feedback(state, messages).map_err(invalid)?;
-        state.main_progress.seen.extend(receipts);
-        let recovery = repair_recovery::delivered(state, messages).map_err(invalid)?;
-        state.main_progress.seen.extend(recovery);
-        repair::begin(state).map_err(invalid)?;
-    }
     if let Some(delivered) = state.pending_coverage.take() {
         state.replace_coverage(delivered);
     }
@@ -996,35 +1020,50 @@ pub(super) async fn execute_turn<J: Journal>(
     let mut tool_results = Vec::new();
     let mut local_completion = None;
     let mut batch_failed = false;
-    fit_batch(input, config, state, &response.tool_calls, &pending_views).await?;
     let turn_duty = crate::outline::agent::current(input, state);
+    // A submit-only Discover batch retires the source packs occupying the
+    // current window. Probe the next request after those in-memory writes, not
+    // before them while both the old sources and their response coexist.
+    // execute_turn owns a full staged checkpoint; a failed final probe commits
+    // neither the writes nor SDK/domain progress. No external write is skipped.
+    let pack_commit_batch = turn_duty == crate::outline::agent::Duty::Discover
+        && !response.tool_calls.is_empty()
+        && response
+            .tool_calls
+            .iter()
+            .all(|call| call.name == "submit_pack")
+        && suppressed.is_empty();
+    if !pack_commit_batch {
+        fit_batch(input, config, state, &response.tool_calls, &pending_views).await?;
+    }
     for (call_index, call) in response.tool_calls.iter().enumerate() {
         let tool_started = Instant::now();
         state.tool_calls += 1;
-        if !one_shot_outline(state) && state.tool_calls > config.limits.max_tool_calls {
-            return Err(error("AGENT_TURN_BUDGET_EXCEEDED", "tool budget exhausted"));
-        }
-        let readonly = matches!(
-            call.name.as_str(),
-            "collection_index"
-                | "source_index"
-                | "read_source"
-                | "read_form"
-                | "read_form_cell"
-                | "read_outline"
-                | "read_outline_fragment"
-                | "read_review_task"
-                | "read_source_view"
-                | "search_sources"
-                | "inspect_analysis"
-                | "check_gaps"
-                | "inspect_review"
-        );
+        let readonly = crate::outline::agent::registry()
+            .iter()
+            .find(|spec| spec.name == call.name)
+            .is_some_and(|spec| !spec.mutating);
         let write_before = (!readonly).then(|| state.clone());
+        let draft_before_read = readonly.then(|| state.outline_run.tool_draft.clone());
         let pending_before = state.pending_coverage.clone();
         let views_before = pending_views.len();
         let read_bytes_before = state.read_bytes;
-        let args: Result<Value, _> = serde_json::from_str(&call.arguments);
+        let args: Result<Value, String> = serde_json::from_str::<Value>(&call.arguments)
+            .map_err(|e| e.to_string())
+            .and_then(|args| {
+                if crate::outline::agent::handles(&call.name) {
+                    state
+                        .outline_run
+                        .tool_draft
+                        .model_wire
+                        .decode(args, false)
+                        .and_then(|args| {
+                            crate::outline::source_wire::resolve(state, &call.name, args)
+                        })
+                } else {
+                    Ok(args)
+                }
+            });
         // Read tools may accumulate their own receipts, but subsequent
         // writes in this batch see only the previously delivered evidence.
         let prior_coverage = matches!(
@@ -1062,6 +1101,10 @@ pub(super) async fn execute_turn<J: Journal>(
             && args.as_ref().is_ok_and(|args| args["status"] == "complete")
         {
             Err("an earlier tool failed in this batch; inspect its feedback and repair or account for the failed operation before completing the scope in a later turn".into())
+        } else if call.name == "read_source_view"
+            && crate::outline::agent::deny(turn_duty, &call.name, false).is_some()
+        {
+            Err("original-image read is unavailable in the advertised duty".into())
         } else if call.name == "read_source_view" {
             match args {
                 Ok(args) => {
@@ -1082,21 +1125,37 @@ pub(super) async fn execute_turn<J: Journal>(
                 }
                 Err(e) => Err(e.to_string()),
             }
-        } else if matches!(call.name.as_str(), "inspect_analysis" | "inspect_review") {
+        } else if matches!(call.name.as_str(), "read_requirements" | "read_outline") {
             match args {
                 Ok(args) => {
-                    inspect_in_context(
+                    read_projection_in_context(
                         input,
                         config,
                         state,
                         &args,
                         &response.tool_calls[call_index..],
                         &pending_views,
-                        prior_coverage.as_ref().expect("inspection stages coverage"),
+                        turn_duty,
                     )
                     .await
                 }
-                Err(error) => Err(error.to_string()),
+                Err(e) => Err(e.to_string()),
+            }
+        } else if matches!(call.name.as_str(), "read_evidence" | "read_claim_evidence") {
+            match args {
+                Ok(args) => {
+                    read_evidence_in_context(
+                        input,
+                        config,
+                        state,
+                        &args,
+                        &response.tool_calls[call_index..],
+                        &pending_views,
+                        turn_duty,
+                    )
+                    .await
+                }
+                Err(e) => Err(e.to_string()),
             }
         } else {
             args.map_err(|e| e.to_string())
@@ -1112,7 +1171,7 @@ pub(super) async fn execute_turn<J: Journal>(
                 } else {
                     value
                 };
-                json!({"ok":true,"result":value})
+                tool_result_envelope(value)
             }
             Err(message) => {
                 if matches!(
@@ -1140,16 +1199,10 @@ pub(super) async fn execute_turn<J: Journal>(
             .read_bytes
             .checked_add(content.len())
             .ok_or_else(|| invalid("read budget overflow"))?;
-        if !one_shot_outline(state) && state.read_bytes > config.limits.max_read_bytes {
-            return Err(error(
-                "AGENT_TURN_BUDGET_EXCEEDED",
-                "tool output exceeds remaining read budget; checkpoint retained",
-            ));
-        }
         state
             .transcript
             .push(json!({"role":"tool","tool_call_id":call.id,"content":content}));
-        if state.role == role && !state.done {
+        if !pack_commit_batch && state.role == role && !state.done {
             let fits = fit_batch(
                 input,
                 config,
@@ -1170,6 +1223,9 @@ pub(super) async fn execute_turn<J: Journal>(
                 } else {
                     // Keep immutable pixels cached, but not their new receipts.
                     state.pending_coverage = pending_before;
+                    if let Some(before) = &draft_before_read {
+                        state.outline_run.tool_draft = before.clone();
+                    }
                 }
                 succeeded = false;
                 pending_views.truncate(views_before);
@@ -1188,24 +1244,23 @@ pub(super) async fn execute_turn<J: Journal>(
                 .await?;
             }
         }
+        if readonly
+            && succeeded
+            && let Some(before) = &draft_before_read
+        {
+            crate::outline::read_receipts::queue(
+                state,
+                before,
+                &call.id,
+                turn_duty == crate::outline::agent::Duty::Check,
+            );
+        }
         batch_failed |= !succeeded;
         if succeeded
             && let Some(completion) =
                 context::focused_completion(state, &call.name, &out["result"]).map_err(invalid)?
         {
             local_completion = Some(completion);
-        }
-        if succeeded && let Ok(args) = serde_json::from_str(&call.arguments) {
-            source_review::record_query(input, state, &call.name, &args);
-        }
-        if succeeded
-            && call.name == "put_source_review"
-            && response
-                .tool_calls
-                .get(call_index + 1)
-                .is_some_and(|next| next.name == "read_review_task")
-        {
-            source_review::select_next(input, config, state).map_err(invalid)?;
         }
         tool_results.push(
             state
@@ -1217,287 +1272,411 @@ pub(super) async fn execute_turn<J: Journal>(
         tracing::info!(event="analysis_tool_completed",turn=state.turn,role=?state.role,
             tool=call.name, success=succeeded, elapsed_ms=tool_started.elapsed().as_millis() as u64);
     }
+    if pack_commit_batch && state.role == role && !state.done {
+        // Collect the real tool receipts before successful completed-history
+        // compaction is allowed to remove their transcript group.
+        fit_batch(input, config, state, &[], &pending_views).await?;
+    }
     if !pending_views.is_empty() {
         state
             .transcript
             .push(json!({"role":"user","source_view_refs":pending_views}));
     }
     context::observe_progress(state, &role, local_completion, &config.limits).map_err(invalid)?;
-    if role == Role::Reviewer {
-        source_review::charge_pack(input, config, state).map_err(invalid)?;
-        finish_review_batch(input, config, state).map_err(invalid)?;
-        source_review::select_next(input, config, state).map_err(invalid)?;
-    } else if state.role == Role::Reviewer
-        && state.review.is_some()
-        && review_complete(input, config, state).map_err(invalid)?
-    {
-        // A successful handoff with all independent judgments still current
-        // has no new review work. Main-role reading receipts can change the
-        // full analysis digest without repairing any of its findings.
-        record_completed_review(input, config, state, true).map_err(invalid)?;
-    }
     // 停止只在填章回路里问一次，且只在章界生效：本章仍按预算写完，之后不再派新章。
-    let stop = state.draft_stage == crate::analysis::draft::DraftStage::Fill
-        && journal.stop_requested().await?;
+    let stop = false;
     crate::analysis::draft::after_batch(input, state, batch_failed, stop).map_err(invalid)?;
+    if turn_duty == crate::outline::agent::Duty::Check {
+        crate::outline::agent::finish_check_repair_batch(input, state).map_err(invalid)?;
+    }
     state.turn += 1;
-    if state.role != role
-        || (outline_phase_before != state.analysis.outline.phase
-            && state.analysis.outline.phase == super::outline_flow::Phase::Check)
-    {
+    if state.role != role {
         state.transcript.clear();
+    } else if outline_phase_before != state.analysis.outline.phase
+        && state.analysis.outline.phase == super::outline_flow::Phase::Check
+    {
+        crate::outline::read_receipts::handoff_history(state);
     }
     Ok(tool_results)
 }
 
 const BATCH_OUTPUT_DEFERRED: &str = "Tool output does not fit the remaining batch context. Request a smaller range or fewer calls next turn. This result commits no business change or new reading/review coverage.";
 
-/// Called once after every tool in the saved response has been applied. The
-/// caller commits this result with the tools, never as a separate model turn.
-pub(super) fn finish_review_batch(
-    input: &FrozenInput,
-    config: &Config,
-    state: &mut Checkpoint,
-) -> Result<(), String> {
-    if state.role != Role::Reviewer || state.done || !review_complete(input, config, state)? {
-        return Ok(());
-    }
-    record_completed_review(input, config, state, false)
-}
-
-fn record_completed_review(
-    input: &FrozenInput,
-    config: &Config,
-    state: &mut Checkpoint,
-    unchanged_handoff: bool,
-) -> Result<(), String> {
-    let sha = digest(&state.analysis)?;
-    let findings: Vec<_> = state.review_draft.values().cloned().collect();
-    let repeated = state
-        .review
-        .as_ref()
-        .is_some_and(|r| r.analysis_sha256 == sha);
-    state.review_rounds += 1;
-    state.done = findings.is_empty()
-        || repeated
-        || unchanged_handoff
-        || state.review_rounds >= config.limits.max_review_rounds;
-    let source_review = state
-        .source_review
-        .as_mut()
-        .ok_or("source review state missing")?;
-    source_review.completed_analysis_sha256 = Some(sha.clone());
-    source_review.active_task = None;
-    let global_checks: Vec<_> = state
-        .analysis
-        .review_global_checks
-        .values()
-        .cloned()
-        .collect();
-    let contract_sha256 = crate::analysis::rule_contract::contract_sha256()?;
-    let omitted_sources = source_review::omitted_sources(input, config, state)?;
-    state.review = Some(Review {
-        analysis_sha256: sha,
-        coverage: state.reviewer_coverage.clone(),
-        findings,
-        contract_sha256,
-        global_checks,
-        omitted_sources,
-        draft: false,
-    });
-    // Retain findings and source receipts through repairs. The reviewer must
-    // explicitly revise/withdraw them against the repaired candidate versions.
-    if !state.done {
-        state.role = Role::Main;
-    }
-    Ok(())
-}
-
-pub(super) fn review_complete(
-    input: &FrozenInput,
-    config: &Config,
-    state: &Checkpoint,
-) -> Result<bool, String> {
-    if !state.main_progress.blockers.is_empty()
-        || !state.reviewer_progress.blockers.is_empty()
-        || !tools::gaps(input, &state.analysis).is_empty()
-        || !tools::review_gaps(input, &state.analysis, &state.reviewer_coverage).is_empty()
-        || !source_review::pending(input, config, state)?.is_empty()
-    {
-        return Ok(false);
-    }
-    let scope: Vec<_> = input
-        .source_units
-        .iter()
-        .map(|s| s.source_unit_revision_id.clone())
-        .collect();
-    for key in context::scope_references(&state.analysis, &scope) {
-        if !context::has_review_outcome(state, &key)? {
-            return Ok(false);
-        }
-    }
-    for finding in state.review_draft.values() {
-        if validate_finding(input, state, finding).is_err() {
-            return Ok(false);
-        }
-    }
-    let checks: Vec<_> = state
-        .analysis
-        .review_global_checks
-        .values()
-        .cloned()
-        .collect();
-    let findings: Vec<_> = state.review_draft.values().cloned().collect();
-    if rule_contract::validate_inventory(input, &state.analysis, &checks, &findings).is_err()
-        || checks.iter().any(|check| {
-            rule_contract::validate_evidence(
-                input,
-                &state.analysis,
-                &state.reviewer_coverage,
-                check,
-            )
-            .is_err()
-        })
-    {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
-/// Failed exact lookups remain failures; suggest only an existing navigation query.
-fn inspection_error(error: tools::InspectionError, args: &Value, max_bytes: usize) -> String {
-    let tools::InspectionError::CandidateIdentity(message) = error else {
-        return error.into();
-    };
-    let Some(limit) = args["limit"].as_u64().filter(|limit| *limit > 0) else {
-        return message;
-    };
-    let mut query =
-        json!({"kind":"all","offset":0,"limit":limit,"view":"index","scope":"collection"});
-    if let Some(source_id) = args.get("source_id") {
-        query["source_id"] = source_id.clone();
-    }
-    let guided = format!(
-        "{message}. Locate full candidate IDs in the collection index; do not guess or complete an ID. An explicit source_id still narrows this query. The returned query_scope and total describe only its filters, not semantic absence. Follow returned next until total as needed, then inspect exact IDs with view=detail. Index navigation grants no detail receipt or work handoff. Next inspect_analysis query: {query}"
-    );
-    if json!({"ok":false,"error":guided}).to_string().len() <= max_bytes {
-        guided
-    } else {
-        message
-    }
-}
-
-/// Candidate and finding pages must coexist with the source under comparison.
-/// Shrink the page before falling back to eviction of that evidence.
-/// Probe only bounded transcript/receipt data, not the graph or cached pixels.
-pub(super) async fn inspect_in_context(
+/// Directory and actual target-body pages share transport admission with source pages.
+async fn read_projection_in_context(
     input: &FrozenInput,
     config: &Config,
     state: &mut Checkpoint,
     args: &Value,
     remaining: &[knowledge::models::ChatToolCall],
     views: &[String],
-    committed: &Coverage,
+    duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
-    let scope = state
-        .work()
-        .filter(|work| work.status == WorkStatus::Active)
-        .map(|work| work.source_scope.clone());
-    let expected = context::focused_work_evidence(state, &state.transcript);
-    let mut query = args.clone();
+    let tool = &remaining[0].name;
+    let projection_started = std::time::Instant::now();
+    if let Some(error) = crate::outline::agent::deny(duty, tool, false) {
+        return Err(error.into());
+    }
+    let identity = json!({"tool":tool,"input":crate::outline::evidence::input_digest(input)?,"revision":state.outline_run.reading_packs.as_ref().map(|w|w.revision),"epoch":state.outline_run.tool_draft.read_epoch,"duty":format!("{duty:?}")});
+    let mut page = if let Some(cursor) = args["cursor"].as_str() {
+        if args.as_object().is_none_or(|v| v.len() != 1) {
+            return Err("continuation accepts only the host cursor".into());
+        }
+        let saved = state
+            .outline_run
+            .tool_draft
+            .evidence_continuations
+            .get(cursor)
+            .ok_or("unknown or expired projection cursor")?;
+        if saved["identity"] != identity {
+            return Err("projection scope or revision changed".into());
+        }
+        saved["page"].clone()
+    } else {
+        crate::outline::agent::full_read_projection(input, state, tool, args)?
+    };
+    let projection_ms = projection_started.elapsed().as_millis() as u64;
+    let mut fit_probes = 0usize;
+    let fit_started = std::time::Instant::now();
+    if page.get("items").is_none() && page.get("slot_id").is_none() {
+        page = json!({"items":[page],"total":1});
+    }
+    let mut records = state.outline_run.tool_draft.metadata_records.clone();
+    let mut original = page.clone();
+    let mut fragments = page["items"][0]
+        .get("field_fragments")
+        .map(|v| {
+            serde_json::from_value::<Vec<crate::outline::metadata_fragments::Field>>(v.clone())
+                .map_err(|e| e.to_string())
+        })
+        .transpose()?;
+    let mut selected = page["items"].as_array().map(Vec::len);
+    let mut text_end = page["text"].as_str().map(str::len);
     loop {
-        let mut coverage = state.coverage().clone();
-        let page = if remaining[0].name == "inspect_review" {
-            inspect_review(state, &query, config.limits.max_tool_result_bytes)?
+        let mut tail = Value::Null;
+        if let Some(count) = selected {
+            let rows = original["items"].as_array().unwrap();
+            page["items"] = json!(&rows[..count]);
+            page["remaining"] = json!(rows.len() - count);
+            if count < rows.len() {
+                tail = original.clone();
+                tail["items"] = json!(&rows[count..]);
+            }
+        }
+        if let Some(end) = text_end {
+            let text = original["text"].as_str().unwrap();
+            let start = original["start_byte"].as_u64().unwrap_or(0) as usize;
+            page["text"] = json!(&text[..end]);
+            page["end_byte"] = json!(start + end);
+            page["remaining"] = json!(text.len() - end);
+            if end < text.len() {
+                tail = original.clone();
+                tail["text"] = json!(&text[end..]);
+                tail["start_byte"] = json!(start + end);
+            }
+        }
+        if let Some(fields) = &fragments {
+            let key = original["items"][0]["record_key"]
+                .as_str()
+                .ok_or("fragment record identity missing")?;
+            let record = records.get(key).ok_or("unknown metadata record")?;
+            let all: Vec<crate::outline::metadata_fragments::Field> =
+                serde_json::from_value(original["items"][0]["field_fragments"].clone())
+                    .map_err(|e| e.to_string())?;
+            let mut rest = all[fields.len()..].to_vec();
+            if let (Some(end), Some(full_end)) = (
+                fields.last().and_then(|f| f.end_byte),
+                all.get(fields.len() - 1).and_then(|f| f.end_byte),
+            ) && end < full_end
+            {
+                let mut last = all[fields.len() - 1].clone();
+                let start = last.start_byte.unwrap();
+                last.value = json!(&last.value.as_str().unwrap()[end - start..]);
+                last.start_byte = Some(end);
+                rest.insert(0, last);
+            }
+            page["items"] = json!([record.page(key, fields)]);
+            if rest.is_empty() {
+                let rows = &original["items"].as_array().unwrap()[1..];
+                tail = if rows.is_empty() {
+                    Value::Null
+                } else {
+                    let mut p = original.clone();
+                    p["items"] = json!(rows);
+                    p
+                };
+            } else {
+                tail = original.clone();
+                tail["items"][0] = record.page(key, &rest);
+            }
+        }
+        let saved = json!({"identity":identity,"page":tail});
+        let next = if tail.is_null() {
+            None
         } else {
-            tools::inspect_analysis(
-                input,
-                &state.analysis,
-                &mut coverage,
-                committed,
-                &query,
-                config.limits.max_tool_result_bytes,
-                scope.as_deref(),
-            )
-            .map_err(|error| inspection_error(error, &query, config.limits.max_tool_result_bytes))?
+            Some(format!(
+                "page_{}",
+                crate::outline::canonical_sha256(&saved)?
+            ))
         };
-        let transcript = state.transcript.clone();
-        let counters = (state.turn, state.tool_calls, state.read_bytes);
-        let staged = state.replace_coverage(committed.clone());
-        let pending = state.pending_coverage.replace(coverage.clone());
-        state
-            .transcript
-            .push(json!({"role":"tool","tool_call_id":remaining[0].id,
-            "content":json!({"ok":true,"result":page}).to_string()}));
-        state
-            .transcript
-            .extend(remaining[1..].iter().map(|call| deferred_message(&call.id)));
-        if !views.is_empty() {
-            state
-                .transcript
-                .push(json!({"role":"user","source_view_refs":views}));
+        page["next_cursor"] = json!(next);
+        page["selection_complete"] = json!(tail.is_null());
+        let mut candidate = state.clone();
+        candidate.outline_run.tool_draft.metadata_records = records.clone();
+        crate::outline::agent::queue_read_projection(&mut candidate, tool, &page, duty);
+        if let Some(key) = &next {
+            candidate
+                .outline_run
+                .tool_draft
+                .evidence_continuations
+                .insert(key.clone(), saved);
         }
-        state.turn = state.turn.saturating_add(1);
-        state.tool_calls = state.tool_calls.saturating_add(remaining.len() - 1);
-        state.read_bytes = config.limits.max_read_bytes;
-        let sized = prepare_request(input, config, state, false).await;
-        let mut actual = context::focused_work_evidence(state, &state.transcript);
-        state.transcript = transcript;
-        (state.turn, state.tool_calls, state.read_bytes) = counters;
-        state.replace_coverage(staged);
-        state.pending_coverage = pending;
-        // Active original views may have moved from history into working
-        // messages. Verify their actual serialized identity and pixels; cache
-        // presence alone is not evidence that the model will receive them.
-        let body = sized
-            .as_ref()
-            .ok()
-            .map(|bytes| serde_json::from_slice::<Value>(bytes))
-            .transpose()
-            .map_err(|error| error.to_string())?;
-        if let Some(messages) = body.as_ref().and_then(|body| body["messages"].as_array()) {
-            actual.extend(context::focused_work_evidence(state, messages));
-        }
-        let missing: Vec<_> = expected
-            .iter()
-            .filter(|(key, ranges)| {
-                !ranges
-                    .iter()
-                    .all(|&(a, b)| tools::contains(actual.get(*key), a, b))
-                    && !key.strip_prefix("view:").is_some_and(|id| {
-                        state.source_views.get(id).is_some_and(|view| {
-                            body.as_ref()
-                                .and_then(|body| body["messages"].as_array())
-                                .is_some_and(|messages| messages.contains(&view.message()))
-                        })
-                    })
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
-        match sized {
-            Ok(_) if missing.is_empty() => {
-                state.replace_coverage(coverage);
+        candidate.transcript.push(json!({"role":"tool","tool_call_id":remaining[0].id,"content":json!({"ok":true,"result":page}).to_string()}));
+        fit_probes += 1;
+        match fit_batch(input, config, &mut candidate, &remaining[1..], views).await {
+            Ok(()) => {
+                tracing::info!(event="analysis_read_projection", tool, projection_ms,
+                    fit_probes, fit_ms=fit_started.elapsed().as_millis() as u64,
+                    selected_rows=selected, selection_complete=tail.is_null());
+                if let Some(cursor) = args["cursor"].as_str() {
+                    candidate.outline_run.tool_draft.evidence_continuations.remove(cursor);
+                }
+                state.outline_run.tool_draft = candidate.outline_run.tool_draft;
                 return Ok(page);
             }
-            Err(error) if error.code != "AGENT_TURN_BUDGET_EXCEEDED" => return Err(error.message),
+            Err(e) if e.code != "AGENT_TURN_BUDGET_EXCEEDED" => return Err(e.message),
             _ => {}
         }
-        let returned = page["items"]
-            .as_array()
-            .ok_or("inspection page missing")?
-            .len();
-        if returned <= 1 {
-            let missing = tools::bounded_page(
-                &missing,
-                0,
-                usize::MAX,
-                config.limits.max_tool_result_bytes / 4,
-            )?;
-            return Err(format!(
-                "inspection result and current source evidence cannot fit together even with one result; narrow the current comparison focus or finish its evidence comparison before fetching more details. An index is navigation only. Evidence omitted by the projected request: {missing}"
-            ));
+        if let Some(count) = selected
+            && count > 1
+        {
+            selected = Some(count.div_ceil(2));
+            continue;
         }
-        query["limit"] = json!(returned / 2);
+        if let Some(end) = text_end {
+            let text = &original["text"].as_str().unwrap()[..end];
+            let boundaries = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .filter(|i| *i > 0)
+                .collect::<Vec<_>>();
+            if !boundaries.is_empty() {
+                text_end = Some(boundaries[boundaries.len() / 2]);
+                continue;
+            }
+        }
+        if let Some(fields) = &mut fragments {
+            if fields.len() > 1 {
+                fields.truncate(fields.len().div_ceil(2));
+                continue;
+            }
+            let (left, _) = crate::outline::metadata_fragments::split(&fields[0])?;
+            fields[0] = left;
+            continue;
+        }
+        if let Some(row) = original["items"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .cloned()
+        {
+            let key = format!(
+                "record_{}",
+                crate::outline::canonical_sha256(&(&identity, &row))?
+            );
+            let record = crate::outline::metadata_fragments::Record::new(row);
+            fragments = Some(record.fields.clone());
+            original["items"][0] = record.page(&key, &record.fields);
+            records.insert(key, record);
+            selected = Some(1);
+            continue;
+        }
+        return Err("remaining request token budget cannot fit one source character and its immutable identity".into());
+    }
+}
+
+/// Host-owned source continuation. Admission uses the same complete next
+/// request token budget as transport, not a separate source byte threshold.
+async fn read_evidence_in_context(
+    input: &FrozenInput,
+    config: &Config,
+    state: &mut Checkpoint,
+    args: &Value,
+    remaining: &[knowledge::models::ChatToolCall],
+    views: &[String],
+    duty: crate::outline::agent::Duty,
+) -> Result<Value, String> {
+    use crate::outline::evidence::{self, EvidenceRef};
+    if let Some(error) = crate::outline::agent::deny(duty, &remaining[0].name, false) {
+        return Err(error.into());
+    }
+    let tool = &remaining[0].name;
+    let saved = args["cursor"]
+        .as_str()
+        .map(|cursor| {
+            state
+                .outline_run
+                .tool_draft
+                .evidence_continuations
+                .get(cursor)
+                .cloned()
+                .ok_or("unknown or expired evidence cursor")
+        })
+        .transpose()?;
+    let claim = if tool == "read_claim_evidence" {
+        let id = saved
+            .as_ref()
+            .and_then(|v| v["requirement_id"].as_str())
+            .or_else(|| args["requirement_id"].as_str())
+            .ok_or("requirement_id is required")?;
+        let record = state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .and_then(|w| w.requirement_records().get(id))
+            .ok_or("unknown requirement")?;
+        Some(crate::outline::claim_review::build(input, id, record)?)
+    } else {
+        None
+    };
+    let identity = json!({"tool":tool,"claim_version":claim.as_ref().map(|c|&c.version),"read_epoch":state.outline_run.tool_draft.read_epoch,"input":evidence::input_digest(input)?,"revision":state.outline_run.reading_packs.as_ref().map(|w|w.revision),"duty":format!("{duty:?}")});
+    let refs: Vec<EvidenceRef> = if let Some(cursor) = args["cursor"].as_str() {
+        if args.get("refs").is_some() {
+            return Err("cursor cannot be combined with refs".into());
+        }
+        let saved = state
+            .outline_run
+            .tool_draft
+            .evidence_continuations
+            .get(cursor)
+            .ok_or("unknown or expired evidence cursor")?;
+        if saved["identity"] != identity {
+            return Err("evidence cursor input, revision or duty changed".into());
+        }
+        serde_json::from_value(saved["refs"].clone()).map_err(|e| e.to_string())?
+    } else if let Some(unit) = &claim {
+        unit.evidence_units
+            .iter()
+            .flat_map(|u| u.excerpts.iter().map(|e| e.evidence.clone()))
+            .collect()
+    } else {
+        serde_json::from_value(args["refs"].clone()).map_err(|e| e.to_string())?
+    };
+    if refs.is_empty() {
+        return Err("evidence selection must not be empty".into());
+    }
+    evidence::resolve_evidence(input, &refs)?;
+    let mut selected = refs.clone();
+    loop {
+        let mut tail = refs[selected.len()..].to_vec();
+        let original = &refs[selected.len() - 1];
+        let last = selected.last().unwrap();
+        if let (Some((_, end)), Some((_, full_end))) = (last.range(), original.range())
+            && end < full_end
+        {
+            let mut rest = original.clone();
+            match &mut rest {
+                EvidenceRef::Text { start_byte, .. } | EvidenceRef::GridCell { start_byte, .. } => {
+                    *start_byte = end
+                }
+                _ => {}
+            }
+            tail.insert(0, rest);
+        }
+        let continuation = json!({"identity":identity,"refs":tail,"requirement_id":claim.as_ref().map(|c|&c.requirement_id)});
+        let next = if tail.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "page_{}",
+                crate::outline::canonical_sha256(&continuation)?
+            ))
+        };
+        let mut candidate = state.clone();
+        let mut page = crate::outline::agent::apply_for_duty(
+            input,
+            &mut candidate,
+            "read_evidence",
+            &json!({"refs":selected}),
+            duty,
+        )?;
+        if let Some(unit) = &claim {
+            let excerpts = page["excerpts"]
+                .as_array()
+                .ok_or("source projection missing")?;
+            let mut items = Vec::new();
+            for source in &unit.evidence_units {
+                let partial = excerpts
+                    .iter()
+                    .filter(|excerpt| {
+                        serde_json::from_value::<EvidenceRef>(excerpt["evidence"].clone())
+                            .ok()
+                            .is_some_and(|reference| {
+                                source.excerpts.iter().any(|original| {
+                                    evidence::covered_by_union(
+                                        &reference,
+                                        std::slice::from_ref(&original.evidence),
+                                    )
+                                })
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !partial.is_empty() {
+                    items.push(json!({"quote_handle":source.quote_handle,"role":source.role,"excerpts":partial,"unit_complete_in_this_page":source.excerpts.iter().all(|e|evidence::covered_by_union(&e.evidence,&selected))}));
+                }
+            }
+            page = json!({"requirement_id":unit.requirement_id,"version":unit.version,"original_requirement":unit.original_requirement.description,"claims":unit.claims,"items":items,"total_units":unit.evidence_units.len(),"instruction":"A quote unit can span multiple host pages. Follow next_cursor until selection_complete, then compare complete units; fragments grant only their exact delivered intervals."});
+        }
+        page["next_cursor"] = json!(next);
+        page["selection_complete"] = json!(tail.is_empty());
+        if let Some(key) = &next {
+            candidate
+                .outline_run
+                .tool_draft
+                .evidence_continuations
+                .insert(key.clone(), continuation);
+        }
+        candidate.transcript.push(json!({"role":"tool","tool_call_id":remaining[0].id,"content":json!({"ok":true,"result":page}).to_string()}));
+        match fit_batch(input, config, &mut candidate, &remaining[1..], views).await {
+            Ok(()) => {
+                if let Some(cursor) = args["cursor"].as_str() {
+                    candidate.outline_run.tool_draft.evidence_continuations.remove(cursor);
+                }
+                state.outline_run.tool_draft = candidate.outline_run.tool_draft;
+                return Ok(page);
+            }
+            Err(e) if e.code != "AGENT_TURN_BUDGET_EXCEEDED" => return Err(e.message),
+            _ => {}
+        }
+        if selected.len() > 1 {
+            selected.truncate(selected.len().div_ceil(2));
+            continue;
+        }
+        let quote = evidence::resolve_evidence(input, &selected)?
+            .remove(0)
+            .quote;
+        let boundaries = quote
+            .char_indices()
+            .map(|(i, _)| i)
+            .filter(|i| *i > 0)
+            .collect::<Vec<_>>();
+        if boundaries.is_empty() {
+            return Err("remaining request token budget cannot fit source metadata plus one UTF-8 character; finish the current comparison or release redundant history, then retry the same cursor".into());
+        }
+        let cut = boundaries[boundaries.len() / 2];
+        match &mut selected[0] {
+            EvidenceRef::Text {
+                start_byte,
+                end_byte,
+                ..
+            }
+            | EvidenceRef::GridCell {
+                start_byte,
+                end_byte,
+                ..
+            } => *end_byte = *start_byte + cut,
+            _ => return Err("image evidence requires original view delivery".into()),
+        }
     }
 }
 
@@ -1514,28 +1693,25 @@ async fn fit_batch(
     remaining: &[knowledge::models::ChatToolCall],
     views: &[String],
 ) -> Result<(), AgentError> {
-    state
+    // Request preparation may compact completed history. Keep the probe
+    // isolated so temporary responses/views cannot be evicted from underneath
+    // the caller, and so a rejected batch cannot change its source receipts.
+    // The actual next request repeats admission and commits any compaction.
+    let mut sizing = state.clone();
+    sizing
         .transcript
         .extend(remaining.iter().map(|c| deferred_message(&c.id)));
     if !views.is_empty() {
-        state
+        sizing
             .transcript
             .push(json!({"role":"user","source_view_refs":views}));
     }
     // Size the next turn, including worst-case digits in the read counter.
-    let (turn, tool_calls, read_bytes) = (state.turn, state.tool_calls, state.read_bytes);
-    state.turn = state.turn.saturating_add(1);
-    state.tool_calls = state.tool_calls.saturating_add(remaining.len());
-    state.read_bytes = config.limits.max_read_bytes;
-    let result = prepare_request(input, config, state, false)
+    sizing.turn = sizing.turn.saturating_add(1);
+    sizing.tool_calls = sizing.tool_calls.saturating_add(remaining.len());
+    prepare_request(input, config, &mut sizing, false)
         .await
-        .map(|_| ());
-    (state.turn, state.tool_calls, state.read_bytes) = (turn, tool_calls, read_bytes);
-    let temporary = remaining.len() + usize::from(!views.is_empty());
-    state
-        .transcript
-        .truncate(state.transcript.len() - temporary);
-    result
+        .map(|_| ())
 }
 
 pub(super) async fn request(
@@ -1563,13 +1739,143 @@ pub(super) async fn prepare_request(
     result
 }
 
+/// Planning-only placeholders reserve pending original-image context. They are
+/// never sent or entered into visual delivery receipts. Cached actual views use
+/// their real identity; unrendered views reserve the same bounded identity shape.
+fn reserve_pack_image_messages(
+    input: &FrozenInput,
+    config: &Config,
+    state: &Checkpoint,
+    sessions: &[Value],
+    body: &mut Value,
+) -> Result<(), String> {
+    let ids = sessions
+        .iter()
+        .flat_map(|session| session["pack"]["atoms"].as_array().into_iter().flatten())
+        .filter(|atom| {
+            atom["carrier"]["kind"] == "image" && atom["carrier"]["vision_required"] == true
+        })
+        .filter_map(|atom| atom["carrier"]["evidence"]["image_id"].as_str())
+        .collect::<BTreeSet<_>>();
+    let existing = body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .filter_map(|part| part["image_url"]["url"].as_str())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    for id in ids {
+        let cached = state
+            .source_views
+            .values()
+            .find(|view| view.identity.source_id == id);
+        if cached.is_some_and(|view| {
+            existing.contains(&format!("data:image/jpeg;base64,{}", view.jpeg_base64))
+        }) {
+            continue;
+        }
+        let message = if let Some(view) = cached {
+            view.message()
+        } else {
+            let source = input
+                .source_units
+                .iter()
+                .find(|source| source.source_unit_revision_id == id)
+                .ok_or("image source missing while planning")?;
+            let view = crate::analysis::views::SourceView {
+                identity: crate::analysis::views::ViewIdentity {
+                    source_id: id.into(),
+                    original_sha256: source.locator["image_ref"]
+                        .as_str()
+                        .and_then(|value| value.strip_prefix("objects/"))
+                        .ok_or("image object missing while planning")?
+                        .into(),
+                    image_sha256: "a1".repeat(32),
+                    page_ordinal: source.locator["page_ordinal"].as_u64().unwrap_or(0) as u32,
+                    width: config.limits.max_source_view_edge,
+                    height: config.limits.max_source_view_edge,
+                    renderer: format!(
+                        "frozen-source-view-v2/full-frame/jpeg-q85/edge{}",
+                        config.limits.max_source_view_edge
+                    ),
+                },
+                jpeg_base64: String::new(),
+            };
+            view.message()
+        };
+        body["messages"]
+            .as_array_mut()
+            .ok_or("request messages missing")?
+            .push(message);
+    }
+    Ok(())
+}
+
+/// The plan is built before its own progress counters exist. Reserve their
+/// complete wire shape, including numeric growth during later discovery turns,
+/// inside the same token budget. These placeholders are never transported.
+fn reserve_discovery_progress(progress: &mut Value) {
+    for key in [
+        "outline_pack_total",
+        "outline_pack_pending",
+        "outline_pack_running",
+        "outline_pack_failed",
+        "outline_pack_committed",
+    ] {
+        progress[key] = json!(usize::MAX);
+    }
+    fn reserve_counters(value: &mut Value) {
+        match value {
+            Value::Number(_) => *value = json!(usize::MAX),
+            Value::Object(fields) => fields.values_mut().for_each(reserve_counters),
+            Value::Array(values) => values.iter_mut().for_each(reserve_counters),
+            _ => {}
+        }
+    }
+    reserve_counters(progress);
+}
+
+/// Keep complete errors in the checkpoint; show a progressively smaller repair
+/// page only when the actual request needs space. Sources and claims are intact.
+fn shrink_discovery_feedback(sessions: &mut [Value]) -> bool {
+    let Some(session) = sessions
+        .iter_mut()
+        .filter(|session| {
+            session["feedback"]["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.len() > 1)
+        })
+        .max_by_key(|session| session["feedback"]["errors"].as_array().unwrap().len())
+    else {
+        return false;
+    };
+    let feedback = &mut session["feedback"];
+    let errors = feedback["errors"].as_array_mut().unwrap();
+    errors.truncate(errors.len().div_ceil(2));
+    let shown = errors.len();
+    feedback["truncated"] = json!(true);
+    feedback["omitted_errors"] = json!(
+        feedback["total"]
+            .as_u64()
+            .unwrap_or(shown as u64)
+            .saturating_sub(shown as u64)
+    );
+    true
+}
+
+// Bounded non-durable schema/handle feedback plus its serialized tool framing.
+// This is repair headroom in context tokens, never a source byte/pack limit.
+pub(super) const DISCOVERY_FEEDBACK_RESERVE_TOKENS: usize = 1024;
+
 async fn prepare_fitted_request(
     input: &FrozenInput,
     config: &Config,
     state: &mut Checkpoint,
     defer_images: bool,
 ) -> Result<Vec<u8>, AgentError> {
-    context::annotate_delivered_source_lines(state, config.limits.max_tool_result_bytes)
+    context::annotate_delivered_source_lines(state, config.limits.context_wire_ceiling())
         .map_err(invalid)?;
     if state.execution().watch.needs_replan_context() {
         // Recovery must change the working context before another full-budget
@@ -1578,48 +1884,53 @@ async fn prepare_fitted_request(
         while context::compact_delivered_navigation(&mut state.transcript)
             || context::compact_recallable_candidate_details(
                 state,
-                config.limits.max_tool_result_bytes,
+                config.limits.context_wire_ceiling(),
             )
-            || context::evict_delivered_group(state, config.limits.max_history_bytes, false)
+            || context::evict_delivered_group(state, config.limits.context_wire_ceiling(), false)
         {
         }
     }
     let mut excluded_recall = std::collections::BTreeSet::new();
-    let mut omit_preloaded_evidence = false;
-    let mut package_budget = None;
-    let mut reading_sessions = if matches!(
+    let needs_discovery = matches!(
         state.draft_stage,
         draft::DraftStage::None | draft::DraftStage::Outline
     ) && state
         .outline_run
         .reading_packs
         .as_ref()
-        .is_none_or(|work| !work.complete())
-    {
-        crate::outline::discover::claim_turn(
-            &mut state.outline_run.reading_packs,
-            input,
-            crate::outline::discover::reading_budget(config.limits.pack_max_chars),
-            crate::outline::discover::DEFAULT_PACK_CONCURRENCY,
-        )
+        .is_none_or(|work| !work.complete());
+    let mut reading_sessions = if needs_discovery {
+        if let Some(work) = state.outline_run.reading_packs.as_mut() {
+            work.claim(crate::outline::discover::DEFAULT_PACK_CONCURRENCY);
+            work.inflight_sessions(input)
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
+    if let Some(message) = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .and_then(|work| work.planning_error())
+    {
+        return Err(error(
+            "AGENT_PACK_PLAN_INVALID",
+            format!("{message}; adjust the pack budget or reparse; checkpoint retained"),
+        ));
+    }
+
     let turn_duty = crate::outline::agent::current(input, state);
-    let discovering = turn_duty == crate::outline::agent::Duty::Discover;
+    let mut host_items = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .map(|work| work.requirement_records().len())
+        .unwrap_or(0);
     loop {
-        let reviewer = state.role == Role::Reviewer;
-        let review_packet = if reviewer {
-            source_review::packet(input, config, state).map_err(invalid)?
-        } else {
-            Value::Null
-        };
-        let draft_fill = matches!(
-            state.draft_stage,
-            crate::analysis::draft::DraftStage::Fill
-                | crate::analysis::draft::DraftStage::Published
-        );
-        let system = crate::outline::agent::system_prompt(turn_duty, draft_fill);
+        let reviewer = false;
+        let system = crate::outline::agent::system_prompt(turn_duty);
         let mut brief = json!({"project_id":input.project_id,"document_set_id":input.document_set_id,
             "source_count":input.source_units.len(),"form_count":input.structured_forms.len(),
             "document_count":input.documents.len(),"relation_count":input.document_relations.len(),"decision_count":input.decisions.len(),
@@ -1631,22 +1942,8 @@ async fn prepare_fitted_request(
             json!({"role":"system","content":system}),
             json!({"role":"user","content":brief.to_string()}),
         ];
-        let latest = state
-            .transcript
-            .iter()
-            .rposition(|m| m["role"] == "assistant")
-            .map(|index| {
-                if index > 0 && evidence_delivery::is_retained_message(&state.transcript[index - 1])
-                {
-                    index - 1
-                } else {
-                    index
-                }
-            })
-            .unwrap_or(0);
-        let mut history_end = messages.len();
         let mut visible_views = std::collections::BTreeSet::new();
-        for (index, message) in state.transcript.iter().enumerate() {
+        for message in &state.transcript {
             if let Some(refs) = message["source_view_refs"].as_array() {
                 for id in refs {
                     visible_views.insert(
@@ -1665,9 +1962,6 @@ async fn prepare_fitted_request(
             } else {
                 messages.push(message.clone());
             }
-            if index < latest {
-                history_end = messages.len();
-            }
         }
         // The assigned original and explicitly focused visual evidence survive
         // history eviction. Explicit reviewer support reads still in bounded
@@ -1680,7 +1974,7 @@ async fn prepare_fitted_request(
             .filter(|work| work.status == WorkStatus::Active)
         {
             let focused_views = context::focused_view_ids(state);
-            let support_views = context::reviewer_support_view_ids(state);
+            let support_views = std::collections::BTreeSet::<String>::new();
             let assigned_pack = if reviewer {
                 work.source_scope.clone()
             } else {
@@ -1688,24 +1982,9 @@ async fn prepare_fitted_request(
             };
             // One original page can cover several parsed text/grid sources.
             // Reuse one delivered image, preferring already visible pixels.
-            let layout_view = state
-                .coverage()
-                .views
-                .iter()
-                .filter(|(_, identity)| {
-                    review_packet["current"]["layout_view"].is_object()
-                        && work.source_scope.contains(&identity.source_id)
-                        && assigned_pack.iter().any(|source| {
-                            source_review::same_page(input, source, &identity.source_id)
-                        })
-                })
-                .min_by_key(|(id, _)| !visible_views.contains(id.as_str()))
-                .map(|(id, _)| id);
             for (id, identity) in &state.coverage().views {
                 if ((work.source_scope.contains(&identity.source_id)
-                    && (assigned_pack.contains(&identity.source_id)
-                        || layout_view == Some(id)
-                        || focused_views.contains(id)))
+                    && (assigned_pack.contains(&identity.source_id) || focused_views.contains(id)))
                     || support_views.contains(id))
                     && !visible_views.contains(id.as_str())
                 {
@@ -1719,37 +1998,20 @@ async fn prepare_fitted_request(
             }
         }
         let mut recalled =
-            context::retained_candidate_message(state, config.limits.max_tool_result_bytes)
+            context::retained_candidate_message(state, config.limits.context_wire_ceiling())
                 .map_err(invalid)?;
         context::trim_optional_candidate_recall(state, &mut recalled, &mut excluded_recall, 0)
             .map_err(invalid)?;
         if !recalled.is_null() {
             messages.push(recalled.clone());
         }
-        let preloaded_evidence = if omit_preloaded_evidence {
-            None
-        } else {
-            evidence_delivery::select_with_budget(input, config, state, package_budget)?
-                .map(|evidence| evidence.content)
-        };
-        if discovering && package_budget.is_some() && preloaded_evidence.is_none() {
-            if context::evict_completed_discovery_history(state, config.limits.max_history_bytes) {
-                package_budget = None;
-                continue;
-            }
-            return Err(error(
-                "AGENT_TURN_BUDGET_EXCEEDED",
-                "context budget cannot hold a minimal discovery evidence package",
-            ));
-        }
-        let has_preloaded_evidence = preloaded_evidence.is_some();
         let host = crate::outline::agent::host_packet(
             input,
             state,
-            config.limits.max_tool_result_bytes,
+            host_items,
             state.progress(input),
             context::request_work(state).map_err(invalid)?,
-            preloaded_evidence.as_ref(),
+            None,
         );
         messages.push(json!({"role":"user","content":host.to_string()}));
         let bytes = crate::agent_runtime::chat::prepare(
@@ -1758,39 +2020,171 @@ async fn prepare_fitted_request(
             crate::outline::agent::schemas_for(turn_duty),
         )
         .await?;
-        let body: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
-        let history_bytes = if history_end > 2 {
-            let messages = body["messages"]
-                .as_array()
+        let mut body: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+        crate::outline::discover::compact_request(&mut body).map_err(invalid)?;
+        let issued_keys =
+            crate::outline::source_wire::request(state, &mut body).map_err(invalid)?;
+        let canonical_body = body.clone();
+        let issued_registry =
+            crate::outline::model_wire::project(state, &mut body).map_err(invalid)?;
+        let bytes = serde_json::to_vec(&body).map_err(invalid)?;
+        if needs_discovery && state.outline_run.reading_packs.is_none() {
+            // The initial reading plan is fitted to this complete real request
+            // envelope, not to a second byte/character/cell threshold.
+            let mut planning_host = host.clone();
+            reserve_discovery_progress(&mut planning_host["progress"]);
+            let planning_started = std::time::Instant::now();
+            let candidate_fits = std::cell::Cell::new(0usize);
+            let cache_before = crate::agent_runtime::chat::cache_counts();
+            let fits = |sessions: &[Value]| -> Result<bool, String> {
+                candidate_fits.set(candidate_fits.get() + 1);
+                let mut candidate = canonical_body.clone();
+                let mut candidate_brief = brief.clone();
+                candidate_brief["reading_packs"] = json!(sessions);
+                candidate["messages"][1]["content"] = json!(candidate_brief.to_string());
+                candidate["messages"]
+                    .as_array_mut()
+                    .ok_or("request messages missing")?
+                    .last_mut()
+                    .ok_or("request host packet missing")?["content"] =
+                    json!(planning_host.to_string());
+                reserve_pack_image_messages(input, config, state, sessions, &mut candidate)?;
+                crate::outline::discover::compact_request(&mut candidate)?;
+                crate::outline::source_wire::request(state, &mut candidate)?;
+                crate::outline::model_wire::project(state, &mut candidate)?;
+                let tokens = context::estimate_input_tokens(&candidate, &config.limits)
+                    .map_err(|error| error.to_string())?;
+                Ok(tokens
+                    .saturating_add(config.provider.output_token_reserve as usize)
+                    .saturating_add(config.provider.output_token_reserve as usize)
+                    .saturating_add(DISCOVERY_FEEDBACK_RESERVE_TOKENS)
+                    <= config.limits.max_context_tokens)
+            };
+            let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(input, &fits);
+            let cache_after = crate::agent_runtime::chat::cache_counts();
+            tracing::info!(event="analysis_pack_planned", candidate_fits=candidate_fits.get(),
+                cache_hits=cache_after.0.saturating_sub(cache_before.0),
+                cache_misses=cache_after.1.saturating_sub(cache_before.1),
+                elapsed_ms=planning_started.elapsed().as_millis() as u64);
+            if let Some(message) = work.planning_error() {
+                return Err(error("AGENT_PACK_PLAN_INVALID", message));
+            }
+            work.claim(crate::outline::discover::DEFAULT_PACK_CONCURRENCY);
+            reading_sessions = work.inflight_sessions(input);
+            state.outline_run.reading_packs = Some(work);
+            continue;
+        }
+        // A running pack has one prior-response allowance inside the same
+        // context budget. An existing latest tool group already consumes that
+        // allowance (including identity errors without a durable pack receipt).
+        // Failed packs use it for their projected repair feedback instead.
+        let input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
+        let discovery_lifecycle_tokens = if reading_sessions
+            .iter()
+            .any(|session| session["status"] == "running")
+        {
+            let mut priorless = body.clone();
+            let messages = priorless["messages"]
+                .as_array_mut()
                 .ok_or_else(|| invalid("SDK messages missing"))?;
-            let history = messages
-                .get(2..history_end)
-                .ok_or_else(|| invalid("SDK message grouping changed"))?;
-            serde_json::to_vec(history).map_err(invalid)?.len()
+            let consumed = if let Some(start) = messages
+                .iter()
+                .rposition(|message| message["role"] == "assistant")
+            {
+                messages.drain(start..messages.len() - 1);
+                input_tokens
+                    .saturating_sub(context::estimate_input_tokens(&priorless, &config.limits)?)
+            } else {
+                0
+            };
+            (config.provider.output_token_reserve as usize)
+                .saturating_add(DISCOVERY_FEEDBACK_RESERVE_TOKENS)
+                .saturating_sub(consumed)
         } else {
             0
         };
-        let context_excess = bytes
-            .len()
-            .saturating_sub(config.limits.max_context_bytes)
-            .max(
-                context::estimate_input_tokens(&body, &config.limits)?
-                    .saturating_add(config.provider.max_tokens as usize)
-                    .saturating_sub(config.limits.max_context_tokens),
-            );
+        let context_excess = input_tokens
+            .saturating_add(config.provider.output_token_reserve as usize)
+            .saturating_add(discovery_lifecycle_tokens)
+            .saturating_sub(config.limits.max_context_tokens);
+        #[cfg(test)]
+        if let Ok(root) = std::env::var("KB_PRIVATE_BUDGET_DIAGNOSTIC_DIR") {
+            let mut parts = Vec::new();
+            if let Some(messages) = body["messages"].as_array() {
+                for (index, message) in messages.iter().enumerate() {
+                    let mut without = body.clone();
+                    without["messages"].as_array_mut().unwrap().remove(index);
+                    parts.push(json!({"index":index,"role":message["role"],"bytes":serde_json::to_vec(message).unwrap().len(),"marginal_tokens":input_tokens.saturating_sub(context::estimate_input_tokens(&without,&config.limits)?)}));
+                }
+            }
+            let mut without_tools = body.clone();
+            without_tools.as_object_mut().unwrap().remove("tools");
+            let entry = json!({"input_tokens":input_tokens,"serialized_bytes":bytes.len(),"output_reserve":config.provider.output_token_reserve,"lifecycle_reserve":discovery_lifecycle_tokens,"feedback_reserve":DISCOVERY_FEEDBACK_RESERVE_TOKENS,"context_limit":config.limits.max_context_tokens,"excess":context_excess,"tools_marginal_tokens":input_tokens.saturating_sub(context::estimate_input_tokens(&without_tools,&config.limits)?),"messages":parts});
+            use std::io::Write;
+            let path = std::path::Path::new(&root).join("budget-preparation-iterations.jsonl");
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .unwrap(),
+                "{}",
+                entry
+            )
+            .unwrap();
+        }
         let fits_total = context_excess == 0;
-        if fits_total && history_bytes <= config.limits.max_history_bytes {
+        if !fits_total && !defer_images && reading_sessions.is_empty() {
+            // A paging probe must not repeatedly evict older history when the
+            // latest, unconsumed read group alone already exceeds the window.
+            // This is only an early rejection: every accepted page still goes
+            // through full request preparation and final transport admission.
+            let messages = body["messages"].as_array().ok_or_else(|| invalid("messages missing"))?;
+            if let Some(start) = messages.iter().rposition(|m| m["role"] == "assistant") {
+                let is_read = messages[start]["tool_calls"].as_array().is_some_and(|calls|
+                    calls.iter().any(|call| matches!(call["function"]["name"].as_str(),
+                        Some("read_requirements" | "read_outline" | "read_evidence" | "read_claim_evidence"))));
+                if is_read && start + 1 < messages.len() {
+                    let mut required = body.clone();
+                    let mut kept = messages[..start].iter().filter(|m|m["role"]=="system").cloned().collect::<Vec<_>>();
+                    kept.extend_from_slice(&messages[start..messages.len()-1]);
+                    required["messages"] = json!(kept);
+                    let tokens = context::estimate_input_tokens(&required, &config.limits)?;
+                    if tokens.saturating_add(config.provider.output_token_reserve as usize) > config.limits.max_context_tokens {
+                        return Err(error("AGENT_TURN_BUDGET_EXCEEDED", "unconsumed read group exceeds context; continue with a smaller source page"));
+                    }
+                }
+            }
+        }
+        if fits_total {
+            state.outline_run.tool_draft.source_keys = issued_keys;
+            state.outline_run.tool_draft.model_wire = issued_registry;
+            crate::outline::read_receipts::seal(state, &body).map_err(invalid)?;
             return Ok(bytes);
         }
-        // A mixed batch can bind a large old index to unique source evidence.
-        // Compact only delivered navigation before evicting whole groups.
-        if context::compact_delivered_navigation(&mut state.transcript)
+        // Host requirement previews are optional. Only the complete request's
+        // measured token fit can shrink them; tools retain the full records and
+        // fragment even a single oversized record through opaque continuations.
+        let dropped_preview = host_items > 0;
+        host_items = 0;
+        // Completed pack acknowledgements are reconstructible from durable
+        // receipts. Release them before shrinking any still-unread source.
+        // These operations preserve the latest unconsumed tool group and its
+        // evidence. Finish the same lossless cleanup before rebuilding the
+        // full request, instead of reserializing it after every old group.
+        let mut compacted = false;
+        while context::evict_completed_discovery_history(state, config.limits.context_wire_ceiling())
+            || context::compact_delivered_navigation(&mut state.transcript)
             || context::compact_recallable_candidate_details(
                 state,
-                config.limits.max_tool_result_bytes,
+                config.limits.context_wire_ceiling(),
             )
-            || context::evict_delivered_group(state, config.limits.max_history_bytes, false)
+            || context::evict_delivered_group(state, config.limits.context_wire_ceiling(), false)
+            || shrink_discovery_feedback(&mut reading_sessions)
         {
+            compacted = true;
+        }
+        if dropped_preview || compacted {
             continue;
         } else if !fits_total
             && context::trim_optional_candidate_recall(
@@ -1804,29 +2198,8 @@ async fn prepare_fitted_request(
             // Optional recall uses remaining space. Preserve focused candidates
             // and fresh results; try the full cache again on the next request.
             continue;
-        } else if discovering && has_preloaded_evidence {
-            if context::evict_completed_discovery_history(state, config.limits.max_history_bytes) {
-                package_budget = None;
-                continue;
-            }
-            // Retry the entire request with a smaller package. The exact cap
-            // travels in the reserved payload so receipt replay is deterministic.
-            let current =
-                preloaded_evidence.as_ref().unwrap()["assigned_evidence"]["workload_bytes_limit"]
-                    .as_u64()
-                    .unwrap_or(0) as usize;
-            if current <= 1 {
-                return Err(error(
-                    "AGENT_TURN_BUDGET_EXCEEDED",
-                    "context budget cannot hold a minimal discovery evidence package",
-                ));
-            }
-            package_budget = Some(current / 2);
-        } else if has_preloaded_evidence {
-            // Keep the current protocol group intact. An optional evidence
-            // preload that cannot fit grants no receipt; explicit tools remain.
-            omit_preloaded_evidence = true;
-        } else if context::evict_delivered_group(state, config.limits.max_history_bytes, true) {
+        } else if context::evict_delivered_group(state, config.limits.context_wire_ceiling(), true)
+        {
             continue;
         } else if defer_images
             && let Some(id) = views::defer_last_image(&mut state.transcript).map_err(invalid)?
@@ -1861,236 +2234,9 @@ async fn prepare_fitted_request(
     }
 }
 
-pub fn validate_finding(
-    input: &FrozenInput,
-    state: &Checkpoint,
-    finding: &Finding,
-) -> Result<(), String> {
-    if finding.code.trim().is_empty()
-        || finding.message.trim().is_empty()
-        || finding.correction.trim().is_empty()
-    {
-        return Err("actionable finding needs code, message and a concrete correction".into());
-    }
-    for source in &finding.sources {
-        tools::validate_span(input, &state.reviewer_coverage, source)?;
-    }
-    let mut fields = std::collections::BTreeSet::new();
-    for affected in &finding.affected {
-        let id = &affected.id;
-        if !fields.insert((id, &affected.path)) {
-            return Err("duplicate affected field".into());
-        }
-        let kind = if state.analysis.records.contains_key(id) {
-            "record"
-        } else if state.analysis.relations.contains_key(id) {
-            "relation"
-        } else {
-            return Err("foreign affected record".into());
-        };
-        let key = format!("{kind}:{id}");
-        let object = context::reference(&state.analysis, &key)?;
-        let current = digest(&object)?;
-        if state.reviewer_coverage.candidate.get(&key) != Some(&current) {
-            return Err(format!(
-                "independently inspect current affected outcome: {key}"
-            ));
-        }
-        if object.pointer(&affected.path).is_none() {
-            return Err(format!(
-                "unknown affected field: {key}{}; use a JSON Pointer to the inspected object",
-                affected.path
-            ));
-        }
-    }
-    if finding.sources.is_empty() && finding.affected.is_empty() {
-        return Err("finding needs source evidence or an affected record".into());
-    }
-    Ok(())
-}
-
-fn repair_finding_receipt(finding: &Finding) -> Result<String, String> {
-    Ok(format!("repair_feedback:{}", digest(finding)?))
-}
-
 // Read receipts belong to the main role and exact finding contents. They use
 // the existing durable seen set, but do not reset a progress watch or attest a
 // repair. Only tool results actually present in a completed request count.
-pub(super) fn delivered_repair_feedback(
-    state: &Checkpoint,
-    messages: &[Value],
-) -> Result<std::collections::BTreeSet<String>, String> {
-    let known = state
-        .findings_for_repair()
-        .into_iter()
-        .map(repair_finding_receipt)
-        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    let queries: std::collections::BTreeSet<_> = messages
-        .iter()
-        .filter(|message| message["role"] == "assistant")
-        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
-        .filter(|call| call["function"]["name"] == "inspect_review")
-        .filter_map(|call| call["id"].as_str())
-        .collect();
-    let mut received = std::collections::BTreeSet::new();
-    for message in messages {
-        if message["role"] != "tool"
-            || !message["tool_call_id"]
-                .as_str()
-                .is_some_and(|id| queries.contains(id))
-        {
-            continue;
-        }
-        let Some(content) = message["content"]
-            .as_str()
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-        else {
-            continue;
-        };
-        if content["ok"] != true {
-            continue;
-        }
-        for value in content["result"]["items"].as_array().into_iter().flatten() {
-            // Main feedback pages contain whole Finding values, unlike the
-            // reviewer's independently owned draft ID/value index.
-            if let Ok(finding) = serde_json::from_value::<Finding>(value.clone()) {
-                let receipt = repair_finding_receipt(&finding)?;
-                if known.contains(&receipt) {
-                    received.insert(receipt);
-                }
-            }
-        }
-    }
-    Ok(received)
-}
-
-#[cfg(test)]
-pub(super) fn repair_feedback_packet(
-    state: &Checkpoint,
-    messages: &[Value],
-    limits: &Limits,
-) -> Result<Value, String> {
-    // Project only the evidence delivered in this request for navigation. The
-    // same receipts become durable after its complete model response, before
-    // applying that response's tools; queued or failed sends cannot grant them.
-    let projected = delivered_repair_feedback(state, messages)?;
-    let findings = state.findings_for_repair();
-    let mut unread = Vec::new();
-    for (index, finding) in findings.iter().enumerate() {
-        let receipt = repair_finding_receipt(finding)?;
-        if !state.main_progress.seen.contains(&receipt) && !projected.contains(&receipt) {
-            unread.push(index);
-        }
-    }
-    Ok(
-        json!({"count":findings.len(),"received":findings.len()-unread.len(),
-        "unread":unread.len(),
-        "next_query":unread.first().map(|offset|json!({"offset":offset,"limit":findings.len()-offset})),
-        "repair":repair::packet(state, limits)?,
-        "instruction":"Read missing repair feedback with inspect_review using next_query and follow each returned next offset. Current-request receipts are provisional until this response completes. Compare every finding against original evidence and repair or source-back a disagreement before requesting independent review. Receiving the whole feedback is required for handoff, but is never proof of repair or approval."}),
-    )
-}
-
-/// Retrieve complete findings within the existing byte budget. Querying a
-/// finding neither changes it nor acknowledges any semantic comparison.
-pub(super) fn inspect_review(
-    state: &Checkpoint,
-    args: &Value,
-    max_bytes: usize,
-) -> Result<Value, String> {
-    let object = args.as_object().ok_or("review query must be an object")?;
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "offset" | "limit" | "ids"))
-    {
-        return Err("only offset, limit and optional draft finding ids are accepted".into());
-    }
-    let offset = args["offset"]
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or("offset required")?;
-    let limit = args["limit"]
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok())
-        .filter(|n| *n > 0)
-        .ok_or("positive limit required")?;
-    let mut selected = Vec::new();
-    if let Some(value) = object.get("ids") {
-        if !matches!(state.role, Role::Reviewer) {
-            return Err("ids select reviewer draft findings; page prior repair feedback with offset and limit".into());
-        }
-        let ids: Vec<String> = serde_json::from_value(value.clone())
-            .map_err(|_| tools::field_error("/ids", "use a nonempty array of draft finding IDs"))?;
-        let mut seen = std::collections::BTreeSet::new();
-        if ids.is_empty() {
-            return Err(tools::field_error(
-                "/ids",
-                "use a nonempty array of draft finding IDs",
-            ));
-        }
-        for id in &ids {
-            if !seen.insert(id) {
-                return Err(tools::field_error("/ids", "finding IDs must be distinct"));
-            }
-            let finding = state.review_draft.get(id).ok_or_else(|| {
-                tools::field_error("/ids", format!("unknown draft finding ID: {id}"))
-            })?;
-            selected.push(repair::reviewer_item(state, id, finding)?);
-        }
-    } else if matches!(state.role, Role::Reviewer) {
-        selected.extend(
-            state
-                .review_draft
-                .iter()
-                .map(|(id, finding)| repair::reviewer_item(state, id, finding))
-                .collect::<Result<Vec<_>, String>>()?,
-        );
-    } else {
-        selected.extend(
-            state
-                .findings_for_repair()
-                .into_iter()
-                .map(|finding| json!(finding)),
-        );
-    }
-    let total = selected.len();
-    if offset > total {
-        return Err("offset outside review".into());
-    }
-    let mut out = json!({"total":total,"next":offset,"items":[]});
-    if state.role == Role::Main {
-        out["repair_history"] = json!({});
-    }
-    if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() > max_bytes {
-        return Err("review pagination envelope exceeds budget".into());
-    }
-    for (index, item) in selected.into_iter().enumerate().skip(offset).take(limit) {
-        let history_id = if state.role == Role::Main {
-            let finding: Finding =
-                serde_json::from_value(item.clone()).map_err(|e| e.to_string())?;
-            let id = digest(&finding)?;
-            let new_history = out["repair_history"].get(&id).is_none();
-            out["repair_history"][&id] = repair::main_history(state, &finding)?;
-            Some((id, new_history))
-        } else {
-            None
-        };
-        out["items"].as_array_mut().unwrap().push(item);
-        out["next"] = json!(index + 1);
-        if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() > max_bytes {
-            out["items"].as_array_mut().unwrap().pop();
-            if let Some((id, true)) = history_id {
-                out["repair_history"].as_object_mut().unwrap().remove(&id);
-            }
-            out["next"] = json!(index);
-            if index == offset {
-                return Err("single complete review finding exceeds budget; finding text cannot be truncated".into());
-            }
-            break;
-        }
-    }
-    Ok(out)
-}
 
 #[cfg(test)]
 pub(super) fn apply(
@@ -2130,46 +2276,196 @@ pub(super) fn apply_in_batch(
 
 fn apply_inner(
     input: &FrozenInput,
-    config: &Config,
+    _config: &Config,
     state: &mut Checkpoint,
     name: &str,
     args: &Value,
     turn_duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
     if state.execution().watch.recovery == Recovery::Blocked
-        && !matches!(
-            name,
-            "submit_pack"
-                | "put_chapters"
-                | "bind_forms"
-                | "put_slots"
-                | "read_outline"
-                | "finish_outline"
-        )
+        && !crate::outline::agent::handles(name)
     {
-        return Err("local execution is blocked; select an independent source scope, or retry after its saved dependencies change".into());
+        return Err("local execution is blocked; checkpoint retained".into());
     }
     let unmapped =
         !crate::outline::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty();
     if let Some(reason) = crate::outline::agent::deny(turn_duty, name, unmapped) {
         return Err(reason.into());
     }
-    if matches!(
-        name,
-        "submit_pack"
-            | "put_chapters"
-            | "bind_forms"
-            | "put_slots"
-            | "read_outline"
-            | "finish_outline"
-    ) {
-        return crate::outline::agent::apply(
-            input,
-            config.limits.pack_max_chars,
-            state,
-            name,
-            args,
-        );
+    if crate::outline::agent::handles(name) {
+        return crate::outline::agent::apply_for_duty(input, state, name, args, turn_duty);
     }
     Err("unknown or role-forbidden tool".into())
+}
+
+#[cfg(test)]
+mod visual_transport_tests;
+
+/// Local-only admission probe. This prepares the genuine SDK request without a
+/// network transport and labels its explicit reference tokenizer configuration.
+#[cfg(test)]
+pub(crate) async fn local_token_plan(
+    input: &FrozenInput,
+) -> Result<(crate::outline::discover::DiscoverWork, Value), AgentError> {
+    let reference = super::tests::config();
+    let mut provider = reference.provider;
+    provider.model_id = "gpt-4.1".into();
+    let mut limits = reference.limits;
+    limits.max_context_tokens = 131_072;
+    limits.token_safety_margin = 4096;
+    limits.image_token_reserve = 16_384;
+    limits.tokenizer = crate::agent_runtime::TokenizerProfile {
+        model_id: provider.model_id.clone(),
+        encoding: crate::agent_runtime::TokenEncoding::O200kBase,
+        calibration: None,
+    };
+    let config = Config::with_provider(provider, limits)?;
+    let mut state = retirement::checkpoint(input);
+    state.turn = 0;
+    state.config_sha256 = digest(&config).map_err(invalid)?;
+    let body = request(input, &config, &mut state).await?;
+    let value: Value = serde_json::from_slice(&body).map_err(invalid)?;
+    let accounting = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
+        &value,
+        &config.limits.tokenizer,
+        config.limits.image_token_reserve,
+        config.limits.token_safety_margin,
+        config.provider.output_token_reserve as usize,
+    )?;
+    let first_brief: Value = serde_json::from_str(
+        value["messages"][1]["content"]
+            .as_str()
+            .ok_or_else(|| invalid("brief missing"))?,
+    )
+    .map_err(invalid)?;
+    let summary = json!({
+        "reference_model":"gpt-4.1", "tokenizer":"o200k_base", "provider_called":false,
+        "is_user_deployed_model":false, "max_context_tokens":config.limits.max_context_tokens,
+        "first_request_bytes":body.len(), "first_request_packs":first_brief["reading_packs"].as_array().map_or(0,Vec::len),
+        "token_accounting":accounting,
+    });
+    Ok((
+        state
+            .outline_run
+            .reading_packs
+            .ok_or_else(|| invalid("reading plan missing"))?,
+        summary,
+    ))
+}
+
+#[cfg(test)]
+mod token_transport_validation;
+
+#[cfg(test)]
+mod provider_defaults_tests {
+    use super::*;
+    #[test]
+    #[ignore = "isolated config-only entry probe; explicit synthetic loopback provider; never sends a request"]
+    fn minimal_environment_entry_freezes_selected_model_and_defaults() {
+        if std::env::var_os("KB_TEST_EXPECT_UNKNOWN_PROFILE").is_some() {
+            assert!(
+                Config::from_environment()
+                    .unwrap_err()
+                    .message
+                    .contains("requires a measured")
+            );
+            return;
+        }
+        let config = Config::from_environment().unwrap();
+        assert_eq!(config.limits.max_context_tokens, 131072);
+        assert_eq!(config.limits.tokenizer.model_id, config.provider.model_id);
+        let frozen = serde_json::to_value(&config).unwrap();
+        for field in [
+            "max_tool_result_bytes",
+            "run_budget",
+            "max_turns",
+            "max_tool_calls",
+            "max_read_bytes",
+        ] {
+            assert!(frozen["limits"].get(field).is_none());
+        }
+    }
+    #[test]
+    fn context_override_may_lower_but_cannot_exceed_profile_ceiling() {
+        let mut provider = super::super::tests::config().provider;
+        provider.model_id = "gpt-4.1".into();
+        for allowed in [32768, Limits::PROFILE_CONTEXT_CEILING] {
+            let limits = Config::configured_limits(
+                &provider,
+                None,
+                Some(&json!({"max_context_tokens":allowed}).to_string()),
+            )
+            .unwrap();
+            assert_eq!(
+                Config::with_provider(provider.clone(), limits)
+                    .unwrap()
+                    .limits
+                    .max_context_tokens,
+                allowed
+            );
+        }
+        for denied in [Limits::PROFILE_CONTEXT_CEILING + 1, usize::MAX] {
+            let limits = Config::configured_limits(
+                &provider,
+                None,
+                Some(&json!({"max_context_tokens":denied}).to_string()),
+            )
+            .unwrap();
+            assert!(
+                Config::with_provider(provider.clone(), limits)
+                    .unwrap_err()
+                    .message
+                    .contains("profile ceiling")
+            );
+        }
+    }
+    #[test]
+    fn basic_known_provider_needs_no_limits_blob_and_custom_profile_is_model_bound() {
+        let mut provider = super::super::tests::config().provider;
+        provider.model_id = "gpt-4.1".into();
+        let defaults = Config::configured_limits(&provider, None, None).unwrap();
+        assert_eq!(defaults.max_context_tokens, 131072);
+        assert_eq!(defaults.tokenizer.model_id, provider.model_id);
+        assert!(!defaults.vision_enabled);
+        Config::with_provider(provider.clone(), defaults).unwrap();
+        provider.model_id = "custom-unverified-model".into();
+        assert!(Config::configured_limits(&provider, None, None).is_err());
+        let profile = r#"{"encoding":"o200k_base","calibration":{"multiplier_bps":11500,"provenance":"synthetic measurement fixture only"}}"#;
+        let custom =
+            Config::configured_limits(&provider, Some(profile), Some(r#"{"vision_enabled":true}"#))
+                .unwrap();
+        assert_eq!(custom.tokenizer.model_id, provider.model_id);
+        assert_eq!(custom.max_context_tokens, 131072);
+        assert!(custom.vision_enabled);
+        for key in [
+            "run_budget",
+            "max_turns",
+            "max_tool_calls",
+            "max_read_bytes",
+            "max_review_rounds",
+            "reviewer_reserve",
+            "pack_max_units",
+            "pack_max_turns",
+            "max_tool_result_bytes",
+            "tokenizer",
+        ] {
+            assert!(
+                Config::configured_limits(
+                    &provider,
+                    Some(profile),
+                    Some(&json!({key:1}).to_string())
+                )
+                .is_err(),
+                "{key}"
+            );
+        }
+        assert!(
+            Config::configured_limits(
+                &provider,
+                Some(r#"{"model_id":"someone-else","encoding":"o200k_base"}"#),
+                None
+            )
+            .is_err()
+        );
+    }
 }

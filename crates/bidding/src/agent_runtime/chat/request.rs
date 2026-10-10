@@ -37,51 +37,8 @@ fn response_error(error: CompletionError) -> AgentError {
     }
 }
 
-/// Application estimate, not a provider tokenizer or an upper bound. Base64 is
-/// transport encoding; each image instead consumes its configured allowance.
-pub(crate) fn estimate_input_tokens(
-    body: &Value,
-    image_token_reserve: usize,
-    token_safety_margin: usize,
-) -> Result<usize, AgentError> {
-    let overflow = || AgentError::new("AGENT_OUTPUT_INVALID", "context token estimate overflow");
-    let mut text = body.clone();
-    let mut reserve = token_safety_margin;
-    if let Some(messages) = text["messages"].as_array_mut() {
-        for message in messages {
-            if let Some(parts) = message["content"].as_array_mut() {
-                for part in parts {
-                    if part["type"] == "image_url" {
-                        part["image_url"]["url"] = json!("");
-                        reserve = reserve
-                            .checked_add(image_token_reserve)
-                            .ok_or_else(overflow)?;
-                    }
-                }
-            }
-        }
-    }
-    let serialized = serde_json_canonicalizer::to_vec(&text)
-        .map_err(|e| AgentError::new("AGENT_OUTPUT_INVALID", e.to_string()))?;
-    let serialized = std::str::from_utf8(&serialized)
-        .map_err(|e| AgentError::new("AGENT_OUTPUT_INVALID", e.to_string()))?;
-    // Deliberately more conservative than the observed ~3 UTF-8 bytes/token:
-    // ASCII: two chars/token; common CJK: two tokens/character; other scripts
-    // and symbols: byte fallback. Count the entire envelope, then add margin.
-    let halves = serialized.chars().try_fold(0usize, |sum, c| {
-        let cost = if c.is_ascii() {
-            1
-        } else if ('\u{3400}'..='\u{9fff}').contains(&c) {
-            4
-        } else {
-            c.len_utf8() * 2
-        };
-        sum.checked_add(cost).ok_or_else(overflow)
-    })?;
-    halves.div_ceil(2).checked_add(reserve).ok_or_else(overflow)
-}
-
-/// The frozen compatible Chat contract uses max_tokens for every configured
+/// Output reserve is internal admission accounting, never a wire output cap.
+/// The frozen compatible Chat contract omits output limits for every configured
 /// model. Use the SDK's compatible-provider default, without name heuristics.
 #[derive(Debug, Default, Clone)]
 struct FrozenChat;
@@ -183,7 +140,7 @@ pub(crate) async fn prepare(
         documents: vec![],
         tools,
         temperature: None,
-        max_tokens: Some(runtime.max_tokens.into()),
+        max_tokens: None,
         tool_choice: Some(ToolChoice::Required),
         additional_params: runtime
             .reasoning_effort
@@ -239,7 +196,7 @@ mod tests {
                 "schema_version":1,"base_url":"https://model.example.invalid/custom/v1",
                 "endpoint":"https://model.example.invalid/custom/v1/chat/completions",
                 "protocol":"openai_chat_completions_sse","model_id":model,
-                "credential_ref":"env:LLM_API_KEY","stream":true,"max_tokens":8192,"timeout_ms":90000,
+                "credential_ref":"env:LLM_API_KEY","stream":true,"output_token_reserve":8192,"timeout_ms":90000,
                 "response_mode":"tool_calls","transport_retries":0,"temperature":null,"reasoning_effort":"medium"
             })).unwrap();
             let bytes = prepare(&runtime, messages.clone(), tools.clone())
@@ -247,7 +204,7 @@ mod tests {
                 .unwrap();
             let body: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(body["model"], model);
-            assert_eq!(body["max_tokens"], runtime.max_tokens);
+            assert!(body.get("max_tokens").is_none());
             assert!(body.get("max_completion_tokens").is_none());
             assert_eq!(body["reasoning_effort"], "medium");
             assert_eq!(body["tool_choice"], "required");

@@ -7,7 +7,6 @@
 //! The shared checkpoint turn still runs here. Outline and response apply
 //! their own tools.
 pub mod agent;
-pub mod budget;
 pub mod draft;
 pub mod evidence_refs;
 pub mod outline;
@@ -17,7 +16,6 @@ pub mod readback;
 pub mod relations;
 pub mod rule_contract;
 pub mod semantic_compare;
-pub mod source_review;
 pub mod tools;
 pub mod views;
 
@@ -546,10 +544,7 @@ impl AnalysisResult {
                 });
             }
         }
-        for (role, coverage) in [
-            (agent::Role::Main, &self.analysis.coverage),
-            (agent::Role::Reviewer, &self.review.coverage),
-        ] {
+        for (role, coverage) in [(agent::Role::Main, &self.analysis.coverage)] {
             for (source_id, error) in &coverage.view_failures {
                 items.push(SourceOpenItem::View {
                     source_id: source_id.clone(),

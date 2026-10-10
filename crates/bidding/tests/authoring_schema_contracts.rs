@@ -19,7 +19,7 @@ fn checked_in_schemas_are_only_the_live_contracts() {
     assert_eq!(
         names,
         [
-            "outline-tools-v1.schema.json",
+            "outline-tools-v2.schema.json",
             "response-tools-v1.schema.json",
             "tender-analysis-tools-v1.schema.json",
         ]
@@ -29,7 +29,7 @@ fn checked_in_schemas_are_only_the_live_contracts() {
 #[test]
 fn outline_and_response_models_see_the_closed_tool_set() {
     let outline: Value =
-        serde_json::from_str(include_str!("../schemas/outline-tools-v1.schema.json")).unwrap();
+        serde_json::from_str(include_str!("../schemas/outline-tools-v2.schema.json")).unwrap();
     let response: Value =
         serde_json::from_str(include_str!("../schemas/response-tools-v1.schema.json")).unwrap();
     let names = |tools: &Value| -> Vec<_> {
@@ -46,10 +46,15 @@ fn outline_and_response_models_see_the_closed_tool_set() {
             "submit_pack",
             "put_chapters",
             "bind_forms",
-            "bind_forms_append",
             "put_slots",
-            "put_slots_append",
+            "put_fulfillments",
             "read_outline",
+            "read_requirements",
+            "read_evidence",
+            "read_source_view",
+            "submit_review",
+            "read_claim_evidence",
+            "submit_claim_comparison",
             "finish_outline"
         ]
     );
@@ -66,7 +71,7 @@ fn outline_and_response_models_see_the_closed_tool_set() {
         );
     }
     let chapters = validator_from(outline[1]["function"]["parameters"].clone());
-    let mut chapter = json!({"chapters":[{"id":"letter","parent_id":null,"order":0,"title":"投标函","purpose":"response","requirement_ids":[]}]});
+    let mut chapter = json!({"mode":"replace","chapters":[{"id":"letter","parent_id":null,"order":0,"title":"投标函","purpose":"response","requirement_ids":[]}]});
     assert!(chapters.is_valid(&chapter));
     chapter["chapters"][0]
         .as_object_mut()
@@ -82,4 +87,49 @@ fn outline_and_response_models_see_the_closed_tool_set() {
     assert!(responses.is_valid(&row));
     row["responses"][0]["status"] = json!("invented");
     assert!(!responses.is_valid(&row));
+}
+
+#[test]
+fn registry_parameters_match_the_single_checked_in_schema() {
+    let checked: Vec<Value> =
+        serde_json::from_str(include_str!("../schemas/outline-tools-v2.schema.json")).unwrap();
+    for spec in bidding::outline::agent::registry() {
+        let schema = checked
+            .iter()
+            .find(|schema| schema["function"]["name"] == spec.name)
+            .unwrap();
+        assert_eq!(spec.schema, *schema);
+        validator_from(spec.schema["function"]["parameters"].clone());
+    }
+}
+
+#[test]
+fn collection_write_modes_are_explicit_and_closed() {
+    let tools: Value =
+        serde_json::from_str(include_str!("../schemas/outline-tools-v2.schema.json")).unwrap();
+    for (name, field) in [
+        ("put_chapters", "chapters"),
+        ("bind_forms", "bindings"),
+        ("put_slots", "slots"),
+    ] {
+        let tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == name)
+            .unwrap();
+        let schema = validator_from(tool["function"]["parameters"].clone());
+        let mut args = json!({field:[]});
+        if field == "chapters" {
+            args[field] = json!([{ "id":"response", "parent_id":null, "order":0, "title":"Response", "purpose":"response", "requirement_ids":[] }]);
+        }
+        assert!(!schema.is_valid(&args), "missing mode: {name}");
+        args["mode"] = json!("append");
+        assert!(!schema.is_valid(&args), "unknown mode: {name}");
+        for mode in ["replace", "upsert"] {
+            args["mode"] = json!(mode);
+            assert!(schema.is_valid(&args), "valid mode: {name} {mode}");
+        }
+        assert!(!bidding::outline::agent::handles(&format!("{name}_append")));
+    }
 }

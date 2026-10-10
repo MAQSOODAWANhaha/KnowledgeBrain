@@ -1,0 +1,1155 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_pack",
+      "description": "Submit the claimed reading pack. Set repair to true only when that same pack already failed.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pack_id",
+          "call_id",
+          "claim_token",
+          "pack_revision",
+          "requirements",
+          "no_requirement_reason",
+          "inspected_atom_ids",
+          "repair"
+        ],
+        "properties": {
+          "pack_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "call_id": {
+            "type": "string",
+            "pattern": "^op_[0-9a-f]{16}$",
+            "description": "Copy current submission_operation_id exactly; host resolves the canonical receipt identity."
+          },
+          "claim_token": {
+            "type": "string",
+            "pattern": "^cl_[0-9a-f]{16}$",
+            "description": "Copy current host-issued claim_token exactly. Never infer, truncate or repair it."
+          },
+          "pack_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "description",
+                "evidence",
+                "source_section_id",
+                "kind",
+                "obligation_strength",
+                "extraction_quality"
+              ],
+              "properties": {
+                "obligation_strength": {
+                  "enum": [
+                    "mandatory",
+                    "optional",
+                    "informational",
+                    "unknown"
+                  ]
+                },
+                "extraction_quality": {
+                  "enum": [
+                    "explicit",
+                    "inferred",
+                    "uncertain"
+                  ]
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "evidence_key"
+                    ],
+                    "properties": {
+                      "evidence_key": {
+                        "type": "string",
+                        "pattern": "^ev_[0-9a-f]{24}$"
+                      }
+                    }
+                  }
+                },
+                "source_section_id": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "atom_key"
+                  ],
+                  "properties": {
+                    "atom_key": {
+                      "type": "string",
+                      "pattern": "^atom_[0-9a-f]{64}$"
+                    }
+                  }
+                },
+                "kind": {
+                  "enum": [
+                    "qualification",
+                    "material",
+                    "format",
+                    "scoring",
+                    "technical",
+                    "commercial",
+                    "unknown"
+                  ]
+                },
+                "condition_support": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "support_key"
+                    ],
+                    "properties": {
+                      "support_key": {
+                        "type": "string",
+                        "pattern": "^cs_[0-9a-f]{24}$"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "description": "Extract actual obligations with original evidence. An empty array is valid only when all owned atoms were actually inspected and no obligation exists; then a specific nonempty no_requirement_reason and complete distinct inspected_atom_ids are mandatory."
+          },
+          "no_requirement_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2048
+          },
+          "inspected_atom_ids": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "atom_key"
+              ],
+              "properties": {
+                "atom_key": {
+                  "type": "string",
+                  "pattern": "^atom_[0-9a-f]{64}$"
+                }
+              }
+            },
+            "uniqueItems": true
+          },
+          "repair": {
+            "type": "boolean",
+            "description": "true only when reading session status is failed; false when running. Schema rejection does not change pack status."
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_chapters",
+      "description": "Write chapters. mode=replace replaces the full chapter collection; mode=upsert updates submitted IDs and preserves other chapters. Preserve existing requirement assignments when updating a chapter. Upsert merges by chapter id and retains omitted chapters; it does not rename or replace an existing tree. Sibling order must be unique per parent, including roots. Reuse existing ids when updating; use replace only for an intentional complete tree replacement.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "chapters"
+        ],
+        "properties": {
+          "chapters": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "parent_id",
+                "order",
+                "title",
+                "purpose",
+                "requirement_ids"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "parent_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "order": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "purpose": {
+                  "type": "string",
+                  "enum": [
+                    "group",
+                    "response"
+                  ]
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "upsert"
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "bind_forms",
+      "description": "Bind forms to response chapters. mode=replace replaces all bindings; mode=upsert updates submitted form IDs and preserves other bindings. Continuation chains must remain consistent. Upsert retains omitted items and existing positions and appends new ids; it cannot delete or reorder. For reordering, read the complete current list and use replace with all valid items. Form continuation chains must remain in source order.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "bindings"
+        ],
+        "properties": {
+          "bindings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "form_id",
+                "chapter_id"
+              ],
+              "properties": {
+                "form_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "chapter_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "upsert"
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_slots",
+      "description": "Write template slots from source_copy, editable_blank or supported generated_explanation. mode=replace replaces all slots; mode=upsert updates submitted slot IDs and preserves other slots. Source references must have been read. Slot fields depend on content.type: source_copy has exactly one refs entry and omits text, match_query and blank_kind; editable_blank requires blank_kind and nonempty match_query and omits text; generated_explanation requires text and nonempty supporting_refs and omits match_query and blank_kind. Upsert retains omitted items and existing positions and appends new ids; it cannot delete or reorder. For reordering, read the complete current list and use replace with all valid items. Form continuation chains must remain in source order.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "slots": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "slot_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "chapter_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "content": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "source_copy"
+                        },
+                        "refs": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "source_key"
+                            ],
+                            "properties": {
+                              "source_key": {
+                                "type": "string",
+                                "pattern": "^src_[0-9a-f]{64}$"
+                              }
+                            }
+                          },
+                          "maxItems": 1,
+                          "minItems": 1
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "refs"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "editable_blank"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "generated_explanation"
+                        },
+                        "supporting_refs": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "source_key"
+                            ],
+                            "properties": {
+                              "source_key": {
+                                "type": "string",
+                                "pattern": "^src_[0-9a-f]{64}$"
+                              }
+                            }
+                          },
+                          "maxItems": 128,
+                          "minItems": 1
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "supporting_refs"
+                      ]
+                    }
+                  ]
+                },
+                "blank_kind": {
+                  "enum": [
+                    "bidder_blank",
+                    "signature"
+                  ]
+                },
+                "match_query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "slot_id",
+                "chapter_id",
+                "content"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "content": {
+                        "properties": {
+                          "type": {
+                            "const": "source_copy"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [],
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "text"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "match_query"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "blank_kind"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "content": {
+                        "properties": {
+                          "type": {
+                            "const": "editable_blank"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "blank_kind",
+                      "match_query"
+                    ],
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "text"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "content": {
+                        "properties": {
+                          "type": {
+                            "const": "generated_explanation"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "text"
+                    ],
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "match_query"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "blank_kind"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "maxItems": 128
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "upsert"
+            ]
+          }
+        },
+        "required": [
+          "mode",
+          "slots"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_fulfillments",
+      "description": "Upsert explicit requirement-to-response target links. A Group or an empty target list never fulfills a requirement. This tool has no mode argument. target_refs must be nonempty and identify existing same-chapter targets or a visible manual task. A generated_explanation alone does not fulfill a requirement.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "fulfillments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "requirement_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "primary_response_chapter_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "target_refs": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "text_slot"
+                          },
+                          "slot_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "slot_id"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "form_binding"
+                          },
+                          "form_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "form_id"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "manual_task"
+                          },
+                          "task_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "task_id",
+                          "description"
+                        ]
+                      }
+                    ]
+                  },
+                  "maxItems": 128
+                }
+              },
+              "required": [
+                "requirement_id",
+                "primary_response_chapter_id",
+                "target_refs"
+              ]
+            },
+            "maxItems": 128
+          }
+        },
+        "required": [
+          "fulfillments"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_outline",
+      "description": "Read host data using current keys. Follow returned next_cursor unchanged until selection_complete; the host fits the full request token budget.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "enum": [
+              "summary",
+              "chapters",
+              "slots",
+              "bindings",
+              "fulfillments",
+              "issues",
+              "forms",
+              "slot_body"
+            ]
+          },
+          "chapter_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "slot_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_requirements",
+      "description": "Read host data using current keys. Follow returned next_cursor unchanged until selection_complete; the host fits the full request token budget.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "enum": [
+              "requirements",
+              "packs"
+            ]
+          },
+          "source_section_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "chapter_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "unfulfilled_only": {
+            "type": "boolean"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_evidence",
+      "description": "Read host data using current keys. Follow returned next_cursor unchanged until selection_complete; the host fits the full request token budget.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_key"
+              ],
+              "properties": {
+                "source_key": {
+                  "type": "string",
+                  "pattern": "^src_[0-9a-f]{64}$"
+                }
+              }
+            },
+            "maxItems": 128
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "oneOf": [
+          {
+            "required": [
+              "refs"
+            ],
+            "not": {
+              "required": [
+                "cursor"
+              ]
+            }
+          },
+          {
+            "required": [
+              "cursor"
+            ],
+            "not": {
+              "required": [
+                "refs"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_source_view",
+      "description": "Read the original image for a frozen source via the configured image-capable model. The host supplies pixels separately. A URL or OCR text alone does not count as image evidence.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id"
+        ],
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_review",
+      "description": "Submit a bounded independent review of source obligations, condition/negation/numeric fidelity and actual response adequacy. Every issue requires source evidence. Re-read source before reviewing.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "requirement_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "maxItems": 128
+          },
+          "pack_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "maxItems": 128
+          },
+          "inspected_evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "review_evidence_key"
+              ],
+              "properties": {
+                "review_evidence_key": {
+                  "type": "string",
+                  "pattern": "^rv_[0-9a-f]{24}$"
+                }
+              }
+            },
+            "maxItems": 128
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "maxItems": 128
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "review_evidence_key"
+                    ],
+                    "properties": {
+                      "review_evidence_key": {
+                        "type": "string",
+                        "pattern": "^rv_[0-9a-f]{24}$"
+                      }
+                    }
+                  },
+                  "maxItems": 128
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "description",
+                "requirement_ids",
+                "evidence"
+              ]
+            },
+            "maxItems": 128
+          }
+        },
+        "required": [
+          "requirement_ids",
+          "pack_ids",
+          "inspected_evidence",
+          "issues"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_claim_evidence",
+      "description": "Read a requirement as the complete original requirement; declare independently judgeable obligations explicitly, with applicability, exact original text fragments and primary/support evidence plus complete source carriers and cross-pack project selection rows. Continue the opaque next_cursor unchanged. Quote handles resolve canonical originals, never retype offsets or quotations. Mark each selection's relevance; retrieval marks do not imply business meaning.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "oneOf": [
+          {
+            "required": [
+              "requirement_id"
+            ],
+            "not": {
+              "required": [
+                "cursor"
+              ]
+            }
+          },
+          {
+            "required": [
+              "cursor"
+            ],
+            "not": {
+              "required": [
+                "requirement_id"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "requirement_id": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_claim_comparison",
+      "description": "After all claim evidence pages have been delivered, compare every claim and evidence unit. Unsupported or uncertain results retain needs_review. This does not repair the requirement; a host-authorized reopen and complete resubmission followed by fresh Check is required.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requirement_id",
+          "version",
+          "observations",
+          "decisions",
+          "declared_claims"
+        ],
+        "properties": {
+          "requirement_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "declared_claims": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim_handle",
+                "obligation",
+                "applicability",
+                "original_fragments",
+                "primary_handles",
+                "support_handles"
+              ],
+              "properties": {
+                "claim_handle": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "obligation": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "applicability": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "original_fragments": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "primary_handles": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "support_handles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "observations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "quote_handle",
+                "polarity",
+                "applicability",
+                "condition"
+              ],
+              "properties": {
+                "quote_handle": {
+                  "type": "string"
+                },
+                "polarity": {
+                  "enum": [
+                    "required",
+                    "not_required",
+                    "conditional",
+                    "optional",
+                    "unclear",
+                    "mixed"
+                  ]
+                },
+                "applicability": {
+                  "enum": [
+                    "relevant",
+                    "not_relevant",
+                    "unclear"
+                  ]
+                },
+                "condition": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "decisions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim_handle",
+                "evidence_handles",
+                "verdict",
+                "action",
+                "resulting_claim"
+              ],
+              "properties": {
+                "claim_handle": {
+                  "type": "string"
+                },
+                "evidence_handles": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "verdict": {
+                  "enum": [
+                    "supports",
+                    "contradicts",
+                    "uncertain"
+                  ]
+                },
+                "action": {
+                  "enum": [
+                    "retain",
+                    "retract_positive_obligation",
+                    "mark_not_applicable",
+                    "narrow_condition",
+                    "manual_review"
+                  ]
+                },
+                "resulting_claim": {
+                  "type": "string"
+                }
+              },
+              "oneOf": [
+                {
+                  "properties": {
+                    "verdict": {
+                      "const": "supports"
+                    },
+                    "action": {
+                      "enum": [
+                        "retain"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "verdict": {
+                      "const": "contradicts"
+                    },
+                    "action": {
+                      "enum": [
+                        "retract_positive_obligation",
+                        "mark_not_applicable",
+                        "narrow_condition",
+                        "manual_review"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "verdict": {
+                      "const": "uncertain"
+                    },
+                    "action": {
+                      "enum": [
+                        "manual_review"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "finish_outline",
+      "description": "Finish after independent source-backed review covers every pack and requirement. Unresolved issues remain needs_review.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    }
+  }
+]

@@ -41,6 +41,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+tiktoken-rs = "=0.12.1"
 unicode-normalization = "=0.1.25"
 uuid.workspace = true
 url = "2"

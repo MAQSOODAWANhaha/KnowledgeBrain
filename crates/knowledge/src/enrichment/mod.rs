@@ -5,6 +5,7 @@ mod language;
 mod ocr;
 mod pending;
 mod prompts;
+mod regions;
 mod summary;
 
 pub use chat::{
@@ -336,20 +337,69 @@ pub fn process_image_on_job(
         return Ok(());
     }
     let version = job.version.clone();
-    drop_prior_image_chunks_job(job, image_key);
     let parent = parent_text_chunk_job(job, image_key);
     let language = language_for_job(job);
-    let (ocr, caption) = describe_image(image_key, image_source_type, &language)?;
+    let base = vlm_base_url();
     let mut parts = Vec::new();
-    if enable_ocr {
-        let ocr = sanitize_ocr_text(&ocr);
-        if !ocr.is_empty() {
-            parts.push(("image_ocr", ocr));
+    let mut errors = Vec::new();
+    let mut ocr_provenance = job
+        .chunks
+        .values()
+        .find(|c| c.context_header == image_key && c.chunk_type == "image_ocr")
+        .and_then(|c| c.source_locator.as_ref())
+        .and_then(|v| v.get("ocr_provenance"))
+        .cloned();
+    for (enabled, kind, prompt) in [
+        (
+            enable_ocr,
+            "image_ocr",
+            ocr_prompt(image_source_type).to_owned(),
+        ),
+        (enable_caption, "image_caption", caption_prompt(&language)),
+    ] {
+        if !enabled {
+            continue;
+        }
+        // Retry only the failed lane. A caption failure never discards completed
+        // literal OCR, and a caption is never accepted as OCR evidence.
+        let cached = job
+            .chunks
+            .values()
+            .find(|c| c.context_header == image_key && c.chunk_type == kind)
+            .map(|c| c.content.clone());
+        let result = if kind == "image_ocr" && cached.is_none() {
+            match recognize_image_regions(image_key, &prompt) {
+                Ok(result) => {
+                    ocr_provenance =
+                        Some(serde_json::to_value(&result).map_err(|e| e.to_string())?);
+                    if result.complete {
+                        Ok(result.text)
+                    } else {
+                        if !result.text.is_empty() {
+                            parts.push(("image_ocr_partial", result.text));
+                        }
+                        Err("incomplete required OCR after bounded subdivision".into())
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            cached
+                .map(Ok)
+                .unwrap_or_else(|| vlm_complete(&base, &prompt, image_key))
+        };
+        match result {
+            Ok(text) => {
+                if !text.trim().is_empty() {
+                    parts.push((kind, text));
+                } else if kind == "image_ocr" {
+                    errors.push("ocr_error: complete OCR returned no literal text".to_string());
+                }
+            }
+            Err(error) => errors.push(format!("{kind}_error: {error}")),
         }
     }
-    if enable_caption && !caption.trim().is_empty() {
-        parts.push(("image_caption", caption));
-    }
+    drop_prior_image_chunks_job(job, image_key);
     for (ctype, content) in parts {
         let mut ch = Chunk {
             id: Uuid::new_v4(),
@@ -362,19 +412,25 @@ pub fn process_image_on_job(
             end_at: content.chars().count() as i32,
             parent_chunk_id: parent,
             generated_questions: Vec::new(),
-            source_locator: None,
+            source_locator: (ctype == "image_ocr" || ctype == "image_ocr_partial").then(|| serde_json::json!({"ocr_provenance":ocr_provenance,"completeness":if ctype=="image_ocr" {"complete"} else {"partial"}})),
         };
-        crate::index::index_one_in(
-            &mut job.embeddings,
-            &ch,
-            &doc.title,
-            version.vector_enabled,
-            version.keyword_enabled,
-        )?;
+        if ctype != "image_ocr_partial" {
+            crate::index::index_one_in(
+                &mut job.embeddings,
+                &ch,
+                &doc.title,
+                version.vector_enabled,
+                version.keyword_enabled,
+            )?;
+        }
         ch.context_header = image_key.to_string();
         job.chunks.insert(ch.id, ch);
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn parent_text_chunk_job(job: &DocJob, image_key: &str) -> Option<uuid::Uuid> {
@@ -395,8 +451,10 @@ fn drop_prior_image_chunks_job(job: &mut DocJob, image_key: &str) {
         .chunks
         .values()
         .filter(|c| {
-            matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
-                && c.context_header == image_key
+            matches!(
+                c.chunk_type.as_str(),
+                "image_ocr" | "image_caption" | "image_ocr_partial"
+            ) && c.context_header == image_key
         })
         .map(|c| c.id)
         .collect();
@@ -468,7 +526,7 @@ pub async fn describe_image_bytes_once_async(
             key,
             serde_json::json!({
                 "model": model,
-                "max_tokens": 1024,
+                "max_tokens": ocr_output_token_budget(),
                 "messages": [{
                     "role": "user",
                     "content": [
@@ -491,7 +549,19 @@ pub async fn describe_image_bytes_once_async(
         ocr_prompt(image_source_type).to_string(),
     )
     .await?;
+    if ocr.finish_reason != "stop" {
+        return Err(ChatTransportError::Response(format!(
+            "incomplete OCR: finish_reason={}",
+            ocr.finish_reason
+        )));
+    }
     let caption = complete(&url, &key, &model, &image_url, caption_prompt(language)).await?;
+    if caption.finish_reason != "stop" {
+        return Err(ChatTransportError::Response(format!(
+            "incomplete caption: finish_reason={}",
+            caption.finish_reason
+        )));
+    }
     if ocr.content.trim().is_empty() {
         return Err(ChatTransportError::Response(
             "VLM OCR output is empty".into(),
@@ -595,7 +665,7 @@ fn vlm_complete_inner(base: &str, prompt: &str, image_key: &str) -> Result<Strin
     let image_url = image_data_url(image_key)?;
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": ocr_output_token_budget(),
         "messages": [{
             "role": "user",
             "content": [
@@ -623,6 +693,134 @@ pub fn markdown_image_keys(md: &str) -> Vec<String> {
         }
     }
     keys
+}
+
+fn ocr_output_token_budget() -> u32 {
+    std::env::var("KNOWLEDGEBRAIN_OCR_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(8192)
+}
+
+/// One physical, cancellation-safe literal OCR call. Empty text is valid only
+/// after a complete `stop` response and a complete SSE terminal event.
+pub async fn literal_ocr_bytes_once_async(
+    image_bytes: &[u8],
+    media_type: &str,
+    image_source_type: &str,
+) -> Result<crate::models::ChatTurn, crate::models::ChatTransportError> {
+    use crate::models::ChatTransportError;
+    if image_bytes.is_empty()
+        || !matches!(
+            media_type,
+            "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+        )
+    {
+        return Err(ChatTransportError::Response(
+            "invalid OCR image media".into(),
+        ));
+    }
+    let base = vlm_base_url();
+    let model = platform::vlm_model();
+    if base.is_empty() || model.is_empty() || model == "stub-vlm" {
+        return Err(ChatTransportError::Response(
+            "VLM endpoint/model is not configured".into(),
+        ));
+    }
+    let image_url = format!(
+        "data:{media_type};base64,{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_bytes)
+    );
+    crate::models::chat_complete_text_once_async(&chat::completions_url_for_vlm(&base),&platform::vlm_api_key(),serde_json::json!({
+        "model":model,"max_tokens":ocr_output_token_budget(),"messages":[{"role":"user","content":[
+            {"type":"text","text":ocr_prompt(image_source_type)}, {"type":"image_url","image_url":{"url":image_url}}
+        ]}]
+    }),std::time::Duration::from_secs(180)).await
+}
+
+fn recognize_image_regions(image_key: &str, prompt: &str) -> Result<regions::Recognition, String> {
+    let hash = image_key
+        .strip_prefix("objects/")
+        .ok_or("required OCR image is not a persisted object")?;
+    let bytes = platform::read_blob(hash).map_err(|e| e.to_string())?;
+    let image = image::load_from_memory(&bytes).map_err(|e| format!("decode OCR image: {e}"))?;
+    let depth = std::env::var("KNOWLEDGEBRAIN_OCR_MAX_REGION_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+        .min(6);
+    let calls = std::env::var("KNOWLEDGEBRAIN_OCR_MAX_REGION_CALLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+        .clamp(1, 64);
+    tokio::task::block_in_place(|| {
+        Ok(regions::recognize(&image, depth, calls, |bytes| {
+            let model = platform::vlm_model();
+            let base = vlm_base_url();
+            if model.is_empty() || model == "stub-vlm" || base.is_empty() {
+                return Err("VLM endpoint/model is not configured".into());
+            }
+            let url = format!(
+                "data:image/png;base64,{}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+            );
+            let turn = crate::models::chat_complete_text_once(
+                &chat::completions_url_for_vlm(&base),
+                &platform::vlm_api_key(),
+                serde_json::json!({
+                    "model":model,"max_tokens":ocr_output_token_budget(),"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":url}}]}]
+                }),
+                std::time::Duration::from_secs(180),
+            )?;
+            if turn.finish_reason != "stop" || !turn.tool_calls.is_empty() {
+                return Err(format!("incomplete OCR: {}", turn.finish_reason));
+            }
+            Ok(turn.content)
+        }))
+    })
+}
+
+pub use regions::{Fragment as OcrFragment, Recognition as OcrRecognition};
+
+/// Spatial retry is bounded separately from transport. Each crop uses the
+/// one-physical-call primitive; incomplete or ambiguous evidence is explicit.
+pub async fn literal_ocr_regions_async(
+    image_bytes: &[u8],
+    media_type: &str,
+    image_source_type: &str,
+) -> Result<OcrRecognition, crate::models::ChatTransportError> {
+    use crate::models::ChatTransportError;
+    if !matches!(
+        media_type,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) {
+        return Err(ChatTransportError::Response(
+            "invalid OCR image media".into(),
+        ));
+    }
+    let image = image::load_from_memory(image_bytes)
+        .map_err(|e| ChatTransportError::Response(format!("decode OCR image: {e}")))?;
+    let depth = std::env::var("KNOWLEDGEBRAIN_OCR_MAX_REGION_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+        .min(6);
+    let calls = std::env::var("KNOWLEDGEBRAIN_OCR_MAX_REGION_CALLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8)
+        .clamp(1, 64);
+    Ok(
+        regions::recognize_async(&image, depth, calls, |bytes| async move {
+            literal_ocr_bytes_once_async(&bytes, "image/png", image_source_type)
+                .await
+                .map(|turn| turn.content)
+                .map_err(|e| e.to_string())
+        })
+        .await,
+    )
 }
 
 #[cfg(test)]

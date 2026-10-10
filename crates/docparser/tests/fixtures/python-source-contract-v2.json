@@ -1,0 +1,279 @@
+[
+  {
+    "name": "mixed.pdf",
+    "file_type": "pdf",
+    "file_sha256": "a9ed676a908c021b90dd40d9e9652ba1612a2165c0eab90d98a254ec3c357467",
+    "markdown": "Native evidence 10 and 20\nRepeated header\n\n![mixed_page_1.jpg](images/mixed_page_1.jpg)\n\n![mixed_page_2.jpg](images/mixed_page_2.jpg)\n\n![mixed_page_3.jpg](images/mixed_page_3.jpg)",
+    "metadata": {
+      "page_count": "3",
+      "page_classifications": "[\"text\", \"blank\", \"scanned\"]",
+      "scanned_page_count": "1",
+      "text_page_count": "2",
+      "embedded_image_count": "0",
+      "vector_figure_count": "0",
+      "image_source_type": "scanned_pdf",
+      "repeating_lines": "[]",
+      "document_tree": "{\"kind\":\"document\",\"key\":\"\",\"keys\":[],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"section\",\"key\":\"\",\"keys\":[\"section:0:page:0\"],\"section_ordinal\":0,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"image\",\"key\":\"page:0:image:0\",\"keys\":[\"page:0:image:0\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"images/mixed_page_1.jpg\",\"children\":[]},{\"kind\":\"image\",\"key\":\"page:1:image:0\",\"keys\":[\"page:1:image:0\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"images/mixed_page_2.jpg\",\"children\":[]},{\"kind\":\"image\",\"key\":\"page:2:image:0\",\"keys\":[\"page:2:image:0\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"images/mixed_page_3.jpg\",\"children\":[]}]}]}",
+      "source_contract": "{\"schema_version\":2,\"document_revision\":\"a9ed676a908c021b90dd40d9e9652ba1612a2165c0eab90d98a254ec3c357467\",\"parser_version\":\"docreader-source-v2/bd76a798a757bca9395331e5329f9af8f8591e00efbf7c4d9733a21327766c44\",\"markdown_sha256\":\"0fed131e82e4b34f3ef3943d040e8a6f7dc4120c40935f4bf1477601401b4de0\",\"units\":[{\"unit_id\":\"section:0:page:0\",\"ordinal\":0,\"kind\":\"section\",\"text_sha256\":\"d5b0a5e825eca52a645c4eb97fa19bec4e59f7517bc71548669eca86b077b428\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"page\",\"page_ordinal\":0,\"left\":null,\"top\":null,\"right\":null,\"bottom\":null},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":41}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"page:0:image:0\",\"ordinal\":1,\"kind\":\"image_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"image\",\"original_ref\":\"images/mixed_page_1.jpg\",\"width\":300,\"height\":300,\"media_type\":\"image/jpeg\",\"page_ordinal\":0,\"compound_parent\":null,\"left\":null,\"top\":null,\"right\":null,\"bottom\":null},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":43,\"end_byte\":87}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"page:1:image:0\",\"ordinal\":2,\"kind\":\"image_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"image\",\"original_ref\":\"images/mixed_page_2.jpg\",\"width\":300,\"height\":300,\"media_type\":\"image/jpeg\",\"page_ordinal\":1,\"compound_parent\":null,\"left\":null,\"top\":null,\"right\":null,\"bottom\":null},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":89,\"end_byte\":133}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"page:2:image:0\",\"ordinal\":3,\"kind\":\"image_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":\"section:0\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"image\",\"original_ref\":\"images/mixed_page_3.jpg\",\"width\":300,\"height\":300,\"media_type\":\"image/jpeg\",\"page_ordinal\":2,\"compound_parent\":null,\"left\":null,\"top\":null,\"right\":null,\"bottom\":null},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":135,\"end_byte\":179}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]}],\"page_manifest\":[{\"page_ordinal\":0,\"classification\":\"text\",\"unit_ids\":[\"section:0:page:0\",\"page:0:image:0\"],\"image_unit_ids\":[\"page:0:image:0\"]},{\"page_ordinal\":1,\"classification\":\"blank\",\"unit_ids\":[\"page:1:image:0\"],\"image_unit_ids\":[\"page:1:image:0\"]},{\"page_ordinal\":2,\"classification\":\"scanned\",\"unit_ids\":[\"page:2:image:0\"],\"image_unit_ids\":[\"page:2:image:0\"]}]}",
+      "output_inventory_manifest": "{\"schema_version\":1,\"profile\":\"output_inventory_v1\",\"file_sha256\":\"a9ed676a908c021b90dd40d9e9652ba1612a2165c0eab90d98a254ec3c357467\",\"parser\":\"docreader-output-inventory-v1/pdfium/5.13.0/implementation/4a63a469fe4f9c0a38c1b9ba0124c518bd31aa231cdadc3a614192f564c7c91a/lxml/6.1.3/pillow/12.3.0\",\"config\":{\"profile\":\"output_inventory_v1\",\"preserve_all_pages\":true,\"preserve_page_images\":true,\"text_cleaning\":false,\"settings\":{\"pdf_render_dpi\":72,\"pdf_jpeg_quality\":85,\"pdf_render_max_edge\":300,\"layout_ordering\":true,\"extract_embedded_images\":true}},\"image_sha256\":{\"images/mixed_page_1.jpg\":\"4aec8dc50b1cd5aeeba45c5536d5a8f0f44def004c5067eb747fb6c99586d117\",\"images/mixed_page_2.jpg\":\"d46e0cda03ff88ff91eab64d31dc0efe2b2e34821afee3b3d42235019934fe97\",\"images/mixed_page_3.jpg\":\"10046dbd4048a24390701e3449f0d34f03b152f69ea9081a24d2a87c5247337e\"},\"page_count\":3,\"page_manifest\":[{\"page_ordinal\":0,\"classification\":\"text\",\"unit_ids\":[\"section:0:page:0\",\"page:0:image:0\"],\"image_unit_ids\":[\"page:0:image:0\"]},{\"page_ordinal\":1,\"classification\":\"blank\",\"unit_ids\":[\"page:1:image:0\"],\"image_unit_ids\":[\"page:1:image:0\"]},{\"page_ordinal\":2,\"classification\":\"scanned\",\"unit_ids\":[\"page:2:image:0\"],\"image_unit_ids\":[\"page:2:image:0\"]}],\"units\":[{\"unit_key\":\"section:0:page:0\",\"part\":\"pdf:page:1\",\"ordinal\":0,\"kind\":\"section\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"extracted\",\"reason\":null},{\"unit_key\":\"page:0:image:0\",\"part\":\"pdf:page:1\",\"ordinal\":1,\"kind\":\"image\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"image requires visual review\"},{\"unit_key\":\"page:1:image:0\",\"part\":\"pdf:page:2\",\"ordinal\":2,\"kind\":\"image\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"image requires visual review\"},{\"unit_key\":\"page:2:image:0\",\"part\":\"pdf:page:3\",\"ordinal\":3,\"kind\":\"image\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"image requires visual review\"}]}"
+    },
+    "structured_source_units": [
+      {
+        "key": "section:0:page:0",
+        "ordinal": 0,
+        "kind": "section",
+        "text": "Native evidence 10 and 20\nRepeated header",
+        "locator": {
+          "locator_kind": "document",
+          "section_ordinal": 0,
+          "table_ordinal": null,
+          "row_ordinal": null,
+          "form_ordinal": null,
+          "heading_path": ""
+        },
+        "grid": null
+      },
+      {
+        "key": "page:0:image:0",
+        "ordinal": 1,
+        "kind": "image_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "image",
+          "original_ref": "images/mixed_page_1.jpg",
+          "width": 300,
+          "height": 300,
+          "media_type": "image/jpeg",
+          "page_ordinal": 0,
+          "compound_parent": null,
+          "left": null,
+          "top": null,
+          "right": null,
+          "bottom": null
+        },
+        "grid": null
+      },
+      {
+        "key": "page:1:image:0",
+        "ordinal": 2,
+        "kind": "image_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "image",
+          "original_ref": "images/mixed_page_2.jpg",
+          "width": 300,
+          "height": 300,
+          "media_type": "image/jpeg",
+          "page_ordinal": 1,
+          "compound_parent": null,
+          "left": null,
+          "top": null,
+          "right": null,
+          "bottom": null
+        },
+        "grid": null
+      },
+      {
+        "key": "page:2:image:0",
+        "ordinal": 3,
+        "kind": "image_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "image",
+          "original_ref": "images/mixed_page_3.jpg",
+          "width": 300,
+          "height": 300,
+          "media_type": "image/jpeg",
+          "page_ordinal": 2,
+          "compound_parent": null,
+          "left": null,
+          "top": null,
+          "right": null,
+          "bottom": null
+        },
+        "grid": null
+      }
+    ],
+    "images": [
+      {
+        "original_ref": "images/mixed_page_1.jpg",
+        "hex": "ffd8ffe000104a46494600010100000100010000ffdb0043000503040404030504040405050506070c08070707070f0b0b090c110f1212110f111113161c1713141a1511111821181a1d1d1f1f1f13172224221e241c1e1f1effdb0043010505050706070e08080e1e1411141e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1effc0001108012c012c03012200021101031101ffc4001c0001000300030101000000000000000000000506070203040801ffc4002e1000010402020103030402020300000000000102030405110612210713311422411532516123711724333452ffc40014010100000000000000000000000000000000ffc40014110100000000000000000000000000000000ffda000c03010002110311003f00fb2c0000000000000000000000000000000000000000000000000000000000000000000000000000aea733c0ff00c80ee0afb2f8f35f42dbcc8decd3648d5ca9f6bbf2e4eaaaa9fc79fe4b1197f2de0593cf73acee620d519d94284984c8f66aac57217ceaa8ad45edd552446b91534e6bd53fd05d705cab0997c5d7c84171904566696085b61cd8df23e391d1b911157cfdcd5f8fe8e73725c533213d08a57d9b356c455ed3226efe9d646f66b9eaba446f5f2aa9bd6cf9e2d7a7bea1dbe1d2e3ef70f8e3c94f8ab0c8df55694ce6cf2599e5f6df34ef5f6e34eec722c4decbb5daa2a26adefe01989799cf75dc51891dbcbe26f4f6fbd74ed1475d593b1da7f75723f6aa9a545ded157c81b5bac576a355d3c488e62bdaaaf4f2d4f95ff5fd8ab62bdbaedb15678a785fe5b246f4735dfe953c298264fd33e676f8c65e84f0f7fd2db0633091b2789ceb78e65949a4fdfb6239ec48e3eb2785f6bcf8717af4878de4b0f8de40e96a64317fa8d9492bc573e91ae6aa448d593daaad48e3daa7c22b957aed74aba02fcdbf45ef998dbb59cf85c8c95a92b556372fc23bcf855fecebb59186bdfab4bdb96592c3d5bb8d11522fb55db7f9f08bd55117f9302e11e9466e5aedc566f1d93a524788b34ed5e7ba8b219a77ab5cc7b1616acd37ded4951d2ab55aa9f955524a7e07cfb2f8fa799bf5a3a5c9efd9b6fbb232cb152937e865ad5f4e45f29d951df6ed516455fe40d81bc9312ee47fa0b2c23ed2537dc739aa8b1b6363d18edbb7e1515c9e0f6a6471eb4d2ea5fabf4ae45549bde6f4544f95edbd1f3ce6bd38cfe4fdf7e07803f8d31b82ad4edb1b2d34764248ad432491a35af731db631e88e9348ef876909ae37e9be467cee26d6478edafd25b9d7dd9eae49692235bf46e8d24582ba246ddbfafda8af5554472e80dbe6bb4e1642f9add78db3391b139f222248abf08ddfcaaff0047efd5d5facfa3fa987ea7a77f67dc4efd7f9ebf3afecc2a9705cde3951998e02ce4f49685ca3428acf5fdba4aeb92be355eef44631d13a34eccdb9a8c44d7c20c17a7bc96afa82cb57b17907bdbc81322dc8432d24aecae889a62cce6ada769bfe2f6f488a9f94450360e4fcaf03c6e7c656cbdf8e0b194b9152a50fcc934b23d1a9a6a79d22b936bf09f93c796e77c7b199e5c3da96dfb91cb14362c32abdd5eb492ebda649222756b9db4d6fe3b26f5b4df0f51f09672f4f14ea14a39ed56cce3e77bf6d6b990476a29245daaa7846b15749e575e1154a472ae31c967b5cab8ed5c2cf62af24cbd4bd1651b2c490d68da9024a9222bd1fd9becaf546b577d93cf85d06b57aed3a3124b76dc1563572351f3488c4555f84dafe44b769c52c714b6e06492aa3636ba44457aaf94444fcfc299d7acb81cd66b2f875a3814c8538abd96493c30559ac4323fa235a8db4e48dac7223b6feaf72691349b5dd170de97f239386e5bf55e3713f38de2f428e39f2cd03e48ed43eef6e8feda62a2fb6a8ef09f1fc780dc33dc871985929c57265596ddb86a471c7a7391f2bbab15537b46eff278396737c271ab894eeb32166c25775b963a54a4b0e8606ae9657f445eaddeff00b5d2e9174a6613f08cdbf92d0759e12b77270f2e6659fc8966ae88953ba2f5dabfdd556b34cf6faebecda6fc16df56dfcbefdeadc7f19c5f37778ed88157297315629b2c4a8abafa66fbf3c4ac6b93f73d36ba5d374aaaa813363d45e2d16461a896ac4d148b023ae4355efad0ba744585b24a89d5aaf47375bffe9bbd6d376e314c9f13e42b4f3fc5f1fc62cc347906428dcaf6bde8122c7c2c6c0924522248abdd890aa22311e8bb4d2fca9b580000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000032df503d46bf81e79678f4598e1d8782be2e2bc92676cba259dcf7c8d563151c9f08c4fc397cfc1a914dce7a7d8acef27cb65b30b1dbad91c5438f5ace874e89637c8f495b26f68edc89ad222a2b5177fc047e33d56c3af1ec56432f8fc953b76b1cdc85bad05496c251815553dd95cd6fdac5545545544554455d785d48cdea4f178b396316e96f7fd69e1af62e369c8b5629266b5d135d2a2754ec8f6e977af29bd6d3751cd7a377329661bb7b3d88ca641d8d663ad5bca609b65ce646e7ab2563565446cbd5ea8eedd9ae5445ea9f0bca8fa7f9dc866f9562ece459438c5ac9d393e9fe813ddb31c3057ff00c72a3d1b1b55d1f554e8bfb575d40b755f51f8bd8c9494db35d6468f9e38adbe94895a77c28e59591c9ad3dcd46bbc27cf576b7a522337eaf60b1d84b77d3179c59e065795b527c7cd1492c334a91b656a7555ebb5fe37bd22a22aa10f8bf45598dbd32d2cae32a42d75b92a5aaf876264637ce8f44575873d7f62c8aa8ad6b1cba4455f9df9a1f44ad3597e44cfe2ab59b78f86a77ad887a23a48ac32664d22ba773e572ab551db72785f0a9af217a8bd43e3526713148fbcdffb294d6dbe94adacdb2adedec2caa9d524d7e17e17edfdde08dc5fa998fcd73cc371fc3c1664ab90a96acfd558a7342d91917446be173911af6aab97ca6ff0bf0a8ab0d5fd1baece53364e5b38492ad8c93b2532bb0ad75cf71de5d1b6773d51acefb722f4eed4f08efc92bc4bd3fcd61f39c7ecdee4d56e63b8f519a850ad1e356291f1bd1888e964595c8ae448da9f6b5a8be574807657f5331f0736ce71dcbc162bb285faf521b515495f0a7bd146e67bb2222b18ae7bd5a9b54fc6c90abea3f17b192929b66bac8d1f3c715b7d2912b4ef851cb2b23935a7b9a8d7784f9eaed6f4a79731e9f7ea0de449fab7b5fad6529e43ff005b7ecfd3fb3f67eefbbb7b3f3e35dbe175e6b58bf45598dbd32d2cae32a42d75b92a5aaf876264637ce8f44575873d7f62c8aa8ad6b1cba4455f9d85aabfa9bc61f5ed4b693298f757822b2915cc7cb1cb3c52bfa46e8d9aecfeced351a89db6a9b44d91388f56b176b259a82c51c8b3e9321150a55198f9beb6791d024af6ac2a9b4ebf72efc37aa6f7e484a5e894d0dc7e4173b8caf752b57644fa98a7351678276cd1cd2abe673e55556aa3915c9b45f0a9adaf7e5fd1fbf99c94f9dcd6770d91cbc9916dd6473e1956935a95d205896259bb393488a8eee8a8a9f94f005c28fa8bc6efe57138ca0b91b7672913e589b1d193fc2d63fdb7acdb4ff1757fdaa8ed694b7145e09e9e338be5e9649b7eac8e831b3537c35b1ecad139d24e932bdad62e9a89aeba5ecabf2ae55deef400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007ffd9"
+      },
+      {
+        "original_ref": "images/mixed_page_2.jpg",
+        "hex": "ffd8ffe000104a46494600010100000100010000ffdb0043000503040404030504040405050506070c08070707070f0b0b090c110f1212110f111113161c1713141a1511111821181a1d1d1f1f1f13172224221e241c1e1f1effdb0043010505050706070e08080e1e1411141e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1effc0001108012c012c03012200021101031101ffc4001500010100000000000000000000000000000008ffc40014100100000000000000000000000000000000ffc40014010100000000000000000000000000000000ffc40014110100000000000000000000000000000000ffda000c03010002110311003f00b2c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007ffd9"
+      },
+      {
+        "original_ref": "images/mixed_page_3.jpg",
+        "hex": "ffd8ffe000104a46494600010100000100010000ffdb0043000503040404030504040405050506070c08070707070f0b0b090c110f1212110f111113161c1713141a1511111821181a1d1d1f1f1f13172224221e241c1e1f1effdb0043010505050706070e08080e1e1411141e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1effc0001108012c012c03012200021101031101ffc4001a000100020301000000000000000000000000050703040608ffc400281001000202020202020104030000000000000102030405110612132107223114152341163251ffc40014010100000000000000000000000000000000ffc40014110100000000000000000000000000000000ffda000c03010002110311003f00f6580000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030efedeb6868ec6f6ee7c7afabad8ad97365c96eab8e958eed699ff5111132cc8df2ad5c9bde33ca6962d0d5e46fb1a797146a6cde698b63da931f1ded113d56ddf533d4f513fc031f8f791715cf4ec578ecbb1f2eb4d63361d9d4cbad969168eeb334cb5adbd66227ab75d4f53d4fd4a5947dfc4fc97373d4d8e4bc4b97e77c4f169e4c1afc1f2fc86ae7dbc5b5688eb37cb6cb316c54ad66959be4b64ace5c9688eba476ef81f99ece5f308a78ddb572725e2fcdf1d16a6ee1c94dbcd9670d74a3e5bdfe6c96f8eb789b668ac5266d158ad67ec3d022a3f27fc717b6cf33c5709c1e2c3c0ef5bc76f3870e4a63ae5bebf277c9b99263b89f7f82314dad3f77ea2226d31d22fc8ff1df311cbf21874b84cf7f17af27b1975389e3e343d66326968c532d716d56d8a958cd8f72263a8bc4e59b444c4cf6172731c9e8f11a94dae433fc38726ce0d5adbd2d6ef2e6cb4c38abd444cfddf2523bfe23bee7a88996e28fddf02f208cfc7e1dbf1cc9cd6fe0e4f80cfadcd65ddc392da5adab6d4fea314def35c969f6c39f24fad3abfcbdff00da22a98e7fc339ddefcad6e6b260e473e19e4b4b674b6f0e5d3a62d4d6c54c7f2e1b5af4b6cc7b5a9966698e62978cdd4cd7bb482d5cf969862b378c93ed78a47a63b5bee67a8efa89ea3ff667ea3fdb5b3727a38b9ad6e1b267f5dedad6cdb58717a5bf6c58ad8ab92ddf5d47539b147533dcfb7d77d4f554ff00c17c8bd6dab6e3e2dadc3729c6ebf09d66c7f7a34e5b0ede6b47edfac530e3c38fd67ab4ceb4f513ed5ef9eb7e3bf2cbc6946af8d64e3b91d7e07369731ca63d9d6f7e633ceee865c931ddaddce6c78363ab66ac47efeb7888ebb0f418a778bfc75b19f4bc7f477f84d8b71387caf2f259f477f26a4fc3adfdbb3e1afb62d7ad70d6b6cd6a4ce3c716efe49b5bbeedd60e2fc2398d3dcf8b93f0ff00ef3a34c9b18787c75dec58abc444727b5971e5adbdbdb1d6daf9357d67145af58c115f58fe0174a1f90f27e0b8ff0025e37c6f6f90a5396e4fdbfa4d68a5ad6bc5697bccccc44c5226b8b24c4da63bf4b447731d2b5fc5fe11ccf09cb63dce7789e4773629a94c1bf9b364d0f8b7b6bfa8c578daad71d6b7c9e938ed962f9edf2562662b16b4cbbef2fe2f777fc8bc3b73535e3262e3b99c9b3b77f6ac7c78a78fdcc516fb9ee7fc99b1c751dcfeddff00113301b3c0795f03cf6f67d2e2f7ad9b361acde62d83263ae4a45a6937c76bd6232d3da263da9368efafbfb867e43c8788d0d5ded9d9dab571e8ec535b3c530def68cb78a4d295ad626d7b5be5c7d45626666d11fcfd389fc67e39cf71dbfe398794e32da587c67c77270b19ed9b1de37ef6bebf596914b4cc57d75627f78acf797aebea6527b14f20e3bf1ddf6b8cf1f9e4f9fdbcf3b75d5c96c51f065cd966fed6f92f48b7c31688ea2d133f1c444c77dc06fdff0020789570e9e69e52df1edc4da931a99a7e288c9f15a737e9fe088c9dd2672faf568989fb89eba8531bde17cee3e0f97e378ae0790b53c97c7a388cf9773635a3369ec4e7dbbe5dacfeb926b6f92772f97fc5ed3dd7af58efeae700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007fffd9"
+      }
+    ]
+  },
+  {
+    "name": "multiline.docx",
+    "file_type": "docx",
+    "file_sha256": "c9ec662c1dc1044aad16a471a0a227176f48c78c1049a2e8ffffa0d211924f42",
+    "markdown": "资格要求\n\n重复的正文。\n\n| 项目名称 |  |\n| --- | --- |\n| 10<br>20 | 中文<br>承诺&#9;否 |\n\n重复的正文。",
+    "metadata": {
+      "document_tree": "{\"kind\":\"document\",\"key\":\"\",\"keys\":[],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"attachment\",\"key\":\"carrier:0\",\"keys\":[\"carrier:0\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"/word/styles.xml\",\"children\":[]},{\"kind\":\"attachment\",\"key\":\"carrier:1\",\"keys\":[\"carrier:1\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"/word/document.xml\",\"children\":[]},{\"kind\":\"section\",\"key\":\"\",\"keys\":[\"story:2\"],\"section_ordinal\":2,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"attachment\",\"key\":\"carrier:3\",\"keys\":[\"carrier:3\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"/word/document.xml\",\"children\":[]}]},{\"kind\":\"section\",\"key\":\"\",\"keys\":[\"story:4\"],\"section_ordinal\":4,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"attachment\",\"key\":\"carrier:6\",\"keys\":[\"carrier:6\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"/word/document.xml\",\"children\":[]}]},{\"kind\":\"section\",\"key\":\"\",\"keys\":[],\"section_ordinal\":5,\"heading_path\":\"\",\"title\":\"\",\"children\":[{\"kind\":\"table\",\"key\":\"story:5\",\"keys\":[\"story:5\"],\"section_ordinal\":null,\"heading_path\":\"\",\"title\":\"\",\"children\":[]}]},{\"kind\":\"section\",\"key\":\"\",\"keys\":[\"story:7\"],\"section_ordinal\":7,\"heading_path\":\"\",\"title\":\"\",\"children\":[]},{\"kind\":\"section\",\"key\":\"\",\"keys\":[\"story:8\"],\"section_ordinal\":8,\"heading_path\":\"\",\"title\":\"\",\"children\":[]}]}",
+      "source_contract": "{\"schema_version\":2,\"document_revision\":\"c9ec662c1dc1044aad16a471a0a227176f48c78c1049a2e8ffffa0d211924f42\",\"parser_version\":\"docreader-source-v2/bd76a798a757bca9395331e5329f9af8f8591e00efbf7c4d9733a21327766c44\",\"markdown_sha256\":\"85fd1ea2b3458f17f0e5532e85b1936304e8337a658a9a72fcfe6e852454d7a6\",\"units\":[{\"unit_id\":\"carrier:0\",\"ordinal\":0,\"kind\":\"attachment_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":null,\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"attachment\",\"part_name\":\"/word/styles.xml\",\"relationship_type\":\"output_carrier\"},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"partial\",\"reasons\":[\"attachment_content_not_extracted\"],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"carrier:1\",\"ordinal\":1,\"kind\":\"attachment_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":null,\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"attachment\",\"part_name\":\"/word/document.xml\",\"relationship_type\":\"output_carrier\"},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"partial\",\"reasons\":[\"attachment_content_not_extracted\"],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"story:2\",\"ordinal\":2,\"kind\":\"section\",\"text_sha256\":\"c03e9ac4e0f181e09527c4f1caadcc4029e23868671452f0920028c644edbbb8\",\"grid_sha256\":null,\"section_id\":\"section:2\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":2,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"\"},\"physical_path\":\"/word/document.xml/*[1]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":0,\"end_byte\":12}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"carrier:3\",\"ordinal\":3,\"kind\":\"attachment_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":\"section:2\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"attachment\",\"part_name\":\"/word/document.xml\",\"relationship_type\":\"output_carrier\"},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"partial\",\"reasons\":[\"attachment_content_not_extracted\"],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"story:4\",\"ordinal\":4,\"kind\":\"section\",\"text_sha256\":\"5a95a35057facf02f203cfb05af0ae5037939fbaf8d413c2aae3adc9dc80506a\",\"grid_sha256\":null,\"section_id\":\"section:4\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":4,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"\"},\"physical_path\":\"/word/document.xml/*[2]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":14,\"end_byte\":32}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"story:5\",\"ordinal\":5,\"kind\":\"table_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":\"a058a2bbcb516beb6af64940b00b185feeb611905bd98eab7da47122c053ad25\",\"section_id\":\"section:5\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":5,\"table_ordinal\":2,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"\"},\"physical_path\":\"/word/document.xml/*[3]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":34,\"end_byte\":106}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":\"story:5\",\"header_cells\":[{\"row\":0,\"column\":0,\"role\":\"column_header\"}]},{\"unit_id\":\"carrier:6\",\"ordinal\":6,\"kind\":\"attachment_region\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":\"section:5\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"attachment\",\"part_name\":\"/word/document.xml\",\"relationship_type\":\"output_carrier\"},\"physical_path\":null,\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"partial\",\"reasons\":[\"attachment_content_not_extracted\"],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"story:7\",\"ordinal\":7,\"kind\":\"section\",\"text_sha256\":\"5a95a35057facf02f203cfb05af0ae5037939fbaf8d413c2aae3adc9dc80506a\",\"grid_sha256\":null,\"section_id\":\"section:7\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":7,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"\"},\"physical_path\":\"/word/document.xml/*[4]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[{\"start_byte\":108,\"end_byte\":126}],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]},{\"unit_id\":\"story:8\",\"ordinal\":8,\"kind\":\"section\",\"text_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"grid_sha256\":null,\"section_id\":\"section:8\",\"parent_section_id\":null,\"heading_level\":null,\"heading_path\":\"\",\"physical_locator\":{\"locator_kind\":\"document\",\"section_ordinal\":8,\"table_ordinal\":null,\"row_ordinal\":null,\"form_ordinal\":null,\"heading_path\":\"\"},\"physical_path\":\"/word/document.xml/*[5]\",\"physical_locator_unavailable_reason\":null,\"rendered_spans\":[],\"completeness\":\"complete\",\"reasons\":[],\"table_id\":null,\"header_cells\":[]}],\"page_manifest\":[]}",
+      "output_inventory_manifest": "{\"schema_version\":1,\"profile\":\"output_inventory_v1\",\"file_sha256\":\"c9ec662c1dc1044aad16a471a0a227176f48c78c1049a2e8ffffa0d211924f42\",\"parser\":\"docreader-output-inventory-v1/python-docx/1.2.0/implementation/4a63a469fe4f9c0a38c1b9ba0124c518bd31aa231cdadc3a614192f564c7c91a/lxml/6.1.3/pillow/12.3.0\",\"config\":{\"profile\":\"output_inventory_v1\",\"preserve_story_occurrences\":true,\"settings\":{}},\"image_sha256\":{},\"page_count\":null,\"page_manifest\":[],\"units\":[{\"unit_key\":\"carrier:0\",\"part\":\"/word/styles.xml\",\"ordinal\":0,\"kind\":\"not_checked\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"document default formatting differs from the reconstructable SimSun 12pt / 1.5 line presentation\"},{\"unit_key\":\"carrier:1\",\"part\":\"/word/document.xml\",\"ordinal\":1,\"kind\":\"not_checked\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"section layout cannot be reconstructed\"},{\"unit_key\":\"story:2\",\"part\":\"/word/document.xml\",\"ordinal\":0,\"kind\":\"paragraphs\",\"bookmarks\":[],\"fields\":[],\"heading_level\":1,\"field_region\":null,\"style_name\":\"heading 1\",\"table_layout\":null,\"status\":\"extracted\",\"reason\":null},{\"unit_key\":\"carrier:3\",\"part\":\"/word/document.xml\",\"ordinal\":0,\"kind\":\"not_checked\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"modified standard style cannot be reconstructed: heading 1\"},{\"unit_key\":\"story:4\",\"part\":\"/word/document.xml\",\"ordinal\":1,\"kind\":\"paragraphs\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":\"Normal\",\"table_layout\":null,\"status\":\"extracted\",\"reason\":null},{\"unit_key\":\"story:5\",\"part\":\"/word/document.xml\",\"ordinal\":2,\"kind\":\"table\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":{\"widths_twips\":[4320,4320],\"header_rows\":1},\"status\":\"extracted\",\"reason\":null},{\"unit_key\":\"carrier:6\",\"part\":\"/word/document.xml\",\"ordinal\":2,\"kind\":\"not_checked\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"not_checked\",\"reason\":\"unsupported formatting property: {http://schemas.openxmlformats.org/wordprocessingml/2006/main}tblW\"},{\"unit_key\":\"story:7\",\"part\":\"/word/document.xml\",\"ordinal\":3,\"kind\":\"paragraphs\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":\"Normal\",\"table_layout\":null,\"status\":\"extracted\",\"reason\":null},{\"unit_key\":\"story:8\",\"part\":\"/word/document.xml\",\"ordinal\":4,\"kind\":\"section\",\"bookmarks\":[],\"fields\":[],\"heading_level\":null,\"field_region\":null,\"style_name\":null,\"table_layout\":null,\"status\":\"extracted\",\"reason\":null}]}"
+    },
+    "structured_source_units": [
+      {
+        "key": "carrier:0",
+        "ordinal": 0,
+        "kind": "attachment_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "attachment",
+          "part_name": "/word/styles.xml",
+          "relationship_type": "output_carrier"
+        },
+        "grid": null
+      },
+      {
+        "key": "carrier:1",
+        "ordinal": 1,
+        "kind": "attachment_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "attachment",
+          "part_name": "/word/document.xml",
+          "relationship_type": "output_carrier"
+        },
+        "grid": null
+      },
+      {
+        "key": "story:2",
+        "ordinal": 2,
+        "kind": "section",
+        "text": "资格要求",
+        "locator": {
+          "locator_kind": "document",
+          "section_ordinal": 2,
+          "table_ordinal": null,
+          "row_ordinal": null,
+          "form_ordinal": null,
+          "heading_path": ""
+        },
+        "grid": null
+      },
+      {
+        "key": "carrier:3",
+        "ordinal": 3,
+        "kind": "attachment_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "attachment",
+          "part_name": "/word/document.xml",
+          "relationship_type": "output_carrier"
+        },
+        "grid": null
+      },
+      {
+        "key": "story:4",
+        "ordinal": 4,
+        "kind": "section",
+        "text": "重复的正文。",
+        "locator": {
+          "locator_kind": "document",
+          "section_ordinal": 4,
+          "table_ordinal": null,
+          "row_ordinal": null,
+          "form_ordinal": null,
+          "heading_path": ""
+        },
+        "grid": null
+      },
+      {
+        "key": "story:5",
+        "ordinal": 5,
+        "kind": "table_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "document",
+          "section_ordinal": 5,
+          "table_ordinal": 2,
+          "row_ordinal": null,
+          "form_ordinal": null,
+          "heading_path": ""
+        },
+        "grid": {
+          "row_count": 2,
+          "column_count": 2,
+          "cells": [
+            {
+              "row": 0,
+              "column": 0,
+              "row_span": 1,
+              "col_span": 2,
+              "text": "项目名称"
+            },
+            {
+              "row": 1,
+              "column": 0,
+              "row_span": 1,
+              "col_span": 1,
+              "text": "10\n20"
+            },
+            {
+              "row": 1,
+              "column": 1,
+              "row_span": 1,
+              "col_span": 1,
+              "text": "中文\n承诺\t否"
+            }
+          ],
+          "widths_mm": [
+            76.2,
+            76.2
+          ]
+        }
+      },
+      {
+        "key": "carrier:6",
+        "ordinal": 6,
+        "kind": "attachment_region",
+        "text": "",
+        "locator": {
+          "locator_kind": "attachment",
+          "part_name": "/word/document.xml",
+          "relationship_type": "output_carrier"
+        },
+        "grid": null
+      },
+      {
+        "key": "story:7",
+        "ordinal": 7,
+        "kind": "section",
+        "text": "重复的正文。",
+        "locator": {
+          "locator_kind": "document",
+          "section_ordinal": 7,
+          "table_ordinal": null,
+          "row_ordinal": null,
+          "form_ordinal": null,
+          "heading_path": ""
+        },
+        "grid": null
+      },
+      {
+        "key": "story:8",
+        "ordinal": 8,
+        "kind": "section",
+        "text": "",
+        "locator": {
+          "locator_kind": "document",
+          "section_ordinal": 8,
+          "table_ordinal": null,
+          "row_ordinal": null,
+          "form_ordinal": null,
+          "heading_path": ""
+        },
+        "grid": null
+      }
+    ],
+    "images": []
+  }
+]

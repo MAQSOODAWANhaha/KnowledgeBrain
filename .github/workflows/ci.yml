@@ -57,6 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p "$CI_API_BIN" -p "$CI_WORKER_BIN"
+          cargo build --locked -p bidding --bin "$CI_TENDER_PREPARE_BIN"
           cargo build --locked -p "$CI_PLATFORM_PACKAGE" --bin "$CI_MIGRATOR_BIN" --bin "$CI_SCHEMA_VERIFIER_BIN"
       - name: Package dev binaries and integration tests
         run: bash scripts/ci_package_binaries.sh
@@ -162,6 +163,17 @@ jobs:
           export KB_TENDER_AGENT_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
           log="$RUNNER_TEMP/tender-analysis.log"
           bash scripts/ci_run_packaged_test.sh "$CI_TENDER_TEST" "$log" -- --ignored --test-threads=1 --nocapture
+      - name: Knowledge generation and durable outbox fault acceptance
+        run: |
+          set -euo pipefail
+          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          # Queue failure is deliberate: durable database obligations must survive it.
+          export REDIS_URL="redis://127.0.0.1:1/"
+          export KB_DEPLOYMENT_NAMESPACE_ID="$CI_CONTENT_NAMESPACE_ID"
+          for test_name in $CI_KNOWLEDGE_WORKFLOW_TESTS; do
+            log="$RUNNER_TEMP/${test_name}.log"
+            bash scripts/ci_run_packaged_test.sh "$test_name" "$log" -- --ignored --test-threads=1 --nocapture
+          done
       - name: Frozen exact-version retrieval PostgreSQL acceptance
         run: |
           set -euo pipefail

@@ -813,7 +813,7 @@ mod tests {
 
     fn frozen(units: Vec<Source>, forms: Vec<Value>) -> FrozenInput {
         FrozenInput {
-            schema_version: 1,
+            schema_version: 2,
             project_id: "project".into(),
             document_set_id: "set".into(),
             documents: vec![],

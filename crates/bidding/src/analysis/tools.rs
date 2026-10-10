@@ -40,7 +40,7 @@ fn form<'a>(input: &'a FrozenInput, id: &str) -> Result<&'a Value, String> {
 }
 
 pub fn validate_input(input: &FrozenInput) -> Result<(), String> {
-    if input.schema_version != 1 || input.document_set_id.is_empty() {
+    if input.schema_version != 2 || input.document_set_id.is_empty() {
         return Err("invalid frozen analysis identity".into());
     }
     let ids: BTreeSet<_> = input
@@ -1805,49 +1805,4 @@ fn record_id<T>(args: &Value, records: &BTreeMap<String, T>) -> Result<String, S
         return Err("unknown record id; use null to allocate a new identity".into());
     }
     Ok(id.into())
-}
-
-pub fn schemas_for(reviewer: bool, _limits: &super::agent::Limits) -> Vec<Value> {
-    schemas(reviewer)
-}
-
-pub fn schemas(reviewer: bool) -> Vec<Value> {
-    let contract: Value = serde_json::from_str(include_str!(
-        "../../schemas/tender-analysis-tools-v1.schema.json"
-    ))
-    .expect("checked tender tool schemas");
-    contract
-        .as_array()
-        .expect("tool array")
-        .iter()
-        .filter(|tool| {
-            !reviewer
-                || !matches!(
-                    tool["function"]["name"].as_str(),
-                    Some(
-                        "put_record"
-                            | "put_relation"
-                            | "delete_record"
-                            | "delete_relation"
-                            | "set_disposition"
-                            | "request_review"
-                            | "put_repair_result"
-                    )
-                )
-        })
-        .filter(|tool| {
-            reviewer
-                || !matches!(
-                    tool["function"]["name"].as_str(),
-                    Some(
-                        "read_review_task"
-                            | "put_source_review"
-                            | "put_review_finding"
-                            | "delete_review_finding"
-                            | "complete_review_check"
-                    )
-                )
-        })
-        .cloned()
-        .collect()
 }

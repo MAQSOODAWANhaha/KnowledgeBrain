@@ -1,35 +1,7 @@
-> 历史设计记录。描述的是已删除的骨架编译器，不是现行生成合同。现行合同见 [投标文档](../README.md)。
+# Historical validation scope
 
-# 投标文件骨架编译与可选内容补充
+Project-specific source excerpts, paraphrases, and historical response details are retained only in the authorized private validation archive. This public page makes no claim of real-model semantic acceptance.
 
-下文是当时的编译与填充协议。其中引用的主方案章节已经不存在。
+Public regression uses synthetic inputs. A synthetic example contains two independent text carriers, one response chapter, and an editable blank. Tests must preserve evidence ownership, require fresh Check receipts after repair, and retain shared accounting across journal reloads.
 
-## 骨架编译
-
-发现、组织和核对通过后，宿主从同一规范化章节树编译 Word。预览与 Word 使用相同章节、父子和顺序。章节依据取已保存 grounds，禁止用任意已读来源兜底。
-
-发布依次执行编译、文件检查、对象暂存和数据库事务登记。任务成功必须已有可编辑版本。重复发布返回原收据；旧执行者和版本冲突不得更新 current。编译器拒绝无效树，父链遍历不得死循环。
-
-## 填充接口
-
-统一 `/api/v2/submission-workspaces/{workspace_id}/docx-fills`，包含 basis、latest、任务查询与 stop。请求携带当前 expected 版本及摘要、来源身份，服务端冻结回读树与正文摘要及执行合同。
-
-删除 `/docx-compositions` 旧业务入口、官方编制运行体与 mode 分支，不保留 API 别名。具体错误和状态 DTO 随主方案 T0-C 同步后端、SQL、前端与测试。
-
-## 填充执行
-
-读取已保存 DOCX → 兼容性检查 → 按当前结构重建计划 → 定向绑定 → 只填空的正文承载章 → 编译 → CAS 发布。
-
-书签仅定位身份；改名、改归属后旧依据失效。单章也要重绑，失败保留空章并报告。已有正文不进入模型改写。用户停止可发布已安全完成正文，保留未填章，明确剩余原因。
-
-仅 TOC 排除重复标题。普通 DATE／REF 域正文不得被忽略；图片、签章、自定义样式、章外正文等无法可靠重建时，任务提交前阻止。支持范围采用明确白名单，不能承诺无损后静默删除。
-
-超过文件预算失败保留原稿，不能删正文降级。成功后刷新工作区 current，编辑器与下载同步。保存期间产生版本冲突则不覆盖。
-
-## 验证
-
-主方案 A10–A19 覆盖树安全、回读、填充与版本。须使用真实 Word 保存重开验证，不以正文字符串相等证明图片／排版保真。当前没有旧正式编制或独立终稿复核门。
-
-## 评审后固定边界
-
-发布只由当时的两阶段方案（已删除）第 3.4 节阻断清单决定，其他问题作为版本绑定提示保留。核对只能读取已保存核对片段，不能重新扫描全书。填充白名单仅普通标准段落、受支持表格及可重建 TOC；图片、签章载体、扫描件、自定义样式、页眉页脚、首章前非 TOC 内容和不支持的 DATE／REF 一律提交前拒绝并定位。字段落点使用主方案第 4.1 节，不另建 schema 或状态表。
+Aggregate local status before the new end-to-end fixture: bidding 288 passed / 22 ignored; docparser 56 passed; knowledge 240 passed / 1 ignored. Strict all-features/all-targets clippy passed. The full concurrent phase-cycle fixture remains under validation.

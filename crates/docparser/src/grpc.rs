@@ -331,6 +331,10 @@ async fn read_stream(
             ),
         });
     }
+    crate::parse_source_contract(&result).map_err(|error| StreamErr {
+        code: None,
+        msg: error.0,
+    })?;
     Ok(result)
 }
 
@@ -343,7 +347,7 @@ async fn read_unary(
         .await
         .map_err(|error| map_status(error).classified())?
         .into_inner();
-    Ok(ReadResult {
+    let result = ReadResult {
         markdown: resp.markdown_content,
         error: resp.error,
         images: resp.image_refs.into_iter().map(from_proto_image).collect(),
@@ -351,7 +355,10 @@ async fn read_unary(
         structured_source_units: from_proto_units(resp.structured_source_units)
             .map_err(DocReaderReadError::InvalidResponse)?,
         ..ReadResult::default()
-    })
+    };
+    crate::parse_source_contract(&result)
+        .map_err(|error| DocReaderReadError::InvalidResponse(error.0))?;
+    Ok(result)
 }
 
 fn apply_frame(

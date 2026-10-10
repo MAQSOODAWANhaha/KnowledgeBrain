@@ -47,22 +47,41 @@ struct Calls {
     total: usize,
     attempts: BTreeMap<String, usize>,
 }
+// Sole cumulative spending guard, private acceptance only. Production limits
+// do not contain these quotas. Include the pending request in every admission.
+fn acceptance_admission(
+    a: &bidding::agent_runtime::budget::ModelAccounting,
+    now: u64,
+) -> Result<(), AgentError> {
+    if a.physical_calls > 71
+        || a.reserved_input_tokens > 7_166_928
+        || a.reserved_output_tokens > 581_632
+        || a.started_unix_seconds
+            .is_none_or(|start| now.saturating_sub(start) >= 5438)
+    {
+        return Err(AgentError::new(
+            "PRIVATE_ACCEPTANCE_BUDGET_EXHAUSTED",
+            "private acceptance spending guard stopped before send",
+        ));
+    }
+    Ok(())
+}
+
 struct Local {
     root: PathBuf,
     views: PathBuf,
     input: ta::FrozenInput,
     count: Mutex<Calls>,
-    max_calls: usize,
 }
 impl Local {
     fn reserve(&self, turn: usize, role: &str, body: &[u8]) -> Result<(usize, usize), AgentError> {
         let mut count = self.count.lock().map_err(err)?;
         let boundary = format!("turn-{turn}-{role}");
         let attempt = count.attempts.get(&boundary).copied().unwrap_or(0);
-        if count.total >= self.max_calls || attempt >= 3 {
+        if attempt >= 3 {
             return Err(AgentError::new(
                 "AGENT_TURN_BUDGET_EXCEEDED",
-                "physical call or boundary retry budget exhausted",
+                "same-boundary transport attempts exhausted",
             ));
         }
         let identity = self.root.join(format!("{boundary}.json"));
@@ -98,6 +117,12 @@ impl extraction::Journal for Local {
         } else {
             Ok(None)
         }
+    }
+    async fn admit(&self, state: &extraction::Checkpoint, _body: &[u8]) -> Result<(), AgentError> {
+        acceptance_admission(
+            &state.journal.accounting,
+            bidding::agent_runtime::budget::unix_seconds(),
+        )
     }
     async fn reserve(
         &self,
@@ -140,16 +165,19 @@ impl extraction::Journal for Local {
         let page = source.locator["page_ordinal"]
             .as_u64()
             .ok_or_else(|| err("source has no physical page"))?;
-        let mut view: ta::views::SourceView = read(self.views.join(format!("page-{page}.json")))?;
         let document = self
             .input
             .documents
             .iter()
             .find(|d| d["document_id"] == source.document_id)
             .ok_or_else(|| err("source document missing"))?;
-        if view.identity.page_ordinal as u64 != page
-            || document["sha256"] != view.identity.original_sha256
-        {
+        let revision = document["document_revision"]
+            .as_str()
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| err("source document has no strict revision digest"))?;
+        let mut view: ta::views::SourceView =
+            read(self.views.join(revision).join(format!("page-{page}.json")))?;
+        if view.identity.page_ordinal as u64 != page || revision != view.identity.original_sha256 {
             return Err(err(
                 "source view does not belong to the frozen document/page",
             ));
@@ -172,71 +200,13 @@ impl Drop for Lock {
 }
 // Seed import creates fresh execution ledgers. It must not erase spent repair
 // allowances or bypass an unfinished response from an earlier attempt.
-fn validate_repair_seed_budget(seed: &extraction::Checkpoint) -> Result<(), AgentError> {
-    let empty_watch =
-        serde_json::to_value(bidding::agent_runtime::progress::ProgressWatch::default())
-            .map_err(err)?;
-    if seed.journal.pending.is_some()
-        || !seed.main_progress.blockers.is_empty()
-        || !seed.reviewer_progress.blockers.is_empty()
-        || serde_json::to_value(&seed.main_progress.watch).map_err(err)? != empty_watch
-        || serde_json::to_value(&seed.reviewer_progress.watch).map_err(err)? != empty_watch
-        || serde_json::to_value(&seed.repair).map_err(err)?
-            != serde_json::to_value(extraction::repair::State::default()).map_err(err)?
-    {
-        return Err(err(
-            "repair seed import cannot reset prior execution or repair allowances; preserve the original checkpoint and use a supported recovery contract",
-        ));
-    }
-    Ok(())
-}
 
 // Import only archived model claims validated by the same production gates.
 // This does not carry the old review's reading or completion receipts into a
 // new contract. The immutable old checkpoint remains the audit of that attempt.
-fn validate_repair_seed(
-    input: &ta::FrozenInput,
-    seed: &extraction::Checkpoint,
-) -> Result<(), AgentError> {
-    validate_repair_seed_budget(seed)?;
-    if seed.input_sha256 != ta::digest(input).map_err(err)?
-        || !ta::tools::gaps(input, &seed.analysis).is_empty()
-        || seed.review_draft.is_empty()
-    {
-        return Err(err(
-            "repair seed needs the same frozen input, a structurally complete candidate and archived model findings",
-        ));
-    }
-    for finding in seed.review_draft.values() {
-        extraction::validate_finding(input, seed, finding).map_err(err)?;
-    }
-    Ok(())
-}
 
 // Preserve later candidate edits separately from the archived feedback evidence.
 // Neither input imports an independent approval into the new runtime contract.
-fn read_candidate_seed(
-    input: &ta::FrozenInput,
-    mode: &str,
-    input_dir: &Path,
-    repair_seed: Option<&extraction::Checkpoint>,
-) -> Result<Option<ta::Analysis>, AgentError> {
-    Ok(
-        if mode == "review"
-            || (repair_seed.is_some() && input_dir.join("analysis-seed.json").exists())
-        {
-            let seed = read(input_dir.join("analysis-seed.json"))?;
-            if !ta::tools::gaps(input, &seed).is_empty() {
-                return Err(err(
-                    "review diagnostic seed has structural or primary reading gaps",
-                ));
-            }
-            Some(seed)
-        } else {
-            repair_seed.map(|seed| seed.analysis.clone())
-        },
-    )
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -275,7 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.len() != 5 {
-        return Err("usage: tender_sample <extract|review|repair> <input-directory> <explicit-limits.json> <run-directory>".into());
+        return Err(
+            "usage: tender_sample extract <input-directory> <explicit-limits.json> <run-directory>"
+                .into(),
+        );
     }
     let mode = &args[1];
     let input_dir = PathBuf::from(&args[2]);
@@ -288,39 +261,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(&lock_path)?;
     let _lock = Lock(lock_path);
     let input: ta::FrozenInput = read(input_dir.join("frozen-input.json"))?;
-    let mut limits: Value = read(&args[3])?;
-    let operator_turns = limits["extraction"]["max_turns"].as_u64().unwrap_or(0) as usize;
-    let operator_physical = limits["max_physical_calls"]
-        .as_u64()
-        .ok_or("explicit physical call limit required")? as usize;
-    limits["extraction"]["reviewer_reserve"] = json!(0);
-    // 一次成稿不按回合数截停。这里记下调用方原来的 max_turns，不把它改成固定上限。
-    limits["budget_estimate"] = json!({
-        "kind":"outline",
-        "applied_turns":operator_turns,
-        "applied_physical":operator_physical,
-        "reviewer_reserve":0,
-        "turn_cap":false
-    });
+    let limits: Value = read(&args[3])?;
     let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()?;
-    let repair_seed: Option<extraction::Checkpoint> = if mode == "repair" {
-        let seed = read(input_dir.join("repair-seed.json"))?;
-        validate_repair_seed(&input, &seed)?;
-        Some(seed)
-    } else {
-        None
-    };
-    let review_seed = read_candidate_seed(&input, mode, &input_dir, repair_seed.as_ref())?;
-    let mut contract = json!({"mode":mode,"input_sha256":ta::digest(&input)?,
-                          "provider":provider,"limits":limits});
-    if let Some(seed) = &review_seed {
-        contract["review_seed_sha256"] = json!(ta::digest(seed)?);
+    if mode != "extract" {
+        return Err("retired reviewer seed entry: use extract for the formal Discover/Organize/Check runtime".into());
     }
-    if let Some(seed) = &repair_seed {
-        contract["repair_seed_sha256"] = json!(ta::digest(seed)?);
-        contract["repair_seed_status"] =
-            json!("archived model claims only; new independent review required");
-    }
+    let contract =
+        json!({"mode":mode,"input_sha256":ta::digest(&input)?,"provider":provider,"limits":limits});
     let contract_path = root.join("run-contract.json");
     if contract_path.exists() {
         let previous: Value = read(&contract_path)?;
@@ -348,71 +295,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Calls::default()
         }),
-        max_calls: limits["max_physical_calls"]
-            .as_u64()
-            .ok_or("explicit physical call limit required")? as usize,
     };
     match mode.as_str() {
-        "extract" | "review" | "repair" => {
+        "extract" => {
             let config = extraction::Config::with_provider_for(
                 provider,
                 serde_json::from_value(limits["extraction"].clone())?,
                 Some(&input),
             )?;
             save(root.join("runtime.json"), &config)?;
-            if let Some(seed) = review_seed
-                && !root.join("checkpoint.json").exists()
-            {
-                // A new isolated review of archived claims, never a rewritten
-                // recovery checkpoint or inherited independent reading ledger.
-                let mut state = extraction::Checkpoint {
-                    journal: Default::default(),
-                    input_sha256: ta::digest(&input)?,
-                    config_sha256: ta::digest(&config)?,
-                    turn: 0,
-                    tool_calls: 0,
-                    read_bytes: 0,
-                    review_rounds: 0,
-                    role: if repair_seed.is_some() {
-                        extraction::Role::Main
-                    } else {
-                        extraction::Role::Reviewer
-                    },
-                    analysis: seed,
-                    review: None,
-                    review_draft: repair_seed
-                        .as_ref()
-                        .map(|prior| prior.review_draft.clone())
-                        .unwrap_or_default(),
-                    source_review: Some(ta::source_review::initialize(&input, &config)?),
-                    repair: Default::default(),
-                    dispatch: Default::default(),
-                    reviewer_coverage: Default::default(),
-                    pending_coverage: None,
-                    transcript: vec![],
-                    main_progress: Default::default(),
-                    reviewer_progress: Default::default(),
-                    main_work: None,
-                    reviewer_work: None,
-                    done: false,
-                    source_views: BTreeMap::new(),
-                    draft_stage: Default::default(),
-                    draft_active_id: None,
-                    draft_outline_gaps: None,
-                    draft_outline_stalls: 0,
-                    draft_outline_window: 0,
-                    draft_stopped: false,
-                    draft_compile_object_id: None,
-                    draft_docx_base64: None,
-                    outline_config_sha256: None,
-                    fill_config_sha256: None,
-                    outline_run: Default::default(),
-                };
-                if state.role == extraction::Role::Reviewer {
-                    ta::source_review::select_next(&input, &config, &mut state)?;
-                }
-                save(root.join("checkpoint.json"), &state)?;
-            }
             let result = extraction::run(
                 &input,
                 &config,
@@ -421,11 +312,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &cancel,
             )
             .await?;
-            let name = if matches!(mode.as_str(), "review" | "repair") {
-                "review-diagnostic-result.json"
-            } else {
-                "analysis-result.json"
-            };
+            let name = "analysis-result.json";
             save(root.join(name), &result)?;
         }
         _ => return Err("unknown mode".into()),
@@ -436,56 +323,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repair_seed_import_rejects_spent_execution_and_repair_ledgers() {
-        let clean: extraction::Checkpoint = serde_json::from_value(json!({
-            "journal":bidding::agent_runtime::TurnJournal::default(),
-            "input_sha256":"synthetic-input", "config_sha256":"synthetic-config",
-            "turn":0, "tool_calls":0, "read_bytes":0, "review_rounds":0,
-            "role":"main", "analysis":ta::Analysis::default(), "review_draft":{},
-            "reviewer_coverage":ta::Coverage::default(), "transcript":[],
-            "done":false, "source_views":{}
-        }))
-        .unwrap();
-        validate_repair_seed_budget(&clean).unwrap();
-        let original = json!(clean);
-        let cases = [
-            ("/main_progress/watch/replans", json!(1)),
-            ("/reviewer_progress/watch/no_progress_turns", json!(1)),
-            ("/repair/feedback_sha256", json!("prior-repair-generation")),
-            ("/repair/tasks/last_committed_turn", json!(1)),
-            (
-                "/main_progress/blockers",
-                json!([{
-                    "scope":["source"], "dependencies_sha256":"unchanged",
-                    "watch":{"no_progress_turns":6,"focus_turns":6,"replans":2,"recovery":"blocked"}
-                }]),
-            ),
-            (
-                "/reviewer_progress/blockers",
-                json!([{
-                    "scope":["source"], "dependencies_sha256":"unchanged",
-                    "watch":{"no_progress_turns":6,"focus_turns":6,"replans":2,"recovery":"blocked"}
-                }]),
-            ),
-        ];
-        for (path, value) in cases {
-            let mut candidate = original.clone();
-            *candidate.pointer_mut(path).unwrap() = value;
-            let seed: extraction::Checkpoint = serde_json::from_value(candidate).unwrap();
-            let before = json!(seed);
-            let error = validate_repair_seed_budget(&seed).unwrap_err();
-            assert!(
-                error
-                    .message
-                    .contains("cannot reset prior execution or repair allowances"),
-                "{path}: {error:?}"
-            );
-            assert_eq!(json!(seed), before, "rejection must preserve {path}");
-        }
-        assert_eq!(json!(clean), original);
-    }
 
     #[tokio::test]
     #[ignore = "requires KB_TENDER_PAUSED_RUN_DIR, KB_TENDER_PAUSE_ARCHIVE_DIR and KB_TENDER_RESUME_REPORT; offline real journal recovery only"]
@@ -621,7 +458,6 @@ mod tests {
             views: source.join("source-views"),
             input: input.clone(),
             count: Mutex::new(read(root.join("calls.json")).unwrap()),
-            max_calls: contract["limits"]["max_physical_calls"].as_u64().unwrap() as usize,
         };
         let cancel = CancellationToken::new();
         let model = Capture {
@@ -663,15 +499,8 @@ mod tests {
                 "review_rounds",
                 "role",
                 "analysis",
-                "review",
-                "review_draft",
-                "source_review",
-                "repair",
-                "reviewer_coverage",
                 "main_progress",
-                "reviewer_progress",
                 "main_work",
-                "reviewer_work",
                 "done",
             ] {
                 assert_eq!(after_value[field], before_value[field], "changed {field}");
@@ -722,19 +551,18 @@ mod tests {
             "run":run,"archive":archive,"temporary_owned_directory":temporary,
             "turn":before.turn,"calls_before":before_calls.total,"calls_after":after_calls.total,
             "attempt_before":before_calls.attempts.get(&identity).copied().unwrap_or(0),"attempt_after":after_calls.attempts[&identity],
-            "physical_call_cap":journal.max_calls,"captured_requests":received.len(),
+            "captured_requests":received.len(),
             "captured_request_file":captured_request,
             "body_bytes":reserved.len(),"body_sha256":hash(&reserved),
             "captured_equals_pending_equals_reserved":true,
             "config_sha256":before.config_sha256,"runtime_schema_prompt_digests_match":true,
             "contract_digests":{
-                "main_tools":config.tools_sha256,"review_tools":config.review_tools_sha256,
-                "main_prompt":config.main_prompt_sha256,"review_prompt":config.review_prompt_sha256
+                "main_tools":config.tools_sha256,
+                "main_prompt":config.main_prompt_sha256
             },
             "records":before.analysis.records.len(),"relations":before.analysis.relations.len(),
-            "repair_receipts":before.repair.results.len(),"review_rounds":before.review_rounds,
+            "repair_events":before.outline_run.repair_events.len(),
             "main_blockers":before.main_progress.blockers.len(),
-            "reviewer_blockers":before.reviewer_progress.blockers.len(),
             "journal_sequence_before":before.journal.sequence,"journal_sequence_after":after.journal.sequence,
             "recovery_known_markers":before.main_progress.seen.iter().filter(|s| s.starts_with("main-repair-history-recovery-v1:known:")).count(),
             "recovery_consumed_markers":before.main_progress.seen.iter().filter(|s| s.starts_with("main-repair-history-recovery-v1:consumed:")).count(),
@@ -747,75 +575,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires KB_TENDER_REPAIR_SEED_DIR; validates archived model claims offline"]
-    fn repair_seed_requires_matching_sources_and_original_reviewer_receipts() {
-        let root = PathBuf::from(std::env::var("KB_TENDER_REPAIR_SEED_DIR").unwrap());
-        let original = fs::read(root.join("repair-seed.json")).unwrap();
-        let input: ta::FrozenInput = read(root.join("frozen-input.json")).unwrap();
-        let seed: extraction::Checkpoint = serde_json::from_slice(&original).unwrap();
-        validate_repair_seed(&input, &seed).unwrap();
-        let mut changed = seed.clone();
-        changed.input_sha256 = "different-frozen-input".into();
-        assert!(validate_repair_seed(&input, &changed).is_err());
-        changed = seed.clone();
-        changed.review_draft.clear();
-        assert!(validate_repair_seed(&input, &changed).is_err());
-        changed = seed;
-        changed.reviewer_coverage = Default::default();
-        assert!(validate_repair_seed(&input, &changed).is_err());
-        assert_eq!(fs::read(root.join("repair-seed.json")).unwrap(), original);
-    }
-
-    #[test]
-    #[ignore = "requires KB_TENDER_REPAIR_SEED_DIR and KB_TENDER_REPAIR_CANDIDATE_CHECKPOINT; archived provenance validation only"]
-    fn later_model_candidates_keep_original_feedback_provenance_without_transplanted_receipts() {
-        let root = PathBuf::from(std::env::var("KB_TENDER_REPAIR_SEED_DIR").unwrap());
-        let input: ta::FrozenInput = read(root.join("frozen-input.json")).unwrap();
-        let original = fs::read(root.join("repair-seed.json")).unwrap();
-        let feedback: extraction::Checkpoint = serde_json::from_slice(&original).unwrap();
-        let candidate_bytes =
-            fs::read(std::env::var("KB_TENDER_REPAIR_CANDIDATE_CHECKPOINT").unwrap()).unwrap();
-        let current: extraction::Checkpoint = serde_json::from_slice(&candidate_bytes).unwrap();
-        assert_eq!(current.input_sha256, ta::digest(&input).unwrap());
-        validate_repair_seed(&input, &feedback).unwrap();
-        assert_ne!(
-            ta::digest(&current.analysis).unwrap(),
-            ta::digest(&feedback.analysis).unwrap()
-        );
-        let mut transplanted = feedback.clone();
-        transplanted.analysis = current.analysis.clone();
-        assert!(
-            validate_repair_seed(&input, &transplanted).is_err(),
-            "old reviewer receipts must not approve later changed candidate fields"
-        );
-        let directory = std::env::temp_dir().join(format!("tender-seed-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory).unwrap();
-        save(directory.join("analysis-seed.json"), &current.analysis).unwrap();
-        let selected = read_candidate_seed(&input, "repair", &directory, Some(&feedback))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            ta::digest(&selected).unwrap(),
-            ta::digest(&current.analysis).unwrap()
-        );
-        let mut invalid = current.analysis.clone();
-        invalid.coverage = Default::default();
-        save(directory.join("analysis-seed.json"), &invalid).unwrap();
-        assert!(read_candidate_seed(&input, "repair", &directory, Some(&feedback)).is_err());
-        fs::remove_file(directory.join("analysis-seed.json")).unwrap();
-        let selected = read_candidate_seed(&input, "repair", &directory, Some(&feedback))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            ta::digest(&selected).unwrap(),
-            ta::digest(&feedback.analysis).unwrap()
-        );
-        fs::remove_dir(directory).unwrap();
-        assert_eq!(fs::read(root.join("repair-seed.json")).unwrap(), original);
-    }
-
-    #[test]
-    fn journal_keeps_boundary_retries_and_total_budget_across_restart() {
+    fn journal_preserves_attempt_receipts_without_a_second_cumulative_limit() {
         let directory =
             std::env::temp_dir().join(format!("tender-journal-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory).unwrap();
@@ -823,7 +583,7 @@ mod tests {
             root: directory.clone(),
             views: directory.clone(),
             input: ta::FrozenInput {
-                schema_version: 1,
+                schema_version: 2,
                 project_id: String::new(),
                 document_set_id: String::new(),
                 documents: vec![],
@@ -833,7 +593,6 @@ mod tests {
                 decisions: vec![],
             },
             count: Mutex::new(Calls::default()),
-            max_calls: 7,
         };
         for turn in 0..3 {
             assert_eq!(
@@ -852,10 +611,36 @@ mod tests {
         // Composition requires the global count, extraction the boundary slot.
         assert_eq!(journal.reserve(2, "reviewer", b"review").unwrap(), (6, 1));
         assert_eq!(journal.reserve(3, "main", b"request").unwrap(), (7, 1));
-        assert!(journal.reserve(4, "main", b"request").is_err());
+        assert_eq!(journal.reserve(4, "main", b"request").unwrap(), (8, 1));
         let saved: Calls = read(journal.root.join("calls.json")).unwrap();
-        assert_eq!(saved.total, 7);
+        assert_eq!(saved.total, 8);
         assert_eq!(saved.attempts["turn-2-main"], 3);
         fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod acceptance_guard_tests {
+    use super::*;
+    #[test]
+    fn each_private_spending_boundary_stops_before_send() {
+        use bidding::agent_runtime::budget::ModelAccounting;
+        let allowed = ModelAccounting {
+            physical_calls: 71,
+            reserved_input_tokens: 7_166_928,
+            reserved_output_tokens: 581_632,
+            started_unix_seconds: Some(100),
+        };
+        assert!(acceptance_admission(&allowed, 5537).is_ok());
+        assert!(acceptance_admission(&allowed, 5538).is_err());
+        let mut calls = allowed.clone();
+        calls.physical_calls += 1;
+        assert!(acceptance_admission(&calls, 100).is_err());
+        let mut input = allowed.clone();
+        input.reserved_input_tokens += 1;
+        assert!(acceptance_admission(&input, 100).is_err());
+        let mut output = allowed;
+        output.reserved_output_tokens += 1;
+        assert!(acceptance_admission(&output, 100).is_err());
     }
 }

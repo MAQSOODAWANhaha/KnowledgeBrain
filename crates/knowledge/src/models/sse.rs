@@ -49,32 +49,68 @@ pub fn looks_like_sse(body: &str) -> bool {
     body.lines().any(|l| l.trim_start().starts_with("data:"))
 }
 
-/// Concatenate `choices[0].delta.content` from an SSE body. Ignores
-/// `reasoning_content` (thinking tokens). Falls back to a unary JSON body.
-pub fn collect_chat_content(body: &str) -> Result<String, String> {
-    if looks_like_sse(body) {
-        let mut content = String::new();
+/// Complete text response with the provider's termination evidence. A nonempty
+/// prefix is never sufficient proof that an OCR/text response completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionResult {
+    pub content: String,
+    pub finish_reason: String,
+    pub done_seen: bool,
+    pub transport_status: &'static str,
+    pub usage: Option<ChatUsage>,
+    pub provider_request_id: Option<String>,
+}
+
+impl CompletionResult {
+    pub fn require_complete_text(self) -> Result<String, String> {
+        if self.transport_status != "complete" || !self.done_seen || self.finish_reason != "stop" {
+            return Err(format!(
+                "incomplete completion: finish_reason={}, done_seen={}, transport={}",
+                self.finish_reason, self.done_seen, self.transport_status
+            ));
+        }
+        Ok(self.content)
+    }
+}
+
+pub fn collect_completion(body: &str) -> Result<CompletionResult, String> {
+    let streaming = looks_like_sse(body);
+    let turn = collect_chat_turn(body)?;
+    let mut request_id = None;
+    let done_seen = if streaming {
+        let normalized = body.replace("\r\n", "\n");
+        let complete_terminal = normalized
+            .split_inclusive("\n\n")
+            .any(|event| event.ends_with("\n\n") && event.trim() == "data: [DONE]");
+        let mut done = false;
         for data in sse_data_payloads(body) {
             if data == "[DONE]" {
+                done = true;
                 break;
             }
-            let v: Value = serde_json::from_str(&data)
-                .map_err(|e| format!("sse chat json: {e}: {}", truncate(&data, 180)))?;
-            if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
-                content.push_str(t);
-            } else if let Some(t) = v["choices"][0]["message"]["content"].as_str()
-                && content.is_empty()
-            {
-                content.push_str(t);
+            let value: Value = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+            if let Some(id) = value["id"].as_str() {
+                request_id = Some(id.to_owned());
             }
         }
-        return Ok(content);
-    }
-    let v: Value = serde_json::from_str(body.trim()).map_err(|e| format!("chat json: {e}"))?;
-    Ok(v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
+        done && complete_terminal
+    } else {
+        let value: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+        request_id = value["id"].as_str().map(str::to_owned);
+        true
+    };
+    Ok(CompletionResult {
+        content: turn.content,
+        finish_reason: turn.finish_reason,
+        done_seen,
+        transport_status: if done_seen { "complete" } else { "interrupted" },
+        usage: turn.usage,
+        provider_request_id: request_id,
+    })
+}
+
+pub fn collect_chat_content(body: &str) -> Result<String, String> {
+    collect_completion(body)?.require_complete_text()
 }
 
 /// Last JSON object from an SSE stream, or the unary JSON body.
@@ -133,7 +169,8 @@ pub fn consume_sse_read(reader: &mut impl Read) -> Result<ChatTurn, String> {
         while let Some(idx) = find_event_break(&pending) {
             complete_events += 1;
             let raw = pending.drain(..=idx).collect::<Vec<_>>();
-            let text = String::from_utf8_lossy(&raw);
+            let text =
+                String::from_utf8(raw).map_err(|e| format!("invalid UTF-8 SSE response: {e}"))?;
             for data in sse_data_payloads(&text) {
                 if data == "[DONE]" {
                     turn.tool_calls = calls.into_values().collect();
@@ -143,12 +180,21 @@ pub fn consume_sse_read(reader: &mut impl Read) -> Result<ChatTurn, String> {
             }
         }
     }
-    turn.tool_calls = calls.into_values().collect();
-    Ok(turn)
+    Err(format!(
+        "incomplete SSE stream: missing [DONE]; bytes_read={bytes_read}; complete_events={complete_events}"
+    ))
 }
 
 fn find_event_break(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\n\n").map(|idx| idx + 1)
+    let lf = buf.windows(2).position(|w| w == b"\n\n").map(|idx| idx + 1);
+    let crlf = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|idx| idx + 3);
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 fn apply_sse_data(
@@ -219,7 +265,7 @@ fn unary_turn(v: &Value) -> Result<ChatTurn, String> {
             .to_owned(),
         finish_reason: v["choices"][0]["finish_reason"]
             .as_str()
-            .unwrap_or("stop")
+            .unwrap_or("")
             .to_owned(),
         tool_calls: Vec::new(),
     };
@@ -324,14 +370,15 @@ mod tests {
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
-            "data: [DONE]\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
         );
         assert_eq!(collect_chat_content(body).unwrap(), "hello");
     }
 
     #[test]
     fn unary_json_still_reads_message() {
-        let body = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+        let body = r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}"#;
         assert_eq!(collect_chat_content(body).unwrap(), "hi");
     }
 
@@ -348,6 +395,27 @@ mod tests {
         assert_eq!(turn.tool_calls[0].name, "submit_outline");
         assert_eq!(turn.tool_calls[0].arguments, "{}}");
         assert_eq!(turn.finish_reason, "tool_calls");
+    }
+
+    #[test]
+    fn partial_text_and_missing_termination_never_count_as_complete() {
+        for body in [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+            r#"{"choices":[{"message":{"content":"partial"}}]}"#,
+        ] {
+            assert!(collect_chat_content(body).is_err());
+        }
+        assert!(consume_sse_read(&mut "data: {}\n\n".as_bytes()).is_err());
+    }
+
+    #[test]
+    fn stream_accepts_crlf_framing() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r\n\r\n";
+        assert_eq!(
+            consume_sse_read(&mut body.as_bytes()).unwrap().content,
+            "ok"
+        );
     }
 
     #[test]

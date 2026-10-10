@@ -116,59 +116,43 @@ impl Session {
         body: &[u8],
         prefix: usize,
         suffix: usize,
-        remaining_turns: usize,
         max_bytes: usize,
     ) -> Result<(), AgentError> {
         let body: Value = serde_json::from_slice(body).map_err(|_| failure())?;
         let mut context = Self::context(&body, prefix, suffix)?;
         let expected = projected(context.clone())?;
-        let reuse = match active {
-            Some(session) if session.prefix == prefix && session.suffix == suffix => {
-                projected(session.run.full_history())? == expected
-            }
-            _ => false,
-        };
         let prompt = context.pop().ok_or_else(failure)?;
         let carried = active.as_ref().map(|session| session.run.usage());
-        // Rebase once if accumulated SDK call accounting alone crosses the
-        // state ceiling. No I/O has occurred, and the selected evidence stays.
-        for reset in [!reuse, true] {
-            if reset {
-                let mut run = AgentRun::new(prompt.clone())
-                    .with_history(context.clone())
-                    .max_turns(remaining_turns)
-                    .with_tool_choice(ToolChoice::Required);
-                if let Some(usage) = carried.filter(|usage| usage.has_values()) {
-                    apply_usage(&mut run, usage)?;
-                }
-                *active = Some(Self {
-                    run,
-                    prefix,
-                    suffix,
-                    usage_noted: false,
-                });
-            }
-            let session = active.as_mut().ok_or_else(failure)?;
-            let AgentRunStep::CallModel {
-                prompt,
-                mut history,
-                ..
-            } = session.run.next_step().map_err(|_| failure())?
-            else {
-                return Err(failure());
-            };
-            history.push(prompt);
-            // This is the SDK's actual CallModel context, checked against the
-            // final SDK-serialized body before any reservation or network I/O.
-            if projected(history)? != expected {
-                return Err(failure());
-            }
-            if session.bytes()? <= max_bytes {
-                return Ok(());
-            }
-            if reset {
-                break;
-            }
+        // The host owns the business loop. Each SDK run serves one physical
+        // request, retaining the admitted history and cumulative reported usage.
+        // Build locally so a failed admission cannot replace the saved session.
+        let mut run = AgentRun::new(prompt)
+            .with_history(context)
+            .with_tool_choice(ToolChoice::Required);
+        if let Some(usage) = carried.filter(|usage| usage.has_values()) {
+            apply_usage(&mut run, usage)?;
+        }
+        let mut session = Self {
+            run,
+            prefix,
+            suffix,
+            usage_noted: false,
+        };
+        let AgentRunStep::CallModel {
+            prompt,
+            mut history,
+            ..
+        } = session.run.next_step().map_err(|_| failure())?
+        else {
+            return Err(failure());
+        };
+        history.push(prompt);
+        if projected(history)? != expected {
+            return Err(failure());
+        }
+        if session.bytes()? <= max_bytes {
+            *active = Some(session);
+            return Ok(());
         }
         Err(AgentError::new(
             "AGENT_TURN_BUDGET_EXCEEDED",
@@ -417,7 +401,6 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            3,
             16384,
         )
         .unwrap();
@@ -443,7 +426,6 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            2,
             16384,
         )
         .unwrap();
@@ -476,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_turns_reuse_sdk_state_and_restore_awaiting_model_without_another_step() {
+    fn request_scoped_sdk_preserves_history_and_restores_awaiting_model() {
         let mut active = None;
         let body = request(vec![Message::system("main")], "first progress");
         Session::prepare(
@@ -484,7 +466,6 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            3,
             16384,
         )
         .unwrap();
@@ -509,17 +490,16 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            2,
             16384,
         )
         .unwrap();
         let session = active.as_mut().unwrap();
         assert_eq!(
             session.run.turn(),
-            2,
-            "must not create a one-shot run each turn"
+            1,
+            "the host owns business turns; each SDK run serves one request"
         );
-        assert_eq!(session.run.completion_calls().len(), 1);
+        assert!(session.run.completion_calls().is_empty());
         let history = serde_json::to_string(&session.run.full_history()).unwrap();
         assert!(history.contains("原文证据"));
         assert!(
@@ -541,11 +521,15 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            1,
             16384,
         )
         .unwrap();
-        assert_eq!(active.unwrap().run.turn(), 3);
+        let session = active.unwrap();
+        assert_eq!(session.run.turn(), 1);
+        let history = serde_json::to_string(&session.run.full_history()).unwrap();
+        assert!(history.contains("原文证据"));
+        assert!(history.contains("second result"));
+        assert!(!history.contains("progress"));
     }
 
     #[test]
@@ -557,7 +541,6 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            3,
             16384,
         )
         .unwrap();
@@ -590,7 +573,6 @@ mod tests {
             &initial,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            4,
             16384,
         )
         .unwrap();
@@ -611,7 +593,6 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            1,
             16384,
         )
         .unwrap();
@@ -641,7 +622,6 @@ mod tests {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            3,
             16384,
         )
         .unwrap();
@@ -673,7 +653,6 @@ mod tests {
             &next,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            2,
             16384,
         )
         .unwrap();
