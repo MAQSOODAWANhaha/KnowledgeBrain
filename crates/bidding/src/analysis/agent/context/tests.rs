@@ -2707,18 +2707,25 @@ async fn host_navigation_continuation_reaches_real_handler_and_rejects_filter_ta
         {"role":"user","content":json!({"requirements_navigation":navigation}).to_string()},
         {"role":"tool","tool_call_id":"navigation","content":page.to_string()},
         {"role":"user","content":"{}"}],"tools":outline::schemas_for(outline::Duty::Organize)});
-    let registry=crate::outline::model_wire::project(&state,&mut wire).unwrap();
+    let registry = crate::outline::model_wire::project(&state, &mut wire).unwrap();
     assert!(!wire.to_string().contains("<read_requirements.next_cursor>"));
-    let wire_page:Value=serde_json::from_str(wire["messages"][1]["content"].as_str().unwrap()).unwrap();
-    let host:Value=serde_json::from_str(wire["messages"][2]["content"].as_str().unwrap()).unwrap();
-    let wire_args=json!({"cursor":wire_page["next_cursor"],"wire_scope":host["wire_scope"]});
-    let spec=wire["tools"].as_array().unwrap().iter().find(|s|s["function"]["name"]=="read_requirements").unwrap();
-    let schema=jsonschema::JSONSchema::compile(&spec["function"]["parameters"]).unwrap();
+    let wire_page: Value =
+        serde_json::from_str(wire["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let host: Value =
+        serde_json::from_str(wire["messages"][2]["content"].as_str().unwrap()).unwrap();
+    let wire_args = json!({"cursor":wire_page["next_cursor"],"wire_scope":host["wire_scope"]});
+    let spec = wire["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["function"]["name"] == "read_requirements")
+        .unwrap();
+    let schema = jsonschema::JSONSchema::compile(&spec["function"]["parameters"]).unwrap();
     assert!(schema.is_valid(&wire_args));
     assert!(!schema.is_valid(&json!({"cursor":wire_page["next_cursor"]})));
-    let next=registry.decode(wire_args,false).unwrap();
-    assert_eq!(next,json!({"cursor":cursor}));
-    state.outline_run.tool_draft.model_wire=registry;
+    let next = registry.decode(wire_args, false).unwrap();
+    assert_eq!(next, json!({"cursor":cursor}));
+    state.outline_run.tool_draft.model_wire = registry;
     assert_eq!(next.as_object().unwrap().len(), 1);
     state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     let before = serde_json::to_value(&state).unwrap();
@@ -2756,7 +2763,13 @@ async fn host_navigation_continuation_reaches_real_handler_and_rejects_filter_ta
     )
     .await
     .unwrap();
-    assert!(!state.outline_run.tool_draft.evidence_continuations.contains_key(cursor));
+    assert!(
+        !state
+            .outline_run
+            .tool_draft
+            .evidence_continuations
+            .contains_key(cursor)
+    );
     assert!(
         continued["items"]
             .as_array()
@@ -2979,45 +2992,102 @@ async fn readonly_wire_scopes_do_not_complete_organize_or_check_work() {
 #[tokio::test]
 async fn check_reload_retains_unextracted_source_scope_without_requirements() {
     use crate::outline::agent as outline;
-    let (input, mut state, pack, refs)=crate::outline::fixture_organized(true);
-    assert!(state.outline_run.reading_packs.as_ref().unwrap().requirement_records().is_empty());
+    let (input, mut state, pack, refs) = crate::outline::fixture_organized(true);
+    assert!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .requirement_records()
+            .is_empty()
+    );
     state.transcript.clear();
-    state=serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
-    assert_eq!(outline::current(&input,&state),outline::Duty::Check);
-    let config=crate::analysis::tests::config();
-    let bytes=super::super::prepare_request(&input,&config,&mut state,false).await.unwrap();
-    assert!(crate::analysis::tests::total_request_tokens(&bytes,&config)<=config.limits.max_context_tokens);
-    let body:Value=serde_json::from_slice(&bytes).unwrap();
-    let host:Value=serde_json::from_str(body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap()).unwrap();
-    assert_eq!(host["check_work"]["remaining_comparisons"],0);
-    assert_eq!(host["review"]["remaining_packs"],1);
-    let args=json!({"mode":"packs"});
-    let call=knowledge::models::ChatToolCall{id:"unclaimed-read".into(),name:"read_requirements".into(),arguments:args.to_string()};
-    state.transcript=vec![json!({"role":"assistant","tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]})];
-    let page=super::super::read_projection_in_context(&input,&config,&mut state,&args,&[call],&[],outline::Duty::Check).await.unwrap();
-    assert_eq!(page["selection_complete"],true);
-    let evidence=page["items"].as_array().unwrap().iter().filter_map(|row|row.get("evidence")).cloned().collect::<Vec<_>>();
+    state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(outline::current(&input, &state), outline::Duty::Check);
+    let config = crate::analysis::tests::config();
+    let bytes = super::super::prepare_request(&input, &config, &mut state, false)
+        .await
+        .unwrap();
+    assert!(
+        crate::analysis::tests::total_request_tokens(&bytes, &config)
+            <= config.limits.max_context_tokens
+    );
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let host: Value = serde_json::from_str(
+        body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(host["check_work"]["remaining_comparisons"], 0);
+    assert_eq!(host["review"]["remaining_packs"], 1);
+    let args = json!({"mode":"packs"});
+    let call = knowledge::models::ChatToolCall {
+        id: "unclaimed-read".into(),
+        name: "read_requirements".into(),
+        arguments: args.to_string(),
+    };
+    state.transcript = vec![
+        json!({"role":"assistant","tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]}),
+    ];
+    let page = super::super::read_projection_in_context(
+        &input,
+        &config,
+        &mut state,
+        &args,
+        &[call],
+        &[],
+        outline::Duty::Check,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page["selection_complete"], true);
+    let evidence = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row.get("evidence"))
+        .cloned()
+        .collect::<Vec<_>>();
     assert!(!evidence.is_empty());
-    for reference in &refs {assert!(evidence.contains(&json!(reference)),"unextracted source must remain in independent Check");}
-    assert!(!state.outline_run.tool_draft.reviewed_pack_ids.contains(&pack));
+    for reference in &refs {
+        assert!(
+            evidence.contains(&json!(reference)),
+            "unextracted source must remain in independent Check"
+        );
+    }
+    assert!(
+        !state
+            .outline_run
+            .tool_draft
+            .reviewed_pack_ids
+            .contains(&pack)
+    );
     assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
     assert!(!state.done);
 }
 
 #[tokio::test]
 async fn oversized_unconsumed_unicode_read_probe_rejects_without_mutation() {
-    let (input,mut state,_,_)=crate::outline::fixture_discovered(false);
-    let config=crate::analysis::tests::config();
-    let original_text="合成条款🙂e\u{301}𠀀".repeat(20000);
-    state.transcript=vec![
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let config = crate::analysis::tests::config();
+    let original_text = "合成条款🙂e\u{301}𠀀".repeat(20000);
+    state.transcript = vec![
         json!({"role":"assistant","tool_calls":[{"id":"unconsumed","type":"function","function":{"name":"read_requirements","arguments":"{\"mode\":\"requirements\"}"}}]}),
-        json!({"role":"tool","tool_call_id":"unconsumed","content":json!({"ok":true,"result":{"items":[{"description":original_text}],"selection_complete":false,"next_cursor":"host-preserved"}}).to_string()})
+        json!({"role":"tool","tool_call_id":"unconsumed","content":json!({"ok":true,"result":{"items":[{"description":original_text}],"selection_complete":false,"next_cursor":"host-preserved"}}).to_string()}),
     ];
-    let before=serde_json::to_value(&state).unwrap();
-    let error=super::super::prepare_request(&input,&config,&mut state,false).await.unwrap_err();
-    assert_eq!(error.code,"AGENT_TURN_BUDGET_EXCEEDED");
+    let before = serde_json::to_value(&state).unwrap();
+    let error = super::super::prepare_request(&input, &config, &mut state, false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "AGENT_TURN_BUDGET_EXCEEDED");
     assert!(error.message.contains("unconsumed read group"));
-    assert_eq!(serde_json::to_value(&state).unwrap(),before,"rejected probe preserves complete Unicode payload, history and receipts");
+    assert_eq!(
+        serde_json::to_value(&state).unwrap(),
+        before,
+        "rejected probe preserves complete Unicode payload, history and receipts"
+    );
     assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
 }
 
@@ -3028,29 +3098,55 @@ fn delivered_check_pages_advance_reading_without_completing_semantic_work() {
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     let completed = state.main_progress.completions.clone();
     for (page, idle) in [("pack-a:atom", 0), ("pack-b:atom", 0), ("pack-a:atom", 1)] {
-        state.outline_run.tool_draft.check_reads.structure_keys.insert(page.into());
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .structure_keys
+            .insert(page.into());
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
         assert_eq!(state.main_progress.watch.no_progress_turns, idle);
         assert_eq!(state.main_progress.completions, completed);
     }
     for page in 0..limits.max_no_progress_turns + 2 {
-        state.outline_run.tool_draft.check_reads.structure_keys.insert(format!("source-page-{page}"));
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .structure_keys
+            .insert(format!("source-page-{page}"));
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
         assert_eq!(state.main_progress.watch.no_progress_turns, 0);
         assert_eq!(state.main_progress.watch.replans, 0);
         assert_eq!(state.main_progress.completions, completed);
         state = serde_json::from_value(json!(&state)).unwrap();
     }
-    let reads = state.outline_run.tool_draft.check_reads.structure_keys.clone();
+    let reads = state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .structure_keys
+        .clone();
     for _ in 0..limits.max_no_progress_turns {
-        state.outline_run.tool_draft.check_reads.structure_keys.extend(reads.clone());
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .structure_keys
+            .extend(reads.clone());
         state.outline_run.tool_draft.read_epoch += 1;
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     }
     assert_eq!(state.main_progress.watch.replans, 1);
     assert_eq!(state.main_progress.completions, completed);
     assert!(state.outline_run.tool_draft.claim_comparisons.is_empty());
-    assert!(state.outline_run.tool_draft.reviewed_requirement_ids.is_empty());
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .reviewed_requirement_ids
+            .is_empty()
+    );
 }
 
 #[test]
@@ -3059,26 +3155,61 @@ fn check_read_progress_requires_delivered_new_ranges_not_overlap_or_pending() {
     let (_, mut state, _, _) = crate::outline::fixture_organized(false);
     let limits = crate::analysis::tests::config().limits;
     let reference = |start_byte, end_byte| EvidenceRef::Text {
-        input_digest: "synthetic-input".into(), unit_id: "unicode-source".into(), start_byte, end_byte
+        input_digest: "synthetic-input".into(),
+        unit_id: "unicode-source".into(),
+        start_byte,
+        end_byte,
     };
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     let completed = state.main_progress.completions.clone();
-    state.outline_run.tool_draft.check_reads.pending_evidence.push((0, reference(0, 6)));
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .pending_evidence
+        .push((0, reference(0, 6)));
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 1);
-    state.outline_run.tool_draft.check_reads.evidence.push(reference(0, 6));
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .evidence
+        .push(reference(0, 6));
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 0);
-    state.outline_run.tool_draft.check_reads.evidence.extend([reference(3, 6), reference(0, 3)]);
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .evidence
+        .extend([reference(3, 6), reference(0, 3)]);
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 1);
-    state.outline_run.tool_draft.check_reads.evidence.push(reference(6, 9));
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .evidence
+        .push(reference(6, 9));
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 0);
-    state.outline_run.tool_draft.check_reads.slot_ranges.insert("response".into(), vec![(0, 6)]);
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .slot_ranges
+        .insert("response".into(), vec![(0, 6)]);
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 0);
-    state.outline_run.tool_draft.check_reads.slot_ranges.get_mut("response").unwrap().extend([(3, 6), (0, 3)]);
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .slot_ranges
+        .get_mut("response")
+        .unwrap()
+        .extend([(3, 6), (0, 3)]);
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 1);
     assert_eq!(state.main_progress.completions, completed);
@@ -3089,13 +3220,19 @@ fn completed_wire_read_progress_rejects_stale_and_tampered_frames() {
     use crate::outline::read_receipts;
     let (_, seed, pack, _) = crate::outline::fixture_organized(false);
     let limits = crate::analysis::tests::config().limits;
-    let body = json!({"messages":[{"role":"tool","tool_call_id":"read-A","content":"exact page A"}]});
+    let body =
+        json!({"messages":[{"role":"tool","tool_call_id":"read-A","content":"exact page A"}]});
     for failure in ["epoch", "revision", "wire", "none"] {
         let mut state = seed.clone();
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
         let before = state.outline_run.tool_draft.clone();
         let key = format!("{pack}:source-A");
-        state.outline_run.tool_draft.check_reads.pending_structure_keys.push((0, key.clone()));
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .pending_structure_keys
+            .push((0, key.clone()));
         read_receipts::queue(&mut state, &before, "read-A", true);
         read_receipts::seal(&mut state, &body).unwrap();
         state = serde_json::from_value(json!(&state)).unwrap();
@@ -3108,9 +3245,27 @@ fn completed_wire_read_progress_rejects_stale_and_tampered_frames() {
         }
         read_receipts::confirm(&mut state, &delivered).unwrap();
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
-        assert_eq!(state.outline_run.tool_draft.check_reads.structure_keys.contains(&key), failure == "none");
-        assert!(!state.outline_run.tool_draft.check_reads.structure_keys.contains("other-pack:source-A"));
-        assert_eq!(state.main_progress.watch.no_progress_turns, usize::from(failure != "none"));
+        assert_eq!(
+            state
+                .outline_run
+                .tool_draft
+                .check_reads
+                .structure_keys
+                .contains(&key),
+            failure == "none"
+        );
+        assert!(
+            !state
+                .outline_run
+                .tool_draft
+                .check_reads
+                .structure_keys
+                .contains("other-pack:source-A")
+        );
+        assert_eq!(
+            state.main_progress.watch.no_progress_turns,
+            usize::from(failure != "none")
+        );
         read_receipts::confirm(&mut state, &delivered).unwrap();
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
         assert!(state.main_progress.watch.no_progress_turns >= 1);
@@ -3124,7 +3279,11 @@ fn organize_new_delivered_evidence_is_reading_not_completion() {
     let limits = crate::analysis::tests::config().limits;
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     let completed = state.main_progress.completions.clone();
-    state.outline_run.tool_draft.delivered_evidence.push(refs[0].clone());
+    state
+        .outline_run
+        .tool_draft
+        .delivered_evidence
+        .push(refs[0].clone());
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 0);
     assert_eq!(state.main_progress.completions, completed);
@@ -3135,24 +3294,59 @@ fn organize_new_delivered_evidence_is_reading_not_completion() {
 #[test]
 fn check_task_retains_target_body_until_read_and_reviewed_after_reload() {
     let (input, mut state, _, _) = crate::outline::fixture_organized(false);
-    let host = |state: &Checkpoint| crate::outline::agent::host_packet(&input, state, 0, json!({}), json!({}), None);
+    let host = |state: &Checkpoint| {
+        crate::outline::agent::host_packet(&input, state, 0, json!({}), json!({}), None)
+    };
     let first = host(&state);
-    let id = first["check_work"]["requirement_id"].as_str().unwrap().to_owned();
-    let slot = first["check_work"]["next_unread_slot"]["slot_id"].as_str().unwrap().to_owned();
-    assert_eq!(first["check_work"]["next_unread_slot"]["args"]["slot_id"], slot);
-    state.outline_run.tool_draft.claim_comparisons.insert(id.clone(), crate::outline::claim_review::Comparison {
-        requirement_id: id.clone(), version: "synthetic-comparison".into(), declared_claims: vec![], observations: vec![], decisions: vec![]
-    });
+    let id = first["check_work"]["requirement_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let slot = first["check_work"]["next_unread_slot"]["slot_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        first["check_work"]["next_unread_slot"]["args"]["slot_id"],
+        slot
+    );
+    state.outline_run.tool_draft.claim_comparisons.insert(
+        id.clone(),
+        crate::outline::claim_review::Comparison {
+            requirement_id: id.clone(),
+            version: "synthetic-comparison".into(),
+            declared_claims: vec![],
+            observations: vec![],
+            decisions: vec![],
+        },
+    );
     state.transcript.clear();
     state = serde_json::from_value(json!(&state)).unwrap();
     let after = host(&state);
     assert_eq!(after["check_work"]["requirement_id"], id);
     assert_eq!(after["check_work"]["stage"], "read_target_body");
-    let target = state.outline_run.tool_draft.slots.iter().find(|s| s.slot_id == slot).unwrap();
+    let target = state
+        .outline_run
+        .tool_draft
+        .slots
+        .iter()
+        .find(|s| s.slot_id == slot)
+        .unwrap();
     let bytes = target.text.len();
-    state.outline_run.tool_draft.check_reads.slot_ranges.insert(slot.clone(), vec![(0, bytes)]);
+    state
+        .outline_run
+        .tool_draft
+        .check_reads
+        .slot_ranges
+        .insert(slot.clone(), vec![(0, bytes)]);
     let after = host(&state);
     assert_ne!(after["check_work"]["next_unread_slot"]["slot_id"], slot);
-    assert!(state.outline_run.tool_draft.reviewed_requirement_ids.is_empty());
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .reviewed_requirement_ids
+            .is_empty()
+    );
     assert!(!state.done);
 }

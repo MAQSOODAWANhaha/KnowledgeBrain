@@ -309,11 +309,19 @@ pub fn host_packet(
     }
     if duty == Duty::Check {
         let draft = &state.outline_run.tool_draft;
-        let next = draft.required_requirement_ids.difference(&draft.reviewed_requirement_ids).next();
-        let fulfillment = next.and_then(|id| draft.fulfillments.iter().find(|f| &f.requirement_id == id));
-        let unread_slot = fulfillment.into_iter().flat_map(|f| &f.target_refs)
+        let next = draft
+            .required_requirement_ids
+            .difference(&draft.reviewed_requirement_ids)
+            .next();
+        let fulfillment =
+            next.and_then(|id| draft.fulfillments.iter().find(|f| &f.requirement_id == id));
+        let unread_slot = fulfillment
+            .into_iter()
+            .flat_map(|f| &f.target_refs)
             .filter_map(|target| match target {
-                super::TargetRef::TextSlot { slot_id } => draft.slots.iter().find(|s| &s.slot_id == slot_id),
+                super::TargetRef::TextSlot { slot_id } => {
+                    draft.slots.iter().find(|s| &s.slot_id == slot_id)
+                }
                 _ => None,
             })
             .find(|slot| !super::tools::check_read_slot_complete(draft, slot));
@@ -325,13 +333,17 @@ pub fn host_packet(
             "remaining_unreviewed_packs":draft.required_pack_ids.difference(&draft.reviewed_pack_ids).count(),
             "instruction":"本项来自持久检查进度，不是已完成的语义判断。优先read_claim_evidence读取该要求的全部主张证据；已完整读取后提交submit_claim_comparison，再读取实际目标正文并submit_review。next_unread_slot给出具体slot_id；用其args加当前wire_scope读取，续页使用实际返回的next_cursor，直到selection_complete。已读目录不能替代目标正文、表格材料或人工任务的充分性判断；目标缺少响应内容应如实提交问题。当前要求未复核前不跳到下一条。不要在requirements与packs目录之间反复重启。来源包的未提取义务仍须独立检查，不能以要求比较替代来源覆盖。"});
         let revision = state.outline_run.reading_packs.as_ref().map(|w| w.revision);
-        let continuations: Vec<Value> = draft.evidence_continuations.iter()
-            .filter(|(_, saved)| saved["identity"]["duty"] == "Check"
-                && saved["identity"]["revision"] == json!(revision)
-                && saved["identity"]["input"] == state.input_sha256
-                && (saved["identity"]["epoch"] == draft.read_epoch
-                    || saved["identity"]["read_epoch"] == draft.read_epoch))
-            .map(|(cursor,saved)|json!({"tool":saved["identity"]["tool"],"cursor":cursor}))
+        let continuations: Vec<Value> = draft
+            .evidence_continuations
+            .iter()
+            .filter(|(_, saved)| {
+                saved["identity"]["duty"] == "Check"
+                    && saved["identity"]["revision"] == json!(revision)
+                    && saved["identity"]["input"] == state.input_sha256
+                    && (saved["identity"]["epoch"] == draft.read_epoch
+                        || saved["identity"]["read_epoch"] == draft.read_epoch)
+            })
+            .map(|(cursor, saved)| json!({"tool":saved["identity"]["tool"],"cursor":cursor}))
             .collect();
         packet["available_read_continuations"] = json!({"items":continuations,
             "instruction":"这些宿主游标在历史裁剪后仍有效，仅表示可继续读取，不代表已阅读或复核。调用对应tool，仅传cursor及当前wire_scope；不要重启同一目录首屏。"});
@@ -744,7 +756,19 @@ pub(crate) fn finish_check_repair_batch(
     {
         return Ok(false);
     }
-    let issues = state.outline_run.tool_draft.review_issues.iter().filter(|issue| issue.requirement_ids.iter().any(|requirement| requirement.starts_with(&format!("{pack_id}:")))).cloned().collect::<Vec<_>>();
+    let issues = state
+        .outline_run
+        .tool_draft
+        .review_issues
+        .iter()
+        .filter(|issue| {
+            issue
+                .requirement_ids
+                .iter()
+                .any(|requirement| requirement.starts_with(&format!("{pack_id}:")))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let mut event = json!({"signature":signature,"pack_id":pack_id,"comparison":comparison,"issues":issues,"status":"held_for_review"});
     let revision = state
         .outline_run
@@ -764,8 +788,22 @@ pub(crate) fn finish_check_repair_batch(
     ) {
         Ok(_) => {
             event["status"] = json!("reopened");
-            event["pack_revision"] = next.outline_run.reading_packs.as_ref().unwrap().session(input, pack_id)?["pack"]["pack_revision"].clone();
-            event["original_requirement"] = json!(state.outline_run.reading_packs.as_ref().unwrap().requirement_records().get(&id));
+            event["pack_revision"] = next
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .session(input, pack_id)?["pack"]["pack_revision"]
+                .clone();
+            event["original_requirement"] = json!(
+                state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .requirement_records()
+                    .get(&id)
+            );
             next.outline_run.repair_events.push(event.clone());
             next.transcript.clear();
             next.transcript.push(json!({"role":"user","content":json!({"host_repair_request":event,"instruction":"Review the current reading pack and its host-authorized condition_support_options. Correct evidence-supported claims, retain valid obligations, and submit using current host keys. This is a full pack replacement. The prior response draft is invalidated; organize the repaired requirements and perform a fresh Check afterwards. Unresolved claims must remain reviewable."}).to_string()}));
@@ -1280,7 +1318,9 @@ mod tests {
     fn bounded_schema_feedback_keeps_code_path_and_state_guidance() {
         let short = bounded_schema_feedback("submit_pack", "oneOf", "/requirements/4/evidence/2");
         assert!(short.contains("SCHEMA/oneOf /requirements/4/evidence/2"));
-        assert!(!bounded_schema_feedback("put_slots","required","/slots/0").contains("repair=true"));
+        assert!(
+            !bounded_schema_feedback("put_slots", "required", "/slots/0").contains("repair=true")
+        );
         for path in ["/材料😀".repeat(200), "/field".repeat(200)] {
             let value = bounded_schema_feedback("submit_pack", "type", &path);
             assert!(value.len() <= 160);

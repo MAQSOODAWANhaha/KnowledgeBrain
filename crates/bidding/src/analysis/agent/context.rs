@@ -1102,7 +1102,9 @@ pub(in crate::analysis) fn observe_progress(
         if state.analysis.outline.phase != super::super::outline_flow::Phase::Discover {
             versions.push(delivered_read_progress_marker(state)?);
         }
-        state.main_progress.observe(versions, Some(marker), &limits.progress());
+        state
+            .main_progress
+            .observe(versions, Some(marker), &limits.progress());
         return Ok(());
     }
     if *role == Role::Main
@@ -1205,11 +1207,16 @@ fn merged_read_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 fn delivered_read_progress_marker(state: &Checkpoint) -> Result<String, String> {
     let draft = &state.outline_run.tool_draft;
     let mut carriers = std::collections::BTreeMap::<String, Vec<(usize, usize)>>::new();
-    for (scope, reference) in draft.delivered_evidence.iter().map(|r| ("outline", r))
+    for (scope, reference) in draft
+        .delivered_evidence
+        .iter()
+        .map(|r| ("outline", r))
         .chain(draft.check_reads.evidence.iter().map(|r| ("check", r)))
     {
         let mut carrier = serde_json::to_value(reference).map_err(|e| e.to_string())?;
-        let object = carrier.as_object_mut().ok_or("evidence carrier must be an object")?;
+        let object = carrier
+            .as_object_mut()
+            .ok_or("evidence carrier must be an object")?;
         object.remove("start_byte");
         object.remove("end_byte");
         let ranges = carriers.entry(format!("{scope}:{carrier}")).or_default();
@@ -1220,8 +1227,12 @@ fn delivered_read_progress_marker(state: &Checkpoint) -> Result<String, String> 
     for ranges in carriers.values_mut() {
         *ranges = merged_read_ranges(std::mem::take(ranges));
     }
-    let slots: std::collections::BTreeMap<_, _> = draft.check_reads.slot_ranges.iter()
-        .map(|(id, ranges)| (id, merged_read_ranges(ranges.clone()))).collect();
+    let slots: std::collections::BTreeMap<_, _> = draft
+        .check_reads
+        .slot_ranges
+        .iter()
+        .map(|(id, ranges)| (id, merged_read_ranges(ranges.clone())))
+        .collect();
     digest(&json!({"delivered_reading":carriers,"slots":slots,
         "structures":draft.check_reads.structure_keys,
         "empty_packs":draft.delivered_empty_pack_ids,

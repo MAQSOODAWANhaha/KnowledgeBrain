@@ -383,7 +383,10 @@ fn parse_slot(
         .map_err(|error| format!("slot {slot_id} content: {error}"))?;
     let (kind, text, match_query) = match &content {
         TemplateBody::SourceCopy { refs } => {
-            if slot.get("text").is_some() || slot.get("match_query").is_some() || slot.get("blank_kind").is_some() {
+            if slot.get("text").is_some()
+                || slot.get("match_query").is_some()
+                || slot.get("blank_kind").is_some()
+            {
                 return Err(
                     "source_copy accepts exactly one reference; omit text, match_query and blank_kind; text is resolved by the host".into(),
                 );
@@ -748,7 +751,12 @@ fn validate_targets(
             })
             .collect();
         if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
-            let current=draft.bindings.iter().filter(|binding|chain.contains(&binding.form_id)).map(|binding|binding.form_id.as_str()).collect::<Vec<_>>();
+            let current = draft
+                .bindings
+                .iter()
+                .filter(|binding| chain.contains(&binding.form_id))
+                .map(|binding| binding.form_id.as_str())
+                .collect::<Vec<_>>();
             return Err(format!(
                 "attachment chain {index} bindings are not in source order: current={current:?}, expected={chain:?}; upsert keeps existing positions and appends new ids, so it cannot reorder; read all current bindings, then replace the complete valid binding list in source order"
             ));
@@ -917,13 +925,21 @@ pub fn bounded_page(
     // unbounded projection used by token fitting quadratic in source size.
     let mut item_bytes = 0usize;
     while end < rows.len() {
-        let row_bytes = serde_json::to_vec(&rows[end]).map_err(|e| e.to_string())?.len();
-        let next_bytes = item_bytes.checked_add(row_bytes)
+        let row_bytes = serde_json::to_vec(&rows[end])
+            .map_err(|e| e.to_string())?
+            .len();
+        let next_bytes = item_bytes
+            .checked_add(row_bytes)
             .and_then(|n| n.checked_add(usize::from(end > cursor)))
             .ok_or("page size overflow")?;
         let envelope_bytes = serde_json::to_vec(&make(&[], end + 1))
-            .map_err(|e| e.to_string())?.len();
-        if next_bytes.checked_add(envelope_bytes).ok_or("page size overflow")? > max_bytes {
+            .map_err(|e| e.to_string())?
+            .len();
+        if next_bytes
+            .checked_add(envelope_bytes)
+            .ok_or("page size overflow")?
+            > max_bytes
+        {
             break;
         }
         item_bytes = next_bytes;
@@ -1285,7 +1301,10 @@ fn validate_tree(chapters: &[ChapterOutline]) -> Vec<String> {
         {
             errors.push(format!("chapter {} parent is missing", chapter.id));
         }
-        if let Some(existing) = orders.insert((chapter.parent_id.as_deref(), chapter.order), chapter.id.as_str()) {
+        if let Some(existing) = orders.insert(
+            (chapter.parent_id.as_deref(), chapter.order),
+            chapter.id.as_str(),
+        ) {
             errors.push(format!("chapter {} repeats a sibling order: parent={}, order={}, existing_chapter={existing}; upsert preserves omitted chapters; update the existing id or choose an unused sibling order; use replace only for an intentional complete tree", chapter.id, chapter.parent_id.as_deref().unwrap_or("<root>"), chapter.order));
         }
     }
@@ -1704,104 +1723,407 @@ mod tests {
     fn organize_contract_matrix_covers_all_writes_and_repair_modes() {
         // Synthetic equivalent of the observed multi-leaf Organize failures;
         // no private document content or model acceptance is represented here.
-        let mut input=continued_chain();input.source_units[0].text="合成声明：填写并签署。".into();
-        let reference=super::super::evidence::EvidenceRef::Text{input_digest:super::super::evidence::input_digest(&input).unwrap(),unit_id:"left".into(),start_byte:0,end_byte:input.source_units[0].text.len()};
-        let mut work=super::super::discover::DiscoverWork::plan(&input,131072);
-        let packs=work.claim(2);assert_eq!(packs.len(),1);let pack=&packs[0];
-        let records=(0..2).map(|i|super::super::discover::PackRequirement{condition_support:vec![],obligation_strength:"mandatory".into(),extraction_quality:"explicit".into(),description:format!("Synthetic response {i}"),evidence:vec![reference.clone()],source_section_id:pack.atoms[0].section_id.clone(),kind:"format".into()}).collect();
-        work.submit(&input,&pack.id,super::super::discover::PackSubmit{call_id:"synthetic-organize".into(),claim_token:pack.claim_token.clone(),pack_revision:pack.pack_revision,requirements:records,no_requirement_reason:None,inspected_atom_ids:pack.atoms.iter().filter(|a|!a.context_only).map(|a|a.id.clone()).collect()}).unwrap();
-        let ids=work.requirement_ids();let ordered=ids.iter().cloned().collect::<Vec<_>>();let req_a=&ordered[0];let req_b=&ordered[1];
-        let mut draft=Draft{requirements:work.requirement_records().clone(),..Default::default()};
-        let mut chapters=three_level_chapters();chapters["chapters"][2]["requirement_ids"]=json!([req_a]);chapters["chapters"][3]["requirement_ids"]=json!([req_b]);
-        apply_canonical(&input,&mut draft,&ids,"put_chapters",&chapters).unwrap();
-        let bindings=json!([{"form_id":"form-a","chapter_id":"leaf-a"},{"form_id":"form-b","chapter_id":"leaf-a"},{"form_id":"form-c","chapter_id":"leaf-b"}]);
-        let before=draft.clone();let mut wrong=bindings.clone();wrong[0]["chapter_id"]=json!("mid");assert!(apply_canonical(&input,&mut draft,&ids,"bind_forms",&json!({"mode":"replace","bindings":wrong})).is_err());assert_eq!(draft,before);
-        apply_canonical(&input,&mut draft,&ids,"bind_forms",&json!({"mode":"replace","bindings":bindings})).unwrap();
+        let mut input = continued_chain();
+        input.source_units[0].text = "合成声明：填写并签署。".into();
+        let reference = super::super::evidence::EvidenceRef::Text {
+            input_digest: super::super::evidence::input_digest(&input).unwrap(),
+            unit_id: "left".into(),
+            start_byte: 0,
+            end_byte: input.source_units[0].text.len(),
+        };
+        let mut work = super::super::discover::DiscoverWork::plan(&input, 131072);
+        let packs = work.claim(2);
+        assert_eq!(packs.len(), 1);
+        let pack = &packs[0];
+        let records = (0..2)
+            .map(|i| super::super::discover::PackRequirement {
+                condition_support: vec![],
+                obligation_strength: "mandatory".into(),
+                extraction_quality: "explicit".into(),
+                description: format!("Synthetic response {i}"),
+                evidence: vec![reference.clone()],
+                source_section_id: pack.atoms[0].section_id.clone(),
+                kind: "format".into(),
+            })
+            .collect();
+        work.submit(
+            &input,
+            &pack.id,
+            super::super::discover::PackSubmit {
+                call_id: "synthetic-organize".into(),
+                claim_token: pack.claim_token.clone(),
+                pack_revision: pack.pack_revision,
+                requirements: records,
+                no_requirement_reason: None,
+                inspected_atom_ids: pack
+                    .atoms
+                    .iter()
+                    .filter(|a| !a.context_only)
+                    .map(|a| a.id.clone())
+                    .collect(),
+            },
+        )
+        .unwrap();
+        let ids = work.requirement_ids();
+        let ordered = ids.iter().cloned().collect::<Vec<_>>();
+        let req_a = &ordered[0];
+        let req_b = &ordered[1];
+        let mut draft = Draft {
+            requirements: work.requirement_records().clone(),
+            ..Default::default()
+        };
+        let mut chapters = three_level_chapters();
+        chapters["chapters"][2]["requirement_ids"] = json!([req_a]);
+        chapters["chapters"][3]["requirement_ids"] = json!([req_b]);
+        apply_canonical(&input, &mut draft, &ids, "put_chapters", &chapters).unwrap();
+        let bindings = json!([{"form_id":"form-a","chapter_id":"leaf-a"},{"form_id":"form-b","chapter_id":"leaf-a"},{"form_id":"form-c","chapter_id":"leaf-b"}]);
+        let before = draft.clone();
+        let mut wrong = bindings.clone();
+        wrong[0]["chapter_id"] = json!("mid");
+        assert!(
+            apply_canonical(
+                &input,
+                &mut draft,
+                &ids,
+                "bind_forms",
+                &json!({"mode":"replace","bindings":wrong})
+            )
+            .is_err()
+        );
+        assert_eq!(draft, before);
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "bind_forms",
+            &json!({"mode":"replace","bindings":bindings}),
+        )
+        .unwrap();
         // A preexisting partial list cannot be reordered by resubmitting A,B.
-        let mut partial=draft.clone();partial.bindings.remove(0);let saved=partial.clone();
-        let error=apply_canonical(&input,&mut partial,&ids,"bind_forms",&json!({"mode":"upsert","bindings":bindings})).unwrap_err();
-        for part in ["current=","expected=","cannot reorder","replace"] {assert!(error.contains(part),"{error}");}assert_eq!(partial,saved);
-        apply_canonical(&input,&mut partial,&ids,"bind_forms",&json!({"mode":"replace","bindings":bindings})).unwrap();assert_eq!(partial.bindings,draft.bindings);
-        let slots=json!([
+        let mut partial = draft.clone();
+        partial.bindings.remove(0);
+        let saved = partial.clone();
+        let error = apply_canonical(
+            &input,
+            &mut partial,
+            &ids,
+            "bind_forms",
+            &json!({"mode":"upsert","bindings":bindings}),
+        )
+        .unwrap_err();
+        for part in ["current=", "expected=", "cannot reorder", "replace"] {
+            assert!(error.contains(part), "{error}");
+        }
+        assert_eq!(partial, saved);
+        apply_canonical(
+            &input,
+            &mut partial,
+            &ids,
+            "bind_forms",
+            &json!({"mode":"replace","bindings":bindings}),
+        )
+        .unwrap();
+        assert_eq!(partial.bindings, draft.bindings);
+        let slots = json!([
             {"slot_id":"copy","chapter_id":"leaf-a","content":{"type":"source_copy","refs":[reference]}},
             {"slot_id":"blank-a","chapter_id":"leaf-a","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"材料A"},
             {"slot_id":"sign","chapter_id":"leaf-a","content":{"type":"editable_blank"},"blank_kind":"signature","match_query":"签署人"},
             {"slot_id":"explain","chapter_id":"leaf-a","content":{"type":"generated_explanation","supporting_refs":[reference]},"text":"填写说明"},
             {"slot_id":"blank-b","chapter_id":"leaf-b","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"材料B"}]);
-        let saved=draft.clone();assert!(apply_canonical(&input,&mut draft,&ids,"put_slots",&json!({"mode":"replace","slots":slots})).unwrap_err().contains("outside_scope"));assert_eq!(draft,saved);
-        assert_eq!(super::super::evidence::resolve_evidence(&input,std::slice::from_ref(&reference)).unwrap()[0].quote,input.source_units[0].text);
+        let saved = draft.clone();
+        assert!(
+            apply_canonical(
+                &input,
+                &mut draft,
+                &ids,
+                "put_slots",
+                &json!({"mode":"replace","slots":slots})
+            )
+            .unwrap_err()
+            .contains("outside_scope")
+        );
+        assert_eq!(draft, saved);
+        assert_eq!(
+            super::super::evidence::resolve_evidence(&input, std::slice::from_ref(&reference))
+                .unwrap()[0]
+                .quote,
+            input.source_units[0].text
+        );
         draft.delivered_evidence.push(reference.clone()); // explicit synthetic delivery seam
-        apply_canonical(&input,&mut draft,&ids,"put_slots",&json!({"mode":"replace","slots":slots})).unwrap();
-        let mut reversed=slots.as_array().unwrap().clone();reversed.reverse();
-        apply_canonical(&input,&mut draft,&ids,"put_slots",&json!({"mode":"upsert","slots":reversed})).unwrap();assert_eq!(draft.slots[0].slot_id,"copy");
-        apply_canonical(&input,&mut draft,&ids,"put_slots",&json!({"mode":"replace","slots":reversed})).unwrap();assert_eq!(draft.slots[0].slot_id,"blank-b");
-        let fulfill=|targets:Value|json!({"fulfillments":[{"requirement_id":req_a,"primary_response_chapter_id":"leaf-a","target_refs":targets}]});
-        for targets in [json!([]),json!([{"type":"text_slot","slot_id":"blank-b"}]),json!([{"type":"form_binding","form_id":"form-c"}]),json!([{"type":"text_slot","slot_id":"explain"}])] {
-            let saved=draft.clone();assert!(apply_canonical(&input,&mut draft,&ids,"put_fulfillments",&fulfill(targets)).is_err());assert_eq!(draft,saved);
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_slots",
+            &json!({"mode":"replace","slots":slots}),
+        )
+        .unwrap();
+        let mut reversed = slots.as_array().unwrap().clone();
+        reversed.reverse();
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_slots",
+            &json!({"mode":"upsert","slots":reversed}),
+        )
+        .unwrap();
+        assert_eq!(draft.slots[0].slot_id, "copy");
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_slots",
+            &json!({"mode":"replace","slots":reversed}),
+        )
+        .unwrap();
+        assert_eq!(draft.slots[0].slot_id, "blank-b");
+        let fulfill = |targets: Value| json!({"fulfillments":[{"requirement_id":req_a,"primary_response_chapter_id":"leaf-a","target_refs":targets}]});
+        for targets in [
+            json!([]),
+            json!([{"type":"text_slot","slot_id":"blank-b"}]),
+            json!([{"type":"form_binding","form_id":"form-c"}]),
+            json!([{"type":"text_slot","slot_id":"explain"}]),
+        ] {
+            let saved = draft.clone();
+            assert!(
+                apply_canonical(
+                    &input,
+                    &mut draft,
+                    &ids,
+                    "put_fulfillments",
+                    &fulfill(targets)
+                )
+                .is_err()
+            );
+            assert_eq!(draft, saved);
         }
         apply_canonical(&input,&mut draft,&ids,"put_fulfillments",&fulfill(json!([{"type":"text_slot","slot_id":"copy"},{"type":"text_slot","slot_id":"blank-a"},{"type":"form_binding","form_id":"form-a"}]))).unwrap();
         apply_canonical(&input,&mut draft,&ids,"put_fulfillments",&json!({"fulfillments":[{"requirement_id":req_b,"primary_response_chapter_id":"leaf-b","target_refs":[{"type":"form_binding","form_id":"form-c"}]}]})).unwrap();
-        validate_final_outline(&input,&ids,&draft).unwrap();assert_eq!((draft.chapters.len(),draft.bindings.len(),draft.slots.len(),draft.fulfillments.len()),(4,3,5,2));assert!(!draft.finished);assert!(draft.reviewed_pack_ids.is_empty());
-        let mut checkpoint=super::super::acceptance::checkpoint(&input);checkpoint.outline_run.reading_packs=Some(work);checkpoint.outline_run.tool_draft=draft;
-        assert_eq!(super::super::agent::current(&input,&checkpoint),super::super::agent::Duty::Check);
-        assert!(checkpoint.outline_run.tool_draft.check_reads.evidence.is_empty());
+        validate_final_outline(&input, &ids, &draft).unwrap();
+        assert_eq!(
+            (
+                draft.chapters.len(),
+                draft.bindings.len(),
+                draft.slots.len(),
+                draft.fulfillments.len()
+            ),
+            (4, 3, 5, 2)
+        );
+        assert!(!draft.finished);
+        assert!(draft.reviewed_pack_ids.is_empty());
+        let mut checkpoint = super::super::acceptance::checkpoint(&input);
+        checkpoint.outline_run.reading_packs = Some(work);
+        checkpoint.outline_run.tool_draft = draft;
+        assert_eq!(
+            super::super::agent::current(&input, &checkpoint),
+            super::super::agent::Duty::Check
+        );
+        assert!(
+            checkpoint
+                .outline_run
+                .tool_draft
+                .check_reads
+                .evidence
+                .is_empty()
+        );
         assert!(!checkpoint.done); // Check-ready is not semantic acceptance or completion.
-        let revision=checkpoint.outline_run.reading_packs.as_ref().unwrap().revision;
-        let identity=json!({"tool":"read_requirements","duty":"Check","revision":revision,"input":checkpoint.input_sha256,"epoch":checkpoint.outline_run.tool_draft.read_epoch});
-        checkpoint.outline_run.tool_draft.evidence_continuations.insert("saved-cursor".into(),json!({"identity":identity,"page":{"items":[]}}));
+        let revision = checkpoint
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .revision;
+        let identity = json!({"tool":"read_requirements","duty":"Check","revision":revision,"input":checkpoint.input_sha256,"epoch":checkpoint.outline_run.tool_draft.read_epoch});
+        checkpoint
+            .outline_run
+            .tool_draft
+            .evidence_continuations
+            .insert(
+                "saved-cursor".into(),
+                json!({"identity":identity,"page":{"items":[]}}),
+            );
         checkpoint.transcript.clear();
-        let host=super::super::agent::host_packet(&input,&checkpoint,0,json!({}),json!({}),None);
-        assert_eq!(host["check_work"]["remaining_comparisons"],2);
+        let host =
+            super::super::agent::host_packet(&input, &checkpoint, 0, json!({}), json!({}), None);
+        assert_eq!(host["check_work"]["remaining_comparisons"], 2);
         assert!(ids.contains(host["check_work"]["requirement_id"].as_str().unwrap()));
-        assert_eq!(host["available_read_continuations"]["items"][0]["cursor"],"saved-cursor");
-        assert_eq!(checkpoint.outline_run.tool_draft.check_reads.evidence.len(),0);
-        checkpoint.outline_run.tool_draft.read_epoch+=1;
-        let stale=super::super::agent::host_packet(&input,&checkpoint,0,json!({}),json!({}),None);
-        assert_eq!(stale["available_read_continuations"]["items"],json!([]));
-
+        assert_eq!(
+            host["available_read_continuations"]["items"][0]["cursor"],
+            "saved-cursor"
+        );
+        assert_eq!(
+            checkpoint.outline_run.tool_draft.check_reads.evidence.len(),
+            0
+        );
+        checkpoint.outline_run.tool_draft.read_epoch += 1;
+        let stale =
+            super::super::agent::host_packet(&input, &checkpoint, 0, json!({}), json!({}), None);
+        assert_eq!(stale["available_read_continuations"]["items"], json!([]));
     }
 
     #[test]
     fn slot_variant_schema_and_host_contracts_agree() {
-        let input=input();
-        let reference=super::super::evidence::EvidenceRef::Text{input_digest:super::super::evidence::input_digest(&input).unwrap(),unit_id:"source".into(),start_byte:0,end_byte:input.source_units[0].text.len()};
-        let wire_ref=json!({"source_key":format!("src_{}","a".repeat(64))});
-        let variants=[
+        let input = input();
+        let reference = super::super::evidence::EvidenceRef::Text {
+            input_digest: super::super::evidence::input_digest(&input).unwrap(),
+            unit_id: "source".into(),
+            start_byte: 0,
+            end_byte: input.source_units[0].text.len(),
+        };
+        let wire_ref = json!({"source_key":format!("src_{}","a".repeat(64))});
+        let variants = [
             json!({"slot_id":"copy","chapter_id":"leaf","content":{"type":"source_copy","refs":[wire_ref.clone()]}}),
             json!({"slot_id":"blank","chapter_id":"leaf","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}),
             json!({"slot_id":"signature","chapter_id":"leaf","content":{"type":"editable_blank"},"blank_kind":"signature","match_query":"签署人"}),
-            json!({"slot_id":"explanation","chapter_id":"leaf","content":{"type":"generated_explanation","supporting_refs":[wire_ref]},"text":"说明"})];
-        for row in &variants {super::super::agent::validate_arguments("put_slots",&json!({"mode":"upsert","slots":[row]})).unwrap();}
-        for count in [0,2] {let mut bad=variants[0].clone();bad["content"]["refs"]=json!(vec![bad["content"]["refs"][0].clone();count]);assert!(super::super::agent::validate_arguments("put_slots",&json!({"mode":"upsert","slots":[bad]})).is_err());}
-        for (index,field) in [(1,"match_query"),(1,"blank_kind"),(3,"text")] {let mut bad=variants[index].clone();bad.as_object_mut().unwrap().remove(field);assert!(super::super::agent::validate_arguments("put_slots",&json!({"mode":"upsert","slots":[bad]})).is_err());}
-        let mut unsupported=variants[3].clone();unsupported["content"]["supporting_refs"]=json!([]);assert!(super::super::agent::validate_arguments("put_slots",&json!({"mode":"upsert","slots":[unsupported]})).is_err());
-
-        for (index,field,value) in [(0,"match_query",json!("")),(0,"match_query",json!("repair")),(0,"text",json!("invented")),(0,"blank_kind",json!("signature")),(3,"match_query",json!("repair")),(3,"blank_kind",json!("signature")),(1,"text",json!("invented"))] {
-            let mut row=variants[index].clone();row[field]=value;
-            assert!(super::super::agent::validate_arguments("put_slots",&json!({"mode":"upsert","slots":[row]})).is_err());
+            json!({"slot_id":"explanation","chapter_id":"leaf","content":{"type":"generated_explanation","supporting_refs":[wire_ref]},"text":"说明"}),
+        ];
+        for row in &variants {
+            super::super::agent::validate_arguments(
+                "put_slots",
+                &json!({"mode":"upsert","slots":[row]}),
+            )
+            .unwrap();
         }
-        let mut draft=Draft::default();let reqs=BTreeSet::new();
+        for count in [0, 2] {
+            let mut bad = variants[0].clone();
+            bad["content"]["refs"] = json!(vec![bad["content"]["refs"][0].clone(); count]);
+            assert!(
+                super::super::agent::validate_arguments(
+                    "put_slots",
+                    &json!({"mode":"upsert","slots":[bad]})
+                )
+                .is_err()
+            );
+        }
+        for (index, field) in [(1, "match_query"), (1, "blank_kind"), (3, "text")] {
+            let mut bad = variants[index].clone();
+            bad.as_object_mut().unwrap().remove(field);
+            assert!(
+                super::super::agent::validate_arguments(
+                    "put_slots",
+                    &json!({"mode":"upsert","slots":[bad]})
+                )
+                .is_err()
+            );
+        }
+        let mut unsupported = variants[3].clone();
+        unsupported["content"]["supporting_refs"] = json!([]);
+        assert!(
+            super::super::agent::validate_arguments(
+                "put_slots",
+                &json!({"mode":"upsert","slots":[unsupported]})
+            )
+            .is_err()
+        );
+
+        for (index, field, value) in [
+            (0, "match_query", json!("")),
+            (0, "match_query", json!("repair")),
+            (0, "text", json!("invented")),
+            (0, "blank_kind", json!("signature")),
+            (3, "match_query", json!("repair")),
+            (3, "blank_kind", json!("signature")),
+            (1, "text", json!("invented")),
+        ] {
+            let mut row = variants[index].clone();
+            row[field] = value;
+            assert!(
+                super::super::agent::validate_arguments(
+                    "put_slots",
+                    &json!({"mode":"upsert","slots":[row]})
+                )
+                .is_err()
+            );
+        }
+        let mut draft = Draft::default();
+        let reqs = BTreeSet::new();
         apply_canonical(&input,&mut draft,&reqs,"put_chapters",&json!({"mode":"replace","chapters":[{"id":"leaf","parent_id":null,"order":0,"title":"Response","purpose":"response","requirement_ids":[]}]})).unwrap();
         draft.delivered_evidence.push(reference.clone());
-        let mut slots=variants.to_vec();slots[0]["content"]["refs"]=json!([reference]);slots[3]["content"]["supporting_refs"]=slots[0]["content"]["refs"].clone();
-        apply_canonical(&input,&mut draft,&reqs,"put_slots",&json!({"mode":"replace","slots":slots})).unwrap();
-        assert_eq!(draft.slots.len(),4);assert_eq!(draft.slots[0].text,input.source_units[0].text);assert!(draft.slots[1].text.is_empty());
-        for index in [0,3] {let before=serde_json::to_value(&draft).unwrap();let mut bad=slots[index].clone();bad["match_query"]=json!("repair");assert!(apply_canonical(&input,&mut draft,&reqs,"put_slots",&json!({"mode":"upsert","slots":[bad]})).is_err());assert_eq!(serde_json::to_value(&draft).unwrap(),before);}
+        let mut slots = variants.to_vec();
+        slots[0]["content"]["refs"] = json!([reference]);
+        slots[3]["content"]["supporting_refs"] = slots[0]["content"]["refs"].clone();
+        apply_canonical(
+            &input,
+            &mut draft,
+            &reqs,
+            "put_slots",
+            &json!({"mode":"replace","slots":slots}),
+        )
+        .unwrap();
+        assert_eq!(draft.slots.len(), 4);
+        assert_eq!(draft.slots[0].text, input.source_units[0].text);
+        assert!(draft.slots[1].text.is_empty());
+        for index in [0, 3] {
+            let before = serde_json::to_value(&draft).unwrap();
+            let mut bad = slots[index].clone();
+            bad["match_query"] = json!("repair");
+            assert!(
+                apply_canonical(
+                    &input,
+                    &mut draft,
+                    &reqs,
+                    "put_slots",
+                    &json!({"mode":"upsert","slots":[bad]})
+                )
+                .is_err()
+            );
+            assert_eq!(serde_json::to_value(&draft).unwrap(), before);
+        }
     }
 
     #[test]
     fn chapter_collision_names_both_roots_and_preserves_state() {
-        let input=input();let mut draft=Draft::default();let ids=BTreeSet::new();
-        let root=|id:&str,order:u64|json!({"id":id,"parent_id":null,"order":order,"title":"Root","purpose":"response","requirement_ids":[]});
-        apply_canonical(&input,&mut draft,&ids,"put_chapters",&json!({"mode":"replace","chapters":[root("existing",0)]})).unwrap();
-        let before=serde_json::to_value(&draft).unwrap();
-        let error=apply_canonical(&input,&mut draft,&ids,"put_chapters",&json!({"mode":"upsert","chapters":[root("new",0)]})).unwrap_err();
-        for part in ["chapter new","parent=<root>","order=0","existing_chapter=existing","upsert preserves"] {assert!(error.contains(part),"{error}");}
-        assert_eq!(serde_json::to_value(&draft).unwrap(),before);
-        apply_canonical(&input,&mut draft,&ids,"put_chapters",&json!({"mode":"upsert","chapters":[root("existing",0)]})).unwrap();
-        assert_eq!(draft.chapters.len(),1);
-        apply_canonical(&input,&mut draft,&ids,"put_chapters",&json!({"mode":"replace","chapters":[root("new",0)]})).unwrap();
-        assert_eq!(draft.chapters.len(),1);assert_eq!(draft.chapters[0].id,"new");
+        let input = input();
+        let mut draft = Draft::default();
+        let ids = BTreeSet::new();
+        let root = |id: &str, order: u64| json!({"id":id,"parent_id":null,"order":order,"title":"Root","purpose":"response","requirement_ids":[]});
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_chapters",
+            &json!({"mode":"replace","chapters":[root("existing",0)]}),
+        )
+        .unwrap();
+        let before = serde_json::to_value(&draft).unwrap();
+        let error = apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_chapters",
+            &json!({"mode":"upsert","chapters":[root("new",0)]}),
+        )
+        .unwrap_err();
+        for part in [
+            "chapter new",
+            "parent=<root>",
+            "order=0",
+            "existing_chapter=existing",
+            "upsert preserves",
+        ] {
+            assert!(error.contains(part), "{error}");
+        }
+        assert_eq!(serde_json::to_value(&draft).unwrap(), before);
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_chapters",
+            &json!({"mode":"upsert","chapters":[root("existing",0)]}),
+        )
+        .unwrap();
+        assert_eq!(draft.chapters.len(), 1);
+        apply_canonical(
+            &input,
+            &mut draft,
+            &ids,
+            "put_chapters",
+            &json!({"mode":"replace","chapters":[root("new",0)]}),
+        )
+        .unwrap();
+        assert_eq!(draft.chapters.len(), 1);
+        assert_eq!(draft.chapters[0].id, "new");
     }
 
     #[test]
@@ -1837,16 +2159,32 @@ mod tests {
 
     #[test]
     fn incremental_page_sizes_preserve_exact_prefix_boundaries() {
-        let rows = (0..24).map(|i| json!({"id":i,"text":"条件\n\"\\".repeat(i)})).collect::<Vec<_>>();
+        let rows = (0..24)
+            .map(|i| json!({"id":i,"text":"条件\n\"\\".repeat(i)}))
+            .collect::<Vec<_>>();
         for cursor in [0, 9, 23, 24] {
             for budget in (1..5000).step_by(17).chain([usize::MAX]) {
-                let make = |end:usize| json!({"version":"v","items":&rows[cursor..end],"next_cursor":if end<rows.len(){Some(end)}else{None},"remaining":rows.len()-end,"total":rows.len()});
-                let expected = if serde_json::to_vec(&make(cursor)).unwrap().len() > budget { None } else {
-                    let mut end=cursor;
-                    while end<rows.len() && serde_json::to_vec(&make(end+1)).unwrap().len()<=budget {end+=1;}
-                    if end==cursor && end<rows.len() {None} else {Some(make(end))}
+                let make = |end: usize| json!({"version":"v","items":&rows[cursor..end],"next_cursor":if end<rows.len(){Some(end)}else{None},"remaining":rows.len()-end,"total":rows.len()});
+                let expected = if serde_json::to_vec(&make(cursor)).unwrap().len() > budget {
+                    None
+                } else {
+                    let mut end = cursor;
+                    while end < rows.len()
+                        && serde_json::to_vec(&make(end + 1)).unwrap().len() <= budget
+                    {
+                        end += 1;
+                    }
+                    if end == cursor && end < rows.len() {
+                        None
+                    } else {
+                        Some(make(end))
+                    }
                 };
-                assert_eq!(bounded_page(&rows,cursor,budget,"v").ok(),expected,"cursor={cursor} budget={budget}");
+                assert_eq!(
+                    bounded_page(&rows, cursor, budget, "v").ok(),
+                    expected,
+                    "cursor={cursor} budget={budget}"
+                );
             }
         }
     }

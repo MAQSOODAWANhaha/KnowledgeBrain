@@ -880,11 +880,30 @@ async fn finalize_run<J: Journal>(
 /// Credit only pixels present in the exact saved request consumed by the
 /// complete provider response. A cached image or successful tool result alone
 /// never establishes visual evidence, and each Check phase has its own scope.
-fn validate_frozen_view(input: &FrozenInput, config: &Config, view: &views::SourceView) -> Result<(), String> {
-    view.validate(&view.identity.source_id, config.limits.max_source_view_edge, config.limits.max_source_view_bytes)?;
-    let source=input.source_units.iter().find(|source| source.source_unit_revision_id==view.identity.source_id && source.locator["image_available"]==true).ok_or("view has no frozen original source")?;
-    let original=source.locator["image_ref"].as_str().and_then(|value|value.strip_prefix("objects/"));
-    if original != Some(view.identity.original_sha256.as_str()) { return Err("delivered image original hash differs from frozen source".into()); }
+fn validate_frozen_view(
+    input: &FrozenInput,
+    config: &Config,
+    view: &views::SourceView,
+) -> Result<(), String> {
+    view.validate(
+        &view.identity.source_id,
+        config.limits.max_source_view_edge,
+        config.limits.max_source_view_bytes,
+    )?;
+    let source = input
+        .source_units
+        .iter()
+        .find(|source| {
+            source.source_unit_revision_id == view.identity.source_id
+                && source.locator["image_available"] == true
+        })
+        .ok_or("view has no frozen original source")?;
+    let original = source.locator["image_ref"]
+        .as_str()
+        .and_then(|value| value.strip_prefix("objects/"));
+    if original != Some(view.identity.original_sha256.as_str()) {
+        return Err("delivered image original hash differs from frozen source".into());
+    }
     Ok(())
 }
 
@@ -1435,11 +1454,21 @@ async fn read_projection_in_context(
         fit_probes += 1;
         match fit_batch(input, config, &mut candidate, &remaining[1..], views).await {
             Ok(()) => {
-                tracing::info!(event="analysis_read_projection", tool, projection_ms,
-                    fit_probes, fit_ms=fit_started.elapsed().as_millis() as u64,
-                    selected_rows=selected, selection_complete=tail.is_null());
+                tracing::info!(
+                    event = "analysis_read_projection",
+                    tool,
+                    projection_ms,
+                    fit_probes,
+                    fit_ms = fit_started.elapsed().as_millis() as u64,
+                    selected_rows = selected,
+                    selection_complete = tail.is_null()
+                );
                 if let Some(cursor) = args["cursor"].as_str() {
-                    candidate.outline_run.tool_draft.evidence_continuations.remove(cursor);
+                    candidate
+                        .outline_run
+                        .tool_draft
+                        .evidence_continuations
+                        .remove(cursor);
                 }
                 state.outline_run.tool_draft = candidate.outline_run.tool_draft;
                 return Ok(page);
@@ -1640,7 +1669,11 @@ async fn read_evidence_in_context(
         match fit_batch(input, config, &mut candidate, &remaining[1..], views).await {
             Ok(()) => {
                 if let Some(cursor) = args["cursor"].as_str() {
-                    candidate.outline_run.tool_draft.evidence_continuations.remove(cursor);
+                    candidate
+                        .outline_run
+                        .tool_draft
+                        .evidence_continuations
+                        .remove(cursor);
                 }
                 state.outline_run.tool_draft = candidate.outline_run.tool_draft;
                 return Ok(page);
@@ -2062,10 +2095,13 @@ async fn prepare_fitted_request(
             };
             let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(input, &fits);
             let cache_after = crate::agent_runtime::chat::cache_counts();
-            tracing::info!(event="analysis_pack_planned", candidate_fits=candidate_fits.get(),
-                cache_hits=cache_after.0.saturating_sub(cache_before.0),
-                cache_misses=cache_after.1.saturating_sub(cache_before.1),
-                elapsed_ms=planning_started.elapsed().as_millis() as u64);
+            tracing::info!(
+                event = "analysis_pack_planned",
+                candidate_fits = candidate_fits.get(),
+                cache_hits = cache_after.0.saturating_sub(cache_before.0),
+                cache_misses = cache_after.1.saturating_sub(cache_before.1),
+                elapsed_ms = planning_started.elapsed().as_millis() as u64
+            );
             if let Some(message) = work.planning_error() {
                 return Err(error("AGENT_PACK_PLAN_INVALID", message));
             }
@@ -2139,19 +2175,42 @@ async fn prepare_fitted_request(
             // latest, unconsumed read group alone already exceeds the window.
             // This is only an early rejection: every accepted page still goes
             // through full request preparation and final transport admission.
-            let messages = body["messages"].as_array().ok_or_else(|| invalid("messages missing"))?;
+            let messages = body["messages"]
+                .as_array()
+                .ok_or_else(|| invalid("messages missing"))?;
             if let Some(start) = messages.iter().rposition(|m| m["role"] == "assistant") {
-                let is_read = messages[start]["tool_calls"].as_array().is_some_and(|calls|
-                    calls.iter().any(|call| matches!(call["function"]["name"].as_str(),
-                        Some("read_requirements" | "read_outline" | "read_evidence" | "read_claim_evidence"))));
+                let is_read = messages[start]["tool_calls"]
+                    .as_array()
+                    .is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            matches!(
+                                call["function"]["name"].as_str(),
+                                Some(
+                                    "read_requirements"
+                                        | "read_outline"
+                                        | "read_evidence"
+                                        | "read_claim_evidence"
+                                )
+                            )
+                        })
+                    });
                 if is_read && start + 1 < messages.len() {
                     let mut required = body.clone();
-                    let mut kept = messages[..start].iter().filter(|m|m["role"]=="system").cloned().collect::<Vec<_>>();
-                    kept.extend_from_slice(&messages[start..messages.len()-1]);
+                    let mut kept = messages[..start]
+                        .iter()
+                        .filter(|m| m["role"] == "system")
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    kept.extend_from_slice(&messages[start..messages.len() - 1]);
                     required["messages"] = json!(kept);
                     let tokens = context::estimate_input_tokens(&required, &config.limits)?;
-                    if tokens.saturating_add(config.provider.output_token_reserve as usize) > config.limits.max_context_tokens {
-                        return Err(error("AGENT_TURN_BUDGET_EXCEEDED", "unconsumed read group exceeds context; continue with a smaller source page"));
+                    if tokens.saturating_add(config.provider.output_token_reserve as usize)
+                        > config.limits.max_context_tokens
+                    {
+                        return Err(error(
+                            "AGENT_TURN_BUDGET_EXCEEDED",
+                            "unconsumed read group exceeds context; continue with a smaller source page",
+                        ));
                     }
                 }
             }
@@ -2173,8 +2232,10 @@ async fn prepare_fitted_request(
         // evidence. Finish the same lossless cleanup before rebuilding the
         // full request, instead of reserializing it after every old group.
         let mut compacted = false;
-        while context::evict_completed_discovery_history(state, config.limits.context_wire_ceiling())
-            || context::compact_delivered_navigation(&mut state.transcript)
+        while context::evict_completed_discovery_history(
+            state,
+            config.limits.context_wire_ceiling(),
+        ) || context::compact_delivered_navigation(&mut state.transcript)
             || context::compact_recallable_candidate_details(
                 state,
                 config.limits.context_wire_ceiling(),

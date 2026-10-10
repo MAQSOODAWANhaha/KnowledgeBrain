@@ -17,10 +17,10 @@ use std::{
 mod request;
 mod tokenization;
 pub(crate) use request::{prepare, system_content};
-pub use tokenization::{TokenEncoding, TokenizerCalibration, TokenizerProfile};
+pub(crate) use tokenization::cache_counts;
 #[cfg(test)]
 pub(crate) use tokenization::estimate_request_tokens;
-pub(crate) use tokenization::cache_counts;
+pub use tokenization::{TokenEncoding, TokenizerCalibration, TokenizerProfile};
 pub(crate) use tokenization::{estimate_input_tokens, estimate_request_tokens_with_reserve};
 
 fn invalid() -> AgentError {
