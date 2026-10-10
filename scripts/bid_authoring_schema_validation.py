@@ -13,7 +13,6 @@ SCHEMA_DIR = ROOT / "crates/bidding/schemas"
 LIVE = {
     "outline-tools-v2.schema.json",
     "response-tools-v1.schema.json",
-    "tender-analysis-tools-v1.schema.json",
 }
 
 
