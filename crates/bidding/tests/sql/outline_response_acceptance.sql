@@ -267,6 +267,7 @@ DECLARE
   manifest jsonb;
   wrong_source jsonb;
   result kb_sha256;
+  expiry_result jsonb;
   v_cancel uuid := gen_random_uuid();
   v_cancel_sha kb_sha256 := encode(public.digest(v_cancel::text,'sha256'),'hex')::kb_sha256;
 BEGIN
@@ -331,6 +332,15 @@ BEGIN
   IF NOT EXISTS(SELECT 1 FROM kb_object_upload_expiry_candidates() id WHERE id=v_cancel)
       OR NOT EXISTS(SELECT 1 FROM object_owner_references WHERE owner_kind='object_upload_staging' AND owner_id=v_cancel) THEN
     RAISE EXCEPTION 'cancel did not retain durable expiry work';
+  END IF;
+  -- This SQL fixture has no retention process. Exercise its exact database
+  -- consumer after proving the producer left durable work, rather than leaving
+  -- an intentional cancelled upload behind in the enclosing stack test.
+  expiry_result:=kb_object_upload_expire_one(v_cancel);
+  IF expiry_result->>'state'<>'expired' OR expiry_result->'deletion'='null'::jsonb
+      OR EXISTS(SELECT 1 FROM object_upload_staging WHERE id=v_cancel)
+      OR EXISTS(SELECT 1 FROM object_owner_references WHERE owner_kind='object_upload_staging' AND owner_id=v_cancel) THEN
+    RAISE EXCEPTION 'retention did not consume cancelled staging';
   END IF;
 END
 $frozen_manifest$;
