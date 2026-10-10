@@ -30,3 +30,20 @@ The frozen schema is version 2 and the supported parser contract is exactly `sou
 Discovery uses ordered atoms, carrier-specific evidence and claimed pack revisions. Empty-text grids remain visible. Oversized cells are split at UTF-8 boundaries while preserving anchor identity. Repeated table headers are context with their original evidence identity. Stored image locators alone do not grant visual-reading evidence; actual transported image pixels require a completed-response receipt before an `ImageRegion` citation or whole-pack negative scan is accepted.
 
 Native DOCX/XLSX contract fixtures contain the original OOXML bytes and the real producer responses. Regenerate them with `python services/docreader/scripts/generate_native_office_fixtures.py crates/docparser/tests/fixtures/python-native-office-v2.json`. This isolated local harness loads the unchanged native parser modules without importing optional MarkItDown/ONNX engines. Archive clocks are fixed so consecutive runs produce identical fixtures. The existing mixed-PDF fixture separately covers text, scanned and blank pages.
+
+### Excel 原生单元格保真
+
+SpreadsheetCell 从 Python 原生解析经 protobuf 和 Rust 保留 `raw_value`、
+`value_type`、`number_format`、`display_text`、`display_complete`、
+`display_incomplete_reason`，以及公式表达式、引用和可用缓存值/缓存类型。
+Frozen 的原生 locator 保留这些字段；表格正文采用可靠显示值，显示未知时保留原值。
+
+显示器只处理明确支持的数字小数位、分组、百分比、引号单位和 `yyyy-mm-dd` 日期。
+未知自定义格式、未实现的 General 数值显示、公式缓存缺失或缓存错误均明确标记，
+不计算公式，不把公式文本当计算结果。单元格显示不完整不等同于整个来源丢失；
+后续业务解释必须结合原值、格式与不完整原因。原生元数据计入解析载荷上限。
+
+`generate_excel_wire_fixture.py` 生成无用户资料的 XLSX，并调用实际 ExcelParser 与
+生产 protobuf 编码器。Rust 测试解码该 wire fixture，复用生产 unary 响应转换，先核对
+protobuf 单元格与 source contract 的物理 locator 一致，再构建并验证 Frozen。
+这证明跨语言元数据传递，不能替代真实模型语义验收或证明所有 Excel 格式均受支持。

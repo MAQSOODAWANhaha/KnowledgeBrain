@@ -892,6 +892,71 @@ pub(crate) mod tests {
             "source-v2",
         )
     }
+    #[test]
+    fn python_excel_protobuf_preserves_native_values_through_freeze() {
+        use prost::Message;
+        let wire = include_bytes!("../../../docparser/tests/fixtures/python-excel-wire.pb");
+        let response = docparser::proto::ReadResponse::decode(wire.as_slice()).unwrap();
+        let parsed = ReadResult::try_from(response).unwrap();
+        let contract = docparser::parse_source_contract(&parsed).unwrap().unwrap();
+        // Check the protobuf fields themselves before Frozen prefers the physical
+        // locator in source_contract; metadata JSON must not mask wire field loss.
+        for unit in &parsed.structured_source_units {
+            if let docparser::StructuredSourceLocator::Spreadsheet { cells, .. } = &unit.locator {
+                let physical = serde_json::to_value(
+                    contract
+                        .unit(&unit.key)
+                        .unwrap()
+                        .physical_locator
+                        .as_ref()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(serde_json::to_value(cells).unwrap(), physical["cells"]);
+            }
+        }
+        let frozen = build(parsed, vec![]).unwrap();
+        validate_frozen_input_contract(&frozen).unwrap();
+        let cells = frozen
+            .source_units
+            .iter()
+            .filter_map(|source| source.locator["cells"].as_array())
+            .flatten()
+            .collect::<Vec<_>>();
+        let cell = |address: &str| {
+            *cells
+                .iter()
+                .find(|cell| cell["address"] == address)
+                .unwrap()
+        };
+        assert_eq!(cell("A1")["display_text"], "15%");
+        assert_eq!(cell("A1")["raw_value"], "0.15");
+        assert_eq!(cell("B1")["display_text"], "2026-01-02");
+        assert_eq!(cell("C1")["number_format"], "#,##0.00\"元\"");
+        assert_eq!(cell("C1")["display_text"], "1,234.50元");
+        assert_eq!(cell("D1")["formula"], "=C1*(1+A1)");
+        assert_eq!(cell("D1")["formula_references"], json!(["C1", "A1"]));
+        assert!(cell("D1")["cached_value"].is_null());
+        assert_eq!(
+            cell("D1")["display_incomplete_reason"],
+            "formula_cached_value_missing"
+        );
+        assert_eq!(cell("E1")["cached_value"], "42");
+        assert_eq!(cell("E1")["display_text"], "42.00元");
+        assert_eq!(cell("E1")["formula_references"], json!(["'参数'!A1"]));
+        assert_eq!(cell("F1")["display_complete"], false);
+        assert_eq!(
+            cell("F1")["display_incomplete_reason"],
+            "unsupported_number_format"
+        );
+        assert_eq!(cell("G1")["cached_value_type"], "e");
+        assert_eq!(
+            cell("G1")["display_incomplete_reason"],
+            "formula_cached_error"
+        );
+        assert_eq!(cell("H1")["display_text"], "普通文字");
+    }
+
     pub(crate) fn python_fixture_input(index: usize) -> FrozenInput {
         let parsed = fixture(index);
         let images = results(&parsed);

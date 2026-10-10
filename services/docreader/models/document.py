@@ -230,6 +230,16 @@ class SpreadsheetCell(BaseModel):
     row: int = Field(ge=1)
     column: int = Field(ge=1)
     text: str
+    raw_value: str = ""
+    value_type: str = "unknown"
+    number_format: str = "General"
+    display_text: Optional[str] = None
+    display_complete: bool = False
+    display_incomplete_reason: Optional[str] = None
+    formula: Optional[str] = None
+    formula_references: List[str] = Field(default_factory=list)
+    cached_value: Optional[str] = None
+    cached_value_type: Optional[str] = None
 
 
 class SpreadsheetRange(BaseModel):

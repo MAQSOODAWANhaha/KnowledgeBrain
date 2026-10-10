@@ -43,6 +43,26 @@ pub struct SpreadsheetCell {
     pub row: u32,
     pub column: u32,
     pub text: String,
+    #[serde(default)]
+    pub raw_value: String,
+    #[serde(default)]
+    pub value_type: String,
+    #[serde(default)]
+    pub number_format: String,
+    #[serde(default)]
+    pub display_text: Option<String>,
+    #[serde(default)]
+    pub display_complete: bool,
+    #[serde(default)]
+    pub display_incomplete_reason: Option<String>,
+    #[serde(default)]
+    pub formula: Option<String>,
+    #[serde(default)]
+    pub formula_references: Vec<String>,
+    #[serde(default)]
+    pub cached_value: Option<String>,
+    #[serde(default)]
+    pub cached_value_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

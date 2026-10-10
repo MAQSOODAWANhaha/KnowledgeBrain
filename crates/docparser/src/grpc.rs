@@ -347,18 +347,27 @@ async fn read_unary(
         .await
         .map_err(|error| map_status(error).classified())?
         .into_inner();
-    let result = ReadResult {
-        markdown: resp.markdown_content,
-        error: resp.error,
-        images: resp.image_refs.into_iter().map(from_proto_image).collect(),
-        metadata: resp.metadata,
-        structured_source_units: from_proto_units(resp.structured_source_units)
-            .map_err(DocReaderReadError::InvalidResponse)?,
-        ..ReadResult::default()
-    };
-    crate::parse_source_contract(&result)
-        .map_err(|error| DocReaderReadError::InvalidResponse(error.0))?;
-    Ok(result)
+    ReadResult::try_from(resp)
+}
+
+/// Decode the unary wire response with the same source contract checks as ingestion.
+impl TryFrom<crate::proto::ReadResponse> for ReadResult {
+    type Error = DocReaderReadError;
+
+    fn try_from(resp: crate::proto::ReadResponse) -> Result<Self, Self::Error> {
+        let result = ReadResult {
+            markdown: resp.markdown_content,
+            error: resp.error,
+            images: resp.image_refs.into_iter().map(from_proto_image).collect(),
+            metadata: resp.metadata,
+            structured_source_units: from_proto_units(resp.structured_source_units)
+                .map_err(DocReaderReadError::InvalidResponse)?,
+            ..ReadResult::default()
+        };
+        crate::parse_source_contract(&result)
+            .map_err(|error| DocReaderReadError::InvalidResponse(error.0))?;
+        Ok(result)
+    }
 }
 
 fn apply_frame(
@@ -481,6 +490,16 @@ fn from_proto_unit(unit: ProtoStructuredSourceUnit) -> Result<StructuredSourceUn
                     row: cell.row,
                     column: cell.column,
                     text: cell.text,
+                    raw_value: cell.raw_value,
+                    value_type: cell.value_type,
+                    number_format: cell.number_format,
+                    display_text: cell.display_text,
+                    display_complete: cell.display_complete,
+                    display_incomplete_reason: cell.display_incomplete_reason,
+                    formula: cell.formula,
+                    formula_references: cell.formula_references,
+                    cached_value: cell.cached_value,
+                    cached_value_type: cell.cached_value_type,
                 });
             }
             let mut merged_ranges = Vec::with_capacity(value.merged_ranges.len());
@@ -1464,12 +1483,14 @@ mod tests {
                             row: 4,
                             column: 4,
                             text: "row".into(),
+                            ..Default::default()
                         },
                         crate::proto::SpreadsheetCell {
                             address: "F4".into(),
                             row: 4,
                             column: 6,
                             text: "tail".into(),
+                            ..Default::default()
                         },
                     ],
                     merged_ranges: vec![range("D4:E4", 4, 4, 4, 5)],
