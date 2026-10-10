@@ -1084,7 +1084,13 @@ fn requirement_page(
                 rows.push(json!({"pack_id":id,"source_review_version":source_version,"source_disposition":review}));
             }
             for evidence in refs {
-                rows.push(json!({"pack_id":id,"source_review_version":source_version,"evidence":evidence,"reviewed":super::evidence::covered_by_union(&evidence,&super::source_review::reviewed_evidence(&state.outline_run.tool_draft.source_dispositions,&id)),"no_requirement_reason":session["no_requirement_reason"]}));
+                let read = match &evidence {
+                    super::evidence::EvidenceRef::ImageRegion { image_id, .. } => {
+                        json!({"tool":"read_source_view","args":{"source_id":image_id}})
+                    }
+                    _ => json!({"tool":"read_evidence","args":{"refs":[evidence]}}),
+                };
+                rows.push(json!({"pack_id":id,"source_review_version":source_version,"evidence":evidence,"read":read,"reviewed":super::evidence::covered_by_union(&evidence,&super::source_review::reviewed_evidence(&state.outline_run.tool_draft.source_dispositions,&id)),"no_requirement_reason":session["no_requirement_reason"]}));
             }
         }
         return super::tools::bounded_page(&rows, cursor, max, &version);

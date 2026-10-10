@@ -1938,3 +1938,383 @@ async fn related_read_issued_keys_survive_peer_commit_but_not_input_change() {
             .is_empty()
     );
 }
+
+struct MixedNativeDiscoveryModel {
+    fallback: Delayed,
+    image_requests: AtomicUsize,
+    word_grid_requests: AtomicUsize,
+    expected_image_urls: BTreeSet<String>,
+}
+#[async_trait]
+impl Model for MixedNativeDiscoveryModel {
+    async fn turn(&self, config: &Config, bytes: &[u8]) -> Result<ChatTurn, AgentError> {
+        let body: Value = serde_json::from_slice(bytes).unwrap();
+        let packet = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .find(|p| p["reading_packs"].is_array())
+            .unwrap();
+        let session = &packet["reading_packs"][0];
+        let atoms = session["pack"]["atoms"].as_array().unwrap();
+        let pixels = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter(|part| part["type"] == "image_url")
+            .count();
+        let mut requirements = Vec::new();
+        for atom in atoms {
+            let image = atom["carrier"]["kind"] == "image";
+            let entries = if atom["cells"].is_array() {
+                atom["cells"].as_array()
+            } else {
+                atom["excerpts"].as_array()
+            };
+            let Some(entries) = entries else { continue };
+            let selected = if image {
+                entries.first()
+            } else {
+                entries.iter().find(|entry| {
+                    let text = entry["quote"]
+                        .as_str()
+                        .or_else(|| entry["text"].as_str())
+                        .unwrap_or("");
+                    text.contains("Tender requirements:")
+                        || text.contains("Keep this fixed wording.")
+                        || text.contains("Bidder name:")
+                        || text.contains("Authorized signature:")
+                        || (image && text.contains("Signed schedule required"))
+                })
+            };
+            if let Some(entry) = selected {
+                if image {
+                    assert!(
+                        pixels > 0,
+                        "OCR fixture text must not substitute for original pixels"
+                    );
+                    let urls = body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|m| m["content"].as_array())
+                        .flatten()
+                        .filter_map(|part| part["image_url"]["url"].as_str());
+                    assert!(
+                        urls.into_iter()
+                            .all(|url| self.expected_image_urls.contains(url))
+                    );
+                    self.image_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                if atom["carrier"]["kind"] == "grid" {
+                    self.word_grid_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                // This mock response is a fixture oracle, not a visual/OCR accuracy claim.
+                let quote = if image {
+                    "Signed schedule required"
+                } else {
+                    entry["quote"]
+                        .as_str()
+                        .or_else(|| entry["text"].as_str())
+                        .unwrap()
+                };
+                requirements.push(json!({"description":quote,"kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit",
+                    "source_section_id":{"atom_key":atom["atom_key"]},"evidence":[{"evidence_key":entry["evidence_key"]}],"condition_support":[]}));
+            }
+        }
+        let mut response = self.fallback.turn(config, bytes).await?;
+        if !requirements.is_empty() {
+            let mut args: Value = serde_json::from_str(&response.tool_calls[0].arguments).unwrap();
+            args["requirements"] = json!(requirements);
+            args["no_requirement_reason"] = Value::Null;
+            args["inspected_atom_ids"] = json!([]);
+            response.tool_calls[0].arguments = args.to_string();
+        }
+        Ok(response)
+    }
+}
+
+fn mixed_native_runtime_fixture() -> (FrozenInput, Config, Checkpoint, BTreeSet<String>) {
+    let input = crate::outline::frozen::tests::mixed_native_input();
+    let (build, _) = crate::outline::frozen::tests::mixed_native_build();
+    let config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.config_sha256 = digest(&config).unwrap();
+    state.outline_run.reading_packs = Some(
+        crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        }),
+    );
+    for source in input
+        .source_units
+        .iter()
+        .filter(|s| s.locator["kind"] == "image_region")
+    {
+        let document = build
+            .documents
+            .iter()
+            .find(|d| d.document_id == source.document_id)
+            .unwrap();
+        let image = document
+            .parsed
+            .images
+            .iter()
+            .find(|image| image.original_ref == source.locator["original_ref"])
+            .unwrap();
+        let digest = source.locator["image_ref"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("objects/")
+            .unwrap();
+        let view = crate::outline::visual::render_frozen_image_view(
+            &source.source_unit_revision_id,
+            digest,
+            0,
+            &image.data,
+            config.limits.max_source_view_edge,
+            config.limits.max_source_view_bytes,
+        )
+        .unwrap();
+        state.source_views.insert(view.id().unwrap(), view);
+    }
+    let expected_image_urls = state
+        .source_views
+        .values()
+        .map(|view| format!("data:image/jpeg;base64,{}", view.jpeg_base64))
+        .collect();
+    (input, config, state, expected_image_urls)
+}
+
+#[tokio::test]
+async fn mixed_native_discovery_transports_word_grid_and_original_image_regions() {
+    let (input, config, state, expected_image_urls) = mixed_native_runtime_fixture();
+    let journal = Durable {
+        state: Mutex::new(state),
+        stop_barrier: true,
+        crash_received: AtomicBool::new(false),
+        call_limit: 20,
+    };
+    let model = MixedNativeDiscoveryModel {
+        fallback: Delayed::default(),
+        image_requests: AtomicUsize::new(0),
+        word_grid_requests: AtomicUsize::new(0),
+        expected_image_urls,
+    };
+    let outcome = super::super::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        outcome.code, "TEST_ALL_PACKS_BARRIER",
+        "{}",
+        outcome.message
+    );
+    assert_eq!(model.image_requests.load(Ordering::SeqCst), 2);
+    assert_eq!(model.word_grid_requests.load(Ordering::SeqCst), 1);
+    let saved = journal.state.lock().unwrap();
+    let records = saved
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records();
+    let evidence = records
+        .values()
+        .flat_map(|record| &record.evidence)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        evidence
+            .iter()
+            .filter(|e| matches!(e, crate::outline::evidence::EvidenceRef::ImageRegion { .. }))
+            .count(),
+        2
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|e| matches!(e, crate::outline::evidence::EvidenceRef::GridCell { .. }))
+    );
+}
+
+#[tokio::test]
+async fn mixed_native_related_image_requires_exact_pixels_identity_and_completed_request() {
+    let (input, config, mut state, _) = mixed_native_runtime_fixture();
+    state.outline_run.reading_packs.as_mut().unwrap().claim(1);
+    state
+        .outline_run
+        .discover_workers
+        .insert("pack-0".into(), Worker::default());
+    let journal = Durable {
+        state: Mutex::new(state.clone()),
+        stop_barrier: false,
+        crash_received: AtomicBool::new(false),
+        call_limit: 20,
+    };
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let request = host.prepare_inner("pack-0", false).await.unwrap();
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    let payloads = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+        .collect::<Vec<_>>();
+    let packet = payloads
+        .iter()
+        .find(|p| p["reading_packs"].is_array())
+        .unwrap();
+    let reference = packet["reading_packs"][0]["pack"]["read_dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|d| d["available_originals"].as_array().unwrap())
+        .filter(|r| r["requires_original_pixels"] == true)
+        .next_back()
+        .unwrap()["evidence"]
+        .clone();
+    let scope = payloads
+        .iter()
+        .find_map(|p| p["wire_scope"].as_str())
+        .unwrap();
+    let response = ChatTurn {
+        content: "Request original fixture pixels; OCR stub is not visual evidence.".into(),
+        finish_reason: "tool_calls".into(),
+        usage: None,
+        tool_calls: vec![knowledge::models::ChatToolCall {
+            id: "read-original-image".into(),
+            name: "read_evidence".into(),
+            arguments: json!({"wire_scope":scope,"refs":[reference]}).to_string(),
+        }],
+    };
+    host.reserve(&request).await.unwrap();
+    host.received(&request, &response).await.unwrap();
+    host.commit(&request, response).await.unwrap();
+    assert!(
+        host.state.outline_run.discover_workers["pack-0"]
+            .pending
+            .is_none()
+    );
+    let delivered = host.prepare_inner("pack-0", false).await.unwrap();
+    assert!(
+        host.state.outline_run.discover_workers["pack-0"]
+            .images
+            .is_empty(),
+        "dependency does not grant ownership of target pack images"
+    );
+    let next_response = Delayed::default()
+        .turn(&config, &delivered.body)
+        .await
+        .unwrap();
+    host.reserve(&delivered).await.unwrap();
+    host.received(&delivered, &next_response).await.unwrap();
+    let received = host.state.clone();
+    for mode in [
+        "missing_pixels",
+        "dimensions",
+        "original_sha",
+        "region",
+        "unknown_response",
+    ] {
+        let mut candidate = received.clone();
+        let mut altered = delivered.clone();
+        match mode {
+            "missing_pixels" => {
+                let mut wire: Value = serde_json::from_slice(&altered.body).unwrap();
+                wire["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|m| !m["content"].is_array());
+                altered.body = serde_json::to_vec(&wire).unwrap();
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut("pack-0")
+                    .unwrap()
+                    .pending = Some(Pending::Received {
+                    request: altered.clone(),
+                    response: serde_json::to_value(&next_response).unwrap(),
+                });
+            }
+            "dimensions" => {
+                for view in candidate.source_views.values_mut() {
+                    view.identity.width += 1;
+                }
+            }
+            "original_sha" => {
+                for view in candidate.source_views.values_mut() {
+                    view.identity.original_sha256 = "a".repeat(64);
+                }
+            }
+            "region" => {
+                let frame = &mut candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut("pack-0")
+                    .unwrap()
+                    .related_read_frames[0];
+                if let crate::outline::evidence::EvidenceRef::ImageRegion { region, .. } =
+                    &mut frame.options[0].evidence[0]
+                {
+                    *region = "cropped".into();
+                }
+            }
+            "unknown_response" => {
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut("pack-0")
+                    .unwrap()
+                    .pending = Some(Pending::Sending {
+                    request: altered.clone(),
+                });
+            }
+            _ => unreachable!(),
+        }
+        let before = json!(candidate.outline_run.reading_packs);
+        assert!(
+            confirm_worker_related_reads(&input, &mut candidate, &altered).is_err(),
+            "{mode}"
+        );
+        assert_eq!(json!(candidate.outline_run.reading_packs), before, "{mode}");
+    }
+    let mut confirmed = received;
+    confirm_worker_related_reads(&input, &mut confirmed, &delivered).unwrap();
+    let session = confirmed
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .session(&input, "pack-0")
+        .unwrap();
+    assert_eq!(
+        session["pack"]["condition_support_options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        confirmed
+            .outline_run
+            .tool_draft
+            .check_reads
+            .evidence
+            .is_empty()
+    );
+}
+
+include!("discover_mixed_cycle_tests.rs");

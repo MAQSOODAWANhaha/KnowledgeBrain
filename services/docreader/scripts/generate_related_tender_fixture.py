@@ -13,7 +13,7 @@ from docreader.main import _structured_units_to_proto
 from docreader.proto.docreader_pb2 import ReadResponse
 
 
-def records():
+def records(*, mixed=False):
     writer = PdfWriter()
     page = writer.add_blank_page(width=612, height=792)
     font = writer._add_object(DictionaryObject({NameObject('/Type'): NameObject('/Font'),
@@ -26,6 +26,11 @@ def records():
         'The response must include the prescribed pricing schedule and its totals.',
         'An unavailable formula result must remain explicitly unresolved.',
     ]
+    if mixed:
+        lines.extend([
+            'The signed response form is provided in response.docx.',
+            'The signature instructions are provided in signature.png.',
+        ])
     stream.set_data(('BT /F1 12 Tf 40 720 Td ' + ' 0 -24 Td '.join(f'({line}) Tj' for line in lines) + ' ET').encode('ascii'))
     page[NameObject('/Contents')] = writer._add_object(stream)
     raw = BytesIO()

@@ -1306,12 +1306,13 @@ fn outline_visual_receipts_require_actual_pixels_and_original_object_identity() 
     for cached in state.source_views.values_mut() {
         cached.identity.original_sha256 = "f".repeat(64);
     }
+    let altered_message = state.source_views.values().next().unwrap().message();
     assert!(
         super::super::confirm_outline_visual_delivery(
             &input,
             &config,
             &mut state,
-            &json!({"messages":[view.message()]})
+            &json!({"messages":[altered_message]})
         )
         .unwrap_err()
         .contains("original hash")

@@ -992,6 +992,246 @@ pub(crate) mod tests {
         assert_eq!(cell("H1")["display_text"], "普通文字");
     }
 
+    pub(crate) fn mixed_native_build() -> (FrozenBuildInput, Vec<FrozenImageResult>) {
+        use crate::analysis::source_manifest::*;
+        use prost::Message;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../docparser/tests/fixtures/python-mixed-tender-wire.json"
+        ))
+        .unwrap();
+        let mut documents = Vec::new();
+        let mut images = Vec::new();
+        for (key, id, role) in [
+            ("main_pdf", "main", DocumentRole::Primary),
+            ("pricing_xlsx", "pricing", DocumentRole::Supplement),
+            ("response_docx", "response", DocumentRole::PrescribedForm),
+            ("signature_png", "signature", DocumentRole::Supplement),
+        ] {
+            let bytes = hex::decode(fixture[key].as_str().unwrap()).unwrap();
+            let parsed = ReadResult::try_from(
+                docparser::proto::ReadResponse::decode(bytes.as_slice()).unwrap(),
+            )
+            .unwrap();
+            for mut receipt in results(&parsed) {
+                receipt.document_id = id.into();
+                receipt.literal_text = fixture["ocr_contract_stub"].as_str().unwrap().into();
+                receipt.provenance = json!({"test_only":"golden synthetic text; no OCR or semantic accuracy claim", "literal":true});
+                images.push(receipt);
+            }
+            documents.push(ParsedDocument {
+                document_id: id.into(),
+                role,
+                parsed,
+            });
+        }
+        let document_relations = [
+            ("pricing", "pricing schedule is provided in synthetic.xlsx"),
+            (
+                "response",
+                "signed response form is provided in response.docx",
+            ),
+            (
+                "signature",
+                "signature instructions are provided in signature.png",
+            ),
+        ]
+        .into_iter()
+        .map(|(id, basis)| DocumentRelation {
+            id: format!("{id}-reference"),
+            from: RelationEndpoint {
+                document_id: "main".into(),
+                unit_id: None,
+            },
+            to: Some(RelationEndpoint {
+                document_id: id.into(),
+                unit_id: None,
+            }),
+            kind: DocumentRelationKind::ExplicitReference,
+            status: DocumentRelationStatus::Confirmed,
+            required: true,
+            basis: basis.into(),
+            locator: json!({"page_ordinal":0}),
+        })
+        .collect();
+        (
+            FrozenBuildInput {
+                project_id: "project".into(),
+                document_set_id: "mixed-set".into(),
+                documents,
+                document_relations,
+                decisions: vec![],
+            },
+            images,
+        )
+    }
+
+    pub(crate) fn mixed_native_input() -> FrozenInput {
+        let (build, images) = mixed_native_build();
+        build_frozen_input(build, images, PARSER_CONTRACT_VERSION).unwrap()
+    }
+
+    #[test]
+    fn mixed_native_roles_formats_and_member_counts_are_independent() {
+        use crate::analysis::source_manifest::DocumentRole;
+        // Real parser contracts, synthetic membership variations; not semantic validation.
+        // A primary Word file, optional PDF member and repeated same-format members.
+        for formats in [vec![2], vec![2, 0], vec![2, 0, 0], vec![2, 0, 0, 1, 1]] {
+            let (template, receipts) = mixed_native_build();
+            let mut build = template.clone();
+            build.documents.clear();
+            build.document_relations.clear();
+            let mut images = Vec::new();
+            for (ordinal, index) in formats.iter().enumerate() {
+                let original = &template.documents[*index];
+                let mut document = original.clone();
+                document.document_id = format!("member-{ordinal}");
+                document.role = if ordinal == 0 {
+                    DocumentRole::Primary
+                } else {
+                    DocumentRole::Supplement
+                };
+                for receipt in receipts
+                    .iter()
+                    .filter(|r| r.document_id == original.document_id)
+                {
+                    let mut receipt = receipt.clone();
+                    receipt.document_id = document.document_id.clone();
+                    images.push(receipt);
+                }
+                build.documents.push(document);
+            }
+            let input = build_frozen_input(build, images, PARSER_CONTRACT_VERSION).unwrap();
+            validate_frozen_input_contract(&input).unwrap();
+            assert_eq!(input.documents.len(), formats.len());
+            assert_eq!(
+                input
+                    .documents
+                    .iter()
+                    .filter(|d| d.role == DocumentRole::Primary)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                input
+                    .documents
+                    .iter()
+                    .find(|d| d.document_id == "member-0")
+                    .unwrap()
+                    .role,
+                DocumentRole::Primary
+            );
+            assert!(input.source_units.iter().any(
+                |s| s.document_id == "member-0" && s.text.contains("Keep this fixed wording.")
+            ));
+            let packs =
+                crate::outline::discover::plan_packs_with_budget(&input, &|_| Ok(true)).unwrap();
+            let members = packs
+                .iter()
+                .flat_map(|p| p.document_ids.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                members,
+                input
+                    .documents
+                    .iter()
+                    .map(|d| d.document_id.clone())
+                    .collect()
+            );
+            for document in &input.documents {
+                assert!(
+                    input
+                        .source_units
+                        .iter()
+                        .any(|s| s.document_id == document.document_id)
+                );
+            }
+        }
+        // Role does not dictate reference direction or format. Existing literal PDF
+        // references remain grounded when Word takes the primary role.
+        let (mut build, images) = mixed_native_build();
+        build.documents[0].role = DocumentRole::Supplement;
+        build.documents[2].role = DocumentRole::Primary;
+        let input = build_frozen_input(build, images, PARSER_CONTRACT_VERSION).unwrap();
+        assert!(input.required_relations_ready());
+        let packs =
+            crate::outline::discover::plan_packs_with_budget(&input, &|_| Ok(true)).unwrap();
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].document_ids.len(), input.documents.len());
+    }
+
+    #[test]
+    fn mixed_native_four_files_preserve_word_grid_and_distinct_image_occurrences() {
+        let input = mixed_native_input();
+        validate_frozen_input_contract(&input).unwrap();
+        assert_eq!(input.documents.len(), 4);
+        assert!(
+            input
+                .source_units
+                .iter()
+                .any(|source| source.document_id == "response"
+                    && source.text.contains("Keep this fixed wording."))
+        );
+        let word_ids = input
+            .source_units
+            .iter()
+            .filter(|source| source.document_id == "response")
+            .map(|source| source.source_unit_revision_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(input.structured_forms.iter().any(|form| {
+            word_ids.contains(form["source_unit_revision_id"].as_str().unwrap())
+                && form["definition"]["cells"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|cell| cell["text"] == "Authorized signature: ____")
+        }));
+        let images = input
+            .source_units
+            .iter()
+            .filter(|source| source.locator["kind"] == "image_region")
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2);
+        assert_ne!(
+            images[0].source_unit_revision_id,
+            images[1].source_unit_revision_id
+        );
+        assert!(
+            images
+                .iter()
+                .all(|source| source.text == "Signed schedule required"
+                    && source.locator["vision_required"] == true)
+        );
+        let packs =
+            crate::outline::discover::plan_packs_with_budget(&input, &|_| Ok(true)).unwrap();
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].document_ids.len(), 4);
+    }
+
+    #[test]
+    fn mixed_native_missing_ocr_attachment_identity_and_unconfirmed_links_block() {
+        use crate::analysis::source_manifest::DocumentRelationStatus;
+        let (build, images) = mixed_native_build();
+        assert!(
+            build_frozen_input(build.clone(), vec![], PARSER_CONTRACT_VERSION)
+                .unwrap_err()
+                .contains("OCR missing")
+        );
+        let mut bad = images.clone();
+        bad[0].completeness = "incomplete".into();
+        assert!(build_frozen_input(build.clone(), bad, PARSER_CONTRACT_VERSION).is_err());
+        let mut missing = build.clone();
+        missing.documents.retain(|doc| doc.document_id != "pricing");
+        assert!(build_frozen_input(missing, images.clone(), PARSER_CONTRACT_VERSION).is_err());
+        let mut duplicate = build.clone();
+        duplicate.documents[3].document_id = duplicate.documents[2].document_id.clone();
+        assert!(build_frozen_input(duplicate, images.clone(), PARSER_CONTRACT_VERSION).is_err());
+        let mut unconfirmed = build;
+        unconfirmed.document_relations[1].status = DocumentRelationStatus::Unconfirmed;
+        let input = build_frozen_input(unconfirmed, images, PARSER_CONTRACT_VERSION).unwrap();
+        assert!(!input.required_relations_ready());
+        assert!(crate::outline::tools::template_ready(&input, &Default::default()).is_err());
+    }
+
     pub(crate) fn related_native_input() -> FrozenInput {
         use crate::analysis::source_manifest::*;
         use prost::Message;

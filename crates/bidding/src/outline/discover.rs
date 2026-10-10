@@ -975,9 +975,7 @@ impl DiscoverWork {
                     .find(|form| form["form_definition_revision_id"] == *table_id)
                     .and_then(|form| form["source_unit_revision_id"].as_str())
                     .ok_or("related table owner missing")?,
-                EvidenceRef::ImageRegion { .. } => {
-                    return Err("related image needs original pixel delivery".into());
-                }
+                EvidenceRef::ImageRegion { image_id, .. } => image_id.as_str(),
             };
             let source = input
                 .source_units
@@ -1604,7 +1602,11 @@ fn dependency_originals(
             .iter()
             .filter(|form| form["source_unit_revision_id"] == source.source_unit_revision_id)
             .collect::<Vec<_>>();
-        if !forms.is_empty() {
+        if source.locator["kind"] == "image_region" {
+            originals.push(json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
+                "requires_original_pixels":true,
+                "evidence":EvidenceRef::ImageRegion { input_digest:pack.input_digest.clone(),image_id:source.source_unit_revision_id.clone(),region:"original".into() }}));
+        } else if !forms.is_empty() {
             for form in forms {
                 let table = form["form_definition_revision_id"]
                     .as_str()

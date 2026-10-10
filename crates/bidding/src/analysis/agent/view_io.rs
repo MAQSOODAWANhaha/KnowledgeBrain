@@ -75,8 +75,23 @@ pub(super) async fn read_source_view<J: Journal>(
     )
     .map_err(invalid)?;
     let id = view.id().map_err(invalid)?;
-    let out = json!({"view_id":id,"identity":view.identity,"citation":{"source_id":source_id,"start":0,"end":0,"view_id":id},
+    let mut out = json!({"view_id":id,"identity":view.identity,"citation":{"source_id":source_id,"start":0,"end":0,"view_id":id},
         "note":"The original image follows as a separate image message. It does not count as reading parsed text or grid cells."});
+    if crate::outline::agent::current(input, state) == crate::outline::agent::Duty::Check
+        && input.source_units.iter().any(|source| {
+            source.source_unit_revision_id == source_id && source.locator["image_available"] == true
+        })
+    {
+        let reference = crate::outline::evidence::EvidenceRef::ImageRegion {
+            input_digest: crate::outline::evidence::input_digest(input).map_err(invalid)?,
+            image_id: source_id.into(),
+            region: "original".into(),
+        };
+        out["evidence"] = json!(reference);
+        // Preview handle only: validation still requires a subsequent exact pixel-delivery receipt.
+        out["review_evidence_key"] =
+            json!(crate::outline::agent::review_evidence_key(state, &reference).map_err(invalid)?);
+    }
     state.read_bytes += view.jpeg_base64.len();
     let coverage = &mut state.analysis.coverage;
     coverage.view_failures.remove(source_id);

@@ -932,7 +932,11 @@ fn confirm_outline_visual_delivery(
     let mut delivered = Vec::new();
     for view in state.source_views.values() {
         let url = format!("data:image/jpeg;base64,{}", view.jpeg_base64);
-        if !urls.contains(url.as_str()) {
+        if !urls.contains(url.as_str())
+            || !body["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.contains(&view.message()))
+        {
             continue;
         }
         view.validate(
@@ -1607,13 +1611,45 @@ async fn read_evidence_in_context(
             ))
         };
         let mut candidate = state.clone();
-        let mut page = crate::outline::agent::apply_for_duty(
-            input,
-            &mut candidate,
-            "read_evidence",
-            &json!({"refs":selected}),
-            duty,
-        )?;
+        // Claim metadata may name image units, but only read_source_view's
+        // completed pixel delivery grants an image receipt. Never route image
+        // metadata through the text/grid pending-read credit path.
+        let native_refs = selected
+            .iter()
+            .filter(|reference| {
+                claim.is_none() || !matches!(reference, EvidenceRef::ImageRegion { .. })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut page = if native_refs.is_empty() {
+            json!({"input_digest":evidence::input_digest(input)?,"excerpts":[]})
+        } else {
+            crate::outline::agent::apply_for_duty(
+                input,
+                &mut candidate,
+                "read_evidence",
+                &json!({"refs":native_refs}),
+                duty,
+            )?
+        };
+        if claim.is_some() {
+            for reference in &selected {
+                if let EvidenceRef::ImageRegion { image_id, .. } = reference {
+                    let mut excerpt = serde_json::to_value(
+                        evidence::resolve_evidence(input, std::slice::from_ref(reference))?
+                            .remove(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    excerpt["read"] =
+                        json!({"tool":"read_source_view","args":{"source_id":image_id}});
+                    excerpt["requires_original_pixels"] = json!(true);
+                    page["excerpts"]
+                        .as_array_mut()
+                        .ok_or("source projection missing")?
+                        .push(excerpt);
+                }
+            }
+        }
         if let Some(unit) = &claim {
             let excerpts = page["excerpts"]
                 .as_array()

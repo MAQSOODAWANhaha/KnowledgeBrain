@@ -5,6 +5,9 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Semantic role is independent of parser format and document count.
+/// Supported native text/grid/image carriers come from each parser contract;
+/// this manifest does not make unsupported or incomplete inputs readable.
 pub enum DocumentRole {
     Primary,
     Supplement,

@@ -161,7 +161,7 @@ impl<J: Journal> PackHost<'_, J> {
             .ok_or_else(|| invalid("reading plan missing"))?;
         let identity = work.pack_wire_identity(id).map_err(invalid)?;
         let session = work.session(self.input, id).map_err(invalid)?;
-        let image_ids = session["pack"]["atoms"]
+        let owned_image_ids = session["pack"]["atoms"]
             .as_array()
             .into_iter()
             .flatten()
@@ -172,6 +172,22 @@ impl<J: Journal> PackHost<'_, J> {
                     .map(str::to_owned)
             })
             .collect::<BTreeSet<_>>();
+        let mut image_ids = owned_image_ids.clone();
+        for frame in &self.worker(id)?.related_read_frames {
+            for reference in frame.options.iter().flat_map(|option| &option.evidence) {
+                if let crate::outline::evidence::EvidenceRef::ImageRegion { image_id, .. } =
+                    reference
+                {
+                    image_ids.insert(image_id.clone());
+                }
+            }
+        }
+        if !image_ids.is_empty() && !self.config.limits.vision_enabled {
+            return Err(error(
+                "AGENT_VISION_NOT_CONFIGURED",
+                "original image dependency requires the configured model's image capability",
+            ));
+        }
         let mut views = Vec::new();
         for image_id in image_ids {
             let view = if let Some(view) = self
@@ -251,7 +267,7 @@ impl<J: Journal> PackHost<'_, J> {
         let mut read_frames = worker.related_read_frames.clone();
         for frame in &mut read_frames {
             frame.sealed_sha256 =
-                crate::outline::read_receipts::wire_hash(&body, &frame.call_id).map_err(invalid)?;
+                related_read_wire_hash(self.input, self.state, frame, &body).map_err(invalid)?;
         }
         let body = serde_json_canonicalizer::to_vec(&body).map_err(invalid)?;
         let request = Request {
@@ -277,6 +293,7 @@ impl<J: Journal> PackHost<'_, J> {
         worker.generation = generation;
         worker.images = views
             .iter()
+            .filter(|view| owned_image_ids.contains(&view.identity.source_id))
             .map(|view| {
                 (
                     view.identity.source_id.clone(),
@@ -582,6 +599,65 @@ fn retire_delivered_related_history(history: &[Value], delivered: &BTreeSet<Stri
         .collect()
 }
 
+fn related_read_wire_hash(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    frame: &coordinator::RelatedReadFrame,
+    body: &Value,
+) -> Result<Option<String>, String> {
+    let tool_hash = crate::outline::read_receipts::wire_hash(body, &frame.call_id)?;
+    let mut originals = Vec::new();
+    for reference in frame.options.iter().flat_map(|option| &option.evidence) {
+        if let crate::outline::evidence::EvidenceRef::ImageRegion {
+            image_id, region, ..
+        } = reference
+        {
+            if region != "original" {
+                return Err("dependency image region is not original".into());
+            }
+            let source = input
+                .source_units
+                .iter()
+                .find(|source| source.source_unit_revision_id == *image_id)
+                .ok_or("dependency image source missing")?;
+            let view = state
+                .source_views
+                .values()
+                .find(|view| view.identity.source_id == *image_id)
+                .ok_or("dependency image view missing")?;
+            view.validate(
+                image_id,
+                view.identity.width.max(view.identity.height),
+                view.jpeg_base64.len(),
+            )?;
+            if source.locator["image_ref"]
+                .as_str()
+                .and_then(|r| r.strip_prefix("objects/"))
+                != Some(view.identity.original_sha256.as_str())
+            {
+                return Err("dependency image original hash changed".into());
+            }
+            let message = view.message();
+            if !body["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.contains(&message))
+            {
+                return Err(
+                    "dependency original image pixels and identity absent from exact request"
+                        .into(),
+                );
+            }
+            originals.push(message);
+        }
+    }
+    if originals.is_empty() {
+        return Ok(tool_hash);
+    }
+    tool_hash
+        .map(|hash| crate::outline::canonical_sha256(&(hash, originals)))
+        .transpose()
+}
+
 fn confirm_worker_related_reads(
     input: &FrozenInput,
     state: &mut Checkpoint,
@@ -615,8 +691,7 @@ fn confirm_worker_related_reads(
             return Err("related read frame belongs to another input or pack revision".into());
         }
         if frame.sealed_sha256.is_some()
-            && crate::outline::read_receipts::wire_hash(&body, &frame.call_id)?
-                == frame.sealed_sha256
+            && related_read_wire_hash(input, state, frame, &body)? == frame.sealed_sha256
         {
             work.confirm_related_read(input, &request.scope.pack, &frame.options)?;
             delivered_calls.insert(frame.call_id.clone());
