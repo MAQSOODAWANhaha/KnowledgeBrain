@@ -45,6 +45,27 @@
 | `outline/discover_planner.rs::plan_packs_with_budget`、`discover.rs::ParsePack` | 章节合拆、完整请求预算；当前包单document_id，同文档合包筛选 | 跨文件关联不能仅新增类型：规划器须实际选择关联atom或依赖读取，并保留逐原子来源 |
 | `analysis/agent.rs::read_projection_in_context` | full_read_projection已在候选fit循环外构建 | profile实际checkpoint clone、host投影、序列化与测量成本，不重复列已完成优化 |
 
+### 当前解析调用链（已实现）
+
+此处三个层次不能笼统称为同一个“解析模块”：
+
+1. **bidding冻结准备入口**：`outline/frozen.rs::prepare_tender_input` → `prepare_tender_input_with` → `ConfiguredTenderSourceParser::parse`。该适配器调用`docparser::convert_tender_source`，不重新实现PDF/Office格式解析。
+2. **Rust docparser路由、传输和契约层**：`convert.rs::convert_tender_source`为招标来源固定选择builtin，`convert_with_cancel`路由到`grpc::read`/`read_stream`；接收并组装元数据和图片、传递取消、校验表格/来源合同。它不只是DTO。通用非招标转换还有simple、anydoc与HTTP引擎入口，不能把这些通用路径当成招标冻结路径。
+3. **Python DocReader原生格式层**：`services/docreader/main.py::_parse_request`调用`parser.parse_file`，由registry选择PDF、Excel、Word、图片等实现；生成原生结构、定位和相应格式/OCR结果。Excel显示/单位/类型/公式保真首先在此层及返回合同补齐。
+4. **返回bidding冻结与业务处理**：检查source contract和完整性，`build_frozen_input`建立稳定证据；`outline/parse.rs`提供发布次序/完整性辅助；`discover_planner`选择阅读范围，Discover解释招标义务。
+
+另有已实现的补充图像识别路径：`outline/frozen.rs::ConfiguredTenderImageProcessor`调用`knowledge::enrichment::literal_ocr_regions_async`，检查识别完整性，经`TenderImageStore`持久化图片并构建`FrozenImageResult`。因此当前并非所有OCR都在Python。此共享识别调用是内容准备基础设施，不等于knowledge材料召回或投标人事实填写业务已接通。
+
+### 目标职责及接口决策（待实现评估）
+
+纯文字OCR、原图保真及区域定位属于**内容解析职责**；招标义务、适用条件、章节模板和充分性判断属于bidding业务职责。职责归属不直接等同部署进程归属：不能据此立即将现有补充OCR搬入Python，或只为目录一致迁移已验证路径。
+
+第一步保留`TenderSourceParser`/`TenderImageProcessor`/`TenderImageStore`边界，准确区分内容识别输出与业务判断。解析/识别接口应返回原始图像身份、文档/单元/区域定位、literal text、解析或识别版本、完整性及终止/失败状态，并传递取消；不得返回“符合投标要求”等业务结论。bidding消费这些结果冻结证据并独立复核，不把识别成功当业务通过。持久化仍遵循对象owner/staging lease，不能产生无归属裸写入。
+
+再评估现有`ConfiguredTenderImageProcessor`是否只做取消、完整性校验、存储和来源映射的薄适配；若符合，则可保留编排位置，将内容识别实现约束在解析能力接口后。若识别逻辑与招标状态实质耦合、存在重复OCR或无法独立测试，应重构或替换该边界。是否统一到Python服务，须比较原生定位保真、模型配置与预算、取消/重试、图像所有权、故障恢复、重复处理和实测延迟后决定，不提前宣称搬迁更优。
+
+验证至少覆盖同图输入的原文/区域与图片身份不变、识别不完整显式失败、取消停止、存储归属、重载以及不产生业务结论。接口或实现替换后删除被替代路径，不维持双套权威识别结果；在此之前文档明确当前行为与目标职责。本次只记录决策和接口要求，未迁移OCR、改解析实现或调用真实模型。
+
 ## 4. 第0阶段：已实现修复
 
 `analysis/agent/context.rs`保留one_shot_progress_marker作为业务完成标记，新增delivered_read_progress_marker及merged_read_ranges。当前作用域内确认交付的新来源、结构和目标区间进入读取进展，不进入业务完成集合。来源身份含input digest与载体；结构回执含pack前缀；区间规范合并。重复、重叠、A/B/A、pending frame以及epoch/nonce自身不产生新覆盖。Discover继续按真实包提交推进。
