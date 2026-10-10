@@ -113,60 +113,129 @@ pub fn validate(input: &FrozenInput, draft: &Draft, review: &Review) -> Result<b
             );
         }
         let mut unique = BTreeSet::new();
+        let mut has_response_field = false;
         for field in &claim.fields {
             if !unique.insert(super::canonical_sha256(field)?) {
                 return Err("duplicate template field in one claim".into());
             }
             match field {
                 Field::Slot { slot_id, label } => {
-                    if !fulfillment.target_refs.contains(&TargetRef::TextSlot { slot_id: slot_id.clone() }) {
+                    if !fulfillment.target_refs.contains(&TargetRef::TextSlot {
+                        slot_id: slot_id.clone(),
+                    }) {
                         return Err("template field is outside requirement targets".into());
                     }
-                    let slot = draft.slots.iter().find(|s| s.slot_id == *slot_id).ok_or("template slot missing")?;
-                    if label.trim().is_empty() || !(slot.text.contains(label) || slot.match_query.contains(label)) {
-                        return Err("template field label is not anchored in visible slot content".into());
+                    let slot = draft
+                        .slots
+                        .iter()
+                        .find(|s| s.slot_id == *slot_id)
+                        .ok_or("template slot missing")?;
+                    if label.trim().is_empty()
+                        || !(slot.text.contains(label) || slot.match_query.contains(label))
+                    {
+                        return Err(
+                            "template field label is not anchored in visible slot content".into(),
+                        );
                     }
+                    has_response_field |= matches!(
+                        slot.content,
+                        super::TemplateBody::EditableBlank | super::TemplateBody::SourceCopy { .. }
+                    );
                     if !super::tools::check_read_slot_complete(draft, slot) {
                         return Err("template field needs a complete fresh slot read".into());
                     }
                 }
-                Field::FormRange { form_id, start_row, end_row, start_column, end_column, label } => {
-                    if !fulfillment.target_refs.contains(&TargetRef::FormBinding { form_id: form_id.clone() }) {
+                Field::FormRange {
+                    form_id,
+                    start_row,
+                    end_row,
+                    start_column,
+                    end_column,
+                    label,
+                } => {
+                    if !fulfillment.target_refs.contains(&TargetRef::FormBinding {
+                        form_id: form_id.clone(),
+                    }) {
                         return Err("template form is outside requirement targets".into());
                     }
-                    let form = input.structured_forms.iter().find(|f| f["form_definition_revision_id"] == *form_id)
+                    let form = input
+                        .structured_forms
+                        .iter()
+                        .find(|f| f["form_definition_revision_id"] == *form_id)
                         .ok_or("template form missing")?;
-                    let cells = form["definition"]["cells"].as_array().ok_or("template form has no native cells")?;
+                    let cells = form["definition"]["cells"]
+                        .as_array()
+                        .ok_or("template form has no native cells")?;
                     if start_row > end_row || start_column > end_column || label.trim().is_empty() {
                         return Err("template form range is invalid".into());
                     }
-                    let row_end = cells.iter().filter_map(|c| c["row"].as_u64()
-                        .map(|r| r.saturating_add(c["row_span"].as_u64().unwrap_or(1).max(1))))
-                        .max().ok_or("template form has no rows")?;
-                    let column_end = cells.iter().filter_map(|c| c["column"].as_u64()
-                        .map(|col| col.saturating_add(c.get("column_span").or_else(|| c.get("col_span")).and_then(|v| v.as_u64()).unwrap_or(1).max(1))))
-                        .max().ok_or("template form has no columns")?;
+                    let row_end = cells
+                        .iter()
+                        .filter_map(|c| {
+                            c["row"].as_u64().map(|r| {
+                                r.saturating_add(c["row_span"].as_u64().unwrap_or(1).max(1))
+                            })
+                        })
+                        .max()
+                        .ok_or("template form has no rows")?;
+                    let column_end = cells
+                        .iter()
+                        .filter_map(|c| {
+                            c["column"].as_u64().map(|col| {
+                                col.saturating_add(
+                                    c.get("column_span")
+                                        .or_else(|| c.get("col_span"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(1)
+                                        .max(1),
+                                )
+                            })
+                        })
+                        .max()
+                        .ok_or("template form has no columns")?;
                     if *end_row as u64 >= row_end || *end_column as u64 >= column_end {
                         return Err("template form range exceeds native grid bounds".into());
                     }
-                    let selected: Vec<_> = cells.iter().filter(|c| {
-                        c["row"].as_u64().is_some_and(|r| (*start_row..=*end_row).contains(&(r as usize))) &&
-                        c["column"].as_u64().is_some_and(|col| (*start_column..=*end_column).contains(&(col as usize)))
-                    }).collect();
-                    if selected.is_empty() || !selected.iter().any(|c| c["text"].as_str().is_some_and(|t| t.contains(label))) {
+                    let selected: Vec<_> = cells
+                        .iter()
+                        .filter(|c| {
+                            c["row"]
+                                .as_u64()
+                                .is_some_and(|r| (*start_row..=*end_row).contains(&(r as usize)))
+                                && c["column"].as_u64().is_some_and(|col| {
+                                    (*start_column..=*end_column).contains(&(col as usize))
+                                })
+                        })
+                        .collect();
+                    if selected.is_empty()
+                        || !selected
+                            .iter()
+                            .any(|c| c["text"].as_str().is_some_and(|t| t.contains(label)))
+                    {
                         return Err("template form range lacks its visible field label".into());
                     }
+                    has_response_field = true;
                     // A form ID alone never proves its labels were read.
                     let digest = super::evidence::input_digest(input)?;
                     for cell in selected {
                         if let Some(text) = cell["text"].as_str().filter(|s| !s.is_empty()) {
                             let evidence = super::evidence::EvidenceRef::GridCell {
-                                input_digest: digest.clone(), table_id: form_id.clone(),
-                                anchor_row: cell["row"].as_u64().ok_or("cell row missing")? as usize,
-                                anchor_column: cell["column"].as_u64().ok_or("cell column missing")? as usize,
-                                start_byte: 0, end_byte: text.len(),
+                                input_digest: digest.clone(),
+                                table_id: form_id.clone(),
+                                anchor_row: cell["row"].as_u64().ok_or("cell row missing")?
+                                    as usize,
+                                anchor_column: cell["column"]
+                                    .as_u64()
+                                    .ok_or("cell column missing")?
+                                    as usize,
+                                start_byte: 0,
+                                end_byte: text.len(),
                             };
-                            super::evidence::validate_evidence(&[evidence], input, &draft.check_reads.evidence)?;
+                            super::evidence::validate_evidence(
+                                &[evidence],
+                                input,
+                                &draft.check_reads.evidence,
+                            )?;
                         }
                     }
                 }
@@ -175,8 +244,15 @@ pub fn validate(input: &FrozenInput, draft: &Draft, review: &Review) -> Result<b
                         TargetRef::ManualTask { task_id: id, description } if id == task_id && description.contains(label))) {
                         return Err("manual field is outside its visible requirement task".into());
                     }
+                    has_response_field = true;
                 }
             }
+        }
+        if claim.verdict == Verdict::TemplateReady && !has_response_field {
+            return Err(
+                "ready claim needs an actual response field; explanation may only support it"
+                    .into(),
+            );
         }
     }
     Ok(source_supported

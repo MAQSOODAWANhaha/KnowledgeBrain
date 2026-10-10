@@ -1760,3 +1760,133 @@ fn no_obligation_disposition_cannot_erase_existing_requirement_evidence() {
     assert!(error.contains("conflicts with an existing requirement"));
     assert_eq!(state.outline_run.tool_draft, before);
 }
+
+#[test]
+fn mixed_targets_require_a_response_field_for_each_ready_claim() {
+    let (input, mut state, pack, refs) = organized(false);
+    let id = state
+        .outline_run
+        .tool_draft
+        .required_requirement_ids
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    agent::apply_for_duty(&input,&mut state,"put_slots",&json!({"mode":"upsert","slots":[{
+        "slot_id":"instruction","chapter_id":"response","content":{"type":"generated_explanation","supporting_refs":refs},
+        "text":"Synthetic preparation instructions"}]}),Duty::Organize).unwrap();
+    agent::apply_for_duty(&input,&mut state,"put_fulfillments",&json!({"fulfillments":[{
+        "requirement_id":id,"primary_response_chapter_id":"response","target_refs":[
+            {"type":"text_slot","slot_id":"instruction"},{"type":"text_slot","slot_id":"blank"}]}]}),Duty::Organize).unwrap();
+    fresh_check_reads(&input, &mut state, &refs);
+    let mut reviews = scripted_template_reviews(&input, &state, &json!([id]));
+    let instruction =
+        json!({"type":"slot","slot_id":"instruction","label":"Synthetic preparation instructions"});
+    let blank = json!({"type":"slot","slot_id":"blank","label":"资格材料"});
+    reviews[0]["claims"][0]["fields"] = json!([instruction]);
+    let before = state.outline_run.tool_draft.clone();
+    let result = apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":[id],"pack_ids":[pack],
+        "inspected_evidence":refs,"issues":[],"template_reviews":reviews}),
+    );
+    assert!(
+        result.is_err(),
+        "a different blank in fulfillment must not make instruction-only claim coverage sufficient"
+    );
+    assert_eq!(state.outline_run.tool_draft, before);
+    for fields in [json!([blank]), json!([blank, instruction])] {
+        let mut probe = state.clone();
+        reviews[0]["claims"][0]["fields"] = fields;
+        apply(
+            &input,
+            &mut probe,
+            "submit_review",
+            &json!({"requirement_ids":[id],"pack_ids":[pack],
+            "inspected_evidence":refs,"issues":[],"template_reviews":reviews}),
+        )
+        .unwrap();
+        apply(&input, &mut probe, "finish_outline", &json!({})).unwrap();
+        assert!(
+            probe
+                .outline_run
+                .tool_draft
+                .slots
+                .iter()
+                .find(|s| s.slot_id == "blank")
+                .unwrap()
+                .text
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn unresolved_reviews_remain_actionable_after_reload_without_history() {
+    for verdict in ["insufficient", "unresolved"] {
+        let (input, mut state, pack, refs) = organized(false);
+        fresh_check_reads(&input, &mut state, &refs);
+        let id = state
+            .outline_run
+            .tool_draft
+            .required_requirement_ids
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        let mut reviews = scripted_template_reviews(&input, &state, &json!([id]));
+        reviews[0]["claims"][0]["verdict"] = json!(verdict);
+        reviews[0]["claims"][0]["reason"] = json!("The field does not yet cover the obligation");
+        apply(
+            &input,
+            &mut state,
+            "submit_review",
+            &json!({"requirement_ids":[id],"pack_ids":[pack],
+            "inspected_evidence":refs,"issues":[],"template_reviews":reviews}),
+        )
+        .unwrap();
+        state.transcript.clear();
+        state = serde_json::from_value(json!(state)).unwrap();
+        let packet = host_packet(&input, &state, 0, json!({}), json!({}), None);
+        assert_eq!(packet["check_work"]["requirement_id"], id);
+        assert_eq!(
+            packet["check_work"]["blocked_template_review"]["claims"][0]["reason"],
+            "The field does not yet cover the obligation"
+        );
+        assert!(packet["check_work"]["blocked_template_review"]["claims"][0]["fields"].is_array());
+        assert_eq!(
+            packet["check_work"]["template_review_version"],
+            template_review::version(&input, &state.outline_run.tool_draft, &id).unwrap()
+        );
+        assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+    }
+    let (input, mut state, pack, refs) = organized(true);
+    fresh_check_reads(&input, &mut state, &refs);
+    let draft = &state.outline_run.tool_draft;
+    let version =
+        source_review::version(&input, draft, &pack, &draft.source_scopes[&pack]).unwrap();
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":[],"pack_ids":[pack],
+        "inspected_evidence":refs,"issues":[],"template_reviews":[],"source_dispositions":[{
+            "pack_id":pack,"version":version,"evidence":refs,"verdict":"unresolved",
+            "requirement_ids":[],"reason":"Source obligation still requires resolution"}]}),
+    )
+    .unwrap();
+    state.transcript.clear();
+    state = serde_json::from_value(json!(state)).unwrap();
+    let packet = host_packet(&input, &state, 0, json!({}), json!({}), None);
+    assert_eq!(
+        packet["check_work"]["source_scope"]["blocked_disposition"]["reason"],
+        "Source obligation still requires resolution"
+    );
+    assert_eq!(
+        packet["check_work"]["source_scope"]["source_review_version"],
+        version
+    );
+    assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+}

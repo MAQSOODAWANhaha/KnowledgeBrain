@@ -309,10 +309,14 @@ pub fn host_packet(
     }
     if duty == Duty::Check {
         let draft = &state.outline_run.tool_draft;
-        let next = draft
-            .required_requirement_ids
-            .difference(&draft.reviewed_requirement_ids)
-            .next();
+        // A submitted judgment is not necessarily resolved. Keep failed or
+        // stale judgments actionable after the conversation is discarded.
+        let next = draft.required_requirement_ids.iter().find(|id| {
+            !draft.reviewed_requirement_ids.contains(*id)
+                || draft.template_reviews.get(*id).is_none_or(|review| {
+                    !super::template_review::validate(input, draft, review).unwrap_or(false)
+                })
+        });
         let fulfillment =
             next.and_then(|id| draft.fulfillments.iter().find(|f| &f.requirement_id == id));
         let unread_slot = fulfillment
@@ -334,13 +338,16 @@ pub fn host_packet(
             .next()
             .map(|id| {
                 let reviewed = super::source_review::reviewed_evidence(&draft.source_dispositions, id);
+                let blocked = draft.source_dispositions.values().find(|review|
+                    review.pack_id == *id && review.verdict == super::source_review::Verdict::Unresolved);
                 match state.outline_run.reading_packs.as_ref() {
                     Some(work) => match work.pack_evidence(input, id) {
                         Ok(scope) => json!({
                             "pack_id":id,
+                            "blocked_disposition":blocked,
                             "source_review_version":draft.source_scopes.get(id).and_then(|scope|super::source_review::version(input,draft,id,scope).ok()),
-                            "next_evidence":scope.iter().find(|reference|
-                                !super::evidence::covered_by_union(reference, &reviewed)),
+                            "next_evidence":blocked.and_then(|review|review.evidence.first()).or_else(||scope.iter().find(|reference|
+                                !super::evidence::covered_by_union(reference, &reviewed))),
                             "source_ranges_reviewed":scope.iter().all(|reference|
                                 super::evidence::covered_by_union(reference, &reviewed)),
                             "instruction":"独立核对本范围未提取义务和条件，读取不等于复核。使用当前工具返回的引用提交本pack的有界submit_review；没有next_evidence仅表示正文范围已提交，仍须完成该包结构复核。不得把空提取包直接判为无义务。"
@@ -354,6 +361,7 @@ pub fn host_packet(
             "remaining_comparisons":draft.required_requirement_ids.iter().filter(|id|!draft.claim_comparisons.contains_key(*id)).count(),
             "stage":if source_scope.is_some() {"review_sources"} else if next.is_some_and(|id| !draft.claim_comparisons.contains_key(id)) {"compare_claims"} else if unread_slot.is_some() {"read_target_body"} else if next.is_some() {"review_requirement"} else {"review_sources"},
             "target_refs":fulfillment.map(|f| &f.target_refs),
+            "blocked_template_review":next.and_then(|id|draft.template_reviews.get(id)),
             "template_review_version":next.and_then(|id| super::template_review::version(input, draft, id).ok()),
             "next_unread_slot":unread_slot.map(|slot|json!({"slot_id":slot.slot_id,"chapter_id":slot.chapter_id,"text_bytes":slot.text.len(),"tool":"read_outline","args":{"mode":"slot_body","slot_id":slot.slot_id}})),
             "remaining_unreviewed_packs":draft.required_pack_ids.difference(&draft.reviewed_pack_ids).count(),
@@ -1027,6 +1035,8 @@ fn requirement_page(
         work.requirement_records(),
         &state.outline_run.tool_draft.fulfillments,
         &state.outline_run.tool_draft.reviewed_pack_ids,
+        &state.outline_run.tool_draft.template_reviews,
+        &state.outline_run.tool_draft.source_dispositions,
     ))?;
     let cursor = args["cursor"].as_u64().unwrap_or(0) as usize;
     if cursor > 0 && args["version"].as_str() != Some(&version) {
@@ -1059,6 +1069,15 @@ fn requirement_page(
                 }
             }
             rows.extend(structures);
+            for review in state
+                .outline_run
+                .tool_draft
+                .source_dispositions
+                .values()
+                .filter(|r| r.pack_id == id)
+            {
+                rows.push(json!({"pack_id":id,"source_review_version":source_version,"source_disposition":review}));
+            }
             for evidence in refs {
                 rows.push(json!({"pack_id":id,"source_review_version":source_version,"evidence":evidence,"reviewed":super::evidence::covered_by_union(&evidence,&super::source_review::reviewed_evidence(&state.outline_run.tool_draft.source_dispositions,&id)),"no_requirement_reason":session["no_requirement_reason"]}));
             }
@@ -1071,7 +1090,7 @@ fn requirement_page(
         args["source_section_id"].as_str().is_none_or(|section| record.source_section_id==section)
         && chapter.is_none_or(|chapter|state.outline_run.tool_draft.chapters.iter().any(|c|c.id==chapter && c.requirement_ids.contains(id)))
         && (!unfulfilled || !state.outline_run.tool_draft.fulfillments.iter().any(|f|f.requirement_id == **id))
-    }).map(|(id,record)|json!({"requirement_id":id,"requirement":record,"reviewed":state.outline_run.tool_draft.reviewed_requirement_ids.contains(id),"fulfillment":state.outline_run.tool_draft.fulfillments.iter().find(|f|f.requirement_id == *id)})).collect();
+    }).map(|(id,record)|json!({"requirement_id":id,"requirement":record,"template_review":state.outline_run.tool_draft.template_reviews.get(id),"template_review_version":super::template_review::version(input,&state.outline_run.tool_draft,id).ok(),"reviewed":state.outline_run.tool_draft.reviewed_requirement_ids.contains(id),"fulfillment":state.outline_run.tool_draft.fulfillments.iter().find(|f|f.requirement_id == *id)})).collect();
     super::tools::bounded_page(&rows, cursor, max, &version)
 }
 
