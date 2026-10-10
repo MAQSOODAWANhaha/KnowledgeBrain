@@ -144,7 +144,11 @@ def test_xlsx_preserves_sheets_cells_merges_tables_and_rows() -> None:
     assert texts[(0, 0)] == "Item" and texts[(1, 0)] == "Security"
     assert isinstance(table_unit.locator, SpreadsheetLocator)
     assert table_unit.locator.defined_tables[0].a1_range == "A1:B3"
-    assert table_unit.locator.cells == []
+    assert {cell.address: cell.text for cell in table_unit.locator.cells} == {
+        "A1": "Item", "B1": "Response", "A2": "Security", "B2": "Comply",
+        "A3": "Support", "B3": "24x7",
+    }
+    assert all(cell.value_type == "string" and cell.display_complete for cell in table_unit.locator.cells)
     sheet = next(unit for unit in units if unit.key == "sheet:0")
     assert isinstance(sheet.locator, SpreadsheetLocator)
     assert sheet.locator.cells == []
