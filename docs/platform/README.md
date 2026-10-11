@@ -33,6 +33,7 @@
 
 ## 当前参考
 
+- 配置与单数据库账号收敛：[待实施方案](../../plans/platform/configuration-simplification.md)（仅全新部署；用户配置账号密码、JWT、模型和最大上下文，其余默认或部署派生）
 - 招标文件驱动的投标文件编制工作区：[目标契约](../bidding/authoring.md)（来源、候选、证据与身份边界；[正文/保存目标](../bidding/onlyoffice.md)仍归招投标领域）
 - 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
 - 共享机制计划：[`../../plans/platform/README.md`](../../plans/platform/README.md)

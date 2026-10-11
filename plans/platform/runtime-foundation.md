@@ -1,5 +1,7 @@
 # 共享平台运行时基础方案
 
+> 配置与数据库角色目标已由[配置收敛方案](configuration-simplification.md)更新：后续 fresh 部署使用一套应用数据库账号，不再按 migrator/API/worker/retention 划分账号。本文下述多角色、owner/ACL 隔离描述记录现有实现，相关目标以新方案为准；schema、审计、幂等和对象引用合同不因此取消。不处理存量迁移。
+
 | 项 | 值 |
 | --- | --- |
 | 状态 | 方案已确认；普通实施与隔离开发验证已授权，任务见[实施台账](../implementation-tasks.md) |
