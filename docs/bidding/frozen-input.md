@@ -60,9 +60,9 @@ Discover 包可包含相邻且有已确认关系的多个文档，各原子保�
 
 本地合成 PDF＋Excel 纵向测试覆盖解析、冻结、关联分页、条件支持、Organize 和新的 Check；不代表真实服务或语义验收。Word/图片混合样例已覆盖完整的本地模拟闭环与独立原图交付；这仍不是模型视觉或语义验收。局部 repair 和后续性能工作的完成状态以对应测试记录为准。单个不可再拆的原生元数据若超过完整请求预算，会明确失败，尚未实现元数据分片。
 
-真实验收 runner 必须从原始文件重新解析并生成 schema 3 的新冻结输入；不得改写旧快照版本、迁移旧阅读回执或复用旧来源集合的 Check 信用。
+真实验收使用正常 parse/freeze 管线产生并校验的 schema 3 输入；仅当原始字节、解析/冻结合同和完整输入摘要均匹配时可复用同一冻结来源。新运行不能改写旧快照版本、迁移阅读回执或复用旧来源集合的 Check 信用。
 
-关联目标指定空正文的原生网格单元时，主机从该单元拥有的表格签发 GridCell 引用。并发工作者的 source key 绑定完整输入摘要和自身运行、包修订及 claim；其他包提交不使在途读取失效，自身 reopen 或依赖来源／关系变化仍拒绝旧信用。检查点契约 26 拒绝旧作用域合同；SQL 发布入口只接受 FrozenInput schema 3。OutlineArtifact schema为3，旧1/2严格拒绝，不与FrozenInput版本迁移混同。
+关联目标指定空正文的原生网格单元时，主机从该单元拥有的表格签发 GridCell 引用。并发工作者的 source key 绑定完整输入摘要和自身运行、包修订及 claim；其他包提交不使在途读取失效，自身 reopen 或依赖来源／关系变化仍拒绝旧信用。已推送基线4647bb8的检查点契约为29；未提交修改拟为30，尚未验收。不同合同拒绝旧作用域状态；SQL 发布入口只接受 FrozenInput schema 3。OutlineArtifact schema为3，旧1/2严格拒绝，不与FrozenInput版本迁移混同。
 
 已删除绕过冻结校验并生成 schema 1 的旧 Python sample writer。保留的 `scripts/bidding_source_captions.py` 仅提供标题辅助函数；CI 运行对应 caption 测试。新的本地验收必须调用正常 parse／freeze 管线，不能复用旧 writer 输出。
 

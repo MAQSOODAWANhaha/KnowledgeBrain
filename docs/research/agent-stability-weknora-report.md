@@ -1,6 +1,6 @@
 # 技术/商务 Agent 稳定性与 WeKnora 可借鉴性报告
 
-本报告为外部研究，不是投标业务 Gate 或自动审批方案。当前 [业务 PRD](../bidding/prd.md)允许缺料继续编制/导出；以下“证据门禁”仅用于避免模型虚构事实，不要求拟议方案逐句有证件。正式正文由 [ONLYOFFICE/DOCX 契约](../bidding/onlyoffice.md)定义，研究不证明已接入。
+本报告为外部研究，不是投标业务 Gate 或自动审批方案。当前 [业务 PRD](../bidding/README.md)允许缺料继续编制/导出；以下“证据门禁”仅用于避免模型虚构事实，不要求拟议方案逐句有证件。正式正文由 [ONLYOFFICE/DOCX 契约](../bidding/onlyoffice.md)定义，研究不证明已接入。
 
 ## 结论摘要
 

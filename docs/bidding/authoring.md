@@ -1,15 +1,9 @@
 # 模块归属
 
-生成合同以 [PRD](prd.md) 和 [大纲运行时](outline.md) 为准。本页只写三个包各自拥有什么。
+业务入口见[招投标文档](README.md)，执行合同仅见[运行时合同](../design/evidence-runtime-contract.md)。
 
-`crates/bidding/src/lib.rs` 的边界：
+- `analysis`：冻结来源、运行协调、检查点/journal 及阶段接线；`analysis/outline_flow.rs` 是当前阶段状态的一部分，不是旧扫描路径的代名词。
+- `outline`：Discover 要求及支持、Organize 章节与模板、独立 Check/修复、产物验证与发布。不能把它描述为“不评审要求”。
+- `response`：后续消费已发布冻结大纲，按槽检索与填充；knowledge 业务接入不在本轮验收范围，不能因模块存在就宣称联通。
 
-- `analysis` 读冻结招标文件，产出记录、关系和修复。它不发布章节，也不写知识库响应。共享检查点的回合循环仍放在这里；大纲和响应各自应用自己的工具。
-- `outline` 拥有章节树和规定模板槽。`finish_outline` 之后，`tool_draft.finished` 且投影通过 `validate_artifact` 时发布 `OutlineArtifact`。它不评审分析记录，不读企业知识库。
-- `response` 只消费冻结的 `OutlineArtifact`，按响应槽写证据。它不解析招标文件，不改章节，不改模板。对不上证据的槽文本是 `【待人工补充】`。
-
-章节身份是 id。标题可以改，附件绑定跟着章节 id，不跟着标题。一个附件表的 `form_id` 只能出现在一个章节上。
-
-Word 正文是用户保存的文件。编制编辑器是 ONLYOFFICE，打开的是这份已保存 DOCX。大纲产物是冻结的 `OutlineArtifact`，不是另一份会随编辑回写的正文主源。响应结果用 `outline_sha256` 绑回这一份大纲。
-
-检查点保存 `DiscoverWork`、`tool_draft` 和 `phase`。Journal 负责恢复、请求预约和提交。不另建一套随对话增长的语义记忆。
+章节、表格、来源、槽和要求均用稳定身份关联，不以标题代替身份。检查点保存权威领域状态；对话投影不成为第二份语义真源。用户保存的 DOCX 是正文主源，OutlineArtifact 不随编辑回写；响应绑定具体 outline 摘要。

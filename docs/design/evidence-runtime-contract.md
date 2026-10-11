@@ -1,6 +1,14 @@
 # 证据与审查运行时契约
 
-本文描述本次改造的生产边界。离线协议测试、领域夹具和真实模型语义验收分别记录，不互相替代；真实验收尚未完成。
+本文记录 `4647bb8` 的生产边界及审查限制；最新唯一整改合同与反例矩阵见[执行计划](check-execution-plan.md)。宿主自动交付及新的停滞判定尚未完成，未提交代码不算已发布实现。离线协议测试、领域夹具和真实模型语义验收分别记录，不互相替代；真实验收尚未完成。
+
+## 已推送基线与未提交状态
+
+- `4647bb8`：FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 29；Discover 并发 2、每请求 1 包。仍使用默认六次的可配置业务拒绝计数阈值，不能称为精确无进展判断。
+- 当前未提交停滞修改：拟替代固定阈值、checkpoint 拟为 30；存在已列明缺陷，仅专项测试过，未发布。
+- 宿主自动支持交付：设计阶段，尚未实现。新的选择、确认与 Check 修正以执行计划为待验收合同。
+
+工具参数唯一规范为 [outline-tools-v2.schema.json](../../crates/bidding/schemas/outline-tools-v2.schema.json)，duty 白名单与路由以 `outline::agent::registry()` 为准；不维护第二份手抄工具清单。输入细节见[冻结输入](../bidding/frozen-input.md)。
 
 ## 模型输入与宿主证据
 
@@ -23,11 +31,11 @@
 
 成功工具结果先成为 pending frame。最终装配器对实际 compact/project 后的 tool message 封存摘要；只有匹配 journal 已持久化完成响应的请求才确认交付。预取、同响应中读后写、被回收的未发送结果、失败批次、旧修订或旧 Check epoch 不授予授权。
 
-Discover 的业务拒绝与宿主交付错误分开处理：当前 Failed claim 可以继续补读，完整持久响应仍是授信前提；宿主确认错误保留未消费 frame 并终止该 worker，不反复采购响应。新增覆盖按已交付与待交付证据的联集判断；重复读取不能伪造进展。
+Discover 的业务拒绝与宿主交付错误分开处理：当前 Failed claim 可以继续补读，完整持久响应仍是授信前提；宿主确认错误保留未消费 frame 并终止该 worker，不反复采购响应。读取排队去重按已交付与待交付证据的联集判断；该去重事实不等于确认进展。整改目标是：只有精确完成响应确认的范围可推进阅读状态，待交付不能清除失败状态。基线目前会在新页面排队后清零业务拒绝计数；未提交修改也仍将 pending 纳入进展，两者都不符合该目标，但都不能因此授予正式 Check 信用。
 
 Discover 目录用 `original_read_complete` 标明当前 claim 已确认的完整原文覆盖。worker 的 `next_required_read` 优先指向正文续页，否则指向下一未覆盖条件；该导航可预期当前请求附带页面被消费后的下一动作，但不提前授予交付信用或语义适用性。已读首项仍可追溯，不应在尚有未读条件时成为默认重复读取目标。
 
-Discover worker 的请求投影只合并连续逐字相同的已退役助手观察，完整历史继续保留；不自动概括或删除独特观察，不改变主 agent 的历史策略。最小来源页无法容纳时是明确的宿主容量停止，未读完的支持不获完整授权。分页候选在预算探测前应用与成功落盘相同的 continuation 游标变更；不能漏算下一请求实际携带的游标。全程预算验证必须使用同一输入和窗口，核对逐页实际准入、完整交付与最终提交，不能只放大测试窗口。
+Discover worker 的请求投影合并连续逐字相同的已退役助手观察。但基线在失败 repair 后替换 worker 历史的路径会丢失独特观察，因此“完整历史保留”尚未全路径成立；执行计划要求修复并验证，不将投影测试当成审计保留证明。最小来源页无法容纳时是明确的宿主容量停止，未读完的支持不获完整授权。分页候选在预算探测前应用与成功落盘相同的 continuation 游标变更；不能漏算下一请求实际携带的游标。全程预算验证必须使用同一输入和窗口，核对逐页实际准入、完整交付与最终提交，不能只放大测试窗口。
 
 阶段交接共用 `handoff_history`：保留当前尚未交付、身份仍有效的工具组，移除较早历史。保留历史本身不授予读取回执。repair 轮换 claim 后，历史回收可按原提交身份核验已有持久回执和摘要；新模型提交仍按 live claim 拒绝旧 key。
 
@@ -47,7 +55,7 @@ Discover worker 的请求投影只合并连续逐字相同的已退役助手观�
 
 本页记录当前接口合同；设计文档中的 planned 项是待实现计划，历史日志只证明对应版本和执行范围。最新修复须附实际测试记录；真实模型验收单独记录调用、usage 与语义结论，不从离线测试推断已通过。
 
-本批离线验证：bidding library 412 通过、23 忽略；生产解析合成 DOCX 跨包集成 1 通过，Excel 必要 OCR/视觉清单集成 2 通过；docreader 完整测试目录 230 通过、15 因缺样例跳过。刷新合成 Excel wire 后的 Rust 冻结专项、bidding library/tests 严格 Clippy、格式及两份 live schema 校验通过。新增同 worker 生产生命周期回归覆盖未读拒绝、实际分页回执、修复与逐轮重载；独立 Check 使用明确的宿主回执测试入口，不代表真实模型复核。宿主确认错误停止重试、联合覆盖不伪造进展的回归也通过。固定同一合成输入与1300余量，重复观察投影和真实游标计量修复后可完整交付22528字节并提交；独特观察保留且容量不足时明确停止，重载不再预留请求。实际wire断言严格区分SDK文本与空工具字段，避免零计数假通过。真实服务验收尚未通过；原始材料、服务结果和运行账本私有保存，不进入仓库。CI 结果以 PR 当前提交的 workflow 为准，不能沿用旧提交结果。
+历史离线测试只覆盖其记录版本和用例，不证明最新整改合同通过。基线导航回归验证合成下一项可达，未证明完整真实服务验收；新计划中的合并表格、比较一致性、修复交叉生命周期与停滞反例均需新增验证。真实原始材料、服务结果和费用账本私有保存，不进入仓库。CI 以具体提交为准。
 
 ## 集合写入模式
 
@@ -55,7 +63,7 @@ Discover worker 的请求投影只合并连续逐字相同的已退役助手观�
 
 ## 运行参数默认值与边界
 
-应用层统一提供请求输出预算 16384 token、单请求传输超时 180000 ms；环境变量仅作显式覆盖，非法正数仍拒绝。此默认值是保守请求预算，不冒称未知供应商的原生最大输出能力。完整请求继续计入输出预留并受上下文预算约束。隔离启动器无需复制这两个非秘密参数才能启动。
+应用层 config/request-defaults.json 提供请求输出预算 16384 token、单请求传输超时 180000 ms；环境变量仅作显式覆盖，非法正数仍拒绝。此默认值是保守请求预算，不冒称未知供应商的原生最大输出能力。完整请求继续计入输出预留并受上下文预算约束。隔离启动器无需复制这两个非秘密参数才能启动。注意：当前 deploy/docker-compose.yml 仍显式回退到 8192，content-stack-e2e 脚本也显式使用 8192；这是实际覆盖值，不能称为应用默认。本轮仅修正文档/示例，生产 Compose 和测试脚本未改，配置对齐列为实现前待处理项。
 
 旧 source-review、finding repair、Reviewer/Fill 协议及其操作限额已经删除；实际生产只使用 Discover/Organize/Check，内容生成经 published outline → match_queries → retrieval → response::respond。旧检查点不兼容。分包根据包含提示、工具、历史、图片和输出预留的完整请求 token 判断。
 
@@ -76,3 +84,52 @@ Rust/API/worker 与 Python 验收入口共享 `config/request-defaults.json` 的
 KnowledgeBrain 尚未发布，架构和协议改造直接采用新设计，不提供旧数据、旧检查点或旧协议迁移，也不保留兼容层。旧验收原始文件和记录仅作为审计证据保留，不作为新合同的运行状态或验收进度。不同合同从新状态执行；同一合同内的持久化恢复、取消、已收到响应的重放去重和未发送暂停幂等继续保留。
 
 模型侧 claim 与 operation 使用宿主签发的短 opaque handle，持久绑定 run、pack、revision、generation 和 canonical 标识。未知、跨域、过期和碰撞严格拒绝，不猜补损坏标识。负提交缺失说明或真实完整检查记录时不得通过；业务拒绝以顶层失败反馈给模型与运行日志。领取工作不算完成进展。
+
+## 已有组织、目标与发布边界
+
+现有章节深度门：至少两条互不续表的附件链时，Response 叶节点须位于根 Group→中间 Group→Response 的第三层；单条链允许较浅树。根可为森林，同级 order 唯一；每个 Response 至少一个槽，每个附件表恰好绑定一个 Response，同一续表链同叶且保持来源顺序。不能以每表独立章节绕过原生章节组织。
+
+组织阶段读取分页要求、分页目录和精确证据；工具返回不包含无限增长的全量草稿。章节树和要求目标分离：Group 仅组织目录，Response 叶节点负责要求，Fulfillment 指向真实槽、表格、可见人工任务等响应目标。
+
+固定原文使用 `TemplateBody::SourceCopy`，主机按冻结引用复制，`purpose` 明确区分 instruction 与 mandated_response，不把招标说明冒充投标人承诺。投标人填写处使用 `EditableBlank`；说明性生成文字必须和原文分开并保留来源；表格使用结构化复制。自由 `fixed_text` 不能充当权威源文字。
+
+`put_chapters`、绑定、槽和履行关系的修改都先验证依赖再整体提交。角色变更或删除不得静默丢掉既有目标。每条续表链单独检查同一合法 Response、顺序和全覆盖，包括项目仅有一条链的情形。
+
+
+Check 在全部在途处理后可对独立已提交范围执行 partial-source 复核；不是局部 Organize 或完整模板批准。正常完成需要全部必要包、来源、要求、具体目标及 fresh Check 通过。已知合并格/表头及显式比较一致性缺口见执行计划，不能将结构通过当语义正确。
+
+`project_draft` 和 `validate_publication` 都按最终输入、章节、槽、表格绑定与履行关系重新校验。最终检查点先保存，发布作为最后一次事务操作；崩溃重放同一 artifact 身份幂等。
+
+数据库事务验证项目、输入、lease token、单调 epoch 和当前到期时间。旧 worker 发布零写入。对象必须 available 且获得持久域 owner 后才能推进 source/DOCX/export head；staging 过期或 GC 不能移除仍有持久 owner 的对象。
+
+
+## 请求级表格与工具更新
+
+FrozenInput 与内部 PackCarrier 保存完整网格及空白锚点。模型请求把每张表的结构归并到唯一 `table_structures` 字典，内容以 `table_id` 和原坐标引用。真正空字符串的普通 1×1 正文格可用半开坐标区间表示；表头、合并格、空白字符与控件等不按空字符串压缩。区间数量仅描述原文可填写位置，不表示要求数量上限或下限。预算规划与实际传输使用同一请求投影。Check 的逐锚点 receipt 始终来自 canonical session，不从紧凑模型视图推导。
+
+
+`put_slots` 的每一项都必须包含 `slot_id`、`chapter_id` 和 `content`。其余字段由 `content.type` 决定，不能用空字符串代替应省略的字段。
+
+| content.type | 必填内容 | 禁止的槽外层字段 |
+| --- | --- | --- |
+| `source_copy` | `content.refs` 恰好一个已读取、已交付的原文范围及 `purpose`；主机复制原文 | `text`、`match_query`、`blank_kind` |
+| `editable_blank` | `blank_kind=bidder_blank|signature`、非空 `match_query`；正文保持空白 | `text` |
+| `generated_explanation` | 非空 `text`、非空且已读取的 `content.supporting_refs` | `match_query`、`blank_kind` |
+
+来源读取和写入不能在同一模型响应中取得交付信用。未读取或未交付的引用、跨来源范围、任意补写的固定原文均被拒绝。分组章节不能承载模板槽。
+
+| 工具 | `upsert` 语义 | 完整替换与顺序 |
+| --- | --- | --- |
+| `put_chapters` | 按已有章节 ID 更新；未提交章节保留，新 ID 新增 | 兄弟章节的 `order` 必须唯一，根章节同样如此。重命名复用原 ID；整体重写使用 `replace` 并保持现有目标引用有效。 |
+| `bind_forms` | 已有表单原位更新归属；未提交项保留，新表单追加 | 不删除或重排。续表必须同叶且符合来源顺序；顺序修复先读取完整绑定，再以 `replace` 提交全部有效绑定。 |
+| `put_slots` | 已有槽原位更新；未提交项保留，新槽追加 | 不删除或重排。调整顺序时先读取完整槽列表，再以 `replace` 提交完整有效列表。 |
+
+`put_fulfillments` 不接受 `mode`。每项的 `target_refs` 必须非空，并引用与 `primary_response_chapter_id` 相同应答叶子下的已有槽或表单绑定，或声明可见人工任务。仅引用生成说明不能履行要求；人工任务会保持需要复核状态。目标修改和拒绝均为原子操作，失败不能部分更新已有结果。
+
+分页首次调用不传 `cursor`。仅当实际工具结果包含非空 `next_cursor` 时，续页传该值作为 `cursor`，并同时提供**当前请求**的 `wire_scope`；不再传 `mode`、筛选字段或 `version`。宿主先验证并移除作用域，再检查内部续页参数。导航说明不会签发占位 cursor；历史作用域、猜测 cursor 和篡改过滤条件均被拒绝。
+
+## 正常结果与文档问题
+
+Discover `submit_pack.issues` 必填，可与正常 requirements 同次提交。问题只接受 `document_missing/document_conflict/document_ambiguous/document_unreadable`，引用当前包 owned 的有效证据，`requested_information` 非空，Discover 的 `requirement_ids` 为空。空 requirements 仍须完整 inspected：真正无义务时 issues 为空并给具体 no_requirement_reason；存在有效文档问题时 reason 必须为 null，不能把不确定当无义务。后续 Check 可在 fresh 读取后关联要求；问题不授予阅读或模板完成信用。
+
+问题保存在 canonical 包记录并投影至现有 Draft，不新增第二 store。报告使用 `Checkpoint::review_report` 输出 results 与 issues，按原文实际 overlap 给 affected_pack_ids、待补信息及未解决状态，并附输入摘要、发现版本、review epoch 与 template_ready。只有全部独立范围处理完成、仅明确文档问题剩余时，现有 `DOCUMENT_ISSUES_REPORTED` 出口保存报告并受控停止，不 publish、不置 done。失败 runner 仍须读取持久报告；传输/宿主错误不能被改名为文档问题。

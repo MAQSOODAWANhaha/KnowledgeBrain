@@ -1,20 +1,14 @@
 # 招投标运行与故障处理
 
-生成合同见 [大纲运行时](outline.md)。本页只写怎么看一次大纲运行，不保留旧扫描工具的操作步骤。
+执行与配置以[运行时合同](../design/evidence-runtime-contract.md)为准，未解决缺陷见[实施计划](../design/check-execution-plan.md)。
 
-## 运行前
+运行前核对构建 SHA、冻结输入、模型/工具/提示/配置摘要及检查点合同。同合同恢复不能重置历史 usage；合同改变从新状态执行，不修改旧摘要冒充恢复。凭据由环境继承，不展示或归档完整环境。
 
-核对当前构建、数据库基线、冻结输入，以及大纲工具合同摘要（统一注册表，`outline-tools-v2.schema.json`）。输入摘要或运行合同变了，检查点不能恢复。模型与凭据来自 `deploy/.env`。大纲运行只有一次成稿。
+- 解析：核对来源顺序、表格、图片及覆盖清单。解析完成不是大纲验收通过。
+- Discover：区分 domain Failed、可纠正业务拒绝、worker terminal 和 pending transport 状态。默认六次的可配置拒绝计数阈值仍在已推基线中；拟替代代码未发布。不要手改 claim 或重启 terminal 掩盖失败。
+- 传输：Prepared / Sending / Received / commit 分开核对；Received 重放不再调用服务。未知发送不能当零成本退款。
+- Organize / Check：核对要求、章节、槽、绑定、履行关系及 fresh 读取/复核；仅有章节或 finished 标记不能替代最终产物验证。
+- 容量与授权：完整请求准入与累计授权是两道门。不得改窗口、重置账本或自动换供应商绕过失败；没有旧 resume_budget 操作接口。
+- 保存与导出：回调持久化才算保存，PDF 绑定同一 DOCX 版本；失败不能用旧正文冒充当前结果。
 
-## 故障定位
-
-- 解析：按文件看来源是否按解析器顺序发布齐全。解析完成不等于大纲已经生成。
-- 发现：看 `reading_packs` 里各包是 `pending`、`running`、`failed` 还是 `committed`。`failed` 包的 `PackFeedback` 给出字段路径和错误码；同一包把 `repair` 设为 true 再交。不要用旧的扫描游标判断发现是否做完。
-- 模型：区分请求已预约、响应已保存、工具已提交。已保存的响应不能再向供应商发一次。
-- 草稿：看 `tool_draft` 的章节、附件绑定、`slots_submitted` 和 `finished`。未绑定附件表时 `finish_outline` 会拒绝。`finished` 为真仍报 `outline is not ready to publish` 时，投影没有通过 `validate_artifact`（例如章节或槽不合法）。空的 `analysis.outline.checks` 不再挡住出场。
-- 预算：重试不把已用轮次清零，也不改已冻结的请求去绕过预算。
-- 保存与导出：保存以回调落库为准。PDF 从同一份已保存 DOCX 转换。失败要明确报告，不能用旧正文冒充当前版本。
-
-## 记录
-
-历史提取和验收轨迹在 [archive](archive/README.md)。那些记录里的旧工具名、调用次数和继续运行命令不能当作现在的操作依据。不要自动重启已耗尽的旧运行，不要为了文档核对去清库或删用户文件。
+报告必须注明运行版本、停止原因、在途/未知请求、实际 usage 和未测阶段。私有证据按运行身份保存，不删除用户数据、不以排障名义部署或清库。

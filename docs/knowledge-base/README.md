@@ -28,4 +28,4 @@
 
 ## 计划
 
-当前参与[解析与 LLM 完整改造](../bidding/parsing-llm-remediation-plan.md#10-knowledge-支撑线generation--outbox--可检索状态)的知识库可靠性工作包。历史计划见 [`../../plans/knowledge-base/README.md`](../../plans/knowledge-base/README.md)。已落地含 crate 拆分、embedding 身份冻结、DocParser convert 门面（cancel + 拆分）、招标冻结网格、详情页分类、图片证据 V3 接缝。后续语义调整仍须在计划目录独立评审。
+知识库可靠性工作由[本域计划](../../plans/knowledge-base/README.md)独立管理。招投标的 knowledge 匹配与填充属于下一阶段，当前[生成整改](../design/check-execution-plan.md)不实施该业务；现有模块及测试不代表已经接通。
