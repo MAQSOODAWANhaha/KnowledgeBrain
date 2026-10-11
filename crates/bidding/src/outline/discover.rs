@@ -1417,8 +1417,12 @@ impl DiscoverWork {
             }
         }
         let record = self.packs.get_mut(pack_id).ok_or("unknown pack")?;
-        if record.status != PackStatus::Running {
-            return Err("related reader is not running".into());
+        // A rejected submission leaves the current claim Failed so it can be
+        // repaired. It must still be able to finish reading its prerequisites.
+        // Worker delivery remains gated by a durable complete Received response;
+        // a failed/terminal transport attempt itself never grants read credit.
+        if !matches!(record.status, PackStatus::Running | PackStatus::Failed) {
+            return Err("related reader is not running or awaiting repair".into());
         }
         for option in options {
             if !record.pack.condition_support_options.contains(option) {

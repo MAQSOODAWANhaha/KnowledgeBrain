@@ -368,13 +368,13 @@ fn structural_refs(input: &FrozenInput, pack: &ParsePack) -> Vec<EvidenceRef> {
         .collect()
 }
 
-fn deliver_context_page(
+fn stage_context_page(
     input: &FrozenInput,
     state: &mut Checkpoint,
     pack: &ParsePack,
     refs: &[EvidenceRef],
     call: &str,
-) {
+) -> Request {
     let work = state.outline_run.reading_packs.as_ref().unwrap();
     let identity = work.pack_wire_identity(&pack.id).unwrap();
     let (page, options) = work.related_read(input, &pack.id, refs).unwrap();
@@ -391,14 +391,36 @@ fn deliver_context_page(
         input_reserve: 1,
         output_reserve: 1,
     };
-    state.outline_run.discover_workers.insert(pack.id.clone(), Worker {
-        pending: Some(Pending::Received { request: request.clone(), response: json!({"content":"","finish_reason":"tool_calls","usage":null,"tool_calls":[{"id":"continue","name":"read_evidence","arguments":"{}"}]}) }),
-        related_read_frames: vec![coordinator::RelatedReadFrame {
-            directory_page: None, call_id: call.into(), pack_revision: pack.pack_revision,
-            input_digest: pack.input_digest.clone(), options,
-            sealed_sha256: crate::outline::read_receipts::wire_hash(&body, call).unwrap(),
-        }], ..Default::default()
+    let worker = state
+        .outline_run
+        .discover_workers
+        .entry(pack.id.clone())
+        .or_default();
+    worker.pending = Some(Pending::Received {
+        request: request.clone(),
+        response: json!({"content":"","finish_reason":"tool_calls","usage":null,"tool_calls":[{"id":"continue","name":"read_evidence","arguments":"{}"}]}),
     });
+    worker
+        .related_read_frames
+        .push(coordinator::RelatedReadFrame {
+            directory_page: None,
+            call_id: call.into(),
+            pack_revision: pack.pack_revision,
+            input_digest: pack.input_digest.clone(),
+            options,
+            sealed_sha256: crate::outline::read_receipts::wire_hash(&body, call).unwrap(),
+        });
+    request
+}
+
+fn deliver_context_page(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    pack: &ParsePack,
+    refs: &[EvidenceRef],
+    call: &str,
+) {
+    let request = stage_context_page(input, state, pack, refs, call);
     confirm_worker_related_reads(input, state, &request).unwrap();
 }
 
@@ -464,4 +486,565 @@ fn s1_partial_context_delivery_blocks_submission_until_full_union_survives_reloa
             .is_empty(),
         "delivery does not force a semantic association"
     );
+}
+
+#[test]
+fn s1_failed_claim_reads_and_repairs_on_the_same_state_without_terminal_or_foreign_credit() {
+    use crate::outline::discover::PackStatus;
+    let (input, work, pack) = fixture();
+    let mut submit = submission(&input, &work, &pack);
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.outline_run.reading_packs = Some(work);
+    let rejected = state
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .submit(&input, &pack.id, submit.clone())
+        .unwrap_err();
+    assert!(
+        rejected
+            .errors
+            .iter()
+            .any(|e| e.code == "structural_context_not_delivered")
+    );
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .status(&pack.id),
+        Some(PackStatus::Failed)
+    );
+    let mut state: Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    let refs = structural_refs(&input, &pack);
+    let mut first = refs.clone();
+    let mut rest = refs.clone();
+    for (left, right) in first.iter_mut().zip(&mut rest) {
+        let EvidenceRef::Text {
+            unit_id, end_byte, ..
+        } = left
+        else {
+            unreachable!()
+        };
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| source.source_unit_revision_id == *unit_id)
+            .unwrap();
+        let boundary = source.text.char_indices().nth(1).unwrap().0;
+        *end_byte = boundary;
+        let EvidenceRef::Text { start_byte, .. } = right else {
+            unreachable!()
+        };
+        *start_byte = boundary;
+    }
+    let request = stage_context_page(&input, &mut state, &pack, &first, "failed-first-page");
+    for mode in ["terminal", "foreign", "stale_revision"] {
+        let mut rejected = state.clone();
+        let mut altered = request.clone();
+        match mode {
+            "terminal" => {
+                rejected
+                    .outline_run
+                    .discover_workers
+                    .get_mut(&pack.id)
+                    .unwrap()
+                    .pending = Some(Pending::Failed {
+                    request: request.clone(),
+                    code: "BUSINESS_REJECTED".into(),
+                })
+            }
+            "foreign" => {
+                let other = rejected
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .pack_ids()
+                    .into_iter()
+                    .find(|id| id != &pack.id)
+                    .unwrap();
+                altered.scope.pack = other.clone();
+                let mut worker = rejected.outline_run.discover_workers[&pack.id].clone();
+                if let Some(Pending::Received { request, .. }) = &mut worker.pending {
+                    *request = altered.clone();
+                }
+                rejected.outline_run.discover_workers.insert(other, worker);
+            }
+            "stale_revision" => altered.scope.revision += 1,
+            _ => unreachable!(),
+        }
+        let before = json!(rejected);
+        assert!(
+            confirm_worker_related_reads(&input, &mut rejected, &altered).is_err(),
+            "{mode}"
+        );
+        assert_eq!(json!(rejected), before, "{mode}: no partial credit");
+    }
+    confirm_worker_related_reads(&input, &mut state, &request).unwrap();
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .status(&pack.id),
+        Some(PackStatus::Failed),
+        "reading does not change the repair state"
+    );
+    submit.call_id = "failed-partial-repair".into();
+    let partial = state
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .repair(&input, &pack.id, submit)
+        .unwrap_err();
+    assert!(
+        partial
+            .errors
+            .iter()
+            .any(|e| e.code == "structural_context_not_delivered")
+    );
+    let current = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .canonical_pack(&pack.id)
+        .unwrap()
+        .clone();
+    assert!(current.pack_revision > pack.pack_revision);
+    assert!(
+        current.condition_support_options.is_empty(),
+        "repair rotates the claim and does not inherit old delivery"
+    );
+    let mut state: Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    // A previous durable request cannot authorize the repaired claim.
+    let before = json!(state);
+    assert!(confirm_worker_related_reads(&input, &mut state, &request).is_err());
+    assert_eq!(json!(state), before);
+    deliver_context_page(&input, &mut state, &current, &first, "repair-first-page");
+    let mut state: Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    deliver_context_page(&input, &mut state, &current, &rest, "repair-last-page");
+    assert!(
+        state.outline_run.discover_workers[&pack.id]
+            .related_read_frames
+            .is_empty()
+    );
+    let work = state.outline_run.reading_packs.as_mut().unwrap();
+    let mut repaired = submission(&input, work, &current);
+    repaired.call_id = "failed-complete-repair".into();
+    work.repair(&input, &pack.id, repaired).unwrap();
+    let restored: Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    let work = restored.outline_run.reading_packs.as_ref().unwrap();
+    assert_eq!(work.status(&pack.id), Some(PackStatus::Committed));
+    assert_eq!(work.requirement_records().len(), 1);
+    assert!(
+        work.requirement_records()
+            .values()
+            .next()
+            .unwrap()
+            .condition_support
+            .is_empty(),
+        "delivery does not force applicability or grant Check credit"
+    );
+    assert!(
+        restored
+            .outline_run
+            .tool_draft
+            .check_reads
+            .evidence
+            .is_empty()
+    );
+}
+
+struct S1Journal(std::sync::Mutex<Checkpoint>);
+#[async_trait]
+impl Journal for S1Journal {
+    async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
+        Ok(Some(self.0.lock().unwrap().clone()))
+    }
+    async fn reserve(&self, _: &Checkpoint, _: &[u8]) -> Result<Option<usize>, AgentError> {
+        panic!("the worker must use reserve_discover_worker")
+    }
+    async fn save(&self, state: &Checkpoint, _: &Value) -> Result<(), AgentError> {
+        *self.0.lock().unwrap() = serde_json::from_value(json!(state)).unwrap();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requires_fresh_check() {
+    // The source is derived from the synthetic native DOCX, with a longer
+    // synthetic introduction solely to force production source pagination.
+    let (mut input, _, _) = fixture();
+    let intro = input
+        .source_units
+        .iter_mut()
+        .find(|source| source.text.contains("Only if"))
+        .unwrap();
+    intro.text = intro.text.repeat(128);
+    let intro_id = intro.source_unit_revision_id.clone();
+    let intro_text = intro.text.clone();
+    let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(serde_json::to_vec(sessions).unwrap().len() <= 20_000)
+    });
+    assert!(
+        work.planning_error().is_none(),
+        "{:?}",
+        work.planning_error()
+    );
+    let packs = work.claim(usize::MAX);
+    let target = packs
+        .iter()
+        .find(|pack| {
+            work.pack_evidence(&input, &pack.id)
+                .unwrap()
+                .iter()
+                .any(|reference| {
+                    matches!(
+                        reference,
+                        EvidenceRef::GridCell {
+                            anchor_row: 64,
+                            anchor_column: 1,
+                            ..
+                        }
+                    )
+                })
+        })
+        .unwrap()
+        .clone();
+    // Unrelated scopes are explicit domain fixtures, not simulated worker
+    // successes. Only the target below exercises the full worker lifecycle.
+    for pack in packs.iter().filter(|pack| pack.id != target.id) {
+        let refs = structural_refs(&input, pack);
+        if !refs.is_empty() {
+            let (_, options) = work.related_read(&input, &pack.id, &refs).unwrap();
+            work.confirm_related_read(&input, &pack.id, &options)
+                .unwrap();
+        }
+        work.submit(
+            &input,
+            &pack.id,
+            PackSubmit {
+                call_id: format!("s1-seed-{}", pack.id),
+                claim_token: pack.claim_token.clone(),
+                pack_revision: pack.pack_revision,
+                requirements: vec![],
+                issues: vec![],
+                no_requirement_reason: Some(
+                    "Synthetic protocol-only seed, not a semantic extraction assertion.".into(),
+                ),
+                inspected_atom_ids: pack
+                    .atoms
+                    .iter()
+                    .filter(|atom| !atom.context_only)
+                    .map(|atom| atom.id.clone())
+                    .collect(),
+            },
+        )
+        .unwrap();
+    }
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.outline_run.reading_packs = Some(work);
+    state
+        .outline_run
+        .discover_workers
+        .insert(target.id.clone(), Worker::default());
+    let mut config = crate::analysis::tests::config();
+    let cancel = CancellationToken::new();
+    let probe_journal = S1Journal(std::sync::Mutex::new(state.clone()));
+    let mut probe = state.clone();
+    let baseline = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut probe,
+        journal: &probe_journal,
+        cancel: &cancel,
+    }
+    .prepare_inner(&target.id, false)
+    .await
+    .unwrap();
+    // Leave room for current repair feedback, the support directory, and
+    // retained observations as delivery advances. The enlarged source still
+    // exceeds this window; the assertion below requires actual body paging.
+    config.limits.max_context_tokens =
+        baseline.input_reserve as usize + baseline.output_reserve as usize + 4096;
+    state.config_sha256 = digest(&config).unwrap();
+    let journal = S1Journal(std::sync::Mutex::new(state.clone()));
+    let mut body_cursor: Option<String> = None;
+    let mut directory_cursor: Option<String> = None;
+    let mut dependencies = std::collections::VecDeque::<String>::new();
+    let mut continuation_calls = 0;
+    let mut delivered_intro = String::new();
+    let mut finished = false;
+    let mut physical_calls = 0;
+    for step in 0..64 {
+        // Recreate the borrowing adapter over the same persisted checkpoint;
+        // no frame, request identity or worker status is manually injected.
+        let mut host = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut state,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        let request = host
+            .next(&BTreeSet::new())
+            .await
+            .unwrap()
+            .expect("the Failed worker must remain schedulable for repair reads");
+        assert_eq!(request.scope.pack, target.id);
+        assert!(
+            request.input_reserve + request.output_reserve
+                <= config.limits.max_context_tokens as u64
+        );
+        let canonical = host
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .session(&input, &target.id)
+            .unwrap();
+        if step == 0 {
+            dependencies.extend(
+                canonical["pack"]["read_dependencies"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|row| {
+                        row["read"]["args"]["dependency_id"]
+                            .as_str()
+                            .map(str::to_owned)
+                    }),
+            );
+            directory_cursor = canonical["pack"]["next_dependency_cursor"]
+                .as_str()
+                .map(str::to_owned);
+        }
+        let (name, args) = if step != 0 && body_cursor.is_some() {
+            continuation_calls += 1;
+            (
+                "read_evidence",
+                json!({"cursor":body_cursor.take().unwrap()}),
+            )
+        } else if step != 0 && !dependencies.is_empty() {
+            (
+                "read_evidence",
+                json!({"dependency_id":dependencies.pop_front().unwrap()}),
+            )
+        } else if step != 0 && directory_cursor.is_some() {
+            (
+                "read_evidence",
+                json!({"dependency_cursor":directory_cursor.take().unwrap()}),
+            )
+        } else {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let payloads = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| message["content"].as_str())
+                .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+                .collect::<Vec<_>>();
+            let session = &payloads
+                .iter()
+                .find(|payload| payload["reading_packs"].is_array())
+                .unwrap()["reading_packs"][0];
+            let pack = &session["pack"];
+            let scope = payloads
+                .iter()
+                .find_map(|payload| payload["wire_scope"].as_str())
+                .unwrap();
+            (
+                "submit_pack",
+                json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic host protocol response only; no semantic extraction assertion.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()}),
+            )
+        };
+        let args = if name == "read_evidence" {
+            host.state.outline_run.discover_workers[&target.id]
+                .registry
+                .fixture_encode(args)
+                .unwrap()
+        } else {
+            args
+        };
+        let response = ChatTurn {
+            content: "Synthetic offline lifecycle response.".into(),
+            finish_reason: "tool_calls".into(),
+            usage: Some(knowledge::models::ChatUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(2),
+                total_tokens: Some(12),
+                ..Default::default()
+            }),
+            tool_calls: vec![knowledge::models::ChatToolCall {
+                id: format!("s1-runtime-{step}"),
+                name: name.into(),
+                arguments: args.to_string(),
+            }],
+        };
+        host.reserve(&request).await.unwrap();
+        physical_calls += 1;
+        assert!(matches!(
+            journal
+                .load()
+                .await
+                .unwrap()
+                .unwrap()
+                .outline_run
+                .discover_workers[&target.id]
+                .pending,
+            Some(Pending::Sending { .. })
+        ));
+        host.received(&request, &response).await.unwrap();
+        assert!(matches!(
+            journal
+                .load()
+                .await
+                .unwrap()
+                .unwrap()
+                .outline_run
+                .discover_workers[&target.id]
+                .pending,
+            Some(Pending::Received { .. })
+        ));
+        host.commit(&request, response).await.unwrap();
+        let worker = &host.state.outline_run.discover_workers[&target.id];
+        let result: Value =
+            serde_json::from_str(worker.history.last().unwrap()["content"].as_str().unwrap())
+                .unwrap();
+        if step == 0 {
+            assert_eq!(result["ok"], false);
+            assert!(
+                result
+                    .to_string()
+                    .contains("structural_context_not_delivered")
+            );
+            assert_eq!(
+                host.state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .status(&target.id),
+                Some(PackStatus::Failed)
+            );
+            assert!(matches!(worker.pending, Some(Pending::Failed { .. })));
+        } else {
+            assert_eq!(
+                result["ok"],
+                true,
+                "step {step}, returned intro bytes {}, continuations {}, history messages {}, input reserve {}, context limit {}: {result}",
+                delivered_intro.len(),
+                continuation_calls,
+                worker.history.len(),
+                request.input_reserve,
+                config.limits.max_context_tokens
+            );
+            if name == "read_evidence" {
+                let read = &result["result"]["read"];
+                assert_eq!(
+                    read["new_coverage"], true,
+                    "each scripted read must add actual source or directory coverage"
+                );
+                body_cursor = read["next_cursor"].as_str().map(str::to_owned);
+                if let Some(rows) = read["read_dependencies"].as_array() {
+                    dependencies.extend(rows.iter().filter_map(|row| {
+                        row["read"]["args"]["dependency_id"]
+                            .as_str()
+                            .map(str::to_owned)
+                    }));
+                    directory_cursor = read["next_dependency_cursor"].as_str().map(str::to_owned);
+                }
+                for excerpt in read["excerpts"].as_array().into_iter().flatten() {
+                    if excerpt["evidence"]["unit_id"] == intro_id {
+                        delivered_intro.push_str(excerpt["quote"].as_str().unwrap());
+                    }
+                }
+            } else {
+                assert_eq!(result["result"]["status"], "committed");
+                finished = true;
+            }
+        }
+        let saved = journal.load().await.unwrap().unwrap();
+        assert_eq!(json!(saved), json!(host.state));
+        state = saved;
+        if finished {
+            break;
+        }
+    }
+    assert!(finished, "bounded lifecycle must commit");
+    assert!(
+        continuation_calls > 0,
+        "source body must use production continuation pages"
+    );
+    assert_eq!(
+        delivered_intro, intro_text,
+        "every original byte must be returned exactly once"
+    );
+    assert_eq!(state.journal.accounting.physical_calls, physical_calls);
+    assert!(
+        state.outline_run.discover_workers[&target.id]
+            .related_read_frames
+            .is_empty()
+    );
+    assert!(matches!(
+        state.outline_run.discover_workers[&target.id].pending,
+        Some(Pending::Committed { .. })
+    ));
+    assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+    crate::outline::agent::synchronize_discovery(&input, &mut state).unwrap();
+    let scope = state.outline_run.tool_draft.source_scopes[&target.id].clone();
+    let version = crate::outline::source_review::version(
+        &input,
+        &state.outline_run.tool_draft,
+        &target.id,
+        &scope,
+    )
+    .unwrap();
+    let refs = scope.evidence.iter().map(|reference| json!({"review_evidence_key":crate::outline::agent::review_evidence_key(&state, reference).unwrap()})).collect::<Vec<_>>();
+    let args = json!({"requirement_ids":[],"pack_ids":[target.id],"inspected_evidence":refs,"issues":[],"template_reviews":[],"source_dispositions":[{"pack_id":target.id,"version":version,"evidence":refs,"verdict":"no_response_obligation","requirement_ids":[],"reason":"Synthetic source disposition checks the host protocol, not semantic extraction."}]});
+    let before = json!(state);
+    assert!(
+        crate::outline::agent::apply_for_duty(
+            &input,
+            &mut state,
+            "submit_review",
+            &args,
+            Duty::Check
+        )
+        .is_err()
+    );
+    assert_eq!(
+        json!(state),
+        before,
+        "Discover reads do not become Check receipts"
+    );
+    // Explicit Check receipt seam, as in the domain acceptance suite. This is
+    // not a claim that a real provider performed the independent semantic review.
+    state.outline_run.tool_draft.check_reads.evidence = scope.evidence;
+    state.outline_run.tool_draft.check_reads.structure_keys = scope.structure_keys;
+    crate::outline::agent::apply_for_duty(&input, &mut state, "submit_review", &args, Duty::Check)
+        .unwrap();
+    assert!(
+        crate::outline::source_review::complete(&input, &state.outline_run.tool_draft, &target.id)
+            .unwrap()
+    );
+    journal.save(&state, &json!({})).await.unwrap();
+    let restored = journal.load().await.unwrap().unwrap();
+    assert!(
+        crate::outline::source_review::complete(
+            &input,
+            &restored.outline_run.tool_draft,
+            &target.id
+        )
+        .unwrap()
+    );
+    assert!(!restored.done);
 }

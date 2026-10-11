@@ -98,6 +98,12 @@ impl<J: Journal> PackHost<'_, J> {
                 .map_err(|e| e.message)?
                 .delivered_dependency_pages
                 .contains(&page_id)
+                && !self
+                    .worker(id)
+                    .map_err(|e| e.message)?
+                    .related_read_frames
+                    .iter()
+                    .any(|frame| frame.directory_page.as_ref() == Some(&page_id))
         );
         let result = json!({"status":"read_pending_delivery","read":page});
         let call = &response.tool_calls[0];
@@ -207,10 +213,21 @@ impl<J: Journal> PackHost<'_, J> {
                 .worker(id)
                 .map_err(|e| e.message)?
                 .delivered_related_evidence;
+            let covered_evidence = delivered
+                .iter()
+                .cloned()
+                .chain(
+                    self.state.outline_run.discover_workers[id]
+                        .related_read_frames
+                        .iter()
+                        .flat_map(|frame| frame.options.iter())
+                        .flat_map(|option| option.evidence.iter().cloned()),
+                )
+                .collect::<Vec<_>>();
             value["new_coverage"] = json!(
                 selected
                     .iter()
-                    .any(|reference| !evidence::covered_by_union(reference, delivered))
+                    .any(|reference| !evidence::covered_by_union(reference, &covered_evidence))
             );
             value["next_cursor"] = json!(next);
             value["selection_complete"] = json!(tail.is_empty());
@@ -637,6 +654,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
         {
             return Err(invalid("worker commit without durable response"));
         }
+        let mut confirmation_failed = false;
         let outcome = (|| -> Result<Value, String> {
             let identity = validate_worker_scope(self.input, self.state, request)?;
             if !crate::agent_runtime::valid_tool_turn(&response)
@@ -659,7 +677,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
             if call.name == "submit_pack" && args["pack_id"] != *id {
                 return Err("cross-pack worker submission".into());
             }
-            confirm_worker_related_reads(self.input, self.state, request)?;
+            confirm_worker_related_reads(self.input, self.state, request).inspect_err(|_| {
+                confirmation_failed = true;
+            })?;
             if call.name == "read_evidence" {
                 let keys = &self.state.outline_run.discover_workers[id].source_keys;
                 let args = crate::outline::source_wire::resolve_in_scope(
@@ -671,7 +691,11 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 return Ok(json!({"status":"read_request","args":args}));
             }
             crate::outline::agent::validate_arguments("submit_pack", &args)?;
-            confirm_worker_images(self.input, self.config, self.state, request)?;
+            confirm_worker_images(self.input, self.config, self.state, request).inspect_err(
+                |_| {
+                    confirmation_failed = true;
+                },
+            )?;
             crate::outline::agent::apply_for_duty(
                 self.input,
                 self.state,
@@ -688,6 +712,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
         };
         let receipt = match outcome {
             Ok(value) => super::tool_result_envelope(value),
+            Err(message) if confirmation_failed => json!({"ok":false,"error":message,
+                "code":"DISCOVER_SOURCE_CONFIRMATION_FAILED",
+                "retryable":false}),
             Err(message) => json!({"ok":false,"error":message}),
         };
         let committed = receipt["ok"] == true && receipt["result"]["status"] == "committed";
@@ -715,10 +742,20 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 receipt,
             });
         } else {
-            worker.rejected_turns += 1;
+            // A host delivery confirmation cannot be repaired by changing the
+            // model's submission. Preserve the failed frame and settled audit,
+            // but never purchase another response to the same host failure.
+            if !confirmation_failed {
+                worker.rejected_turns += 1;
+            }
             worker.pending = Some(Pending::Failed {
                 request: request.clone(),
-                code: "BUSINESS_REJECTED".into(),
+                code: if confirmation_failed {
+                    "DISCOVER_SOURCE_CONFIRMATION_FAILED"
+                } else {
+                    "BUSINESS_REJECTED"
+                }
+                .into(),
             });
         }
         self.state.turn = self

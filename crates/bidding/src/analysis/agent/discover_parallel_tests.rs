@@ -3464,3 +3464,5 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
 }
 
 include!("discover_f1_tests.rs");
+
+include!("discover_confirmation_tests.rs");
