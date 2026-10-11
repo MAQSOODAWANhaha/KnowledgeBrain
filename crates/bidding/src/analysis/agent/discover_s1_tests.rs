@@ -741,7 +741,7 @@ async fn s1_unique_observations_stop_at_capacity_without_losing_notes_or_retryin
 }
 
 #[tokio::test]
-async fn s1_repeated_observations_preserve_full_failed_candidates_at_original_narrow_window() {
+async fn s1_repeated_observations_complete_at_original_narrow_window_with_full_durable_audit() {
     s1_worker_observation_lifecycle(false, true).await;
 }
 
@@ -791,7 +791,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
     assert_eq!(
         intro_text.len(),
         if narrow_window { 22_528 } else { 180_224 },
-        "original narrow negative stays unchanged; longer functional source separates paging cost from audit cost"
+        "original narrow window stays unchanged; longer functional source separates paging cost from audit cost"
     );
     let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(serde_json::to_vec(sessions).unwrap().len() <= 20_000)
@@ -996,8 +996,8 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
         };
         let Some(request) = host.next(&BTreeSet::new()).await.unwrap() else {
             assert!(
-                narrow_window,
-                "functional lifecycle must not accept capacity as success: calls={physical_calls}, intro_pages={continuation_calls}, window={}",
+                narrow_window && unique_observations,
+                "repeated-observation lifecycle must not accept capacity as success: calls={physical_calls}, intro_pages={continuation_calls}, window={}",
                 config.limits.max_context_tokens
             );
             assert!(
@@ -1052,6 +1052,21 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
                 serde_json::from_str::<Value>(&text).ok()
             })
             .collect::<Vec<_>>();
+        let wire_candidates = payloads
+            .iter()
+            .filter_map(|payload| {
+                payload["rejected_submission_audit"]["original_arguments_text"].as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            wire_candidates,
+            rejected_arguments
+                .last()
+                .map(String::as_str)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "wire must retain exactly the latest complete failed candidate"
+        );
         let page = &payloads
             .iter()
             .find(|p| p["automatic_support_page"].is_object())
@@ -1188,27 +1203,29 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
             break;
         }
     }
-    if narrow_window {
+    assert!(
+        !rejected_arguments.is_empty(),
+        "lifecycle fixture must retain at least one failed candidate"
+    );
+    // Wire projection never removes durable rejected arguments; state here has
+    // been reloaded after every commit in both success and capacity paths.
+    let worker = &state.outline_run.discover_workers[&target.id];
+    for original in &rejected_arguments {
+        assert!(
+            worker
+                .history
+                .iter()
+                .any(|m| m["tool_calls"].as_array().is_some_and(|calls| calls
+                    .iter()
+                    .any(|c| c["function"]["arguments"] == *original))),
+            "complete failed candidate must remain in canonical audit"
+        );
+    }
+    if narrow_window && unique_observations {
         assert!(
             capacity_stopped && !finished,
-            "complete failed candidates and observations must produce an explicit bounded host stop"
+            "unique observations must produce an explicit bounded host stop"
         );
-        assert!(
-            !rejected_arguments.is_empty(),
-            "capacity fixture must retain at least one failed candidate"
-        );
-        let worker = &state.outline_run.discover_workers[&target.id];
-        for original in &rejected_arguments {
-            assert!(
-                worker
-                    .history
-                    .iter()
-                    .any(|m| m["tool_calls"].as_array().is_some_and(|calls| calls
-                        .iter()
-                        .any(|c| c["function"]["arguments"] == *original))),
-                "complete failed candidate must remain in canonical audit"
-            );
-        }
         let work = state.outline_run.reading_packs.as_ref().unwrap();
         assert_ne!(work.status(&target.id), Some(PackStatus::Committed));
         let delivered = work

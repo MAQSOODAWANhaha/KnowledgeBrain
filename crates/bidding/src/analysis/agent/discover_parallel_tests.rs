@@ -591,18 +591,57 @@ impl Model for CycleModel {
                 Ordering::SeqCst,
             );
         }
+        // Empty source scopes are now scheduled before requirement review.
+        // After the real packs/evidence reads, settle only the advertised empty
+        // scope. Do not advance the requirement cycle or borrow its version.
+        if self.automatic
+            && allows("submit_review")
+            && self.step.load(Ordering::SeqCst) >= 5
+            && host["check_work"]["requirement_id"].is_null()
+            && host["check_work"]["source_scope"].is_object()
+        {
+            let current_pack = &host["check_work"]["source_scope"]["pack_id"];
+            let dispositions = source_dispositions
+                .iter()
+                .filter(|row| &row["pack_id"] == current_pack)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                dispositions.len(),
+                1,
+                "current source must have fresh read results"
+            );
+            assert_eq!(dispositions[0]["verdict"], "no_response_obligation");
+            let evidence = dispositions[0]["evidence"].clone();
+            assert!(!evidence.as_array().unwrap().is_empty());
+            return Ok(ChatTurn {
+                content: String::new(),
+                finish_reason: "tool_calls".into(),
+                usage: None,
+                tool_calls: vec![knowledge::models::ChatToolCall {
+                    id: format!("cycle-empty-source-{}", current_pack.as_str().unwrap()),
+                    name: "submit_review".into(),
+                    arguments: json!({"wire_scope":host["wire_scope"],
+                        "requirement_ids":[],"pack_ids":[current_pack],
+                        "inspected_evidence":evidence,"issues":[],
+                        "source_dispositions":dispositions,"template_reviews":[]})
+                    .to_string(),
+                }],
+            });
+        }
         let step = self.step.fetch_add(1, Ordering::SeqCst);
         let (name, mut args) = if self.automatic {
-            let id = ids
-                .first()
-                .cloned()
-                .or_else(|| {
-                    results
-                        .iter()
-                        .rev()
-                        .find_map(|r| r.get("requirement_id").cloned())
-                })
-                .expect("requirement must be visible in request");
+            let id = if (5..=8).contains(&step) {
+                assert!(
+                    host["check_work"]["requirement_id"].is_string(),
+                    "requirement review must follow the current source scope"
+                );
+                host["check_work"]["requirement_id"].clone()
+            } else {
+                ids.first()
+                    .cloned()
+                    .expect("requirement must be visible in request")
+            };
             match step {
                 0 => (
                     "put_chapters",
@@ -3459,13 +3498,9 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
-    assert_eq!(candidate_texts.len(), 2);
+    assert_eq!(candidate_texts.len(), 1);
     assert_eq!(
         candidate_texts[0],
-        audit[0]["tool_calls"][0]["function"]["arguments"]
-    );
-    assert_eq!(
-        candidate_texts[1],
         audit[2]["tool_calls"][0]["function"]["arguments"]
     );
     assert!(
@@ -3540,3 +3575,5 @@ include!("discover_batch_repair_tests.rs");
 include!("discover_reference_progress_tests.rs");
 
 include!("discover_correction_window_tests.rs");
+
+include!("discover_read_budget_tests.rs");

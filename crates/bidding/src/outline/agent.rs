@@ -189,23 +189,79 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
         .ok_or("unknown outline tool")?;
     let schema = jsonschema::JSONSchema::compile(&spec.schema["function"]["parameters"])
         .map_err(|e| e.to_string())?;
-    if let Err(mut errors) = schema.validate(args)
-        && let Some(error) = errors.next()
-    {
-        // Refine only a schema rejection; never relocate or accept bad fields.
-        if name == "put_slots"
-            && let Some(message) = slot_text_layer_feedback(args)
-        {
-            return Err(message);
+    if let Err(errors) = schema.validate(args) {
+        use jsonschema::error::ValidationErrorKind;
+        let parameters = &spec.schema["function"]["parameters"];
+        let mut diagnostics = Vec::new();
+        for error in errors {
+            let schema_path = error.schema_path.to_string();
+            let code = schema_path.rsplit('/').next().unwrap_or("constraint");
+            let path = error.instance_path.to_string();
+            let constraint = parameters
+                .pointer(&schema_path)
+                .cloned()
+                .unwrap_or(Value::Null);
+            match &error.kind {
+                ValidationErrorKind::Required { property } => {
+                    let field = property
+                        .as_str()
+                        .unwrap_or("")
+                        .replace('~', "~0")
+                        .replace('/', "~1");
+                    diagnostics.push(json!({"code":code,"path":format!("{path}/{field}"),
+                        "received":{"missing":true},"allowed":{"required":true}}));
+                }
+                ValidationErrorKind::AdditionalProperties { unexpected } => {
+                    for field in unexpected {
+                        let escaped = field.replace('~', "~0").replace('/', "~1");
+                        diagnostics.push(json!({"code":code,"path":format!("{path}/{escaped}"),
+                            "received":schema_received_value(&error.instance[field]),
+                            "allowed":{"additional_property":false}}));
+                    }
+                }
+                _ => {
+                    let allowed = match &error.kind {
+                        ValidationErrorKind::Enum { options } => options.clone(),
+                        ValidationErrorKind::Constant { expected_value } => json!([expected_value]),
+                        _ if constraint.is_object()
+                            || constraint
+                                .as_array()
+                                .is_some_and(|items| items.iter().any(Value::is_object)) =>
+                        {
+                            json!({"schema_path":schema_path})
+                        }
+                        _ => constraint,
+                    };
+                    diagnostics.push(json!({"code":code,"path":path,
+                        "received":schema_received_value(&error.instance),"allowed":allowed}));
+                }
+            }
         }
-        let path = error.schema_path.to_string();
-        return Err(bounded_schema_feedback(
-            name,
-            path.rsplit('/').next().unwrap_or("constraint"),
-            &error.instance_path.to_string(),
+        // Collect every rejection without repairing, coercing, or interpreting
+        // candidate meaning. A compact value summary bounds private large text.
+        let hint = if name == "put_slots" {
+            slot_text_layer_feedback(args)
+        } else {
+            None
+        };
+        return Err(format!(
+            "SCHEMA/validation {}",
+            json!({"tool":name,
+            "state_changed":false,"errors":diagnostics,"hint":hint})
         ));
     }
     Ok(())
+}
+
+fn schema_received_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) if text.len() > 96 => {
+            json!({"type":"string","bytes":text.len(),"omitted":true})
+        }
+        Value::Array(items) => json!({"type":"array","items":items.len(),"omitted":true}),
+        Value::Object(fields) => json!({"type":"object","properties":fields.len(),"omitted":true}),
+        _ => value.clone(),
+    }
 }
 
 fn slot_text_layer_feedback(args: &Value) -> Option<String> {
@@ -225,29 +281,6 @@ fn slot_text_layer_feedback(args: &Value) -> Option<String> {
         }
     }
     None
-}
-
-fn bounded_schema_feedback(tool: &str, code: &str, path: &str) -> String {
-    let prefix = format!("SCHEMA/{code} ");
-    let suffix = match tool {
-        "submit_pack" => "; state unchanged; repair=true only if status=failed",
-        "put_slots" => "; state unchanged; fields must match content.type",
-        "put_fulfillments" => "; state unchanged; no mode; use existing same-chapter targets",
-        _ => "; state unchanged; correct the named field",
-    };
-    let budget = 160usize.saturating_sub(prefix.len() + suffix.len());
-    let mut end = path.len().min(budget);
-    if end < path.len() {
-        end = end.saturating_sub(3);
-    }
-    while !path.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{prefix}{}{ellipsis}{suffix}",
-        &path[..end],
-        ellipsis = if end < path.len() { "..." } else { "" }
-    )
 }
 
 pub fn schemas_for(duty: Duty) -> Vec<Value> {
@@ -1825,20 +1858,7 @@ fn submit_review(
 mod tests {
     use super::*;
     include!("slot_wire_tests.rs");
-    #[test]
-    fn bounded_schema_feedback_keeps_code_path_and_state_guidance() {
-        let short = bounded_schema_feedback("submit_pack", "oneOf", "/requirements/4/evidence/2");
-        assert!(short.contains("SCHEMA/oneOf /requirements/4/evidence/2"));
-        assert!(
-            !bounded_schema_feedback("put_slots", "required", "/slots/0").contains("repair=true")
-        );
-        for path in ["/材料😀".repeat(200), "/field".repeat(200)] {
-            let value = bounded_schema_feedback("submit_pack", "type", &path);
-            assert!(value.len() <= 160);
-            assert!(value.starts_with("SCHEMA/type /"));
-            assert!(value.ends_with("repair=true only if status=failed"));
-        }
-    }
+    include!("schema_feedback_tests.rs");
     #[test]
     fn large_invalid_atom_array_returns_bounded_repair_feedback() {
         let id = "private-instance-do-not-echo".repeat(1024);

@@ -35,7 +35,7 @@ pub struct Limits {
     pub max_focus_replans: usize,
     /// Application token budget, including estimated input and reserved output.
     pub max_context_tokens: usize,
-    /// Optional local admission ceiling for the next host-confirmed correction.
+    /// Optional local admission ceiling for host-confirmed corrections.
     /// Does not change planning or declare provider context capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_correction_context_tokens: Option<usize>,

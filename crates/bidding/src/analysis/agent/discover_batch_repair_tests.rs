@@ -30,14 +30,10 @@ async fn batch_74_candidates_32_typed_errors_repair_atomically_through_worker_re
             .filter_map(|s| serde_json::from_str::<Value>(s).ok())
             .collect::<Vec<_>>();
         if turn > 0 {
-            for original in &original_failed_arguments {
-                assert!(
-                    payloads.iter().any(
-                        |p| p["rejected_submission_audit"]["original_arguments_text"] == *original
-                    ),
-                    "the complete rejected candidate must remain visible, not only its error"
-                );
-            }
+            let audits = payloads.iter().filter(|p| p["rejected_submission_audit"].is_object()).collect::<Vec<_>>();
+            assert_eq!(audits.len(), 1, "wire retains only the latest complete failed proposal");
+            assert_eq!(audits[0]["rejected_submission_audit"]["original_arguments_text"],
+                *original_failed_arguments.last().unwrap());
             let latest = payloads
                 .iter()
                 .rev()

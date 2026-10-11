@@ -1495,7 +1495,6 @@ impl DiscoverWork {
             })
             .collect()
     }
-    #[cfg(test)]
     pub(crate) fn required_support_refs(
         &self,
         input: &FrozenInput,

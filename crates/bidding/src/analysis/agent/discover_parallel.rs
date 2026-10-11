@@ -122,7 +122,7 @@ impl<J: Journal> PackHost<'_, J> {
                     .iter()
                     .any(|frame| frame.directory_page.as_ref() == Some(&page_id))
         );
-        let result = json!({"status":"read_pending_delivery","read":page});
+        let result = json!({"status":"read_pending_delivery","read":page,"required_support":false});
         let call = &response.tool_calls[0];
         let frame = coordinator::RelatedReadFrame {
             user_page: None,
@@ -153,7 +153,7 @@ impl<J: Journal> PackHost<'_, J> {
         .await
         .map_err(|error| {
             if matches!(error.code.as_str(), "AGENT_TURN_BUDGET_EXCEEDED" | "DISCOVER_READ_CAPACITY_EXCEEDED") {
-                ReadPageFailure::Capacity("The indivisible dependency directory page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into())
+                ReadPageFailure::Business("Optional dependency directory cannot fit the ordinary request budget. No page was queued or confirmed; you may submit the complete corrected proposal directly without this optional read.".into())
             } else {
                 ReadPageFailure::Host(error)
             }
@@ -222,6 +222,16 @@ impl<J: Journal> PackHost<'_, J> {
         if refs.is_empty() {
             return Err("dependency selection must not be empty".into());
         }
+        let required = self
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .ok_or("reading plan missing")?
+            .required_support_refs(self.input, id)?;
+        let required_support = refs
+            .iter()
+            .all(|reference| evidence::covered_by_union(reference, &required));
         // Start with one native range instead of materializing a whole attachment.
         let mut selected = vec![refs[0].clone()];
         loop {
@@ -270,7 +280,7 @@ impl<J: Journal> PackHost<'_, J> {
             );
             value["next_cursor"] = json!(next);
             value["selection_complete"] = json!(tail.is_empty());
-            let result = json!({"status":"read_pending_delivery","read":value});
+            let result = json!({"status":"read_pending_delivery","read":value,"required_support":required_support});
             let call = &response.tool_calls[0];
             let frame = coordinator::RelatedReadFrame {
                 user_page: None,
@@ -321,9 +331,13 @@ impl<J: Journal> PackHost<'_, J> {
                     return Ok(result);
                 }
                 Err(error) if matches!(error.code.as_str(), "AGENT_TURN_BUDGET_EXCEEDED" | "DISCOVER_READ_CAPACITY_EXCEEDED") => {
-                    evidence::shrink_selection(self.input, &mut selected)
-                        .map_err(|_| ReadPageFailure::Capacity(
-                            "The minimum UTF-8 source page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into()))?
+                    evidence::shrink_selection(self.input, &mut selected).map_err(|_| {
+                        if required_support {
+                            ReadPageFailure::Capacity("The minimum required UTF-8 source page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into())
+                        } else {
+                            ReadPageFailure::Business("Optional source page cannot fit the ordinary request budget. No page was queued or confirmed; you may submit the complete corrected proposal directly without this optional read.".into())
+                        }
+                    })?
                 }
                 Err(error) => return Err(ReadPageFailure::Host(error)),
             }
@@ -566,8 +580,7 @@ impl<J: Journal> PackHost<'_, J> {
             self.config.limits.token_safety_margin,
             self.config.provider.output_token_reserve as usize,
         )?;
-        let correction = matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "BUSINESS_REJECTED")
-            && super::correction_retry(&worker.history);
+        let correction = worker_correction_window(worker);
         let exceeds_budget =
             count.total_context_tokens > self.config.limits.request_context_limit(correction);
         let mut read_frames = worker.related_read_frames.clone();
@@ -1062,6 +1075,57 @@ impl<J: Journal> Host for PackHost<'_, J> {
             .is_some_and(crate::outline::discover::DiscoverWork::complete)
     }
 }
+// Derive correction state only from host receipts in the current claim.
+// A successful optional read uses the ordinary window; its capacity rejection
+// leaves the unresolved proposal available for a direct corrected submit.
+fn worker_correction_window(worker: &Worker) -> bool {
+    let mut unresolved = false;
+    let mut read_window = None;
+    let history = &worker.history[worker.history_revision_start.min(worker.history.len())..];
+    for (index, message) in history.iter().enumerate() {
+        if message["role"] != "assistant" {
+            continue;
+        }
+        let Some(calls) = message["tool_calls"]
+            .as_array()
+            .filter(|calls| calls.len() == 1)
+        else {
+            continue;
+        };
+        let call = &calls[0];
+        let Some(receipt) = history
+            .get(index + 1)
+            .filter(|r| r["role"] == "tool" && r["tool_call_id"] == call["id"])
+        else {
+            continue;
+        };
+        let Some(result) = receipt["content"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        else {
+            continue;
+        };
+        match call["function"]["name"].as_str() {
+            Some("submit_pack") => {
+                unresolved = result["ok"] == false;
+                read_window = None;
+            }
+            Some("read_evidence") => {
+                read_window = if result["ok"] == true {
+                    Some(
+                        result["result"]["status"] == "read_pending_delivery"
+                            && result["result"]["required_support"] == true,
+                    )
+                } else {
+                    None
+                };
+            }
+            _ => (),
+        }
+    }
+    unresolved && read_window.unwrap_or(true)
+}
+
 // Only complete single-submit failures appended by commit are replaceable.
 // History remains the audit; this is a request projection, never read credit.
 fn settled_submission_pair(history: &[Value], index: usize) -> Option<&Value> {
@@ -1118,8 +1182,7 @@ pub(super) fn project_settled_submission_history(history: &[Value]) -> Vec<Value
 fn project_worker_rejected_history(history: &[Value]) -> Vec<Value> {
     let mut result = Vec::new();
     let mut index = 0;
-    let mut feedbacks = BTreeSet::new();
-    let mut summaries = Vec::new();
+    let mut latest = None;
     while index < history.len() {
         if let Some(receipt) = settled_submission_pair(history, index) {
             if let Some(content) = history[index]["content"].as_str().filter(|s| !s.is_empty()) {
@@ -1128,23 +1191,31 @@ fn project_worker_rejected_history(history: &[Value]) -> Vec<Value> {
             let arguments = history[index]["tool_calls"][0]["function"]["arguments"]
                 .as_str()
                 .unwrap_or("");
-            // Keep every distinct candidate intact, including malformed JSON.
-            // Opaque old arguments remain text, never an executable tool group
-            // or input to ordinary reference issuance.
-            if feedbacks.insert((arguments.to_owned(), receipt["content"].to_string())) {
-                summaries.push(json!({"role":"user","content":json!({
-                    "rejected_submission_audit": {"original_arguments_text":arguments,
-                        "settled_submission_failure":receipt["content"],
-                        "instruction":"These are rejected historical candidates, not an executable action or read credit. Use only host-verified current reference mappings and the current wire_scope to submit a complete corrected proposal; invalid historical references require current evidence. Original arguments remain intact for comparison."}
-                }).to_string()}));
-            }
+            // Durable history retains every candidate. The request needs only
+            // the latest complete failed proposal, including malformed JSON.
+            latest = Some(json!({"role":"user","content":json!({
+                "rejected_submission_audit": {"original_arguments_text":arguments,
+                    "settled_submission_failure":receipt["content"],
+                    "instruction":"This is the latest rejected historical candidate, not an executable action or read credit. Use only host-verified current reference mappings and the current wire_scope to submit a complete corrected proposal; invalid historical references require current evidence. Older candidates remain in durable audit."}
+            }).to_string()}));
             index += 2;
         } else {
-            result.push(history[index].clone());
+            let message = &history[index];
+            let projected_audit = message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .is_some_and(|value| value.get("rejected_submission_audit").is_some());
+            if projected_audit {
+                // Re-projecting an old revision must not append another audit.
+                latest = Some(message.clone());
+            } else {
+                result.push(message.clone());
+            }
             index += 1;
         }
     }
-    result.extend(summaries);
+    result.extend(latest);
     result
 }
 
@@ -1818,7 +1889,7 @@ mod rejected_candidate_projection_tests {
     }
 
     #[test]
-    fn distinct_rejected_candidates_and_malformed_arguments_are_not_silently_compacted() {
+    fn latest_rejected_candidate_is_projected_without_mutating_durable_history() {
         let mut history = Vec::new();
         for (index, args) in ["{broken A", "{broken B", "{broken A"].iter().enumerate() {
             let id = format!("call-{index}");
@@ -1835,6 +1906,29 @@ mod rejected_candidate_projection_tests {
         );
         let retained=projected.iter().filter(|m|m["role"]=="user").map(|m|
             serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["rejected_submission_audit"]["original_arguments_text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(retained, vec!["{broken A", "{broken B"]);
+        assert_eq!(retained, vec!["{broken A"]);
+        assert_eq!(
+            history.len(),
+            6,
+            "all three durable candidate/receipt pairs remain"
+        );
+        assert_eq!(project_worker_rejected_history(&projected), projected);
+        let mut worker = Worker {
+            history: history.clone(),
+            history_revision_start: 2,
+            ..Default::default()
+        };
+        let before = json!(worker.history);
+        let wire = project_worker_request_history(&worker);
+        assert_eq!(
+            wire.iter()
+                .filter(|message| message["role"] == "user")
+                .count(),
+            1
+        );
+        assert_eq!(json!(worker.history), before);
+        worker = serde_json::from_value(json!(worker)).unwrap();
+        assert_eq!(project_worker_request_history(&worker), wire);
+        assert_eq!(json!(worker.history), before);
     }
 }

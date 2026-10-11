@@ -88,7 +88,7 @@ fn misplaced_generated_text_reports_exact_paths_and_preserves_state() {
             assert!(error.contains("/slots/0/content/text"));
             assert!(error.contains("/slots/0/text"));
             assert!(error.contains("supporting_refs inside content"));
-            assert!(error.len() <= 160);
+            assert!(error.starts_with("SCHEMA/validation "));
         }
         if malformed == "missing_text" { assert!(error.contains("SCHEMA/required /slots/0/text")); }
         assert_eq!(serde_json::to_value(&candidate).unwrap(), before, "{malformed}");
