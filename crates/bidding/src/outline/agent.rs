@@ -73,6 +73,9 @@ pub fn current(
     input: &crate::analysis::FrozenInput,
     state: &crate::analysis::agent::Checkpoint,
 ) -> Duty {
+    if super::partial_source::eligible(input, state).is_some() {
+        return Duty::Check;
+    }
     let discovery_open = matches!(state.draft_stage, DraftStage::None | DraftStage::Outline)
         && state
             .outline_run
@@ -318,14 +321,28 @@ pub fn host_packet(
         let draft = &state.outline_run.tool_draft;
         // A submitted judgment is not necessarily resolved. Keep failed or
         // stale judgments actionable after the conversation is discarded.
-        let active_scope = super::source_review::next_scope(input, draft);
+        let partial = super::partial_source::eligible(input, state);
+        let active_scope = if let Some(eligible) = &partial {
+            draft.required_pack_ids.iter().find(|id| {
+                eligible.contains(*id) && !super::partial_source::scope_observed(input, state, id)
+            })
+        } else {
+            super::source_review::next_scope(input, draft)
+        };
+        if partial.is_some() {
+            packet["source_only_review"] = json!(true);
+            packet["claim_review_instruction"] = json!(
+                "Review only the independently committed source scopes using fresh source evidence and source_dispositions. No requirement/template review or finish. Report missed obligations as unresolved to reopen extraction. Global discovery remains failed."
+            );
+        }
         let linked =
             active_scope.map(|pack| super::source_review::linked_requirements(draft, pack));
         let next = draft
             .required_requirement_ids
             .iter()
             .filter(|id| {
-                linked.as_ref().is_none_or(|ids| ids.contains(*id))
+                partial.is_none()
+                    && linked.as_ref().is_none_or(|ids| ids.contains(*id))
                     && !super::source_review::has_document_issue(input, draft, id)
             })
             .find(|id| {
@@ -356,7 +373,7 @@ pub fn host_packet(
         // Delivered reads deliberately do not retire this work, and no second
         // task lifecycle is stored beside the canonical pack review receipts.
         let source_scope = active_scope
-            .filter(|id| !super::source_review::execution_complete(input, draft, id).unwrap_or(false))
+            .filter(|id| if partial.is_some() { !super::partial_source::scope_observed(input,state,id) } else { !super::source_review::execution_complete(input, draft, id).unwrap_or(false) })
             .map(|id| {
                 let reviewed = super::source_review::reviewed_evidence(&draft.source_dispositions, id);
                 let blocked = draft.source_dispositions.values().find(|review|
@@ -393,6 +410,11 @@ pub fn host_packet(
             "next_unread_slot":unread_slot.map(|slot|json!({"slot_id":slot.slot_id,"chapter_id":slot.chapter_id,"text_bytes":slot.text.len(),"tool":"read_outline","args":{"mode":"slot_body","slot_id":slot.slot_id}})),
             "remaining_unreviewed_packs":draft.required_pack_ids.difference(&draft.reviewed_pack_ids).count(),
             "instruction":"本项来自持久检查进度，不是已完成的语义判断。先对source_scope的未处置范围读取并提交明确来源判断；来源处置完成后read_claim_evidence读取该要求的全部主张证据；已完整读取后提交submit_claim_comparison，再读取实际目标正文并submit_review。next_unread_slot给出具体slot_id；用其args加当前wire_scope读取，续页使用实际返回的next_cursor，直到selection_complete。已读目录不能替代目标字段、格式和空位说明的充分性判断；具体义务绑定的空位允许保持空，不能因未填投标人材料报错。泛化说明或具体目标覆盖不足应如实提交问题。当前要求未复核前不跳到下一条。不要在requirements与packs目录之间反复重启。来源包的未提取义务仍须独立检查，不能以要求比较替代来源覆盖。"});
+        if partial.is_some() {
+            packet["check_work"]["instruction"] = json!(
+                "Only review the eligible committed source scope shown here. The bounded packs directory includes canonical requirement records for comparison; cite their actual IDs in source dispositions when obligations are already captured. Reading these records does not grant requirement completion. Read its native evidence freshly and submit source_dispositions; empty extraction is not proof of no obligation. Report omitted obligations as unresolved, then continue every remaining independent source scope. Do not review requirements, targets or templates, do not approve, and never call finish_outline. Global discovery remains blocked."
+            );
+        }
         let revision = state.outline_run.reading_packs.as_ref().map(|w| w.revision);
         let continuations: Vec<Value> = draft
             .evidence_continuations
@@ -409,6 +431,9 @@ pub fn host_packet(
         packet["available_read_continuations"] = json!({"items":continuations,
             "instruction":"这些宿主游标在历史裁剪后仍有效，仅表示可继续读取，不代表已阅读或复核。调用对应tool，仅传cursor及当前wire_scope；不要重启同一目录首屏。"});
         packet["review_navigation"] = json!({"source_index":"read_requirements(mode=packs), first call without cursor; continue with {cursor: actual non-null returned next_cursor, wire_scope: current request scope}; host cursor inherits filters; omit mode, filter fields and version", "response_targets":"read_outline; use slot_body to read each actual target completely", "claim_evidence":"read_claim_evidence; all source carriers and related selections remain available"});
+        if partial.is_some() {
+            packet["review_navigation"] = json!({"source_index":"read_requirements(mode=packs); use actual returned continuation cursors", "source_evidence":"read_evidence or read_source_view only for eligible owned source scope", "completion":"submit_review source_dispositions only; no template approval or finish"});
+        }
     }
     if matches!(duty, Duty::Organize | Duty::Check) {
         let rows: Vec<Value> = state
@@ -450,6 +475,10 @@ pub fn host_packet(
         }
         packet["review"] = json!({"remaining_requirements":state.outline_run.tool_draft.required_requirement_ids.difference(&state.outline_run.tool_draft.reviewed_requirement_ids).count(),
             "remaining_packs":state.outline_run.tool_draft.required_pack_ids.difference(&state.outline_run.tool_draft.reviewed_pack_ids).count()});
+    }
+    if super::partial_source::eligible(input, state).is_some() {
+        // Eligible records are delivered through the bounded source directory.
+        packet.as_object_mut().unwrap().remove("requirements");
     }
     if let Some(evidence) = preloaded_evidence {
         packet["preloaded_evidence"] = evidence.clone();
@@ -500,7 +529,7 @@ pub(crate) fn synchronize_discovery(
     state: &mut Checkpoint,
 ) -> Result<(), String> {
     if let Some(work) = &state.outline_run.reading_packs
-        && work.complete()
+        && (work.complete() || super::partial_source::eligible(input, state).is_some())
     {
         let revision = super::canonical_sha256(&(
             work.plan_sha256.clone(),
@@ -595,6 +624,7 @@ fn apply_for_duty_staged(
     args: &Value,
     duty: Duty,
 ) -> Result<Value, String> {
+    super::partial_source::validate_tool(input, state, name, args)?;
     if let Some(error) = deny(
         duty,
         name,
@@ -874,6 +904,11 @@ pub(crate) fn finish_check_repair_batch(
     input: &FrozenInput,
     state: &mut Checkpoint,
 ) -> Result<bool, String> {
+    if super::partial_source::eligible(input, state).is_some()
+        && !super::partial_source::exhausted(input, state)
+    {
+        return Ok(false);
+    }
     if current(input, state) != Duty::Check || state.done {
         return Ok(false);
     }
@@ -950,6 +985,16 @@ pub(crate) fn finish_check_repair_batch(
         .cloned()
         .collect::<Vec<_>>();
     let mut event = json!({"signature":signature,"pack_id":pack_id,"finding_kind":finding_kind,"comparison":comparison,"issues":issues,"status":"held_for_review"});
+    if super::partial_source::eligible(input, state).is_some() {
+        event["source_only_review"] = json!(true);
+        event["source_only_findings"] = json!(
+            draft
+                .source_dispositions
+                .values()
+                .filter(|row| row.verdict == super::source_review::Verdict::Unresolved)
+                .collect::<Vec<_>>()
+        );
+    }
     if finding_kind == "template_insufficiency" {
         let sources = state
             .outline_run
@@ -1214,6 +1259,8 @@ pub(crate) fn full_read_projection(
 ) -> Result<Value, String> {
     #[cfg(test)]
     let _profile = crate::analysis::agent::profile::enter("full_read_projection");
+    super::partial_source::validate_tool(input, state, name, args)?;
+
     let mut query = args.clone();
     query["max_bytes"] = json!(usize::MAX);
     query["cursor"] = json!(0);
@@ -1330,6 +1377,9 @@ fn requirement_page(
     if args["mode"].as_str() == Some("packs") {
         let mut rows = Vec::new();
         for id in work.pack_ids() {
+            if super::partial_source::eligible(input, state).is_some_and(|ids| !ids.contains(&id)) {
+                continue;
+            }
             if state.outline_run.tool_draft.reviewed_pack_ids.contains(&id) {
                 continue;
             }
@@ -1346,6 +1396,13 @@ fn requirement_page(
                     .get(&id)
                     .ok_or("source scope missing")?,
             )?;
+            // The same bounded source directory exposes canonical extracted
+            // obligations for comparison, without granting requirement review.
+            if super::partial_source::eligible(input, state).is_some() {
+                rows.extend(work.requirement_records().iter()
+                    .filter(|(key,_)| key.starts_with(&format!("{id}:")))
+                    .map(|(key,record)|json!({"pack_id":id,"requirement_id":key,"requirement":record,"source_comparison_only":true})));
+            }
             let mut structures = review_structure_rows(&id, &session);
             for row in &mut structures {
                 row["source_review_version"] = json!(source_version);
@@ -1420,6 +1477,12 @@ fn read_evidence(
     }
     let refs: Vec<super::evidence::EvidenceRef> =
         serde_json::from_value(args["refs"].clone()).map_err(|e| e.to_string())?;
+    if refs
+        .iter()
+        .any(|r| !super::partial_source::permits(input, state, r))
+    {
+        return Err("source-only read outside eligible scope".into());
+    }
     if refs
         .iter()
         .any(|reference| matches!(reference, super::evidence::EvidenceRef::ImageRegion { .. }))
@@ -1534,6 +1597,32 @@ fn submit_review(
         .ok_or("source_dispositions array missing")?
     {
         resolve_review_evidence(state, &mut disposition["evidence"])?;
+    }
+    if super::partial_source::eligible(input, state).is_some() {
+        let inspected: Vec<super::evidence::EvidenceRef> =
+            serde_json::from_value(resolved["inspected_evidence"].clone())
+                .map_err(|e| e.to_string())?;
+        if inspected
+            .iter()
+            .any(|r| !super::partial_source::permits(input, state, r))
+        {
+            return Err("source-only inspected evidence outside eligible scope".into());
+        }
+        for row in resolved["source_dispositions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(resolved["issues"].as_array().into_iter().flatten())
+        {
+            let refs: Vec<super::evidence::EvidenceRef> =
+                serde_json::from_value(row["evidence"].clone()).map_err(|e| e.to_string())?;
+            if refs
+                .iter()
+                .any(|r| !super::partial_source::permits(input, state, r))
+            {
+                return Err("source-only review evidence outside eligible scope".into());
+            }
+        }
     }
     let args = &resolved;
     let requirement_ids: std::collections::BTreeSet<String> =

@@ -53,7 +53,18 @@ fn count_canonical_text(encoding: TokenEncoding, serialized: &str) -> usize {
         let (hit, miss) = counts.get();
         counts.set((hit, miss + 1));
     });
-    let count = encoding.bpe().count_ordinary(serialized);
+    #[cfg(test)]
+    let lookup_profile = crate::analysis::agent::profile::enter("tokenizer_singleton_lookup");
+    let bpe = encoding.bpe();
+    #[cfg(test)]
+    drop(lookup_profile);
+    #[cfg(test)]
+    let bpe_profile = crate::analysis::agent::profile::enter("tokenizer_bpe_count");
+    #[cfg(test)]
+    crate::analysis::agent::profile::observe("bpe_counted_utf8_bytes", serialized.len());
+    let count = bpe.count_ordinary(serialized);
+    #[cfg(test)]
+    drop(bpe_profile);
     LAST_TEXT_COUNT.with(|cache| *cache.borrow_mut() = Some((encoding, serialized.into(), count)));
     count
 }
@@ -270,8 +281,12 @@ pub(crate) fn estimate_request_tokens_with_reserve(
             }
         }
     }
+    #[cfg(test)]
+    let json_profile = crate::analysis::agent::profile::enter("tokenizer_canonical_json");
     let serialized =
         serde_json_canonicalizer::to_string(&text).map_err(|e| invalid(e.to_string()))?;
+    #[cfg(test)]
+    drop(json_profile);
     let text_tokens = count_canonical_text(profile.encoding, &serialized);
     let calibrated_text_tokens = profile.calibrate(text_tokens)?;
     let tool_count = body["tools"].as_array().map_or(0, Vec::len);

@@ -327,7 +327,7 @@ async fn production_failed_pack_does_not_discard_peer_commit() {
         invoke(&input, &config, &journal, &model, &CancellationToken::new())
             .await
             .code,
-        "AGENT_DISCOVER_BLOCKED"
+        "TEST_PHASE_BARRIER"
     );
     assert_eq!(
         journal
@@ -342,7 +342,23 @@ async fn production_failed_pack_does_not_discard_peer_commit() {
             .committed,
         1
     );
+
+    let mut saved = journal.state.lock().unwrap().clone();
+    assert!(!saved.done);
+    assert!(!saved.outline_run.reading_packs.as_ref().unwrap().complete());
+    assert_eq!(model.calls.lock().unwrap().len(), 2);
+    assert!(saved.outline_run.discover_workers.values().any(|worker| matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "TEST_PROVIDER_FAILED")));
+    crate::outline::agent::synchronize_discovery(&input, &mut saved).unwrap();
+    assert_eq!(crate::outline::agent::current(&input, &saved), Duty::Check);
+    assert_eq!(
+        crate::outline::partial_source::eligible(&input, &saved)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(saved.outline_run.tool_draft.required_pack_ids.len(), 2);
 }
+
 #[tokio::test]
 async fn production_targeted_reopen_only_sends_changed_pack() {
     let (input, config, journal) = fixture(2);
@@ -2833,7 +2849,8 @@ async fn dependency_selectors_validate_the_same_immutable_worker_scope_before_mu
 async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
     use crate::outline::discover::{ConditionSupport, ConditionSupportOrigin, DiscoverWork};
     let input = crate::outline::frozen::tests::related_native_input();
-    let config = crate::analysis::tests::config();
+    let mut config = crate::analysis::tests::config();
+    config.limits.max_no_progress_turns = 2;
     let mut state = super::super::retirement::checkpoint(&input);
     let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(sessions
@@ -2968,6 +2985,95 @@ async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
             .check_reads
             .evidence
             .is_empty()
+    );
+    // Exercise the actual durable response/commit route, rather than inferring
+    // exhaustion from related_page metadata alone.
+    let mut last = None;
+    for ordinal in 0..2 {
+        let request = host.prepare_inner("pack-0", false).await.unwrap();
+        let wire: Value = serde_json::from_slice(&request.body).unwrap();
+        let payloads = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .collect::<Vec<_>>();
+        let scope = payloads
+            .iter()
+            .rev()
+            .find(|p| p["wire_scope"].is_string())
+            .unwrap()["wire_scope"]
+            .clone();
+        let repeat = ChatTurn {
+            content: String::new(),
+            finish_reason: "tool_calls".into(),
+            usage: None,
+            tool_calls: vec![knowledge::models::ChatToolCall {
+                id: format!("repeat-{ordinal}"),
+                name: "read_evidence".into(),
+                arguments: json!({"wire_scope":scope,"dependency_id":"pricing-reference"})
+                    .to_string(),
+            }],
+        };
+        host.reserve(&request).await.unwrap();
+        host.received(&request, &repeat).await.unwrap();
+        host.commit(&request, repeat).await.unwrap();
+        let worker = &host.state.outline_run.discover_workers["pack-0"];
+        let receipt: Value =
+            serde_json::from_str(worker.history.last().unwrap()["content"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(receipt["ok"], true);
+        assert_eq!(receipt["result"]["status"], "read_pending_delivery");
+        assert_eq!(receipt["result"]["read"]["new_coverage"], false);
+        assert_eq!(worker.rejected_turns, ordinal + 1);
+        assert!(
+            matches!(&worker.pending,Some(Pending::Failed{request:saved,code}) if saved==&request && code=="BUSINESS_REJECTED")
+        );
+        last = Some(request);
+    }
+    let request = last.unwrap();
+    // Unknown sending is never converted to an exhausted settled attempt.
+    host.state
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap()
+        .pending = Some(Pending::Sending {
+        request: request.clone(),
+    });
+    assert!(host.next(&BTreeSet::new()).await.is_err());
+    assert!(
+        matches!(&host.state.outline_run.discover_workers["pack-0"].pending,Some(Pending::Sending{request:saved}) if saved==&request)
+    );
+    host.state
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap()
+        .pending = Some(Pending::Failed {
+        request: request.clone(),
+        code: "BUSINESS_REJECTED".into(),
+    });
+    let next = host.next(&BTreeSet::new()).await.unwrap();
+    assert!(next.is_none_or(|next| next.scope.pack != "pack-0"));
+    assert!(
+        matches!(&host.state.outline_run.discover_workers["pack-0"].pending,Some(Pending::Failed{request:saved,code}) if saved==&request && code=="DISCOVER_RETRY_EXHAUSTED")
+    );
+    assert!(
+        !host
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .complete()
+    );
+    assert!(!host.state.done);
+    host.save().await.unwrap();
+    let reloaded = journal.load().await.unwrap().unwrap();
+    assert!(
+        matches!(&reloaded.outline_run.discover_workers["pack-0"].pending,Some(Pending::Failed{code,..}) if code=="DISCOVER_RETRY_EXHAUSTED")
     );
 }
 

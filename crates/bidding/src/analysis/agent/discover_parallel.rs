@@ -380,7 +380,11 @@ impl<J: Journal> PackHost<'_, J> {
             frame.sealed_sha256 =
                 related_read_wire_hash(self.input, self.state, frame, &body).map_err(invalid)?;
         }
-        let body = serde_json_canonicalizer::to_vec(&body).map_err(invalid)?;
+        let body = {
+            #[cfg(test)]
+            let _profile = super::profile::enter("worker_request_serialization");
+            serde_json_canonicalizer::to_vec(&body).map_err(invalid)?
+        };
         let request = Request {
             scope: Scope {
                 run: identity["run"]
@@ -487,6 +491,19 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 .discover_workers
                 .entry(id.clone())
                 .or_default();
+            // A repair rotates claim identity after a settled rejection. Keep
+            // that settled request as the exhaustion audit before clearing stale
+            // revision-local keys; unresolved Sending/Received remain untouched.
+            if worker.rejected_turns >= self.config.limits.max_no_progress_turns
+                && let Some(Pending::Failed { code, .. }) = &mut worker.pending
+                && matches!(
+                    code.as_str(),
+                    "BUSINESS_REJECTED" | "DISCOVER_RETRY_EXHAUSTED"
+                )
+            {
+                *code = "DISCOVER_RETRY_EXHAUSTED".into();
+                continue;
+            }
             if let Some(pending) = &worker.pending {
                 let request = match pending {
                     Pending::Prepared { request }
@@ -530,6 +547,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 _ => (),
             }
             if worker.rejected_turns >= self.config.limits.max_no_progress_turns {
+                if let Some(Pending::Failed { code, .. }) = &mut worker.pending {
+                    *code = "DISCOVER_RETRY_EXHAUSTED".into();
+                }
                 continue;
             }
             return self.prepare(&id).await.map(Some);
@@ -647,10 +667,14 @@ impl<J: Journal> Host for PackHost<'_, J> {
         if receipt["ok"] == true && receipt["result"]["status"] == "read_pending_delivery" {
             if receipt["result"]["read"]["new_coverage"] == false {
                 worker.rejected_turns += 1;
+                worker.pending = Some(Pending::Failed {
+                    request: request.clone(),
+                    code: "BUSINESS_REJECTED".into(),
+                });
             } else {
                 worker.rejected_turns = 0;
+                worker.pending = None;
             }
-            worker.pending = None;
         } else if committed {
             worker.pending = Some(Pending::Committed {
                 request: request.clone(),
@@ -924,6 +948,9 @@ pub(super) async fn run<J: Journal, M: Model>(
     };
     if coordinator::drive(&mut host, &provider, cancel).await? {
         Ok(())
+    } else if crate::outline::partial_source::eligible(input, host.state).is_some() {
+        host.save().await?;
+        Ok(())
     } else {
         Err(error(
             "AGENT_DISCOVER_BLOCKED",
@@ -935,3 +962,97 @@ pub(super) async fn run<J: Journal, M: Model>(
 #[cfg(test)]
 #[path = "discover_parallel_tests.rs"]
 mod tests;
+
+// Append inside analysis/agent/discover_parallel.rs; test-only, no transport.
+#[cfg(test)]
+pub(crate) async fn profile_all_pack_requests<J: Journal>(
+    input: &FrozenInput,
+    config: &Config,
+    planned: &Checkpoint,
+    journal: &J,
+    output_directory: &std::path::Path,
+) -> Result<Vec<Value>, AgentError> {
+    use sha2::{Digest, Sha256};
+    let ids = planned
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .ok_or_else(|| invalid("offline profile requires an existing plan"))?
+        .pack_ids();
+    if !output_directory.is_dir() {
+        return Err(invalid("private output directory must already exist"));
+    }
+    let mut rows = Vec::new();
+    for id in &ids {
+        let mut state = planned.clone();
+        let work = state.outline_run.reading_packs.as_mut().unwrap();
+        if ids.iter().any(|id| {
+            !matches!(
+                work.status(id),
+                Some(PackStatus::Pending | PackStatus::Running)
+            )
+        }) {
+            return Err(invalid(
+                "offline first-request profile requires an unsubmitted plan",
+            ));
+        }
+        // Running claims are preserved; only Pending packs receive first claims.
+        // This disposable projection snapshot is never saved or dispatched.
+        work.claim(ids.len());
+        state
+            .outline_run
+            .discover_workers
+            .insert(id.clone(), Worker::default());
+        let cancel = CancellationToken::new();
+        let mut host = PackHost {
+            input,
+            config,
+            state: &mut state,
+            journal,
+            cancel: &cancel,
+        };
+        let prepare_profile = super::profile::enter("offline_pack_prepare");
+        let request = host.prepare_inner(id, false).await?;
+        drop(prepare_profile);
+        let body: Value = serde_json::from_slice(&request.body).map_err(invalid)?;
+        let pack = body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|message| message["content"].as_str())
+            .filter_map(|content| serde_json::from_str::<Value>(content).ok())
+            .find_map(|value| {
+                value
+                    .get("reading_packs")?
+                    .as_array()?
+                    .first()?
+                    .get("pack")
+                    .cloned()
+            })
+            .ok_or_else(|| invalid("offline request pack payload missing"))?;
+        let wire_path = output_directory.join(format!(
+            "profile-pack-{}-request.json",
+            pack["order"]
+                .as_u64()
+                .ok_or_else(|| invalid("pack order missing"))?
+        ));
+        std::fs::write(&wire_path, &request.body).map_err(invalid)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wire_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(invalid)?;
+        }
+        rows.push(json!({
+            "pack_id":id,"order":pack["order"],
+            "atoms":pack["atoms"].as_array().map(Vec::len),
+            "input_estimate":request.input_reserve,"output_reserve":request.output_reserve,
+            "request_bytes":request.body.len(),
+            "private_wire_file":wire_path.file_name().and_then(|name|name.to_str()),
+            "request_sha256":hex::encode(Sha256::digest(&request.body)),
+            "initial_full_request":true,"provider_called":false
+        }));
+    }
+    rows.sort_by_key(|row| row["order"].as_u64().unwrap_or(u64::MAX));
+    Ok(rows)
+}

@@ -47,6 +47,8 @@ fn grid_carrier(def: &Value, table: &str) -> Result<PackCarrier, String> {
 }
 
 fn source_units(input: &FrozenInput, digest: &str) -> Result<Vec<Unit>, String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("planner_source_index");
     let mut document_order = BTreeMap::new();
     for document in &input.documents {
         if !document.document_id.is_empty() {
@@ -138,6 +140,8 @@ fn source_units(input: &FrozenInput, digest: &str) -> Result<Vec<Unit>, String> 
 }
 
 fn assign_links(units: &mut [Unit]) {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("planner_assign_links");
     for unit in units {
         let count = unit.atoms.len();
         for (index, atom) in unit.atoms.iter_mut().enumerate() {
@@ -173,21 +177,51 @@ fn pack(digest: &str, order: usize, atoms: Vec<PackAtom>) -> ParsePack {
 
 /// Exact first-running-session shape, including the actual content-bound claim.
 fn fits_pack(
-    input: &FrozenInput,
+    resolver: &super::super::evidence::EvidenceResolver<'_>,
     pack: &ParsePack,
     fits: &SessionFits<'_>,
 ) -> Result<bool, String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("planner_full_probe");
+    #[cfg(test)]
+    let materialize_profile = crate::analysis::agent::profile::enter("planner_materialize");
+    #[cfg(test)]
+    {
+        use crate::analysis::agent::profile;
+        profile::observe("candidate_atoms_total", pack.atoms.len());
+        profile::observe_max("candidate_atoms_max", pack.atoms.len());
+        for atom in &pack.atoms {
+            profile::observe(
+                match atom.carrier {
+                    PackCarrier::Text { .. } => "candidate_text_atoms",
+                    PackCarrier::Grid { .. } => "candidate_grid_atoms",
+                    PackCarrier::Image { .. } => "candidate_image_atoms",
+                    PackCarrier::Structure { .. } => "candidate_structure_atoms",
+                },
+                1,
+            );
+        }
+    }
     let mut running = pack.clone();
+    #[cfg(test)]
+    let claim_profile = crate::analysis::agent::profile::enter("planner_claim_identity");
     running.claim_token = claim_token(&running, 1, false);
-    let mut session = json!({"duty":"discover","pack":materialize_pack(input,&running)?,"status":"running","feedback":null,"no_requirement_reason":null,"issues":[]});
+    #[cfg(test)]
+    drop(claim_profile);
+    let mut session = json!({"duty":"discover","pack":materialize_pack_with_resolver(resolver,&running)?,"status":"running","feedback":null,"no_requirement_reason":null,"issues":[]});
     add_submission_identity(&mut session, &running, None)?;
     session["submission_instruction"] = json!(SUBMISSION_INSTRUCTION);
+    #[cfg(test)]
+    drop(materialize_profile);
+    #[cfg(test)]
+    let _budget_profile = crate::analysis::agent::profile::enter("planner_request_budget");
     fits(std::slice::from_ref(&session))
 }
 
 #[cfg(test)]
 pub(super) fn test_pack_fits(input: &FrozenInput, pack: &ParsePack, max_tokens: usize) -> bool {
-    fits_pack(input, pack, &|sessions| {
+    let resolver = super::super::evidence::EvidenceResolver::new(input).unwrap();
+    fits_pack(&resolver, pack, &|sessions| {
         test_sessions_fit(sessions, max_tokens)
     })
     .unwrap()
@@ -359,15 +393,60 @@ fn related_atoms(input: &FrozenInput, owned: &[PackAtom], incoming: &[PackAtom])
     })
 }
 
+/// Propose the whole related range as the final pack. Construct and validate
+/// its complete request once; only a rejected final pack changes the boundary.
+/// Halving is conservative, not a monotonic-fit inference: every smaller final
+/// proposal is checked too. Return immediately on success, without fill probes.
+fn fitted_chapter_prefix(
+    input: &FrozenInput,
+    digest: &str,
+    order: usize,
+    chapters: &[Vec<PackAtom>],
+    fits: &impl Fn(&ParsePack) -> Result<bool, String>,
+) -> Result<Option<(usize, ParsePack)>, String> {
+    let mut atoms = Vec::new();
+    let mut ends = Vec::new();
+    for chapter in chapters {
+        if !atoms.is_empty() && !related_atoms(input, &atoms, chapter) {
+            break;
+        }
+        atoms.extend_from_slice(chapter);
+        ends.push(atoms.len());
+    }
+    if ends.is_empty() {
+        return Ok(None);
+    }
+    let candidate = |count: usize| pack(digest, order, atoms[..ends[count - 1]].to_vec());
+    let mut count = ends.len();
+    loop {
+        let proposal = candidate(count);
+        if fits(&proposal)? {
+            return Ok(Some((count, proposal)));
+        }
+        if count == 1 {
+            return Ok(None);
+        }
+        count = count.div_ceil(2);
+    }
+}
+
 /// Merge complete adjacent chapters when the *real request* predicate admits
 /// them. Large chapters preserve atom order and split only failed carriers.
 pub fn plan_packs_with_budget(
     input: &FrozenInput,
     fits: &SessionFits<'_>,
 ) -> Result<Vec<ParsePack>, String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("planner_total");
     input.validate_document_relations()?;
-    let digest = input_digest(input)?;
+    let resolver = super::super::evidence::EvidenceResolver::new(input)?;
+    let digest = resolver.digest().to_owned();
     let mut units = source_units(input, &digest)?;
+    let fits_candidate = |candidate: &ParsePack| -> Result<bool, String> {
+        #[cfg(test)]
+        let _profile = crate::analysis::agent::profile::enter("planner_logical_probe");
+        fits_pack(&resolver, candidate, fits)
+    };
     'replan: loop {
         assign_links(&mut units);
         let mut chapters = Vec::<Vec<(usize, usize)>>::new();
@@ -387,71 +466,73 @@ pub fn plan_packs_with_budget(
                 }
             }
         }
+        #[cfg(test)]
+        crate::analysis::agent::profile::observe("section_groups_across_replans", chapters.len());
+        let chapter_atoms: Vec<Vec<PackAtom>> = chapters
+            .iter()
+            .map(|chapter| {
+                chapter
+                    .iter()
+                    .map(|&(unit, part)| units[unit].atoms[part].clone())
+                    .collect()
+            })
+            .collect();
         let mut out = Vec::new();
-        let mut current: Option<ParsePack> = None;
-        for chapter in chapters {
-            let atoms = chapter
-                .iter()
-                .map(|&(unit, part)| units[unit].atoms[part].clone())
-                .collect::<Vec<_>>();
-            let mut candidate = current
-                .clone()
-                .filter(|pack| related_atoms(input, &pack.atoms, &atoms))
-                .unwrap_or_else(|| {
-                    pack(&digest, out.len() + usize::from(current.is_some()), vec![])
-                });
-            candidate.atoms.extend(atoms.clone());
-            candidate = pack(&digest, candidate.order, candidate.atoms);
-            if fits_pack(input, &candidate, fits)? {
-                if current
-                    .as_ref()
-                    .is_some_and(|pack| !related_atoms(input, &pack.atoms, &atoms))
-                {
-                    out.push(current.take().unwrap());
-                }
-                current = Some(candidate);
+        let mut chapter_index = 0;
+        while chapter_index < chapters.len() {
+            if let Some((consumed, admitted)) = fitted_chapter_prefix(
+                input,
+                &digest,
+                out.len(),
+                &chapter_atoms[chapter_index..],
+                &fits_candidate,
+            )? {
+                out.push(admitted);
+                chapter_index += consumed;
                 continue;
             }
-            if let Some(previous) = current.take() {
-                out.push(previous);
-            }
-            let whole = pack(&digest, out.len(), atoms);
-            if fits_pack(input, &whole, fits)? {
-                current = Some(whole);
-                continue;
-            }
-            for (unit_index, atom_index) in chapter {
-                let atom = units[unit_index].atoms[atom_index].clone();
-                let mut candidate = current
-                    .clone()
-                    .unwrap_or_else(|| pack(&digest, out.len(), vec![]));
-                candidate.atoms.push(atom.clone());
-                candidate = pack(&digest, candidate.order, candidate.atoms);
-                if fits_pack(input, &candidate, fits)? {
-                    current = Some(candidate);
-                    continue;
+            // The first whole chapter was actually rejected. Preserve the
+            // existing ordered atom/UTF-8/grid fallback and replan split links.
+            #[cfg(test)]
+            crate::analysis::agent::profile::observe("standalone_chapter_fallbacks", 1);
+            let chapter = &chapter_atoms[chapter_index];
+            let mut offset = 0;
+            while offset < chapter.len() {
+                // The initial whole chapter has already failed above. Start
+                // its adjustment at half; later residual ranges are first
+                // proposed whole. No successful pack triggers a growth probe.
+                let mut count = if offset == 0 {
+                    chapter.len().div_ceil(2)
+                } else {
+                    chapter.len() - offset
+                };
+                loop {
+                    let candidate =
+                        pack(&digest, out.len(), chapter[offset..offset + count].to_vec());
+                    let already_rejected = offset == 0 && count == chapter.len();
+                    if !already_rejected && fits_candidate(&candidate)? {
+                        out.push(candidate);
+                        offset += count;
+                        break;
+                    }
+                    if count > 1 {
+                        count = count.div_ceil(2);
+                        continue;
+                    }
+                    let (unit_index, atom_index) = chapters[chapter_index][offset];
+                    let atom = units[unit_index].atoms[atom_index].clone();
+                    let parts = split_carrier(input, &atom.carrier)?;
+                    let replacement = parts.into_iter().map(|carrier| PackAtom {
+                        carrier,
+                        ..atom.clone()
+                    });
+                    units[unit_index]
+                        .atoms
+                        .splice(atom_index..=atom_index, replacement);
+                    continue 'replan;
                 }
-                if let Some(previous) = current.take() {
-                    out.push(previous);
-                }
-                let single = pack(&digest, out.len(), vec![atom.clone()]);
-                if fits_pack(input, &single, fits)? {
-                    current = Some(single);
-                    continue;
-                }
-                let parts = split_carrier(input, &atom.carrier)?;
-                let replacement = parts.into_iter().map(|carrier| PackAtom {
-                    carrier,
-                    ..atom.clone()
-                });
-                units[unit_index]
-                    .atoms
-                    .splice(atom_index..=atom_index, replacement);
-                continue 'replan;
             }
-        }
-        if let Some(pack) = current {
-            out.push(pack);
+            chapter_index += 1;
         }
         return Ok(out);
     }
@@ -460,6 +541,151 @@ pub fn plan_packs_with_budget(
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
+
+    fn synthetic_input(count: usize, same_section: bool) -> FrozenInput {
+        FrozenInput {
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
+            project_id: "profile".into(), document_set_id: "set".into(),
+            documents: vec![], document_relations: vec![],
+            source_units: (0..count).map(|ordinal| Source {
+                source_unit_revision_id: format!("unit-{ordinal}"), document_id: "doc".into(),
+                text: "Synthetic obligation".into(),
+                locator: json!({"section_id":(if same_section {0} else {ordinal}).to_string(),"completeness":"complete"}),
+                ordinal,
+            }).collect(), structured_forms: vec![], decisions: vec![],
+        }
+    }
+    #[test]
+    fn bounded_prefix_keeps_exact_coverage_with_nonmonotone_fits() {
+        let input = synthetic_input(17, false);
+        for accepted in [vec![1, 3, 5], vec![1, 2, 8], vec![1, 2, 3, 6]] {
+            let admitted = std::cell::RefCell::new(Vec::new());
+            let packs = plan_packs_with_budget(&input, &|sessions| {
+                let pack = &sessions[0]["pack"];
+                let ok = accepted.contains(&pack["atoms"].as_array().unwrap().len());
+                if ok {
+                    admitted.borrow_mut().push(pack.clone());
+                }
+                Ok(ok)
+            })
+            .unwrap();
+            assert_eq!(
+                packs
+                    .iter()
+                    .flat_map(|p| p.atoms.iter().map(|a| a.unit_ordinal))
+                    .collect::<Vec<_>>(),
+                (0..17).collect::<Vec<_>>()
+            );
+            let resolver = super::super::super::evidence::EvidenceResolver::new(&input).unwrap();
+            for pack in &packs {
+                let mut running = pack.clone();
+                running.claim_token = claim_token(&running, 1, false);
+                let exact = materialize_pack_with_resolver(&resolver, &running).unwrap();
+                assert!(
+                    admitted.borrow().contains(&exact),
+                    "exact returned pack must have passed the real predicate"
+                );
+                assert!(accepted.contains(&pack.atoms.len()));
+            }
+        }
+        assert_eq!(
+            plan_packs_with_budget(&input, &|_| Err("probe failed".into())),
+            Err("probe failed".into())
+        );
+    }
+    #[test]
+    fn bounded_prefix_reduces_full_probes_without_a_candidate_cache() {
+        let input = synthetic_input(128, false);
+        let probes = std::cell::Cell::new(0usize);
+        let packs = plan_packs_with_budget(&input, &|_| {
+            probes.set(probes.get() + 1);
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].atoms.len(), 128);
+        assert_eq!(
+            probes.get(),
+            1,
+            "an admitted whole range needs no candidate probes"
+        );
+    }
+    #[test]
+    fn bounded_prefix_preserves_oversize_chapter_atom_fallback() {
+        let input = synthetic_input(3, true);
+        let packs = plan_packs_with_budget(&input, &|sessions| {
+            Ok(sessions[0]["pack"]["atoms"].as_array().unwrap().len() == 1)
+        })
+        .unwrap();
+        let digest = input_digest(&input).unwrap();
+        let mut units = source_units(&input, &digest).unwrap();
+        assign_links(&mut units);
+        let expected: Vec<_> = units
+            .into_iter()
+            .enumerate()
+            .map(|(order, unit)| pack(&digest, order, unit.atoms))
+            .collect();
+        assert_eq!(packs, expected);
+        assert_eq!(
+            plan_packs_with_budget(&input, &|_| Ok(true)).unwrap().len(),
+            1
+        );
+    }
+    #[test]
+    fn bounded_prefix_preserves_utf8_split_replan_links() {
+        let mut input = synthetic_input(1, true);
+        input.source_units[0].text = "甲😀乙😀丙😀丁😀".into();
+        let packs = plan_packs_with_budget(&input, &|sessions| {
+            Ok(sessions[0]["pack"]["atoms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|atom| {
+                    atom["excerpts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|excerpt| excerpt["quote"].as_str().unwrap().len())
+                        .sum::<usize>()
+                })
+                .sum::<usize>()
+                <= 7)
+        })
+        .unwrap();
+        let atoms: Vec<_> = packs.iter().flat_map(|p| &p.atoms).collect();
+        assert!(atoms.len() > 1);
+        let mut cursor = 0;
+        for (index, atom) in atoms.iter().enumerate() {
+            let PackCarrier::Text {
+                evidence:
+                    EvidenceRef::Text {
+                        start_byte,
+                        end_byte,
+                        ..
+                    },
+            } = &atom.carrier
+            else {
+                panic!("text carrier expected")
+            };
+            assert_eq!(*start_byte, cursor);
+            assert!(
+                input.source_units[0]
+                    .text
+                    .get(*start_byte..*end_byte)
+                    .is_some()
+            );
+            cursor = *end_byte;
+            assert_eq!(
+                atom.previous_fragment_id.as_deref(),
+                index.checked_sub(1).map(|i| atoms[i].id.as_str())
+            );
+            assert_eq!(
+                atom.next_fragment_id.as_deref(),
+                atoms.get(index + 1).map(|a| a.id.as_str())
+            );
+        }
+        assert_eq!(cursor, input.source_units[0].text.len());
+    }
     #[test]
     fn cross_document_co_location_requires_the_native_relation_endpoints() {
         let input = crate::outline::frozen::tests::related_native_input();
@@ -500,3 +726,7 @@ mod endpoint_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "private_planner_profile.rs"]
+mod private_planner_profile;

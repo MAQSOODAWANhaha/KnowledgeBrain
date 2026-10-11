@@ -39,6 +39,8 @@ pub struct SourceExcerpt {
 }
 
 pub fn input_digest(input: &FrozenInput) -> Result<String, String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("frozen_input_digest");
     super::canonical_sha256(input)
 }
 
@@ -154,10 +156,39 @@ pub fn resolve_evidence(
     input: &FrozenInput,
     refs: &[EvidenceRef],
 ) -> Result<Vec<SourceExcerpt>, String> {
-    let digest = input_digest(input)?;
-    refs.iter()
-        .map(|reference| resolve_one(input, reference, &digest))
-        .collect()
+    EvidenceResolver::new(input)?.resolve(refs)
+}
+
+/// A digest belongs to this immutable borrow, never to a caller-supplied string
+/// or a cross-run cache. All reference/range/anchor checks still run per read.
+pub(super) struct EvidenceResolver<'a> {
+    input: &'a FrozenInput,
+    digest: String,
+}
+
+impl<'a> EvidenceResolver<'a> {
+    pub(super) fn new(input: &'a FrozenInput) -> Result<Self, String> {
+        Ok(Self {
+            input,
+            digest: input_digest(input)?,
+        })
+    }
+
+    pub(super) fn input(&self) -> &'a FrozenInput {
+        self.input
+    }
+
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(super) fn resolve(&self, refs: &[EvidenceRef]) -> Result<Vec<SourceExcerpt>, String> {
+        #[cfg(test)]
+        let _profile = crate::analysis::agent::profile::enter("evidence_resolve_batch");
+        refs.iter()
+            .map(|reference| resolve_one(self.input, reference, &self.digest))
+            .collect()
+    }
 }
 
 fn slice(text: &str, start: usize, end: usize) -> Result<&str, String> {
@@ -391,6 +422,49 @@ pub(crate) fn shrink_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn borrowed_resolver_keeps_input_and_range_validation() {
+        let input = crate::outline::frozen::tests::related_native_input();
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| !source.text.is_empty())
+            .unwrap();
+        let resolver = EvidenceResolver::new(&input).unwrap();
+        let reference = EvidenceRef::Text {
+            input_digest: resolver.digest().to_owned(),
+            unit_id: source.source_unit_revision_id.clone(),
+            start_byte: 0,
+            end_byte: source.text.len(),
+        };
+        let expected = resolve_evidence(&input, std::slice::from_ref(&reference)).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                resolver.resolve(std::slice::from_ref(&reference)).unwrap(),
+                expected
+            );
+        }
+        let mut invalid = reference.clone();
+        if let EvidenceRef::Text { end_byte, .. } = &mut invalid {
+            *end_byte = source.text.len() + 1;
+        }
+        assert!(
+            resolver
+                .resolve(&[invalid])
+                .unwrap_err()
+                .contains("invalid_range")
+        );
+        let mut changed = input.clone();
+        changed.source_units[0].text.push_str("changed");
+        assert!(
+            EvidenceResolver::new(&changed)
+                .unwrap()
+                .resolve(&[reference])
+                .unwrap_err()
+                .contains("digest_mismatch")
+        );
+    }
+
     fn span(start: usize, end: usize) -> EvidenceRef {
         EvidenceRef::Text {
             input_digest: "d".into(),

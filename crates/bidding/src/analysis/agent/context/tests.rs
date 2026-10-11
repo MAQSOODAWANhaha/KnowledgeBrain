@@ -2697,15 +2697,15 @@ async fn host_navigation_continuation_reaches_real_handler_and_rejects_filter_ta
         json!("合成要求".repeat(10000));
     let mut state: Checkpoint = serde_json::from_value(raw).unwrap();
     let host = crate::outline::agent::host_packet(&input, &state, 1, json!({}), json!({}), None);
-    assert!(
-        host["review_work"]["target_refs"][0]
-            .get("description")
-            .is_none()
+    assert_eq!(
+        host["requirements_navigation"],
+        outline::requirements_navigation()
     );
     assert!(
-        host["review_work"]["target_refs"][0]["description_bytes"]
-            .as_u64()
+        host["requirements"]["items"][0]["requirement"]["description"]
+            .as_str()
             .unwrap()
+            .len()
             > 32768
     );
     let mut config = crate::analysis::tests::config();
@@ -3632,4 +3632,38 @@ async fn manual_task_actual_request_paging_requires_complete_exact_delivery() {
             .manual_tasks
             .contains(&changed)
     );
+}
+
+#[tokio::test]
+async fn partial_source_async_claim_read_is_rejected_before_projection_or_credit() {
+    let (input, mut state, _, _) = crate::outline::partial_source::tests::fixture();
+    crate::outline::agent::synchronize_discovery(&input, &mut state).unwrap();
+    let config = crate::analysis::tests::config();
+    let before = serde_json::to_value(&state).unwrap();
+    for args in [
+        json!({"requirement_id":"synthetic"}),
+        json!({"cursor":"synthetic"}),
+    ] {
+        let call = knowledge::models::ChatToolCall {
+            id: "claim".into(),
+            name: "read_claim_evidence".into(),
+            arguments: args.to_string(),
+        };
+        let error = super::super::read_evidence_in_context(
+            &input,
+            &config,
+            &mut state,
+            &args,
+            &[call],
+            &[],
+            crate::outline::agent::Duty::Check,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "partial source review permits only source reading and source dispositions"
+        );
+        assert_eq!(before, serde_json::to_value(&state).unwrap());
+    }
 }

@@ -8,6 +8,8 @@ pub(super) async fn read_source_view<J: Journal>(
     args: &Value,
     cancel: &CancellationToken,
 ) -> Result<Value, AgentError> {
+    crate::outline::partial_source::validate_tool(input, state, "read_source_view", args)
+        .map_err(invalid)?;
     if !config.limits.vision_enabled {
         return Err(error(
             "AGENT_VISION_NOT_CONFIGURED",
@@ -26,6 +28,23 @@ pub(super) async fn read_source_view<J: Journal>(
         return Err(invalid(
             "source view must name a source in this frozen collection",
         ));
+    }
+    if let Some(ids) = crate::outline::partial_source::eligible(input, state) {
+        let work = state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .ok_or_else(|| invalid("missing source plan"))?;
+        let allowed = ids.iter().any(|id| {
+            work.canonical_pack(id).is_some_and(|pack| {
+                pack.atoms
+                    .iter()
+                    .any(|a| !a.context_only && a.source_unit_revision_id == source_id)
+            })
+        });
+        if !allowed {
+            return Err(invalid("source-only image read outside eligible scope"));
+        }
     }
     let coverage = &mut state.analysis.coverage;
     coverage

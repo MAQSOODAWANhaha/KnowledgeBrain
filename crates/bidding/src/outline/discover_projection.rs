@@ -33,6 +33,8 @@ pub(super) fn render_grid(
     header_context: &[GridFragment],
     _digest: &str,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("materialize_grid");
     let def = super::super::evidence::table_definition(input, table_id)?;
     // Until controls have typed occupancy, conservatively preserve empty cells
     // in any document carrying images/forms or spreadsheet metadata.

@@ -2123,7 +2123,18 @@ fn explicit_document_issue_is_reported_without_granting_clean_source_credit() {
     assert_eq!(report["issues"][0]["resolved"], false);
     assert_eq!(report["issues"][0]["affected_pack_ids"], json!([pack]));
     assert_eq!(report["template_ready"], false);
-    assert_eq!(state.progress(&input)["outline_review_report"], report);
+    assert!(
+        !report["results"]["source_dispositions"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    let mut compact_report = report.clone();
+    compact_report.as_object_mut().unwrap().remove("results");
+    assert_eq!(
+        state.progress(&input)["outline_review_report"],
+        compact_report
+    );
     let mut system = state.outline_run.tool_draft.clone();
     system.review_issues[0].code = "system_source_omission".into();
     assert!(!source_review::document_issue_report_ready(&input, &system));

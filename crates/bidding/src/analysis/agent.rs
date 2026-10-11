@@ -373,7 +373,9 @@ impl Checkpoint {
                 "bindings":draft.bindings,"slots":draft.slots,"fulfillments":draft.fulfillments,
                 "reviewed_requirement_ids":draft.reviewed_requirement_ids,
                 "reviewed_pack_ids":draft.reviewed_pack_ids,"template_reviews":draft.template_reviews,
-                "source_dispositions":draft.source_dispositions},
+                "source_dispositions":draft.source_dispositions,
+                "source_only_repair_events":self.outline_run.repair_events.iter().filter(|event|event["source_only_review"]==true).collect::<Vec<_>>()},
+            "discovery_complete":self.outline_run.reading_packs.as_ref().is_some_and(crate::outline::discover::DiscoverWork::complete),
             "issues":issues})
     }
 
@@ -596,10 +598,23 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
         #[cfg(test)]
         let _profile = profile::enter("prepare_request");
         crate::outline::agent::synchronize_discovery(self.input, self.state).map_err(invalid)?;
-        if crate::outline::source_review::document_issue_report_ready(
-            self.input,
-            &self.state.outline_run.tool_draft,
-        ) {
+        if crate::outline::partial_source::repair_stopped(self.state)
+            || crate::outline::partial_source::exhausted(self.input, self.state)
+        {
+            self.journal
+                .save(self.state, &self.state.progress(self.input))
+                .await?;
+            return Err(error(
+                "AGENT_DISCOVER_BLOCKED",
+                "independent source review completed; failed discovery still blocks publication",
+            ));
+        }
+        if crate::outline::partial_source::eligible(self.input, self.state).is_none()
+            && crate::outline::source_review::document_issue_report_ready(
+                self.input,
+                &self.state.outline_run.tool_draft,
+            )
+        {
             self.journal
                 .save(self.state, &self.state.progress(self.input))
                 .await?;
@@ -622,6 +637,17 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             .await?;
             crate::outline::agent::synchronize_discovery(self.input, self.state)
                 .map_err(invalid)?;
+        }
+        if crate::outline::partial_source::repair_stopped(self.state)
+            || crate::outline::partial_source::exhausted(self.input, self.state)
+        {
+            self.journal
+                .save(self.state, &self.state.progress(self.input))
+                .await?;
+            return Err(error(
+                "AGENT_DISCOVER_BLOCKED",
+                "independent source review completed; failed discovery still blocks publication",
+            ));
         }
         let started = Instant::now();
         let body = request(self.input, self.config, self.state).await?;
@@ -1179,10 +1205,10 @@ async fn execute_turn_staged<J: Journal>(
                 .unwrap_or_else(|| state.coverage().clone());
             state.replace_coverage(pending)
         });
-        let scope_check = args
-            .as_ref()
-            .map_err(|e| e.to_string())
-            .and_then(|args| context::check_read_scope(input, state, &call.name, args));
+        let scope_check = args.as_ref().map_err(|e| e.to_string()).and_then(|args| {
+            context::check_read_scope(input, state, &call.name, args)?;
+            crate::outline::partial_source::validate_tool(input, state, &call.name, args)
+        });
         let result = if suppressed.contains_key(&call.id) {
             Err("tool unavailable in this role".into())
         } else if let Err(message) = scope_check {
@@ -1409,6 +1435,7 @@ async fn read_projection_in_context(
     let _profile = profile::enter("read_projection_in_context");
     crate::outline::agent::synchronize_discovery(input, state)?;
     let tool = &remaining[0].name;
+    crate::outline::partial_source::validate_tool(input, state, tool, args)?;
     let projection_started = std::time::Instant::now();
     if let Some(error) = crate::outline::agent::deny(duty, tool, false) {
         return Err(error.into());
@@ -1618,6 +1645,7 @@ async fn read_evidence_in_context(
         return Err(error.into());
     }
     let tool = &remaining[0].name;
+    crate::outline::partial_source::validate_tool(input, state, tool, args)?;
     let saved = args["cursor"]
         .as_str()
         .map(|cursor| {
@@ -2156,6 +2184,8 @@ async fn prepare_fitted_request(
             let cache_before = crate::agent_runtime::chat::cache_counts();
             let fits = |sessions: &[Value]| -> Result<bool, String> {
                 candidate_fits.set(candidate_fits.get() + 1);
+                #[cfg(test)]
+                let candidate_profile = profile::enter("planner_candidate_envelope");
                 let mut candidate = canonical_body.clone();
                 let mut candidate_brief = brief.clone();
                 candidate_brief["reading_packs"] = json!(sessions);
@@ -2167,9 +2197,23 @@ async fn prepare_fitted_request(
                     .ok_or("request host packet missing")?["content"] =
                     json!(planning_host.to_string());
                 reserve_pack_image_messages(input, config, state, sessions, &mut candidate)?;
+                #[cfg(test)]
+                drop(candidate_profile);
+                #[cfg(test)]
+                let compact_profile = profile::enter("planner_candidate_compact");
                 crate::outline::discover::compact_request(&mut candidate)?;
+                #[cfg(test)]
+                drop(compact_profile);
+                #[cfg(test)]
+                let source_profile = profile::enter("planner_candidate_source_wire");
                 crate::outline::source_wire::request(state, &mut candidate)?;
+                #[cfg(test)]
+                drop(source_profile);
+                #[cfg(test)]
+                let model_profile = profile::enter("planner_candidate_model_wire");
                 crate::outline::model_wire::project(state, &mut candidate)?;
+                #[cfg(test)]
+                drop(model_profile);
                 let tokens = context::estimate_input_tokens(&candidate, &config.limits)
                     .map_err(|error| error.to_string())?;
                 Ok(tokens
@@ -2615,3 +2659,6 @@ mod provider_defaults_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod partial_source_runtime_tests;

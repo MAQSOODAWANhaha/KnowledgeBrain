@@ -1317,6 +1317,10 @@ impl DiscoverWork {
         found.sort_by_key(|r| r.pack.order);
         found.into_iter().map(|r| r.pack.id.clone()).collect()
     }
+    pub(crate) fn canonical_pack(&self, id: &str) -> Option<&ParsePack> {
+        self.packs.get(id).map(|record| &record.pack)
+    }
+
     pub fn pack_ids(&self) -> BTreeSet<String> {
         self.packs.keys().cloned().collect()
     }
@@ -2038,6 +2042,16 @@ fn section_id(source: &Source) -> String {
 }
 
 fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, String> {
+    materialize_pack_with_resolver(&super::evidence::EvidenceResolver::new(input)?, pack)
+}
+
+fn materialize_pack_with_resolver(
+    resolver: &super::evidence::EvidenceResolver<'_>,
+    pack: &ParsePack,
+) -> Result<Value, String> {
+    let input = resolver.input();
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("materialize_pack_body");
     // Validate the immutable input and every reference in one batch. Resolving
     // each atom separately would canonicalize the entire tender once per atom.
     let references = pack
@@ -2053,11 +2067,13 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
     let mut excerpts = if references.is_empty() {
         Vec::new()
     } else {
-        resolve_evidence(input, &references)?
+        resolver.resolve(&references)?
     }
     .into_iter();
     let mut atoms = Vec::new();
     let mut source_documents = Vec::<Value>::new();
+    #[cfg(test)]
+    let atom_loop_profile = crate::analysis::agent::profile::enter("materialize_atom_loop");
     for atom in &pack.atoms {
         let mut rendered = serde_json::to_value(atom).map_err(|e| e.to_string())?;
         rendered["atom_key"] = json!(atom_key(pack, atom)?);
@@ -2172,10 +2188,20 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
         }
         atoms.push(rendered);
     }
+    #[cfg(test)]
+    drop(atom_loop_profile);
+    #[cfg(test)]
+    let directory_profile =
+        crate::analysis::agent::profile::enter("materialize_dependency_directories");
     let support_page = support_directory(pack, None)?;
     let supports = support_page["condition_support_options"].clone();
     let directory = dependency_directory(input, pack, None)?;
     let read_dependencies = directory["read_dependencies"].clone();
+    #[cfg(test)]
+    drop(directory_profile);
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("materialize_final_json");
+
     Ok(
         json!({"source_documents":source_documents,"read_dependencies":read_dependencies,"next_dependency_cursor":directory["next_dependency_cursor"],"condition_support_options":supports,"next_support_cursor":support_page["next_support_cursor"],"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
     )

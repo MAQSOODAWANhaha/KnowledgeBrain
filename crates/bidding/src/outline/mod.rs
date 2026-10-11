@@ -20,6 +20,7 @@ pub mod frozen;
 pub(crate) mod metadata_fragments;
 pub(crate) mod model_wire;
 pub mod parse;
+pub(crate) mod partial_source;
 pub(crate) mod read_receipts;
 pub(crate) mod repair;
 pub mod source_review;
@@ -180,8 +181,16 @@ pub struct OutlineArtifact {
 }
 
 pub fn canonical_sha256(value: &impl Serialize) -> Result<String, String> {
+    #[cfg(test)]
+    let serialize_profile = crate::analysis::agent::profile::enter("canonical_json");
     let bytes = serde_json_canonicalizer::to_vec(value)
         .map_err(|error| format!("outline canonical JSON: {error}"))?;
+    #[cfg(test)]
+    drop(serialize_profile);
+    #[cfg(test)]
+    crate::analysis::agent::profile::observe("canonical_json_bytes", bytes.len());
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("canonical_sha256");
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
