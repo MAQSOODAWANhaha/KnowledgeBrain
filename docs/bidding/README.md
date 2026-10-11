@@ -1,6 +1,6 @@
 # 招投标文档入口
 
-当前生成合同只有一份：[证据与运行时合同](../design/evidence-runtime-contract.md)。待实现整改与反例门槛只有一份：[实施计划](../design/check-execution-plan.md)。两者明确区分已推送 `4647bb8`、未提交停滞修改、尚未实现的宿主自动交付；真实完整语义验收尚未通过。
+当前生成合同只有一份：[证据与运行时合同](../design/evidence-runtime-contract.md)。实施状态与反例门槛只有一份：[实施计划](../design/check-execution-plan.md)。两者区分当前实现、离线回归及真实服务验收；checkpoint 31 的自动支持交付已实现，本地回归收尾状态见实施计划，真实完整语义验收尚未通过。
 
 用户在解析完成后主动启动一次大纲运行：Discover 提取要求，Organize 建立章节、规定模板与具体响应目标，Check 独立复核来源、主张和模板。结构就绪不等于复核通过；没有旧的草稿／正式编制双流程。产物是冻结 OutlineArtifact，投标人事实和签字空位保持空白，不为通过验收编造材料。
 
@@ -9,7 +9,7 @@ knowledge 匹配填充属于下一阶段，只消费冻结大纲，不重新解�
 | 文档 | 唯一职责 |
 |---|---|
 | [运行时合同](../design/evidence-runtime-contract.md) | 当前执行、证据、模型配置、目标和发布边界及已知限制 |
-| [实施计划](../design/check-execution-plan.md) | 尚未实现的整改、顺序、反例矩阵和验收门槛 |
+| [实施计划](../design/check-execution-plan.md) | 实施状态、反例矩阵和验收门槛 |
 | [冻结输入](frozen-input.md) | 解析、来源身份与冻结不变量 |
 | [模块归属](authoring.md) | analysis / outline / response 的代码责任 |
 | [运行手册](backend-runbook.md) | 当前故障定位与安全恢复 |

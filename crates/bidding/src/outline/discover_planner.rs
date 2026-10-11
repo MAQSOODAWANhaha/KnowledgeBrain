@@ -179,7 +179,7 @@ fn pack(digest: &str, order: usize, atoms: Vec<PackAtom>) -> ParsePack {
 fn fits_pack(
     resolver: &super::super::evidence::EvidenceResolver<'_>,
     pack: &ParsePack,
-    fits: &PlanningFits<'_>,
+    fits: &PlanningProbeFits<'_>,
 ) -> Result<PlanningFit, String> {
     #[cfg(test)]
     let _profile = crate::analysis::agent::profile::enter("planner_full_probe");
@@ -215,13 +215,13 @@ fn fits_pack(
     drop(materialize_profile);
     #[cfg(test)]
     let _budget_profile = crate::analysis::agent::profile::enter("planner_request_budget");
-    fits(std::slice::from_ref(&session))
+    fits(std::slice::from_ref(&session), &running)
 }
 
 #[cfg(test)]
 pub(super) fn test_pack_fits(input: &FrozenInput, pack: &ParsePack, max_tokens: usize) -> bool {
     let resolver = super::super::evidence::EvidenceResolver::new(input).unwrap();
-    fits_pack(&resolver, pack, &|sessions| {
+    fits_pack(&resolver, pack, &|sessions, _| {
         test_sessions_fit(sessions, max_tokens).map(PlanningFit::Unmeasured)
     })
     .unwrap()
@@ -296,10 +296,7 @@ fn split_carrier(input: &FrozenInput, carrier: &PackCarrier) -> Result<Vec<PackC
             else {
                 unreachable!()
             };
-            let headers = original_cells
-                .into_iter()
-                .filter(|cell| cell.header_role != "none")
-                .collect::<Vec<_>>();
+            let headers = original_cells;
             let mut pieces = Vec::new();
             if cells.len() > 1 {
                 let rows = cells
@@ -339,23 +336,56 @@ fn split_carrier(input: &FrozenInput, carrier: &PackCarrier) -> Result<Vec<PackC
             } else {
                 return Err("grid metadata exceeds the context token budget".into());
             }
-            Ok(pieces
+            pieces
                 .into_iter()
                 .map(|cells| {
-                    let header_context = headers
+                    let digest = super::super::evidence::input_digest(input)?;
+                    let owned = cells
                         .iter()
-                        .filter(|header| !cells.contains(header))
-                        .cloned()
+                        .filter(|c| c.start_byte < c.end_byte)
+                        .map(|c| EvidenceRef::GridCell {
+                            input_digest: digest.clone(),
+                            table_id: table_id.clone(),
+                            anchor_row: c.anchor_row,
+                            anchor_column: c.anchor_column,
+                            start_byte: c.start_byte,
+                            end_byte: c.end_byte,
+                        })
+                        .collect::<Vec<_>>();
+                    let support = super::super::source_support::select(input, &owned)?;
+                    let header_context = support
+                        .iter()
+                        .filter_map(|s| match &s.evidence {
+                            EvidenceRef::GridCell {
+                                table_id: t,
+                                anchor_row,
+                                anchor_column,
+                                start_byte,
+                                end_byte,
+                                ..
+                            } if t == table_id => headers
+                                .iter()
+                                .find(|h| {
+                                    h.anchor_row == *anchor_row && h.anchor_column == *anchor_column
+                                })
+                                .map(|h| {
+                                    let mut h = h.clone();
+                                    h.start_byte = *start_byte;
+                                    h.end_byte = *end_byte;
+                                    h
+                                }),
+                            _ => None,
+                        })
                         .collect();
-                    PackCarrier::Grid {
+                    Ok(PackCarrier::Grid {
                         table_id: table_id.clone(),
                         row_count: *row_count,
                         column_count: *column_count,
                         cells,
                         header_context,
-                    }
+                    })
                 })
-                .collect())
+                .collect()
         }
         _ => Err("indivisible image/structure metadata exceeds the context token budget".into()),
     }
@@ -569,6 +599,12 @@ pub fn plan_packs_with_budget(
 pub fn plan_packs_with_measured_budget(
     input: &FrozenInput,
     fits: &PlanningFits<'_>,
+) -> Result<Vec<ParsePack>, String> {
+    plan_packs_with_support_budget(input, &|sessions, _| fits(sessions))
+}
+pub fn plan_packs_with_support_budget(
+    input: &FrozenInput,
+    fits: &PlanningProbeFits<'_>,
 ) -> Result<Vec<ParsePack>, String> {
     #[cfg(test)]
     let _profile = crate::analysis::agent::profile::enter("planner_total");

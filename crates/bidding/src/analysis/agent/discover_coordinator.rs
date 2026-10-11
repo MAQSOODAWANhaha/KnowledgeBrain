@@ -38,6 +38,7 @@ pub(crate) enum Pending {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RelatedReadFrame {
+    pub user_page: Option<Value>,
     pub directory_page: Option<String>,
     pub call_id: String,
     pub pack_revision: u64,
@@ -62,10 +63,14 @@ pub(crate) struct Worker {
     pub delivered_related_evidence: Vec<crate::outline::evidence::EvidenceRef>,
     pub delivered_dependency_pages: BTreeSet<String>,
     pub history: Vec<Value>,
+    pub history_revision_start: usize,
+    pub retired_read_calls: BTreeSet<String>,
     pub pending: Option<Pending>,
     pub generation: u64,
     pub registry: crate::outline::model_wire::Registry,
     pub rejected_turns: usize,
+    pub failure_signatures: BTreeSet<String>,
+    pub progress_evidence: Vec<crate::outline::evidence::EvidenceRef>,
     pub images: Vec<(String, String)>,
     pub source_keys: crate::outline::source_wire::Keys,
     pub related_read_frames: Vec<RelatedReadFrame>,

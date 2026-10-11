@@ -1886,6 +1886,7 @@ fn reserve_pack_image_messages(
     config: &Config,
     state: &Checkpoint,
     sessions: &[Value],
+    support: &[crate::outline::evidence::EvidenceRef],
     body: &mut Value,
 ) -> Result<(), String> {
     let ids = sessions
@@ -1895,6 +1896,12 @@ fn reserve_pack_image_messages(
             atom["carrier"]["kind"] == "image" && atom["carrier"]["vision_required"] == true
         })
         .filter_map(|atom| atom["carrier"]["evidence"]["image_id"].as_str())
+        .chain(support.iter().filter_map(|reference| match reference {
+            crate::outline::evidence::EvidenceRef::ImageRegion { image_id, .. } => {
+                Some(image_id.as_str())
+            }
+            _ => None,
+        }))
         .collect::<BTreeSet<_>>();
     let existing = body["messages"]
         .as_array()
@@ -2073,7 +2080,13 @@ async fn prepare_fitted_request(
             "document_count":input.documents.len(),"relation_count":input.document_relations.len(),"decision_count":input.decisions.len(),
         });
         if !reading_sessions.is_empty() {
-            brief["reading_packs"] = json!(reading_sessions);
+            // Bootstrap uses the same owned-only projection as planning and
+            // worker requests. Required support is delivered by worker pages.
+            let mut projected_sessions = reading_sessions.clone();
+            for session in &mut projected_sessions {
+                crate::outline::discover::project_owned_pack_headers(session);
+            }
+            brief["reading_packs"] = json!(projected_sessions);
         }
         let mut messages = vec![
             json!({"role":"system","content":system}),
@@ -2188,14 +2201,23 @@ async fn prepare_fitted_request(
             let planning_started = std::time::Instant::now();
             let candidate_fits = std::cell::Cell::new(0usize);
             let cache_before = crate::agent_runtime::chat::cache_counts();
-            let fits =
-                |sessions: &[Value]| -> Result<crate::outline::discover::PlanningFit, String> {
-                    candidate_fits.set(candidate_fits.get() + 1);
-                    #[cfg(test)]
-                    let candidate_profile = profile::enter("planner_candidate_envelope");
+            let fits = |sessions: &[Value],
+                        pack: &crate::outline::discover::ParsePack|
+             -> Result<crate::outline::discover::PlanningFit, String> {
+                candidate_fits.set(candidate_fits.get() + 1);
+                let mut selected =
+                    crate::outline::discover::planning_required_support(input, pack)?
+                        .into_iter()
+                        .take(1)
+                        .collect::<Vec<_>>();
+                loop {
                     let mut candidate = canonical_body.clone();
                     let mut candidate_brief = brief.clone();
-                    candidate_brief["reading_packs"] = json!(sessions);
+                    let mut projected_sessions = sessions.to_vec();
+                    for session in &mut projected_sessions {
+                        crate::outline::discover::project_owned_pack_headers(session);
+                    }
+                    candidate_brief["reading_packs"] = json!(projected_sessions);
                     candidate["messages"][1]["content"] = json!(candidate_brief.to_string());
                     candidate["messages"]
                         .as_array_mut()
@@ -2203,9 +2225,23 @@ async fn prepare_fitted_request(
                         .last_mut()
                         .ok_or("request host packet missing")?["content"] =
                         json!(planning_host.to_string());
-                    reserve_pack_image_messages(input, config, state, sessions, &mut candidate)?;
-                    #[cfg(test)]
-                    drop(candidate_profile);
+                    if !selected.is_empty() {
+                        let (page, _) = crate::outline::discover::automatic_support_page(
+                            input, pack, &selected,
+                        )?;
+                        candidate["messages"]
+                            .as_array_mut()
+                            .ok_or("request messages missing")?
+                            .push(json!({"role":"user","content":page.to_string()}));
+                    }
+                    reserve_pack_image_messages(
+                        input,
+                        config,
+                        state,
+                        sessions,
+                        &selected,
+                        &mut candidate,
+                    )?;
                     #[cfg(test)]
                     let compact_profile = profile::enter("planner_candidate_compact");
                     crate::outline::discover::compact_request(&mut candidate)?;
@@ -2223,16 +2259,24 @@ async fn prepare_fitted_request(
                     drop(model_profile);
                     let tokens = context::estimate_input_tokens(&candidate, &config.limits)
                         .map_err(|error| error.to_string())?;
-                    Ok(crate::outline::discover::PlanningFit::Measured {
+                    let available_input = config
+                        .limits
+                        .max_context_tokens
+                        .saturating_sub(config.provider.output_token_reserve as usize);
+                    if tokens > available_input
+                        && !selected.is_empty()
+                        && crate::outline::evidence::shrink_selection(input, &mut selected).is_ok()
+                    {
+                        continue;
+                    }
+                    return Ok(crate::outline::discover::PlanningFit::Measured {
                         estimated_input: tokens,
-                        available_input: config
-                            .limits
-                            .max_context_tokens
-                            .saturating_sub(config.provider.output_token_reserve as usize),
-                    })
-                };
+                        available_input,
+                    });
+                }
+            };
             let mut work =
-                crate::outline::discover::DiscoverWork::plan_with_measured_budget(input, &fits);
+                crate::outline::discover::DiscoverWork::plan_with_support_budget(input, &fits);
             let cache_after = crate::agent_runtime::chat::cache_counts();
             tracing::info!(
                 event = "analysis_pack_planned",

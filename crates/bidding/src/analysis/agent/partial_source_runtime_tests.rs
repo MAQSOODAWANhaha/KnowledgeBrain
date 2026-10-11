@@ -232,13 +232,13 @@ async fn exercise_source_fallback(business_rejection: bool) {
             .values()
             .find_map(|worker| match &worker.pending {
                 Some(discover_coordinator::Pending::Failed { request, code })
-                    if code == "DISCOVER_RETRY_EXHAUSTED" =>
+                    if code == "DISCOVER_NO_STATE_PROGRESS" =>
                 {
                     Some(request)
                 }
                 _ => None,
             })
-            .expect("settled exhausted request audit retained");
+            .expect("settled repeated-failure request audit retained");
         assert_eq!(request.scope.revision, revisions[1]);
         assert!(
             saved

@@ -635,10 +635,24 @@ impl Model for CycleModel {
                         .iter()
                         .map(|u| u["quote_handle"].clone())
                         .collect::<Vec<_>>();
+                    let primary = unit["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|i| i["role"] == "requirement_source")
+                        .map(|i| i["quote_handle"].clone())
+                        .collect::<Vec<_>>();
+                    let support = unit["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|i| i["role"] != "requirement_source")
+                        .map(|i| i["quote_handle"].clone())
+                        .collect::<Vec<_>>();
                     let repairing = !self.saw_repair_wire.load(Ordering::SeqCst);
                     (
                         "submit_claim_comparison",
-                        json!({"requirement_id":unit["requirement_id"],"version":unit["version"],"declared_claims":[{"claim_handle":"requirement","obligation":unit["original_requirement"],"applicability":"synthetic fixture scope","original_fragments":[unit["original_requirement"]],"primary_handles":handles,"support_handles":[]}],"observations":handles.iter().map(|h|json!({"quote_handle":h,"polarity":"mixed","applicability":"relevant","condition":"synthetic condition requiring independent review"})).collect::<Vec<_>>(),"decisions":[{"claim_handle":"requirement","evidence_handles":handles,"verdict":if repairing {"uncertain"}else{"supports"},"action":if repairing {"manual_review"}else{"retain"},"resulting_claim":unit["original_requirement"]}]}),
+                        json!({"requirement_id":unit["requirement_id"],"version":unit["version"],"declared_claims":[{"claim_handle":"requirement","obligation":unit["original_requirement"],"applicability":"synthetic fixture scope","original_fragments":[unit["original_requirement"]],"primary_handles":primary,"support_handles":support}],"observations":handles.iter().map(|h|json!({"quote_handle":h,"polarity":"mixed","applicability":"relevant","condition":"synthetic condition requiring independent review"})).collect::<Vec<_>>(),"decisions":[{"claim_handle":"requirement","evidence_handles":handles,"verdict":if repairing {"uncertain"}else{"supports"},"action":if repairing {"manual_review"}else{"retain"},"resulting_claim":unit["original_requirement"]}]}),
                     )
                 }
                 8 => (
@@ -1519,6 +1533,7 @@ fn related_read_credit_rejects_unknown_stale_foreign_and_modified_requests_atomi
     };
     let response = json!({"content":"","finish_reason":"tool_calls","usage":null,"tool_calls":[{"id":"submit","name":"submit_pack","arguments":"{}"}]});
     let frame = coordinator::RelatedReadFrame {
+        user_page: None,
         directory_page: None,
         call_id: "dependent-original".into(),
         pack_revision: 1,
@@ -2849,8 +2864,7 @@ async fn dependency_selectors_validate_the_same_immutable_worker_scope_before_mu
 async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
     use crate::outline::discover::{ConditionSupport, ConditionSupportOrigin, DiscoverWork};
     let input = crate::outline::frozen::tests::related_native_input();
-    let mut config = crate::analysis::tests::config();
-    config.limits.max_no_progress_turns = 2;
+    let config = crate::analysis::tests::config();
     let mut state = super::super::retirement::checkpoint(&input);
     let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(sessions
@@ -3028,7 +3042,7 @@ async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
         assert_eq!(receipt["result"]["read"]["new_coverage"], false);
         assert_eq!(worker.rejected_turns, ordinal + 1);
         assert!(
-            matches!(&worker.pending,Some(Pending::Failed{request:saved,code}) if saved==&request && code=="BUSINESS_REJECTED")
+            matches!(&worker.pending,Some(Pending::Failed{request:saved,code}) if saved==&request && code==if ordinal==0 {"BUSINESS_REJECTED"} else {"DISCOVER_NO_STATE_PROGRESS"})
         );
         last = Some(request);
     }
@@ -3053,12 +3067,12 @@ async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
         .unwrap()
         .pending = Some(Pending::Failed {
         request: request.clone(),
-        code: "BUSINESS_REJECTED".into(),
+        code: "DISCOVER_NO_STATE_PROGRESS".into(),
     });
     let next = host.next(&BTreeSet::new()).await.unwrap();
     assert!(next.is_none_or(|next| next.scope.pack != "pack-0"));
     assert!(
-        matches!(&host.state.outline_run.discover_workers["pack-0"].pending,Some(Pending::Failed{request:saved,code}) if saved==&request && code=="DISCOVER_RETRY_EXHAUSTED")
+        matches!(&host.state.outline_run.discover_workers["pack-0"].pending,Some(Pending::Failed{request:saved,code}) if saved==&request && code=="DISCOVER_NO_STATE_PROGRESS")
     );
     assert!(
         !host
@@ -3073,7 +3087,7 @@ async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
     host.save().await.unwrap();
     let reloaded = journal.load().await.unwrap().unwrap();
     assert!(
-        matches!(&reloaded.outline_run.discover_workers["pack-0"].pending,Some(Pending::Failed{code,..}) if code=="DISCOVER_RETRY_EXHAUSTED")
+        matches!(&reloaded.outline_run.discover_workers["pack-0"].pending,Some(Pending::Failed{code,..}) if code=="DISCOVER_NO_STATE_PROGRESS")
     );
 }
 
@@ -3090,7 +3104,9 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         cancel: &cancel,
     };
     let mut last_request = None;
-    for _ in 0..2 {
+    // Distinct rejected proposals keep this repair-rotation scenario live;
+    // identical rejected actions terminate in the dedicated stall regressions.
+    for proposal in 0..2 {
         let request = host.next(&BTreeSet::new()).await.unwrap().unwrap();
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         let packet = body["messages"]
@@ -3108,6 +3124,11 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             .unwrap();
         let mut args: Value = serde_json::from_str(&response.tool_calls[0].arguments).unwrap();
         args["requirements"] = json!([{"description":" ","kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":atom["atom_key"]},"evidence":[{"evidence_key":atom["excerpts"][0]["evidence_key"]}]}]);
+        args["requirements"][0]["kind"] = json!(if proposal == 0 {
+            "technical"
+        } else {
+            "commercial"
+        });
         args["no_requirement_reason"] = Value::Null;
         response.tool_calls[0].arguments = args.to_string();
         host.reserve(&request).await.unwrap();
@@ -3163,6 +3184,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
     worker
         .related_read_frames
         .push(coordinator::RelatedReadFrame {
+            user_page: None,
             directory_page: Some("old-directory".into()),
             call_id: "old-read".into(),
             pack_revision: request.scope.revision,
@@ -3242,43 +3264,40 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             assert!(worker.delivered_related_evidence.is_empty());
             assert!(worker.delivered_dependency_pages.is_empty());
             assert!(worker.related_read_frames.is_empty());
-            assert_eq!(worker.history, retained_audit);
+            assert!(worker.history.starts_with(&retained_audit));
             assert!(
-                !worker
+                worker
                     .history
                     .iter()
                     .any(|message| message["content"] == "old owned scope")
             );
             assert!(!worker.source_keys.contains_key("old-source-key"));
-            assert_eq!(
-                worker.rejected_turns,
-                if pending_kind == "committed" { 0 } else { 2 }
-            );
+            assert_eq!(worker.rejected_turns, 2);
         }
     }
-    let mut exhausted = snapshot;
-    exhausted
+    let mut high_audit_count = snapshot;
+    high_audit_count
         .outline_run
         .discover_workers
         .get_mut("pack-0")
         .unwrap()
-        .rejected_turns = config.limits.max_no_progress_turns;
+        .rejected_turns = 100;
     assert!(
         PackHost {
             input: &input,
             config: &config,
-            state: &mut exhausted,
+            state: &mut high_audit_count,
             journal: &journal,
             cancel: &cancel
         }
         .next(&BTreeSet::new())
         .await
         .unwrap()
-        .is_none()
+        .is_some()
     );
     assert_eq!(
-        exhausted.outline_run.discover_workers["pack-0"].rejected_turns,
-        config.limits.max_no_progress_turns
+        high_audit_count.outline_run.discover_workers["pack-0"].rejected_turns,
+        100
     );
 }
 
@@ -3329,7 +3348,8 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
     let atom = &packet["reading_packs"][0]["pack"]["atoms"][0];
     let mut failed = Delayed::default().turn(&config, &first.body).await.unwrap();
     let large = "synthetic failed submission audit ".repeat(10000);
-    failed.content = large.clone();
+    failed.content =
+        "Synthetic observation retained independently of the large submission body.".into();
     let mut args: Value = serde_json::from_str(&failed.tool_calls[0].arguments).unwrap();
     args["requirements"] = json!([{"description":large,"kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":atom["atom_key"]},"evidence":[{"evidence_key":atom["excerpts"][0]["evidence_key"]}]}]);
     // The valid positive extraction conflicts with the existing negative reason.
@@ -3362,7 +3382,7 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
     let mut second_args: Value =
         serde_json::from_str(&second_failure.tool_calls[0].arguments).unwrap();
     assert_eq!(second_args["repair"], true);
-    second_args["requirements"] = json!([{"description":failed.content,"kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":second_atom["atom_key"]},"evidence":[{"evidence_key":second_atom["excerpts"][0]["evidence_key"]}]}]);
+    second_args["requirements"] = json!([{"description":failed.content,"kind":"commercial","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":second_atom["atom_key"]},"evidence":[{"evidence_key":second_atom["excerpts"][0]["evidence_key"]}]}]);
     second_failure.tool_calls[0].arguments = second_args.to_string();
     host.reserve(&second).await.unwrap();
     host.received(&second, &second_failure).await.unwrap();
@@ -3379,8 +3399,8 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         host.state.outline_run.discover_workers["pack-0"].history,
         audit
     );
-    assert!(!String::from_utf8_lossy(&repair.body).contains(&failed.content));
-    assert!(String::from_utf8_lossy(&repair.body).contains("settled_submission_failure"));
+    assert!(String::from_utf8_lossy(&repair.body).contains(&failed.content));
+    assert!(!String::from_utf8_lossy(&repair.body).contains("old-source-key"));
     // Save the common generation/registry starting point for both probes.
     host.save().await.unwrap();
     let measured = host.prepare_inner("pack-0", false).await.unwrap();
@@ -3459,10 +3479,22 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .await
             .unwrap_err()
             .code,
-        "AGENT_TURN_BUDGET_EXCEEDED"
+        "DISCOVER_READ_CAPACITY_EXCEEDED"
     );
 }
 
 include!("discover_f1_tests.rs");
 
 include!("discover_confirmation_tests.rs");
+
+include!("discover_stall_tests.rs");
+
+include!("discover_auto_delivery_tests.rs");
+
+include!("discover_s4_tests.rs");
+
+include!("discover_s2_tests.rs");
+
+include!("discover_s5_tests.rs");
+
+include!("discover_first_support_plan_tests.rs");

@@ -18,7 +18,7 @@ def provider_environment(env_file, inherited):
     config = dotenv_values(env_file, interpolate=False)
     keys = ('KNOWLEDGEBRAIN_CHAT_BASE_URL', 'KNOWLEDGEBRAIN_CHAT_API_KEY',
             'KNOWLEDGEBRAIN_CHAT_MODEL', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL',
-            'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT', 'KB_AUTHORING_MAX_OUTPUT_TOKENS',
+            'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT', 'KB_AUTHORING_OUTPUT_TOKEN_RESERVE',
             'KB_AUTHORING_TIMEOUT_MS')
     env = {k: v for k, v in inherited.items() if k not in keys}
     for key in keys:

@@ -24,6 +24,7 @@ pub(crate) mod partial_source;
 pub(crate) mod read_receipts;
 pub(crate) mod repair;
 pub mod source_review;
+pub(crate) mod source_support;
 pub(crate) mod source_wire;
 pub mod store;
 mod template;

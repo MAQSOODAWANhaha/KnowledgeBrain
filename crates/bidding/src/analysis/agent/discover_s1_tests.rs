@@ -16,7 +16,7 @@ fn fixture() -> (FrozenInput, DiscoverWork, ParsePack) {
         .unwrap(),
     )
     .unwrap();
-    let input = frozen::build_frozen_input(
+    let mut input = frozen::build_frozen_input(
         FrozenBuildInput {
             project_id: "synthetic-s1-project".into(),
             document_set_id: "synthetic-s1-set".into(),
@@ -32,9 +32,39 @@ fn fixture() -> (FrozenInput, DiscoverWork, ParsePack) {
         PARSER_CONTRACT_VERSION,
     )
     .unwrap();
+    // Required context is a precise synthetic parser relation, not a prose heuristic.
+    let intro = input
+        .source_units
+        .iter()
+        .find(|s| s.text.contains("Only if"))
+        .unwrap()
+        .source_unit_revision_id
+        .clone();
+    let intro_source = input
+        .source_units
+        .iter()
+        .find(|s| s.source_unit_revision_id == intro)
+        .unwrap();
+    let intro_doc = intro_source.document_id.clone();
+    let intro_unit = intro_source.locator["unit_id"].as_str().unwrap().to_owned();
+    for form in &input.structured_forms {
+        let owner = input
+            .source_units
+            .iter()
+            .find(|s| {
+                Some(s.source_unit_revision_id.as_str()) == form["source_unit_revision_id"].as_str()
+            })
+            .unwrap();
+        input.document_relations.push(serde_json::from_value(json!({"id":format!("s1-required-{}",owner.source_unit_revision_id),"from":{"document_id":owner.document_id,"unit_id":owner.locator["unit_id"]},"to":{"document_id":intro_doc,"unit_id":intro_unit},"kind":"explicit_reference","status":"confirmed","required":true,"basis":form["definition"]["cells"].as_array().unwrap().iter().find_map(|c|c["text"].as_str().filter(|text|!text.is_empty())).unwrap(),"locator":owner.locator})).unwrap());
+    }
     let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(serde_json::to_vec(sessions).unwrap().len() <= 20_000)
     });
+    assert!(
+        work.planning_error().is_none(),
+        "native S1 fixture planning failed: {:?}",
+        work.planning_error()
+    );
     let pack = work
         .claim(256)
         .into_iter()
@@ -101,12 +131,27 @@ fn s1_native_context_requires_durable_delivery_and_never_transfers_ownership() {
     let identity = work.pack_wire_identity(id).unwrap();
     let session = work.session(&input, id).unwrap();
     assert_eq!(session["pack"]["condition_support_options"], json!([]));
-    let dependency = session["pack"]["read_dependencies"][0]["read"]["args"]["dependency_id"]
-        .as_str()
-        .unwrap();
+    let mut directory = session["pack"].clone();
+    let dependency = loop {
+        if let Some(row) = directory["read_dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["type"] == "structural_context_candidate")
+        {
+            break row["read"]["args"]["dependency_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        }
+        let cursor = directory["next_dependency_cursor"]
+            .as_str()
+            .expect("fixture must contain an optional scoped structural candidate");
+        directory = work.dependency_directory_page(&input, id, cursor).unwrap();
+    };
     assert!(
         !work
-            .dependency_selection(&input, id, dependency)
+            .dependency_selection(&input, id, &dependency)
             .unwrap()
             .is_empty()
     );
@@ -156,6 +201,7 @@ fn s1_native_context_requires_durable_delivery_and_never_transfers_ownership() {
         output_reserve: 1,
     };
     let frame = coordinator::RelatedReadFrame {
+        user_page: None,
         directory_page: None,
         call_id: "s1-original".into(),
         pack_revision: pack.pack_revision,
@@ -220,7 +266,7 @@ fn s1_native_context_requires_durable_delivery_and_never_transfers_ownership() {
     );
     work.reopen_committed(&input, id, pack.pack_revision, "s1-reopen")
         .unwrap();
-    assert!(work.dependency_selection(&input, id, dependency).is_err());
+    assert!(work.dependency_selection(&input, id, &dependency).is_err());
     assert!(work.confirm_related_read(&input, id, &options).is_err());
     assert!(
         work.canonical_pack(id)
@@ -352,20 +398,77 @@ fn s1_check_candidate_requires_fresh_original_reads_and_semantic_applicability()
 }
 
 fn structural_refs(input: &FrozenInput, pack: &ParsePack) -> Vec<EvidenceRef> {
-    let owners = pack
+    use crate::outline::discover::PackCarrier;
+    let owned = pack
         .atoms
         .iter()
-        .map(|atom| atom.source_unit_revision_id.clone())
-        .collect();
-    crate::outline::discover::section_context_sources(input, &owners)
-        .into_iter()
-        .map(|source| EvidenceRef::Text {
-            input_digest: pack.input_digest.clone(),
-            unit_id: source.source_unit_revision_id.clone(),
-            start_byte: 0,
-            end_byte: source.text.len(),
+        .filter(|a| !a.context_only)
+        .flat_map(|atom| match &atom.carrier {
+            PackCarrier::Text { evidence } | PackCarrier::Image { evidence, .. } => {
+                vec![evidence.clone()]
+            }
+            PackCarrier::Grid {
+                table_id, cells, ..
+            } => cells
+                .iter()
+                .filter(|c| c.start_byte < c.end_byte)
+                .map(|c| EvidenceRef::GridCell {
+                    input_digest: pack.input_digest.clone(),
+                    table_id: table_id.clone(),
+                    anchor_row: c.anchor_row,
+                    anchor_column: c.anchor_column,
+                    start_byte: c.start_byte,
+                    end_byte: c.end_byte,
+                })
+                .collect(),
+            PackCarrier::Structure { .. } => vec![],
         })
+        .collect::<Vec<_>>();
+    crate::outline::source_support::select(input, &owned)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.evidence)
         .collect()
+}
+
+fn s1_wire_evidence(worker: &Worker, evidence: &Value) -> EvidenceRef {
+    let decoded=worker.registry.decode(json!({"wire_scope":worker.registry.fixture_encode(json!({})).unwrap()["wire_scope"],"refs":[evidence]}),false).unwrap();
+    let key = decoded["refs"][0]["source_key"]
+        .as_str()
+        .expect("actual wire must use an issued source key");
+    worker
+        .source_keys
+        .get(key)
+        .expect("source key must have been issued by this worker")
+        .clone()
+}
+
+fn split_support_page(
+    input: &FrozenInput,
+    refs: &[EvidenceRef],
+) -> (Vec<EvidenceRef>, Vec<EvidenceRef>) {
+    let mut first = Vec::new();
+    let mut rest = Vec::new();
+    for reference in refs {
+        let Some((start, end)) = reference.range() else {
+            first.push(reference.clone());
+            continue;
+        };
+        let excerpts =
+            crate::outline::evidence::resolve_evidence(input, std::slice::from_ref(reference))
+                .unwrap();
+        let boundary = start + excerpts[0].quote.chars().next().unwrap().len_utf8();
+        let mut left = serde_json::to_value(reference).unwrap();
+        left["end_byte"] = json!(boundary);
+        first.push(serde_json::from_value(left).unwrap());
+        if boundary < end {
+            let mut right = serde_json::to_value(reference).unwrap();
+            right["start_byte"] = json!(boundary);
+            rest.push(serde_json::from_value(right).unwrap());
+        }
+    }
+    assert!(!rest.is_empty());
+    (first, rest)
 }
 
 fn stage_context_page(
@@ -403,6 +506,7 @@ fn stage_context_page(
     worker
         .related_read_frames
         .push(coordinator::RelatedReadFrame {
+            user_page: None,
             directory_page: None,
             call_id: call.into(),
             pack_revision: pack.pack_revision,
@@ -428,37 +532,7 @@ fn deliver_context_page(
 fn s1_partial_context_delivery_blocks_submission_until_full_union_survives_reload() {
     let (input, work, pack) = fixture();
     let submit = submission(&input, &work, &pack);
-    let mut first = Vec::new();
-    let mut rest = Vec::new();
-    for reference in structural_refs(&input, &pack) {
-        let EvidenceRef::Text {
-            input_digest,
-            unit_id,
-            end_byte,
-            ..
-        } = reference
-        else {
-            unreachable!()
-        };
-        let source = input
-            .source_units
-            .iter()
-            .find(|s| s.source_unit_revision_id == unit_id)
-            .unwrap();
-        let middle = source.text.char_indices().nth(1).unwrap().0;
-        first.push(EvidenceRef::Text {
-            input_digest: input_digest.clone(),
-            unit_id: unit_id.clone(),
-            start_byte: 0,
-            end_byte: middle,
-        });
-        rest.push(EvidenceRef::Text {
-            input_digest,
-            unit_id,
-            start_byte: middle,
-            end_byte,
-        });
-    }
+    let (first, rest) = split_support_page(&input, &structural_refs(&input, &pack));
     let mut state = super::super::retirement::checkpoint(&input);
     state.outline_run.reading_packs = Some(work);
     deliver_context_page(&input, &mut state, &pack, &first, "s1-first-page");
@@ -519,27 +593,7 @@ fn s1_failed_claim_reads_and_repairs_on_the_same_state_without_terminal_or_forei
     );
     let mut state: Checkpoint = serde_json::from_value(json!(state)).unwrap();
     let refs = structural_refs(&input, &pack);
-    let mut first = refs.clone();
-    let mut rest = refs.clone();
-    for (left, right) in first.iter_mut().zip(&mut rest) {
-        let EvidenceRef::Text {
-            unit_id, end_byte, ..
-        } = left
-        else {
-            unreachable!()
-        };
-        let source = input
-            .source_units
-            .iter()
-            .find(|source| source.source_unit_revision_id == *unit_id)
-            .unwrap();
-        let boundary = source.text.char_indices().nth(1).unwrap().0;
-        *end_byte = boundary;
-        let EvidenceRef::Text { start_byte, .. } = right else {
-            unreachable!()
-        };
-        *start_byte = boundary;
-    }
+    let (first, rest) = split_support_page(&input, &refs);
     let request = stage_context_page(&input, &mut state, &pack, &first, "failed-first-page");
     for mode in ["terminal", "foreign", "stale_revision"] {
         let mut rejected = state.clone();
@@ -811,7 +865,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
         journal: &probe_journal,
         cancel: &cancel,
     }
-    .prepare_inner(&target.id, false)
+    .prepare_candidate(&target.id, false)
     .await
     .unwrap();
     // Keep the original failing window. A larger window must not mask linear
@@ -820,9 +874,6 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
         baseline.input_reserve as usize + baseline.output_reserve as usize + 1300;
     state.config_sha256 = digest(&config).unwrap();
     let journal = S1Journal(std::sync::Mutex::new(state.clone()));
-    let mut body_cursor: Option<String> = None;
-    let mut directory_cursor: Option<String> = None;
-    let mut dependencies = std::collections::VecDeque::<String>::new();
     let mut continuation_calls = 0;
     let mut delivered_intro = String::new();
     let mut finished = false;
@@ -840,11 +891,15 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             journal: &journal,
             cancel: &cancel,
         };
-        let request = host
-            .next(&BTreeSet::new())
-            .await
-            .unwrap()
-            .expect("the Failed worker must remain schedulable for repair reads");
+        let Some(request) = host.next(&BTreeSet::new()).await.unwrap() else {
+            assert!(unique_observations);
+            assert!(
+                matches!(&host.state.outline_run.discover_workers[&target.id].pending,Some(Pending::Failed {code,..}) if code=="DISCOVER_READ_CAPACITY_EXCEEDED")
+            );
+            capacity_stopped = true;
+            state = journal.load().await.unwrap().unwrap();
+            break;
+        };
         assert_eq!(request.scope.pack, target.id);
         assert!(
             request.input_reserve + request.output_reserve
@@ -856,8 +911,9 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             let canonical_count = host.state.outline_run.discover_workers[&target.id]
                 .history
                 .iter()
-                .filter_map(s1_plain_assistant_text)
-                .filter(|text| text == observation)
+                .filter(|message| {
+                    message["role"] == "assistant" && message["content"] == observation
+                })
                 .count();
             saw_repeated_retired |= canonical_count > 1;
             let retired_count = wire["messages"]
@@ -873,79 +929,58 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
                 "actual wire must retain exactly one observation when canonical retired observations exist, step {step}"
             );
         }
-        let rejected_before = host.state.outline_run.discover_workers[&target.id].rejected_turns;
-        let canonical = host
-            .state
-            .outline_run
-            .reading_packs
-            .as_ref()
+        let payloads = wire["messages"]
+            .as_array()
             .unwrap()
-            .session(&input, &target.id)
-            .unwrap();
-        if step == 0 {
-            dependencies.extend(
-                canonical["pack"]["read_dependencies"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|row| {
-                        row["read"]["args"]["dependency_id"]
-                            .as_str()
-                            .map(str::to_owned)
-                    }),
-            );
-            directory_cursor = canonical["pack"]["next_dependency_cursor"]
-                .as_str()
-                .map(str::to_owned);
+            .iter()
+            .filter_map(|message| {
+                let text = match &message["content"] {
+                    Value::String(s) => s.clone(),
+                    Value::Array(parts) => parts
+                        .iter()
+                        .filter_map(|p| p["text"].as_str())
+                        .collect::<String>(),
+                    _ => return None,
+                };
+                serde_json::from_str::<Value>(&text).ok()
+            })
+            .collect::<Vec<_>>();
+        let page = &payloads
+            .iter()
+            .find(|p| p["automatic_support_page"].is_object())
+            .expect("every incomplete-support turn carries actual source")["automatic_support_page"]
+            ["read"];
+        let before_options = json!(
+            host.state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .canonical_pack(&target.id)
+                .unwrap()
+                .condition_support_options
+        );
+        for excerpt in page["excerpts"].as_array().into_iter().flatten() {
+            if matches!(s1_wire_evidence(&host.state.outline_run.discover_workers[&target.id], &excerpt["evidence"]), EvidenceRef::Text{unit_id,..} if unit_id==intro_id)
+            {
+                let quote = excerpt["quote"].as_str().unwrap();
+                assert!(!quote.is_empty());
+                delivered_intro.push_str(quote);
+                continuation_calls += 1;
+            }
         }
-        let (name, args) = if step != 0 && body_cursor.is_some() {
-            continuation_calls += 1;
-            (
-                "read_evidence",
-                json!({"cursor":body_cursor.take().unwrap()}),
-            )
-        } else if step != 0 && !dependencies.is_empty() {
-            (
-                "read_evidence",
-                json!({"dependency_id":dependencies.pop_front().unwrap()}),
-            )
-        } else if step != 0 && directory_cursor.is_some() {
-            (
-                "read_evidence",
-                json!({"dependency_cursor":directory_cursor.take().unwrap()}),
-            )
-        } else {
-            let body: Value = serde_json::from_slice(&request.body).unwrap();
-            let payloads = body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|message| message["content"].as_str())
-                .filter_map(|text| serde_json::from_str::<Value>(text).ok())
-                .collect::<Vec<_>>();
-            let session = &payloads
-                .iter()
-                .find(|payload| payload["reading_packs"].is_array())
-                .unwrap()["reading_packs"][0];
-            let pack = &session["pack"];
-            let scope = payloads
-                .iter()
-                .find_map(|payload| payload["wire_scope"].as_str())
-                .unwrap();
-            (
-                "submit_pack",
-                json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic host protocol response only; no semantic extraction assertion.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()}),
-            )
-        };
-        let args = if name == "read_evidence" {
-            host.state.outline_run.discover_workers[&target.id]
-                .registry
-                .fixture_encode(args)
-                .unwrap()
-        } else {
-            args
-        };
-        let observation = if unique_observations && name == "read_evidence" {
+        let session = &payloads
+            .iter()
+            .find(|p| p["reading_packs"].is_array())
+            .unwrap()["reading_packs"][0];
+        let pack = &session["pack"];
+        let scope = payloads
+            .iter()
+            .find_map(|p| p["wire_scope"].as_str())
+            .unwrap();
+        let name = "submit_pack";
+        let args = json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic host protocol response only; no semantic extraction assertion.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|a|a["context_only"]!=true).map(|a|json!({"atom_key":a["atom_key"]})).collect::<Vec<_>>()});
+        let observation = if unique_observations {
             format!(
                 "Unique observation {step}: {}",
                 "Synthetic evidence observation retained in its original sequence. ".repeat(3)
@@ -994,6 +1029,20 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
                 .pending,
             Some(Pending::Received { .. })
         ));
+        assert_eq!(
+            json!(
+                host.state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .canonical_pack(&target.id)
+                    .unwrap()
+                    .condition_support_options
+            ),
+            before_options,
+            "a received response is not yet source credit"
+        );
         host.commit(&request, response).await.unwrap();
         let worker = &host.state.outline_run.discover_workers[&target.id];
         let audit_observations = worker
@@ -1009,71 +1058,19 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
         let result: Value =
             serde_json::from_str(worker.history.last().unwrap()["content"].as_str().unwrap())
                 .unwrap();
-        if step == 0 {
-            assert_eq!(result["ok"], false);
+        if result["ok"] == true {
+            assert_eq!(result["result"]["status"], "committed");
+            finished = true;
+        } else {
             assert!(
                 result
                     .to_string()
-                    .contains("structural_context_not_delivered")
-            );
-            assert_eq!(
-                host.state
-                    .outline_run
-                    .reading_packs
-                    .as_ref()
-                    .unwrap()
-                    .status(&target.id),
-                Some(PackStatus::Failed)
-            );
-            assert!(matches!(worker.pending, Some(Pending::Failed { .. })));
-        } else if unique_observations
-            && matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "DISCOVER_READ_CAPACITY_EXCEEDED")
-        {
-            assert_eq!(result["ok"], false);
-            assert_eq!(
-                worker.rejected_turns, rejected_before,
-                "host capacity is not another business rejection"
+                    .contains("Required structural support pages remain"),
+                "step {step}: {result}"
             );
             assert!(
-                emitted_observations.len() > 2,
-                "exercise several distinct observations before capacity stop"
+                matches!(&worker.pending,Some(Pending::Failed {code,..}) if code=="BUSINESS_REJECTED")
             );
-            capacity_stopped = true;
-        } else {
-            assert_eq!(
-                result["ok"],
-                true,
-                "step {step}, returned intro bytes {}, continuations {}, history messages {}, input reserve {}, context limit {}: {result}",
-                delivered_intro.len(),
-                continuation_calls,
-                worker.history.len(),
-                request.input_reserve,
-                config.limits.max_context_tokens
-            );
-            if name == "read_evidence" {
-                let read = &result["result"]["read"];
-                assert_eq!(
-                    read["new_coverage"], true,
-                    "each scripted read must add actual source or directory coverage"
-                );
-                body_cursor = read["next_cursor"].as_str().map(str::to_owned);
-                if let Some(rows) = read["read_dependencies"].as_array() {
-                    dependencies.extend(rows.iter().filter_map(|row| {
-                        row["read"]["args"]["dependency_id"]
-                            .as_str()
-                            .map(str::to_owned)
-                    }));
-                    directory_cursor = read["next_dependency_cursor"].as_str().map(str::to_owned);
-                }
-                for excerpt in read["excerpts"].as_array().into_iter().flatten() {
-                    if excerpt["evidence"]["unit_id"] == intro_id {
-                        delivered_intro.push_str(excerpt["quote"].as_str().unwrap());
-                    }
-                }
-            } else {
-                assert_eq!(result["result"]["status"], "committed");
-                finished = true;
-            }
         }
         let saved = journal.load().await.unwrap().unwrap();
         assert_eq!(json!(saved), json!(host.state));
@@ -1088,7 +1085,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             "distinct observations must be preserved and produce an explicit bounded host stop"
         );
         let work = state.outline_run.reading_packs.as_ref().unwrap();
-        assert_eq!(work.status(&target.id), Some(PackStatus::Failed));
+        assert_ne!(work.status(&target.id), Some(PackStatus::Committed));
         let delivered = work
             .canonical_pack(&target.id)
             .unwrap()
@@ -1139,8 +1136,8 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
         "fixture must actually exercise repeated canonical observations"
     );
     assert!(
-        continuation_calls > 0,
-        "source body must use production continuation pages"
+        continuation_calls > 6,
+        "more than six genuinely new source pages must remain schedulable"
     );
     assert_eq!(
         delivered_intro, intro_text,
@@ -1208,44 +1205,40 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
 }
 
 #[tokio::test]
-async fn s1_two_contexts_wire_navigation_repairs_without_repeating_confirmed_first_entry() {
-    let input = FrozenInput {
-        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
-        project_id: "s1-navigation-project".into(),
-        document_set_id: "s1-navigation-set".into(),
-        documents: vec![],
-        document_relations: vec![],
-        source_units: [
-            "Only if optional service is selected, the following response conditions apply.",
-            "For that optional service, the response must cover the selected service period.",
-            "Provide the optional service response when the preceding conditions apply.",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, text)| crate::analysis::Source {
-            source_unit_revision_id: format!("s1-navigation-source-{ordinal}"),
-            document_id: "s1-navigation-document".into(),
-            text: text.into(),
-            locator: json!({"section_id":"s1-section","heading_path":"Optional service"}),
-            ordinal,
-        })
-        .collect(),
-        structured_forms: vec![],
-        decisions: vec![],
-    };
+async fn s1_two_contexts_auto_delivery_confirms_only_consumed_pages_and_reloads() {
+    // Native synthetic document manifests retain real parser unit identities.
+    let mut input = super::super::token_transport_validation::synthetic_input(1, 3);
+    let source_ids = input
+        .source_units
+        .iter()
+        .map(|s| s.source_unit_revision_id.clone())
+        .collect::<Vec<_>>();
+    for n in 0..2 {
+        let owner = &input.source_units[2];
+        let support = &input.source_units[n];
+        input.document_relations.push(serde_json::from_value(json!({"id":format!("required-{n}"),"from":{"document_id":owner.document_id,"unit_id":owner.locator["unit_id"]},"to":{"document_id":support.document_id,"unit_id":support.locator["unit_id"]},"kind":"explicit_reference","status":"confirmed","required":true,"basis":owner.text.trim(),"locator":owner.locator})).unwrap());
+    }
+    input.validate_document_relations().unwrap();
     let work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(sessions
             .iter()
-            .all(|session| session["pack"]["atoms"].as_array().unwrap().len() == 1))
+            .all(|s| s["pack"]["atoms"].as_array().unwrap().len() == 1))
     });
     assert!(
         work.planning_error().is_none(),
         "{:?}",
         work.planning_error()
     );
-    let ids = work.pack_ids();
-    assert_eq!(ids.len(), 3);
-    let target = ids.iter().nth(2).unwrap().clone();
+    let target = work
+        .pack_ids()
+        .into_iter()
+        .find(|id| {
+            work.pack_evidence(&input, id)
+                .unwrap()
+                .iter()
+                .any(|r| matches!(r,EvidenceRef::Text{unit_id,..} if unit_id==&source_ids[2]))
+        })
+        .unwrap();
     let mut state = super::super::retirement::checkpoint(&input);
     state.turn = 0;
     state.outline_run.reading_packs = Some(work);
@@ -1253,11 +1246,10 @@ async fn s1_two_contexts_wire_navigation_repairs_without_repeating_confirmed_fir
     state.config_sha256 = digest(&config).unwrap();
     let journal = S1Journal(std::sync::Mutex::new(state.clone()));
     let cancel = CancellationToken::new();
-    let mut target_step = 0;
-    let mut first_action = Value::Null;
-    let mut second_action = Value::Null;
+    let mut target_turns = 0;
     let mut calls = 0;
-    for step in 0..12 {
+    let mut delivered = Vec::new();
+    for step in 0..8 {
         let mut host = PackHost {
             input: &input,
             config: &config,
@@ -1265,123 +1257,76 @@ async fn s1_two_contexts_wire_navigation_repairs_without_repeating_confirmed_fir
             journal: &journal,
             cancel: &cancel,
         };
-        let request = host.next(&BTreeSet::new()).await.unwrap().unwrap();
-        let body: Value = serde_json::from_slice(&request.body).unwrap();
-        let payloads = body["messages"]
+        let Some(request) = host.next(&BTreeSet::new()).await.unwrap() else {
+            break;
+        };
+        let wire: Value = serde_json::from_slice(&request.body).unwrap();
+        let payloads = wire["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|message| message["content"].as_str())
-            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .filter_map(|m| {
+                let text = match &m["content"] {
+                    Value::String(s) => s.clone(),
+                    Value::Array(a) => a
+                        .iter()
+                        .filter_map(|v| v["text"].as_str())
+                        .collect::<String>(),
+                    _ => return None,
+                };
+                serde_json::from_str::<Value>(&text).ok()
+            })
             .collect::<Vec<_>>();
         let session = &payloads
             .iter()
             .find(|p| p["reading_packs"].is_array())
             .unwrap()["reading_packs"][0];
         let pack = &session["pack"];
-        let progress = &payloads
+        let scope = payloads
             .iter()
-            .find(|p| p["dependency_progress"].is_object())
-            .unwrap()["dependency_progress"];
-        let next = pack["next_required_read"].clone();
-        assert_eq!(next, progress["next_required_read"]);
-        let is_target = request.scope.pack == target;
-        let canonical = host
+            .find_map(|p| p["wire_scope"].as_str())
+            .unwrap();
+        let before = host
             .state
             .outline_run
             .reading_packs
             .as_ref()
             .unwrap()
             .canonical_pack(&request.scope.pack)
-            .unwrap();
-        let supports_before = json!(canonical.condition_support_options);
+            .unwrap()
+            .condition_support_options
+            .clone();
+        let is_target = request.scope.pack == target;
         if is_target {
-            assert_eq!(pack["read_dependencies"].as_array().unwrap().len(), 1);
-            match target_step {
-                0 => {
-                    assert_eq!(
-                        pack["read_dependencies"][0]["original_read_complete"],
-                        false
-                    );
-                    assert_eq!(next, pack["read_dependencies"][0]["read"]);
-                    assert_eq!(supports_before, json!([]));
-                    first_action = next.clone();
-                }
-                1 => {
-                    assert_eq!(
-                        pack["read_dependencies"][0]["original_read_complete"],
-                        false
-                    );
-                    assert_eq!(
-                        supports_before,
-                        json!([]),
-                        "attached original is not confirmed credit"
-                    );
-                    assert!(
-                        !host.state.outline_run.discover_workers[&target]
-                            .related_read_frames
-                            .is_empty()
-                    );
-                    assert!(!next.is_null());
-                    assert_ne!(
-                        next, first_action,
-                        "after consuming this request, navigate to the second original"
-                    );
-                    second_action = next.clone();
-                }
-                2 => {
-                    assert_eq!(pack["read_dependencies"][0]["original_read_complete"], true);
-                    assert_eq!(
-                        next, second_action,
-                        "confirmed first directory entry must not hide the next page's unread source"
-                    );
-                    assert_eq!(canonical.condition_support_options.len(), 1);
-                }
-                3 => {
-                    assert_eq!(pack["read_dependencies"][0]["original_read_complete"], true);
-                    assert!(
-                        next.is_null(),
-                        "navigation anticipates the second attached original"
-                    );
-                    assert_eq!(
-                        canonical.condition_support_options.len(),
-                        1,
-                        "navigation must not grant the second original before consumption"
-                    );
-                    assert!(
-                        !host.state.outline_run.discover_workers[&target]
-                            .related_read_frames
-                            .is_empty()
-                    );
-                }
-                _ => panic!("target must commit after the corrected submission"),
-            }
-        }
-        // Only the target's second turn intentionally ignores the next action:
-        // its submission must confirm the first original and reject the missing second.
-        let submit = next.is_null() || (is_target && target_step == 1);
-        let (name, args) = if submit {
-            let scope = payloads
-                .iter()
-                .find_map(|p| p["wire_scope"].as_str())
-                .unwrap();
-            (
-                "submit_pack",
-                json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic navigation protocol only, not a semantic extraction assertion.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()}),
-            )
-        } else {
-            assert_eq!(next["tool"], "read_evidence");
-            let mut args = next["args"].clone();
-            args["wire_scope"] = json!(
-                payloads
-                    .iter()
-                    .find_map(|p| p["wire_scope"].as_str())
-                    .unwrap()
+            assert_eq!(
+                before.len(),
+                target_turns,
+                "pending automatic page cannot grant credit"
             );
-            ("read_evidence", args)
-        };
+            let page = &payloads
+                .iter()
+                .find(|p| p["automatic_support_page"].is_object())
+                .unwrap()["automatic_support_page"]["read"];
+            let refs = page["excerpts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    match s1_wire_evidence(
+                        &host.state.outline_run.discover_workers[&target],
+                        &e["evidence"],
+                    ) {
+                        EvidenceRef::Text { unit_id, .. } => unit_id,
+                        _ => panic!("synthetic support must be text"),
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(refs, vec![source_ids[target_turns].clone()]);
+            delivered.extend(refs);
+        }
+        let args = json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic protocol response, not semantic extraction.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|a|a["context_only"]!=true).map(|a|json!({"atom_key":a["atom_key"]})).collect::<Vec<_>>()});
         let response = ChatTurn {
-            content: "Synthetic offline navigation response.".into(),
+            content: "Synthetic response.".into(),
             finish_reason: "tool_calls".into(),
             usage: Some(knowledge::models::ChatUsage {
                 prompt_tokens: Some(10),
@@ -1390,89 +1335,65 @@ async fn s1_two_contexts_wire_navigation_repairs_without_repeating_confirmed_fir
                 ..Default::default()
             }),
             tool_calls: vec![knowledge::models::ChatToolCall {
-                id: format!("s1-navigation-{step}"),
-                name: name.into(),
+                id: format!("s1-auto-{step}"),
+                name: "submit_pack".into(),
                 arguments: args.to_string(),
             }],
         };
         host.reserve(&request).await.unwrap();
         host.received(&request, &response).await.unwrap();
         assert_eq!(
-            json!(
-                host.state
-                    .outline_run
-                    .reading_packs
-                    .as_ref()
-                    .unwrap()
-                    .canonical_pack(&request.scope.pack)
-                    .unwrap()
-                    .condition_support_options
-            ),
-            supports_before,
-            "even durable receipt does not grant source credit before production commit confirms the exact request"
+            host.state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .canonical_pack(&request.scope.pack)
+                .unwrap()
+                .condition_support_options,
+            before,
+            "Received is not confirmation"
         );
         host.commit(&request, response).await.unwrap();
         calls += 1;
         let worker = &host.state.outline_run.discover_workers[&request.scope.pack];
-        let receipt: Value =
+        let result: Value =
             serde_json::from_str(worker.history.last().unwrap()["content"].as_str().unwrap())
                 .unwrap();
-        if is_target && target_step == 1 {
-            assert_eq!(receipt["ok"], false);
+        if is_target && target_turns == 0 {
+            assert_eq!(result["ok"], false);
             assert!(
-                receipt
+                result
                     .to_string()
-                    .contains("structural_context_not_delivered")
+                    .contains("Required structural support pages remain")
             );
             assert!(
-                matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "BUSINESS_REJECTED")
-            );
-            assert_eq!(
-                host.state
-                    .outline_run
-                    .reading_packs
-                    .as_ref()
-                    .unwrap()
-                    .canonical_pack(&target)
-                    .unwrap()
-                    .condition_support_options
-                    .len(),
-                1
+                matches!(&worker.pending,Some(Pending::Failed{code,..}) if code=="BUSINESS_REJECTED")
             );
         } else {
-            assert_eq!(receipt["ok"], true, "step {step}: {receipt}");
-            if !submit {
-                assert_eq!(receipt["result"]["read"]["new_coverage"], true);
-            }
+            assert_eq!(result["ok"], true, "{result}");
         }
         if is_target {
-            target_step += 1;
+            target_turns += 1;
         }
         let saved = journal.load().await.unwrap().unwrap();
         assert_eq!(json!(saved), json!(host.state));
         state = saved;
-        if is_target && submit && target_step == 4 {
-            break;
-        }
     }
-    assert_eq!(target_step, 4);
+    assert_eq!(target_turns, 2);
+    assert_eq!(delivered, source_ids[..2].to_vec());
     let work = state.outline_run.reading_packs.as_ref().unwrap();
-    assert!(
-        work.complete(),
-        "every pack used the actual host lifecycle, without seeding successful unrelated scopes"
-    );
+    assert!(work.complete(), "no other pack was seeded successful");
     assert_eq!(work.status(&target), Some(PackStatus::Committed));
     assert!(
-        work.canonical_pack(&target)
+        work.pack_evidence(&input, &target)
             .unwrap()
-            .condition_support_options
-            .is_empty(),
-        "successful repair rotates the claim; original delivery does not grant fresh-claim support or Check credit"
+            .iter()
+            .all(|r| matches!(r,EvidenceRef::Text{unit_id,..} if unit_id==&source_ids[2]))
     );
-    assert!(work.pack_evidence(&input, &target).unwrap().iter().all(|reference| matches!(reference, EvidenceRef::Text { unit_id, .. } if unit_id == "s1-navigation-source-2")));
     assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
     assert_eq!(state.journal.accounting.physical_calls, calls);
-    let accounting = json!(state.journal.accounting);
+    let before = json!(state.journal.accounting);
     let mut host = PackHost {
         input: &input,
         config: &config,
@@ -1482,5 +1403,5 @@ async fn s1_two_contexts_wire_navigation_repairs_without_repeating_confirmed_fir
     };
     host.replay_received().await.unwrap();
     assert!(host.next(&BTreeSet::new()).await.unwrap().is_none());
-    assert_eq!(json!(host.state.journal.accounting), accounting);
+    assert_eq!(json!(host.state.journal.accounting), before);
 }

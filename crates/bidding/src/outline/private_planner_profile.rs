@@ -122,15 +122,22 @@ async fn private_full_request_planner_profile_without_model() {
     );
     assert_eq!(limits.token_safety_margin, 4096);
     let stage_started = std::time::Instant::now();
-    let provider = serde_json::from_value(json!({
-        "schema_version":1,"base_url":"https://ai.zleiwork.cn/v1",
-        "endpoint":"https://ai.zleiwork.cn/v1/chat/completions",
-        "protocol":"openai_chat_completions_sse","model_id":"gpt-6-luna",
-        "credential_ref":"env:KNOWLEDGEBRAIN_CHAT_API_KEY","stream":true,
-        "output_token_reserve":16384,"timeout_ms":180000,"response_mode":"tool_calls",
-        "transport_retries":0,"temperature":null,"reasoning_effort":null
-    }))
-    .expect("offline runtime contract invalid");
+    // Private file contains only the provider contract and env credential reference.
+    // No credential value is read or copied by this offline test.
+    let provider_json: Value = serde_json::from_slice(
+        &std::fs::read(
+            std::env::var("KB_PRIVATE_PROFILE_PROVIDER").expect("provider contract path required"),
+        )
+        .expect("provider contract unreadable"),
+    )
+    .expect("provider contract invalid JSON");
+    assert_eq!(provider_json["model_id"], "gpt-6-luna");
+    assert_eq!(provider_json["output_token_reserve"], 16384);
+    assert_eq!(
+        provider_json["credential_ref"],
+        "env:KNOWLEDGEBRAIN_CHAT_API_KEY"
+    );
+    let provider = serde_json::from_value(provider_json).expect("provider contract invalid");
     let config = agent::Config::with_provider_for(provider, limits, Some(&input))
         .expect("offline config invalid");
     let config_build_micros = stage_started.elapsed().as_micros();

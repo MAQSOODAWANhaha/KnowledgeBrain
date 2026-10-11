@@ -31,6 +31,7 @@ async fn source_confirmation_failure_stops_same_frame_after_reload_and_keeps_ind
         .unwrap()
         .related_read_frames
         .push(coordinator::RelatedReadFrame {
+            user_page: None,
             directory_page: None,
             call_id: "synthetic-frame".into(),
             pack_revision: request.scope.revision,

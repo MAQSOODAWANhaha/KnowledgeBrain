@@ -125,6 +125,7 @@ impl<J: Journal> PackHost<'_, J> {
         let result = json!({"status":"read_pending_delivery","read":page});
         let call = &response.tool_calls[0];
         let frame = coordinator::RelatedReadFrame {
+            user_page: None,
             directory_page: Some(page_id),
             call_id: call.id.clone(),
             pack_revision: request.scope.revision,
@@ -151,7 +152,7 @@ impl<J: Journal> PackHost<'_, J> {
         .prepare_inner(id, false)
         .await
         .map_err(|error| {
-            if error.code == "AGENT_TURN_BUDGET_EXCEEDED" {
+            if matches!(error.code.as_str(), "AGENT_TURN_BUDGET_EXCEEDED" | "DISCOVER_READ_CAPACITY_EXCEEDED") {
                 ReadPageFailure::Capacity("The indivisible dependency directory page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into())
             } else {
                 ReadPageFailure::Host(error)
@@ -272,6 +273,7 @@ impl<J: Journal> PackHost<'_, J> {
             let result = json!({"status":"read_pending_delivery","read":value});
             let call = &response.tool_calls[0];
             let frame = coordinator::RelatedReadFrame {
+                user_page: None,
                 directory_page: None,
                 call_id: call.id.clone(),
                 pack_revision: request.scope.revision,
@@ -318,7 +320,7 @@ impl<J: Journal> PackHost<'_, J> {
                     }
                     return Ok(result);
                 }
-                Err(error) if error.code == "AGENT_TURN_BUDGET_EXCEEDED" => {
+                Err(error) if matches!(error.code.as_str(), "AGENT_TURN_BUDGET_EXCEEDED" | "DISCOVER_READ_CAPACITY_EXCEEDED") => {
                     evidence::shrink_selection(self.input, &mut selected)
                         .map_err(|_| ReadPageFailure::Capacity(
                             "The minimum UTF-8 source page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into()))?
@@ -332,6 +334,104 @@ impl<J: Journal> PackHost<'_, J> {
         self.prepare_inner(id, true).await
     }
     async fn prepare_inner(&mut self, id: &str, persist: bool) -> Result<Request, AgentError> {
+        let base = self.state.clone();
+        let work = base
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .ok_or_else(|| invalid("reading plan missing"))?;
+        let missing = work
+            .missing_required_support(self.input, id)
+            .map_err(invalid)?;
+        let has_original_frame = self
+            .worker(id)?
+            .related_read_frames
+            .iter()
+            .any(|frame| !frame.options.is_empty());
+        let mut selected = if has_original_frame {
+            vec![]
+        } else {
+            missing.into_iter().take(1).collect::<Vec<_>>()
+        };
+        loop {
+            let mut candidate = base.clone();
+            if !selected.is_empty() {
+                let (page, options) = crate::outline::discover::automatic_support_page(
+                    self.input,
+                    work.canonical_pack(id)
+                        .ok_or_else(|| invalid("pack missing"))?,
+                    &selected,
+                )
+                .map_err(invalid)?;
+                let identity = work.pack_wire_identity(id).map_err(invalid)?;
+                candidate
+                    .outline_run
+                    .discover_workers
+                    .get_mut(id)
+                    .ok_or_else(|| invalid("worker missing"))?
+                    .related_read_frames
+                    .push(coordinator::RelatedReadFrame {
+                        user_page: Some(page),
+                        directory_page: None,
+                        call_id: String::new(),
+                        pack_revision: identity["revision"]
+                            .as_u64()
+                            .ok_or_else(|| invalid("revision missing"))?,
+                        input_digest: base.input_sha256.clone(),
+                        options,
+                        sealed_sha256: None,
+                    });
+            }
+            let result = PackHost {
+                input: self.input,
+                config: self.config,
+                state: &mut candidate,
+                journal: self.journal,
+                cancel: self.cancel,
+            }
+            .prepare_candidate(id, false)
+            .await;
+            match result {
+                Ok(request) => {
+                    *self.state = candidate;
+                    if persist {
+                        self.save().await?;
+                    }
+                    return Ok(request);
+                }
+                Err(error) if error.code == "AGENT_TURN_BUDGET_EXCEEDED" => {
+                    if !selected.is_empty()
+                        && crate::outline::evidence::shrink_selection(self.input, &mut selected)
+                            .is_ok()
+                    {
+                        continue;
+                    }
+                    // Candidate contains the exact unsent oversized request, not
+                    // a fabricated send. No reservation or provider call occurred.
+                    if let Some(Pending::Failed { code, .. }) = &mut candidate
+                        .outline_run
+                        .discover_workers
+                        .get_mut(id)
+                        .unwrap()
+                        .pending
+                    {
+                        *code = "DISCOVER_READ_CAPACITY_EXCEEDED".into();
+                    }
+                    *self.state = candidate;
+                    if persist {
+                        self.save().await?;
+                    }
+                    return Err(super::error(
+                        "DISCOVER_READ_CAPACITY_EXCEEDED",
+                        "Minimum worker request cannot fit; worker stopped before reservation or send.",
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn prepare_candidate(&mut self, id: &str, persist: bool) -> Result<Request, AgentError> {
         let work = self
             .state
             .outline_run
@@ -340,6 +440,7 @@ impl<J: Journal> PackHost<'_, J> {
             .ok_or_else(|| invalid("reading plan missing"))?;
         let identity = work.pack_wire_identity(id).map_err(invalid)?;
         let mut session = work.session(self.input, id).map_err(invalid)?;
+        project_owned_pack_headers(&mut session);
         let owned_image_ids = session["pack"]["atoms"]
             .as_array()
             .into_iter()
@@ -422,7 +523,12 @@ impl<J: Journal> PackHost<'_, J> {
             json!({"role":"user","content":json!({"reading_packs":[session], "semantic_contract":crate::outline::agent::semantic_guidance(Duty::Discover), "repair_context":self.state.outline_run.repair_events.iter().rev().find(|event|event["pack_id"]==id && event["status"]=="reopened" && event["pack_revision"]==identity["revision"])}).to_string()}),
         ];
         messages.push(json!({"role":"user","content":json!({"dependency_progress":{"next_required_read":next_required_read,"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"After consuming all original pages attached to this request, follow next_required_read before submitting. The action anticipates these attached pages only for navigation and grants no delivery credit. original_read_complete marks only confirmed current-claim coverage; do not repeatedly read that completed entry or its support alias while another required original remains. This is navigation, not semantic applicability approval. Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain accessible through condition_support_options and next_support_cursor (read_evidence dependency_cursor). Directory pages grant no original reading credit. Follow pending body cursors until selection_complete; reread original source keys or a support dependency_id when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
-        messages.extend(project_worker_history(&worker.history));
+        messages.extend(project_worker_request_history(worker));
+        for frame in &worker.related_read_frames {
+            if let Some(page) = &frame.user_page {
+                messages.push(json!({"role":"user","content":page.to_string()}));
+            }
+        }
         for view in &views {
             messages.push(view.message());
         }
@@ -459,12 +565,7 @@ impl<J: Journal> PackHost<'_, J> {
             self.config.limits.token_safety_margin,
             self.config.provider.output_token_reserve as usize,
         )?;
-        if count.total_context_tokens > self.config.limits.max_context_tokens {
-            return Err(error(
-                "AGENT_TURN_BUDGET_EXCEEDED",
-                "worker final wire exceeds context; no send",
-            ));
-        }
+        let exceeds_budget = count.total_context_tokens > self.config.limits.max_context_tokens;
         let mut read_frames = worker.related_read_frames.clone();
         for frame in &mut read_frames {
             frame.sealed_sha256 =
@@ -506,9 +607,22 @@ impl<J: Journal> PackHost<'_, J> {
                 )
             })
             .collect();
-        worker.pending = Some(Pending::Prepared {
-            request: request.clone(),
+        worker.pending = Some(if exceeds_budget {
+            Pending::Failed {
+                request: request.clone(),
+                code: "DISCOVER_READ_CAPACITY_EXCEEDED".into(),
+            }
+        } else {
+            Pending::Prepared {
+                request: request.clone(),
+            }
         });
+        if exceeds_budget {
+            return Err(error(
+                "AGENT_TURN_BUDGET_EXCEEDED",
+                "worker final wire exceeds context; no send",
+            ));
+        }
         if persist {
             self.save().await?;
         }
@@ -549,136 +663,132 @@ impl<J: Journal> Host for PackHost<'_, J> {
         Ok(())
     }
     async fn next(&mut self, active: &BTreeSet<String>) -> Result<Option<Request>, AgentError> {
-        let work = self
-            .state
-            .outline_run
-            .reading_packs
-            .as_ref()
-            .ok_or_else(|| invalid("reading plan missing"))?;
-        let mut settled = BTreeSet::new();
-        for id in work.pack_ids() {
-            let Some(worker) = self.state.outline_run.discover_workers.get(&id) else {
-                continue;
-            };
-            let Some(Pending::Failed { request, code }) = &worker.pending else {
-                continue;
-            };
-            if request.scope.pack != id {
-                continue;
-            }
-            let exhausted = worker.rejected_turns >= self.config.limits.max_no_progress_turns
-                && matches!(
-                    code.as_str(),
-                    "BUSINESS_REJECTED" | "DISCOVER_RETRY_EXHAUSTED"
-                );
-            let identity = work.pack_wire_identity(&id).map_err(invalid)?;
-            // Mirror the terminal branches below, including exhausted failed
-            // repairs whose settled request precedes the rotated pack revision.
-            // Sending/Received and retryable business failures never free slots.
-            if request.scope.run == identity["run"]
-                && ((exhausted
-                    && identity["revision"]
-                        .as_u64()
-                        .is_some_and(|revision| request.scope.revision <= revision))
-                    || (code != "BUSINESS_REJECTED"
-                        && request.scope.revision == identity["revision"]))
-            {
-                settled.insert(id);
-            }
-        }
-        let work = self.state.outline_run.reading_packs.as_mut().unwrap();
-        work.claim_excluding_settled(coordinator::WORKERS, &settled);
-        let ids = work
-            .pack_ids()
-            .into_iter()
-            .filter(|id| {
-                matches!(
-                    work.status(id),
-                    Some(PackStatus::Running | PackStatus::Failed)
-                )
-            })
-            .collect::<Vec<_>>();
-        for id in ids {
-            let identity = self
+        loop {
+            let mut local_capacity_failure = false;
+            let work = self
                 .state
                 .outline_run
                 .reading_packs
                 .as_ref()
-                .unwrap()
-                .pack_wire_identity(&id)
-                .map_err(invalid)?;
-            let worker = self
-                .state
-                .outline_run
-                .discover_workers
-                .entry(id.clone())
-                .or_default();
-            // A repair rotates claim identity after a settled rejection. Keep
-            // that settled request as the exhaustion audit before clearing stale
-            // revision-local keys; unresolved Sending/Received remain untouched.
-            if worker.rejected_turns >= self.config.limits.max_no_progress_turns
-                && let Some(Pending::Failed { code, .. }) = &mut worker.pending
-                && matches!(
-                    code.as_str(),
-                    "BUSINESS_REJECTED" | "DISCOVER_RETRY_EXHAUSTED"
-                )
-            {
-                *code = "DISCOVER_RETRY_EXHAUSTED".into();
-                continue;
-            }
-            if let Some(pending) = &worker.pending {
-                let request = match pending {
-                    Pending::Prepared { request }
-                    | Pending::Sending { request }
-                    | Pending::Received { request, .. }
-                    | Pending::Committed { request, .. }
-                    | Pending::Failed { request, .. } => request,
+                .ok_or_else(|| invalid("reading plan missing"))?;
+            let mut settled = BTreeSet::new();
+            for id in work.pack_ids() {
+                let Some(worker) = self.state.outline_run.discover_workers.get(&id) else {
+                    continue;
                 };
-                if request.scope.run != identity["run"]
-                    || request.scope.revision != identity["revision"]
+                let Some(Pending::Failed { request, code }) = &worker.pending else {
+                    continue;
+                };
+                if request.scope.pack != id {
+                    continue;
+                }
+                let identity = work.pack_wire_identity(&id).map_err(invalid)?;
+                if code != "BUSINESS_REJECTED"
+                    && request.scope.run == identity["run"]
+                    && identity["revision"]
+                        .as_u64()
+                        .is_some_and(|revision| request.scope.revision <= revision)
                 {
-                    if matches!(pending, Pending::Sending { .. } | Pending::Received { .. }) {
-                        return Err(invalid(
-                            "unresolved worker journal scope changed; settle or replay before resetting",
-                        ));
+                    settled.insert(id);
+                }
+            }
+            let work = self.state.outline_run.reading_packs.as_mut().unwrap();
+            work.claim_excluding_settled(coordinator::WORKERS, &settled);
+            let ids = work
+                .pack_ids()
+                .into_iter()
+                .filter(|id| {
+                    matches!(
+                        work.status(id),
+                        Some(PackStatus::Running | PackStatus::Failed)
+                    )
+                })
+                .collect::<Vec<_>>();
+            for id in ids {
+                let identity = self
+                    .state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .pack_wire_identity(&id)
+                    .map_err(invalid)?;
+                let worker = self
+                    .state
+                    .outline_run
+                    .discover_workers
+                    .entry(id.clone())
+                    .or_default();
+                // A terminal host/stall outcome stays settled across same-run
+                // claim repair. Never silently revive it after reload or rotation.
+                if matches!(&worker.pending, Some(Pending::Failed { request, code })
+                if code != "BUSINESS_REJECTED" && request.scope.run == identity["run"]
+                    && identity["revision"].as_u64().is_some_and(|revision| request.scope.revision <= revision))
+                {
+                    continue;
+                }
+                if let Some(pending) = &worker.pending {
+                    let request = match pending {
+                        Pending::Prepared { request }
+                        | Pending::Sending { request }
+                        | Pending::Received { request, .. }
+                        | Pending::Committed { request, .. }
+                        | Pending::Failed { request, .. } => request,
+                    };
+                    if request.scope.run != identity["run"]
+                        || request.scope.revision != identity["revision"]
+                    {
+                        if matches!(pending, Pending::Sending { .. } | Pending::Received { .. }) {
+                            return Err(invalid(
+                                "unresolved worker journal scope changed; settle or replay before resetting",
+                            ));
+                        }
+                        let rejected_turns = worker.rejected_turns;
+                        let failure_signatures = worker.failure_signatures.clone();
+                        let progress_evidence = worker.progress_evidence.clone();
+                        let history = worker.history.clone();
+                        let history_revision_start = history.len();
+                        let retired_read_calls = worker.retired_read_calls.clone();
+                        *worker = Worker {
+                            rejected_turns,
+                            failure_signatures,
+                            progress_evidence,
+                            history,
+                            history_revision_start,
+                            retired_read_calls,
+                            ..Default::default()
+                        };
+                    } else if matches!(pending, Pending::Committed { .. }) {
+                        continue;
                     }
-                    let rejected_turns = if matches!(pending, Pending::Committed { .. }) {
-                        0
-                    } else {
-                        worker.rejected_turns
-                    };
-                    // Source delivery and opaque keys belong to one claim revision.
-                    // A failed repair is not progress and must retain its stop counter.
-                    let history = settled_submission_audit(&worker.history);
-                    *worker = Worker {
-                        rejected_turns,
-                        history,
-                        ..Default::default()
-                    };
-                } else if matches!(pending, Pending::Committed { .. }) {
-                    continue;
+                }
+                match &worker.pending {
+                    Some(Pending::Prepared { request }) => return Ok(Some(request.clone())),
+                    Some(Pending::Sending { request })
+                        if active.contains(&request.scope.request) =>
+                    {
+                        continue;
+                    }
+                    Some(Pending::Sending { .. } | Pending::Received { .. }) => {
+                        return Err(invalid("unresolved worker journal"));
+                    }
+                    Some(Pending::Failed { code, .. }) if code != "BUSINESS_REJECTED" => continue,
+                    _ => (),
+                }
+                match self.prepare(&id).await {
+                    Ok(request) => return Ok(Some(request)),
+                    Err(error) if error.code == "DISCOVER_READ_CAPACITY_EXCEEDED" => {
+                        local_capacity_failure = true;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
                 }
             }
-            match &worker.pending {
-                Some(Pending::Prepared { request }) => return Ok(Some(request.clone())),
-                Some(Pending::Sending { request }) if active.contains(&request.scope.request) => {
-                    continue;
-                }
-                Some(Pending::Sending { .. } | Pending::Received { .. }) => {
-                    return Err(invalid("unresolved worker journal"));
-                }
-                Some(Pending::Failed { code, .. }) if code != "BUSINESS_REJECTED" => continue,
-                _ => (),
+            if !local_capacity_failure {
+                return Ok(None);
             }
-            if worker.rejected_turns >= self.config.limits.max_no_progress_turns {
-                if let Some(Pending::Failed { code, .. }) = &mut worker.pending {
-                    *code = "DISCOVER_RETRY_EXHAUSTED".into();
-                }
-                continue;
-            }
-            return self.prepare(&id).await.map(Some);
+            // Newly settled local failures release slots for untouched packs.
         }
-        Ok(None)
     }
     async fn reserve(&mut self, request: &Request) -> Result<(), AgentError> {
         if self.cancel.is_cancelled() {
@@ -727,33 +837,48 @@ impl<J: Journal> Host for PackHost<'_, J> {
         {
             return Err(invalid("worker commit without durable response"));
         }
+        let action = canonical_worker_action(self.input, self.state, request, &response);
+        let mut rejection_class = "invalid_tool_turn";
         let mut confirmation_failed = false;
         let outcome = (|| -> Result<Value, String> {
-            let identity = validate_worker_scope(self.input, self.state, request)?;
-            if !crate::agent_runtime::valid_tool_turn(&response)
-                || response.tool_calls.len() != 1
+            let identity =
+                validate_worker_scope(self.input, self.state, request).inspect_err(|_| {
+                    confirmation_failed = true;
+                })?;
+            if !crate::agent_runtime::valid_tool_turn(&response) {
+                return Err("worker response is not a complete tool turn".into());
+            }
+            confirm_worker_related_reads(self.input, self.state, request).inspect_err(|_| {
+                confirmation_failed = true;
+            })?;
+            confirm_worker_images(self.input, self.config, self.state, request).inspect_err(
+                |_| {
+                    confirmation_failed = true;
+                },
+            )?;
+            if response.tool_calls.len() != 1
                 || !matches!(
                     response.tool_calls[0].name.as_str(),
                     "submit_pack" | "read_evidence"
                 )
             {
                 return Err(
-                    "worker must read a confirmed dependency or submit exactly one owned pack"
-                        .into(),
+                    "worker must request a dependency or submit exactly one owned pack".into(),
                 );
             }
             let call = &response.tool_calls[0];
+            rejection_class = "invalid_json_arguments";
             let args: Value = serde_json::from_str(&call.arguments).map_err(|e| e.to_string())?;
+            rejection_class = "invalid_wire_identity";
             let args = self.state.outline_run.discover_workers[id]
                 .registry
                 .decode(args, false)?;
+            rejection_class = "cross_pack_submission";
             if call.name == "submit_pack" && args["pack_id"] != *id {
                 return Err("cross-pack worker submission".into());
             }
-            confirm_worker_related_reads(self.input, self.state, request).inspect_err(|_| {
-                confirmation_failed = true;
-            })?;
             if call.name == "read_evidence" {
+                rejection_class = "invalid_source_read";
                 let keys = &self.state.outline_run.discover_workers[id].source_keys;
                 let args = crate::outline::source_wire::resolve_in_scope(
                     &json!({"input":self.state.input_sha256,"worker":identity}),
@@ -763,12 +888,21 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 )?;
                 return Ok(json!({"status":"read_request","args":args}));
             }
+            rejection_class = "invalid_submission_schema";
             crate::outline::agent::validate_arguments("submit_pack", &args)?;
-            confirm_worker_images(self.input, self.config, self.state, request).inspect_err(
-                |_| {
-                    confirmation_failed = true;
-                },
-            )?;
+            if !self
+                .state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .missing_required_support(self.input, id)?
+                .is_empty()
+            {
+                rejection_class = "required_support_pending";
+                return Err("Required structural support pages remain; the host will attach the next page automatically before accepting this submission.".into());
+            }
+            rejection_class = "submission_rejected";
             crate::outline::agent::apply_for_duty(
                 self.input,
                 self.state,
@@ -795,7 +929,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 }),
             other => other,
         };
-        let receipt = match outcome {
+        let mut receipt = match outcome {
             Ok(value) => super::tool_result_envelope(value),
             Err(message) if host_failure_code.is_some() => json!({"ok":false,"error":message,
                 "code":host_failure_code,"retryable":false}),
@@ -805,7 +939,32 @@ impl<J: Journal> Host for PackHost<'_, J> {
             Err(message) => json!({"ok":false,"error":message}),
         };
         let committed = receipt["ok"] == true && receipt["result"]["status"] == "committed";
+        let no_coverage = receipt["ok"] == true
+            && receipt["result"]["status"] == "read_pending_delivery"
+            && receipt["result"]["read"]["new_coverage"] == false;
+        let business_failure = host_failure_code.is_none()
+            && !confirmation_failed
+            && rejection_class != "required_support_pending"
+            && (receipt["ok"] != true || no_coverage);
+        let classes = rejection_classes(
+            &receipt,
+            if no_coverage {
+                "read_without_new_coverage"
+            } else {
+                rejection_class
+            },
+        );
+        let signature = crate::outline::canonical_sha256(&(action, classes)).map_err(invalid)?;
         let worker = self.worker_mut(id)?;
+        advance_worker_progress(worker);
+        let repeated_failure = business_failure && !worker.failure_signatures.insert(signature);
+        if repeated_failure {
+            receipt["code"] = json!("DISCOVER_NO_STATE_PROGRESS");
+            receipt["retryable"] = json!(false);
+            receipt["stop_reason"] = json!(
+                "This canonical failure already occurred without new source coverage or a valid product; worker stopped with audit preserved."
+            );
+        }
         worker.history.push(json!({"role":"assistant","content":response.content,"tool_calls":response.tool_calls.iter().map(|call|json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}})).collect::<Vec<_>>()}));
         for call in &response.tool_calls {
             worker
@@ -817,13 +976,20 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 worker.rejected_turns += 1;
                 worker.pending = Some(Pending::Failed {
                     request: request.clone(),
-                    code: "BUSINESS_REJECTED".into(),
+                    code: if repeated_failure {
+                        "DISCOVER_NO_STATE_PROGRESS"
+                    } else {
+                        "BUSINESS_REJECTED"
+                    }
+                    .into(),
                 });
             } else {
-                worker.rejected_turns = 0;
                 worker.pending = None;
             }
         } else if committed {
+            // A canonical product starts a new business epoch. Historical
+            // rejection counts remain audit facts, not a future stop budget.
+            worker.failure_signatures.clear();
             worker.pending = Some(Pending::Committed {
                 request: request.clone(),
                 receipt,
@@ -841,6 +1007,8 @@ impl<J: Journal> Host for PackHost<'_, J> {
                     code
                 } else if confirmation_failed {
                     "DISCOVER_SOURCE_CONFIRMATION_FAILED".into()
+                } else if repeated_failure {
+                    "DISCOVER_NO_STATE_PROGRESS".into()
                 } else {
                     "BUSINESS_REJECTED".into()
                 },
@@ -897,6 +1065,7 @@ fn settled_submission_pair(history: &[Value], index: usize) -> Option<&Value> {
     let value: Value = serde_json::from_str(receipt["content"].as_str()?).ok()?;
     (value["ok"] == false).then_some(receipt)
 }
+#[cfg(test)]
 fn settled_submission_audit(history: &[Value]) -> Vec<Value> {
     let mut result = Vec::new();
     for index in 0..history.len() {
@@ -910,19 +1079,221 @@ fn settled_submission_audit(history: &[Value]) -> Vec<Value> {
 pub(super) fn project_settled_submission_history(history: &[Value]) -> Vec<Value> {
     let mut result = Vec::new();
     let mut index = 0;
+    let mut feedbacks = BTreeSet::new();
+    let mut summaries = Vec::new();
     while index < history.len() {
         if let Some(receipt) = settled_submission_pair(history, index) {
-            result.push(json!({"role":"user","content":json!({"settled_submission_failure":serde_json::from_str::<Value>(receipt["content"].as_str().unwrap()).unwrap(),"instruction":"The prior submission failed. Correct it using the current pack claim and source keys; the omitted duplicate submission body remains in the host audit. This grants no completion or evidence credit."}).to_string()}));
+            if let Some(content) = history[index]["content"].as_str().filter(|s| !s.is_empty()) {
+                result.push(json!({"role":"assistant","content":content}));
+            }
+            if feedbacks.insert(receipt["content"].clone().to_string()) {
+                summaries.push(json!({"role":"user","content":json!({"settled_submission_failure":serde_json::from_str::<Value>(receipt["content"].as_str().unwrap()).unwrap(),"instruction":"The prior submission failed. Correct it using the current pack claim and source keys; the omitted duplicate submission body remains in the host audit. This grants no completion or evidence credit."}).to_string()}));
+            }
             index += 2;
         } else {
             result.push(history[index].clone());
             index += 1;
         }
     }
+    result.extend(summaries);
     result
 }
 
 // Worker-only projection: preserve the audit and every unconsumed tool group.
+// Normalize only host-issued identities; this never authorizes an operation.
+fn canonical_worker_action(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    request: &Request,
+    response: &ChatTurn,
+) -> Value {
+    let worker = &state.outline_run.discover_workers[&request.scope.pack];
+    let work = state.outline_run.reading_packs.as_ref().unwrap();
+    let calls = response
+        .tool_calls
+        .iter()
+        .map(|call| {
+            let raw = match serde_json::from_str::<Value>(&call.arguments) {
+            Ok(raw) => raw,
+            Err(_) => return json!({"tool":call.name,"invalid_json_sha256":crate::outline::canonical_sha256(&call.arguments).expect("string hash")}),
+        };
+            let mut args = worker.registry.decode(raw.clone(), true).unwrap_or(raw);
+            if call.name == "submit_pack" {
+                if let Some(pack) = work.canonical_pack(&request.scope.pack) {
+                    // Partial normalization is still useful for malformed submissions;
+                    // opaque leftovers below become one invalid-handle marker.
+                    let _ = crate::outline::discover::resolve_submission_handles(pack, &mut args);
+                }
+            } else if call.name == "read_evidence" {
+                let resolved = if let Some(key) = args["dependency_id"].as_str() {
+                    work.dependency_selection(input, &request.scope.pack, key)
+                        .ok()
+                        .map(|refs| json!({"refs":refs}))
+                } else if let Some(cursor) = args["cursor"].as_str() {
+                    worker
+                        .related_continuations
+                        .get(cursor)
+                        .map(|page| json!({"refs":page.refs}))
+                } else if let Some(cursor) = args["dependency_cursor"].as_str() {
+                    work.dependency_directory_page(input, &request.scope.pack, cursor)
+                        .ok()
+                } else {
+                    work.pack_wire_identity(&request.scope.pack)
+                        .ok()
+                        .and_then(|identity| {
+                            crate::outline::source_wire::resolve_in_scope(
+                                &json!({"input":state.input_sha256,"worker":identity}),
+                                "read_evidence",
+                                args.clone(),
+                                &worker.source_keys,
+                            )
+                            .ok()
+                        })
+                };
+                if let Some(resolved) = resolved {
+                    args = resolved;
+                }
+            }
+            scrub_action_transport(&mut args);
+            json!({"tool":call.name,"arguments":args})
+        })
+        .collect::<Vec<_>>();
+    json!(calls)
+}
+fn scrub_action_transport(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for key in [
+                "wire_scope",
+                "call_id",
+                "claim_token",
+                "pack_revision",
+                "revision",
+                "generation",
+                "run",
+                "repair",
+                "review_version",
+            ] {
+                fields.remove(key);
+            }
+            for (key, child) in fields.iter_mut() {
+                if matches!(
+                    key.as_str(),
+                    "atom_key"
+                        | "evidence_key"
+                        | "source_key"
+                        | "support_key"
+                        | "dependency_id"
+                        | "dependency_cursor"
+                        | "cursor"
+                        | "next_cursor"
+                        | "next_dependency_cursor"
+                        | "next_support_cursor"
+                ) {
+                    *child = json!("unresolved_handle");
+                } else {
+                    scrub_action_transport(child);
+                    if matches!(
+                        key.as_str(),
+                        "description" | "no_requirement_reason" | "requested_information"
+                    ) && child.as_str().is_some_and(|text| text.trim().is_empty())
+                    {
+                        *child = json!("");
+                    }
+                    if matches!(
+                        key.as_str(),
+                        "evidence" | "inspected_atom_ids" | "condition_support"
+                    ) && let Some(items) = child.as_array_mut()
+                    {
+                        items.sort_by_key(Value::to_string);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_action_transport(item);
+            }
+        }
+        _ => (),
+    }
+}
+fn rejection_classes(receipt: &Value, fallback: &str) -> Value {
+    fn collect(value: &Value, classes: &mut BTreeSet<(String, String)>) {
+        match value {
+            Value::Object(fields) => {
+                if let Some(code) = fields.get("code").and_then(Value::as_str) {
+                    classes.insert((
+                        fields
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .into(),
+                        code.into(),
+                    ));
+                }
+                for child in fields.values() {
+                    collect(child, classes);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, classes);
+                }
+            }
+            _ => (),
+        }
+    }
+    let mut classes = BTreeSet::new();
+    collect(&receipt["result"], &mut classes);
+    if classes.is_empty() {
+        classes.insert((String::new(), fallback.into()));
+    }
+    json!(classes)
+}
+fn advance_worker_progress(worker: &mut Worker) {
+    let mut advanced = false;
+    for reference in &worker.delivered_related_evidence {
+        if !crate::outline::evidence::covered_by_union(reference, &worker.progress_evidence) {
+            worker.progress_evidence.push(reference.clone());
+            advanced = true;
+        }
+    }
+    if advanced {
+        worker.failure_signatures.clear();
+    }
+}
+
+// Structural support is delivered once in a sealed user page. Keep native
+// layout and owned header fragments; retire only context-only source text.
+use crate::outline::discover::project_owned_pack_headers;
+
+fn project_worker_request_history(worker: &Worker) -> Vec<Value> {
+    let split = worker.history_revision_start.min(worker.history.len());
+    let mut history = worker.history[..split]
+        .iter()
+        .filter_map(|message| {
+            (message["role"] == "assistant")
+                .then(|| message["content"].as_str())
+                .flatten()
+                .filter(|text| !text.is_empty())
+                .map(|text| json!({"role":"assistant","content":text}))
+        })
+        .collect::<Vec<_>>();
+    history.extend(
+        retire_delivered_related_history(&worker.history[split..], &worker.retired_read_calls)
+            .into_iter()
+            .filter(|message| {
+                message["role"] != "user"
+                    || !message["content"]
+                        .as_str()
+                        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                        .is_some_and(|value| value.get("automatic_support_page").is_some())
+            }),
+    );
+    project_worker_history(&history)
+}
+
 fn project_worker_history(history: &[Value]) -> Vec<Value> {
     let mut projected = project_settled_submission_history(history);
     projected.dedup_by(|later, earlier| {
@@ -968,7 +1339,39 @@ fn related_read_wire_hash(
     frame: &coordinator::RelatedReadFrame,
     body: &Value,
 ) -> Result<Option<String>, String> {
-    let tool_hash = crate::outline::read_receipts::wire_hash(body, &frame.call_id)?;
+    let tool_hash = if let Some(page) = &frame.user_page {
+        let marker = page["automatic_support_page"]["id"]
+            .as_str()
+            .ok_or("automatic support page identity missing")?;
+        let matches = body["messages"]
+            .as_array()
+            .ok_or("messages missing")?
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter(|message| {
+                let text = match &message["content"] {
+                    Value::String(text) => text.clone(),
+                    Value::Array(parts) => parts
+                        .iter()
+                        .filter_map(|part| part["text"].as_str())
+                        .collect::<String>(),
+                    _ => String::new(),
+                };
+                serde_json::from_str::<Value>(&text)
+                    .is_ok_and(|value| value["automatic_support_page"]["id"] == marker)
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err("automatic support page missing or duplicated in exact request".into());
+        }
+        Some(crate::outline::canonical_sha256(&(
+            matches[0],
+            &frame.options,
+            body,
+        ))?)
+    } else {
+        crate::outline::read_receipts::wire_hash(body, &frame.call_id)?
+    };
     let mut originals = Vec::new();
     for reference in frame.options.iter().flat_map(|option| &option.evidence) {
         if let crate::outline::evidence::EvidenceRef::ImageRegion {
@@ -1053,6 +1456,7 @@ fn confirm_worker_related_reads(
     let mut delivered_calls = BTreeSet::new();
     let mut directory_pages = BTreeSet::new();
     let mut delivered_evidence = worker.delivered_related_evidence.clone();
+    let mut delivered_user_pages = Vec::new();
     for frame in &worker.related_read_frames {
         if frame.pack_revision != request.scope.revision || frame.input_digest != state.input_sha256
         {
@@ -1074,7 +1478,11 @@ fn confirm_worker_related_reads(
                     }
                 }
             }
-            delivered_calls.insert(frame.call_id.clone());
+            if let Some(page) = &frame.user_page {
+                delivered_user_pages.push(json!({"role":"user","content":page.to_string()}));
+            } else {
+                delivered_calls.insert(frame.call_id.clone());
+            }
         } else {
             pending.push(frame.clone());
         }
@@ -1088,7 +1496,8 @@ fn confirm_worker_related_reads(
     worker.related_read_frames = pending;
     worker.delivered_dependency_pages.extend(directory_pages);
     worker.delivered_related_evidence = delivered_evidence;
-    worker.history = retire_delivered_related_history(&worker.history, &delivered_calls);
+    worker.retired_read_calls.extend(delivered_calls);
+    worker.history.extend(delivered_user_pages);
     Ok(())
 }
 

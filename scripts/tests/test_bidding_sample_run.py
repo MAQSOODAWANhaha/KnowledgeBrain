@@ -37,12 +37,12 @@ def test_missing_model_or_interpolation_does_not_fall_back(tmp_path):
 
 def test_tuning_is_reloaded_from_selected_file_without_inherited_reasoning(tmp_path):
     config = tmp_path / '.env'
-    config.write_text('LLM_MODEL=configured\nKB_AUTHORING_MAX_OUTPUT_TOKENS=4096\n'
+    config.write_text('LLM_MODEL=configured\nKB_AUTHORING_OUTPUT_TOKEN_RESERVE=4096\n'
                       'KB_AUTHORING_TIMEOUT_MS=90000\n')
-    inherited = dict(KB_AUTHORING_MAX_OUTPUT_TOKENS='99999', KB_AUTHORING_TIMEOUT_MS='1',
+    inherited = dict(KB_AUTHORING_OUTPUT_TOKEN_RESERVE='99999', KB_AUTHORING_TIMEOUT_MS='1',
                      KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='stale')
     env = module.provider_environment(config, inherited)
-    assert env['KB_AUTHORING_MAX_OUTPUT_TOKENS'] == '4096'
+    assert env['KB_AUTHORING_OUTPUT_TOKEN_RESERVE'] == '4096'
     assert env['KB_AUTHORING_TIMEOUT_MS'] == '90000'
     assert 'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT' not in env
     config.write_text(config.read_text() + 'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT=high\n')

@@ -534,4 +534,86 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[test]
+    #[ignore = "offline synthetic registry timing; requires private output path"]
+    fn synthetic_registry_generations_profile() {
+        use std::io::Write;
+        use std::time::Instant;
+        let output =
+            std::path::PathBuf::from(std::env::var("KB_PRIVATE_REGISTRY_PROFILE").unwrap());
+        let parent = output.parent().unwrap().canonicalize().unwrap();
+        assert!(!parent.starts_with(std::env::current_dir().unwrap().canonicalize().unwrap()));
+        let limits: Value = serde_json::from_slice(
+            &std::fs::read(std::env::var("KB_PRIVATE_PROFILE_LIMITS").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let profile: crate::agent_runtime::chat::TokenizerProfile =
+            serde_json::from_value(limits["extraction"]["tokenizer"].clone()).unwrap();
+        let canonical = json!({"model":profile.model_id,"messages":[{"role":"user","content":json!({
+        "sources":(0..256).map(|n|json!({"requirement_id":format!("synthetic-r-{n}"),
+        "source_unit_revision_id":format!("synthetic-unit-{n}"),"quote_handle":format!("synthetic-q-{n}"),
+        "text":"Synthetic immutable source paragraph."})).collect::<Vec<_>>()
+    }).to_string()}],"tools":[]});
+        let mut registry = Registry::default();
+        let mut rows = Vec::new();
+        for generation in 0..32 {
+            let start = Instant::now();
+            let copied = registry.clone();
+            let clone_us = start.elapsed().as_micros();
+            drop(copied);
+            let start = Instant::now();
+            let mut body = canonical.clone();
+            let body_clone_us = start.elapsed().as_micros();
+            let start = Instant::now();
+            registry = project_scope(
+                &registry,
+                &json!(["synthetic-fixed-source", generation]),
+                &mut body,
+            )
+            .unwrap();
+            let project_us = start.elapsed().as_micros();
+            let start = Instant::now();
+            let bytes = serde_json::to_vec(&registry).unwrap();
+            let serialize_us = start.elapsed().as_micros();
+            let path = parent.join("registry-benchmark-synthetic.tmp");
+            let start = Instant::now();
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path).unwrap();
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            let write_sync_us = start.elapsed().as_micros();
+            let wire_tokens = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
+                &body, &profile, 0, 0, 0,
+            )
+            .unwrap()
+            .total_input_tokens;
+            rows.push(json!({"generation":generation,"scopes":registry.scopes.len(),"wire_estimated_input_tokens":wire_tokens,
+            "bindings":registry.scopes.values().map(|v|v.len()).sum::<usize>(),
+            "registry_bytes":bytes.len(),"wire_bytes":serde_json::to_vec(&body).unwrap().len(),
+            "registry_clone_us":clone_us,"body_clone_us":body_clone_us,"project_inclusive_us":project_us,
+            "registry_serialize_us":serialize_us,"registry_write_sync_us":write_sync_us}));
+        }
+        assert_eq!(registry.scopes.len(), 32);
+        let summary = json!({"model_calls":0,"synthetic_only":true,"tokenizer":profile,"rows":rows,
+        "limitations":"project includes its internal prior clone; standalone clone is separate, not additive. Registry serialization/write+fsync is not full checkpoint Journal.save. Full production prepare is measured by separate private planner helper; Wire tokens use the supplied calibrated profile, not provider usage."});
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(output)
+            .unwrap()
+            .write_all(&serde_json::to_vec_pretty(&summary).unwrap())
+            .unwrap();
+    }
 }

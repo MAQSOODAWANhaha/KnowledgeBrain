@@ -1770,8 +1770,15 @@ async fn discovery_planning_reserves_uncached_and_cached_images_without_deliveri
             1
         );
         let mut planned = body.clone();
-        super::super::reserve_pack_image_messages(&input, &config, &state, &sessions, &mut planned)
-            .unwrap();
+        super::super::reserve_pack_image_messages(
+            &input,
+            &config,
+            &state,
+            &sessions,
+            &[],
+            &mut planned,
+        )
+        .unwrap();
         let base = crate::analysis::tests::request_tokens(&body, &config);
         assert!(
             crate::analysis::tests::request_tokens(&planned, &config)

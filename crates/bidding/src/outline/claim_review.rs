@@ -66,38 +66,13 @@ pub struct Comparison {
     pub decisions: Vec<Decision>,
 }
 
-fn row_refs(
-    input: &FrozenInput,
-    table_id: &str,
-    row: usize,
-    digest: &str,
-) -> Result<Vec<EvidenceRef>, String> {
-    let form = input
-        .structured_forms
-        .iter()
-        .find(|f| f["form_definition_revision_id"] == table_id)
-        .ok_or("table missing")?;
-    let cells = form["definition"]["cells"]
-        .as_array()
-        .ok_or("native cells missing")?;
-    Ok(cells
-        .iter()
-        .filter(|c| c["row"].as_u64() == Some(row as u64))
-        .filter_map(|c| {
-            let text = c["text"].as_str()?;
-            if text.is_empty() {
-                return None;
-            }
-            Some(EvidenceRef::GridCell {
-                input_digest: digest.into(),
-                table_id: table_id.into(),
-                anchor_row: row,
-                anchor_column: c["column"].as_u64()? as usize,
-                start_byte: 0,
-                end_byte: text.len(),
-            })
-        })
-        .collect())
+fn intersects_original(reference: &EvidenceRef, original: &EvidenceRef) -> bool {
+    reference.same_carrier(original)
+        && match (reference.range(), original.range()) {
+            (Some((left, right)), Some((start, end))) => left < end && start < right,
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 pub fn build(
@@ -133,19 +108,15 @@ pub fn build(
                 table_id,
                 anchor_row,
                 ..
-            } => row_refs(input, table_id, *anchor_row, &digest)?,
+            } => super::source_support::row_body(input, table_id, *anchor_row)?,
             EvidenceRef::ImageRegion { .. } => vec![evidence.clone()],
         };
         let key = super::canonical_sha256(&refs)?;
         if seen.insert(key) {
-            let role = if record
-                .condition_support
-                .iter()
-                .any(|support| support.evidence.contains(evidence))
-            {
-                "condition_support"
-            } else {
+            let role = if record.evidence.contains(evidence) {
                 "requirement_source"
+            } else {
+                "condition_support"
             };
             groups.push((role.into(), refs));
         }
@@ -261,7 +232,7 @@ pub fn build(
         if !clause_match && !label_match {
             continue;
         }
-        let refs = row_refs(input, &table, row, &digest)?;
+        let refs = super::source_support::row_body(input, &table, row)?;
         let key = super::canonical_sha256(&refs)?;
         if seen.insert(key) {
             groups.push((
@@ -273,6 +244,21 @@ pub fn build(
                 .into(),
                 refs,
             ));
+        }
+    }
+    // Rebuild structural support for Check from canonical sources. A discovered
+    // support range is a separate auxiliary quote, never another primary owner.
+    // Selection is one hop; added support is not recursively expanded.
+    let originals = groups
+        .iter()
+        .flat_map(|(_, refs)| refs.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut supports = super::source_support::select(input, &record.evidence)?;
+    supports.extend(super::source_support::select_structure(input, &originals)?);
+    for support in supports {
+        let refs = vec![support.evidence];
+        if seen.insert(super::canonical_sha256(&refs)?) {
+            groups.push(("related_structural_context".into(), refs));
         }
     }
     let evidence_units = groups
@@ -417,6 +403,23 @@ pub fn validate(unit: &ReviewUnit, comparison: &Comparison) -> Result<bool, Stri
         {
             return Err("claim evidence identity is invalid or duplicated".into());
         }
+        for handle in &claim.primary_handles {
+            let primary = unit
+                .evidence_units
+                .iter()
+                .find(|quote| quote.quote_handle == *handle)
+                .expect("validated quote handle");
+            if primary.role != "requirement_source"
+                || !primary.excerpts.iter().any(|excerpt| {
+                    unit.original_requirement
+                        .evidence
+                        .iter()
+                        .any(|original| intersects_original(&excerpt.evidence, original))
+                })
+            {
+                return Err("primary evidence must intersect the original requirement source; auxiliary quotes remain support".into());
+            }
+        }
         for fragment in &claim.original_fragments {
             if fragment.is_empty() {
                 return Err("empty original claim fragment".into());
@@ -483,7 +486,33 @@ pub fn validate(unit: &ReviewUnit, comparison: &Comparison) -> Result<bool, Stri
                 }
             ));
         }
+        if d.verdict == "supports"
+            && !claim.primary_handles.iter().any(|handle| {
+                comparison.observations.iter().any(|observation| {
+                    observation.quote_handle == *handle && observation.applicability == "relevant"
+                })
+            })
+        {
+            return Err(
+                "supports/retain requires explicitly relevant original primary evidence".into(),
+            );
+        }
         supported &= d.verdict == "supports";
+    }
+    // Applicability is model-declared, but an explicitly relevant unit cannot
+    // disappear from every decision while the comparison claims full support.
+    // Unresolved comparisons may retain the omission for a subsequent repair.
+    if supported
+        && comparison.observations.iter().any(|observation| {
+            observation.applicability == "relevant"
+                && !comparison.decisions.iter().any(|decision| {
+                    decision
+                        .evidence_handles
+                        .contains(&observation.quote_handle)
+                })
+        })
+    {
+        return Err("a supported comparison must judge every explicitly relevant evidence unit, including conditions and exceptions".into());
     }
     Ok(supported)
 }
@@ -686,5 +715,284 @@ mod tests {
         assert!(validate(&unit, &bad).is_err());
         comparison.version = "stale".into();
         assert!(validate(&unit, &comparison).is_err());
+    }
+
+    fn supported_comparison(unit: &ReviewUnit) -> Comparison {
+        let primary = unit
+            .evidence_units
+            .iter()
+            .find(|quote| quote.role == "requirement_source")
+            .unwrap()
+            .quote_handle
+            .clone();
+        let handles = unit
+            .evidence_units
+            .iter()
+            .map(|quote| quote.quote_handle.clone())
+            .collect::<Vec<_>>();
+        Comparison {
+            requirement_id: unit.requirement_id.clone(),
+            version: unit.version.clone(),
+            declared_claims: vec![DeclaredClaim {
+                claim_handle: "claim".into(),
+                obligation: unit.original_requirement.description.clone(),
+                applicability: "Synthetic declared scope".into(),
+                original_fragments: vec![unit.original_requirement.description.clone()],
+                primary_handles: vec![primary.clone()],
+                support_handles: handles
+                    .iter()
+                    .filter(|handle| **handle != primary)
+                    .cloned()
+                    .collect(),
+            }],
+            observations: handles
+                .iter()
+                .map(|handle| Observation {
+                    quote_handle: handle.clone(),
+                    polarity: "required".into(),
+                    applicability: "relevant".into(),
+                    condition: String::new(),
+                })
+                .collect(),
+            decisions: vec![Decision {
+                claim_handle: "claim".into(),
+                evidence_handles: handles,
+                verdict: "supports".into(),
+                action: "retain".into(),
+                resulting_claim: unit.original_requirement.description.clone(),
+            }],
+        }
+    }
+
+    #[test]
+    fn primary_requires_original_role_and_range_intersection_even_with_relevant_auxiliary() {
+        let (input, record) = fixture();
+        let unit = build(&input, "r", &record).unwrap();
+        let good = supported_comparison(&unit);
+        assert_eq!(validate(&unit, &good), Ok(true));
+        let mut auxiliary = good.clone();
+        auxiliary.declared_claims[0].primary_handles = vec!["q1".into()];
+        auxiliary.declared_claims[0].support_handles = vec!["q0".into()];
+        assert!(
+            validate(&unit, &auxiliary)
+                .unwrap_err()
+                .contains("primary evidence")
+        );
+        let mut mislabeled = unit.clone();
+        mislabeled.evidence_units[1].role = "requirement_source".into();
+        assert!(
+            validate(&mislabeled, &auxiliary)
+                .unwrap_err()
+                .contains("intersect"),
+            "role alone cannot authorize another carrier"
+        );
+        let mut disjoint = unit.clone();
+        if let EvidenceRef::Text {
+            start_byte,
+            end_byte,
+            ..
+        } = &mut disjoint.evidence_units[0].excerpts[0].evidence
+        {
+            *start_byte = 6;
+            *end_byte = 9;
+        } else {
+            panic!("text fixture");
+        }
+        assert!(
+            validate(&disjoint, &good)
+                .unwrap_err()
+                .contains("intersect"),
+            "same carrier alone cannot authorize a disjoint range"
+        );
+        for applicability in ["not_relevant", "unclear"] {
+            let mut bad = good.clone();
+            bad.observations[0].applicability = applicability.into();
+            assert!(
+                validate(&unit, &bad)
+                    .unwrap_err()
+                    .contains("relevant original primary")
+            );
+            bad.decisions[0].verdict = "uncertain".into();
+            bad.decisions[0].action = "manual_review".into();
+            assert_eq!(
+                validate(&unit, &bad),
+                Ok(false),
+                "irrelevant or unclear original remains unresolved"
+            );
+        }
+    }
+
+    #[test]
+    fn relevant_exception_cannot_disappear_but_negative_obligation_can_be_retained() {
+        let (input, record) = fixture();
+        let unit = build(&input, "r", &record).unwrap();
+        let mut comparison = supported_comparison(&unit);
+        comparison.observations[1].polarity = "not_required".into();
+        comparison.declared_claims[0].support_handles.clear();
+        comparison.decisions[0].evidence_handles = vec!["q0".into()];
+        assert!(
+            validate(&unit, &comparison)
+                .unwrap_err()
+                .contains("every explicitly relevant")
+        );
+        comparison.decisions[0].verdict = "uncertain".into();
+        comparison.decisions[0].action = "manual_review".into();
+        assert_eq!(validate(&unit, &comparison), Ok(false));
+        let mut negative = record;
+        negative.description =
+            "No additional document is required under the stated exception.".into();
+        let negative_unit = build(&input, "negative", &negative).unwrap();
+        let mut retained = supported_comparison(&negative_unit);
+        for observation in &mut retained.observations {
+            observation.polarity = "not_required".into();
+        }
+        assert_eq!(
+            validate(&negative_unit, &retained),
+            Ok(true),
+            "polarity does not infer contradiction from natural-language text"
+        );
+    }
+
+    #[test]
+    fn native_rowspan_and_layered_headers_are_fresh_auxiliary_check_context() {
+        let (mut input, mut record) = fixture();
+        input.structured_forms[0]["definition"] = json!({"row_count":4,"column_count":3,"cells":[
+            {"row":0,"column":0,"row_span":1,"column_span":3,"text":"Optional service applicability","header_role":"column_header"},
+            {"row":1,"column":0,"row_span":3,"column_span":1,"text":"Only for the selected service","header_role":"row_header"},
+            {"row":1,"column":1,"row_span":1,"column_span":1,"text":"Response document","header_role":"column_header"},
+            {"row":1,"column":2,"row_span":1,"column_span":1,"text":"Delivery notes","header_role":"column_header"},
+            {"row":2,"column":1,"row_span":1,"column_span":1,"text":"Unrelated row material","header_role":"none"},
+            {"row":2,"column":2,"row_span":1,"column_span":1,"text":"Unrelated row details","header_role":"none"},
+            {"row":3,"column":1,"row_span":1,"column_span":1,"text":"Provide signed form","header_role":"none"},
+            {"row":3,"column":2,"row_span":1,"column_span":1,"text":"Submit a copy","header_role":"none"}
+        ]});
+        record.description = "Provide signed form for the selected optional service.".into();
+        record.evidence = vec![EvidenceRef::GridCell {
+            input_digest: input_digest(&input).unwrap(),
+            table_id: "table".into(),
+            anchor_row: 3,
+            anchor_column: 1,
+            start_byte: 0,
+            end_byte: 19,
+        }];
+        let unit = build(&input, "merged", &record).unwrap();
+        let refs = unit
+            .evidence_units
+            .iter()
+            .flat_map(|quote| {
+                quote
+                    .excerpts
+                    .iter()
+                    .map(|excerpt| excerpt.evidence.clone())
+            })
+            .collect::<Vec<_>>();
+        for (row, column) in [(0, 0), (1, 0), (1, 1), (1, 2), (3, 1), (3, 2)] {
+            assert!(refs.iter().any(|reference| matches!(reference, EvidenceRef::GridCell { anchor_row, anchor_column, .. } if (*anchor_row,*anchor_column)==(row,column))), "missing native structure {row},{column}");
+        }
+        assert!(
+            !refs
+                .iter()
+                .any(|reference| matches!(reference, EvidenceRef::GridCell { anchor_row: 2, .. })),
+            "do not copy unrelated body rows"
+        );
+        assert!(
+            unit.evidence_units
+                .iter()
+                .any(|quote| quote.role == "related_structural_context")
+        );
+        assert_eq!(
+            unit.original_requirement.evidence, record.evidence,
+            "Check context never expands primary ownership"
+        );
+        for quote in &unit.evidence_units {
+            let intersects_owned = quote.excerpts.iter().any(|excerpt| {
+                record
+                    .evidence
+                    .iter()
+                    .any(|original| intersects_original(&excerpt.evidence, original))
+            });
+            if !intersects_owned {
+                assert_ne!(
+                    quote.role, "requirement_source",
+                    "a header-only quote cannot inherit primary role from an adjacent owned cell"
+                );
+            }
+        }
+        let comparison = supported_comparison(&unit);
+        assert_eq!(validate(&unit, &comparison), Ok(true));
+        assert!(
+            condition_support_options(&input, &unit, &comparison, &record.evidence).is_err(),
+            "Discover or original-cell reads do not grant Check header credit"
+        );
+        assert!(
+            !condition_support_options(&input, &unit, &comparison, &refs)
+                .unwrap()
+                .is_empty()
+        );
+        let mut auxiliary_primary = comparison;
+        let auxiliary = unit
+            .evidence_units
+            .iter()
+            .find(|quote| quote.role == "related_structural_context")
+            .unwrap()
+            .quote_handle
+            .clone();
+        auxiliary_primary.declared_claims[0].primary_handles = vec![auxiliary.clone()];
+        auxiliary_primary.declared_claims[0]
+            .support_handles
+            .retain(|handle| *handle != auxiliary);
+        assert!(validate(&unit, &auxiliary_primary).is_err());
+    }
+
+    #[test]
+    fn optional_candidate_cannot_pull_its_cross_document_required_relation() {
+        let (mut input, mut record) = fixture();
+        input.structured_forms.clear();
+        input.source_units.truncate(1);
+        input.source_units[0].ordinal = 2;
+        input.source_units[0].locator["unit_id"] = json!("a");
+        input.source_units[0].locator["section_id"] = json!("synthetic-shared-section");
+        let mut candidate = input.source_units[0].clone();
+        candidate.source_unit_revision_id = "candidate-c".into();
+        candidate.locator["unit_id"] = json!("c");
+        candidate.ordinal = 1;
+        candidate.text = "Earlier optional context.".into();
+        let mut other = candidate.clone();
+        other.source_unit_revision_id = "other-d".into();
+        other.document_id = "other-document".into();
+        other.locator["unit_id"] = json!("d");
+        other.text = "Cross-document support of candidate only.".into();
+        input.source_units.extend([candidate, other]);
+        input.document_relations = vec![serde_json::from_value(json!({"id":"candidate-reference","from":{"document_id":"doc","unit_id":"c"},"to":{"document_id":"other-document","unit_id":"d"},"kind":"explicit_reference","status":"confirmed","required":true,"basis":"synthetic explicit reference","locator":{}})).unwrap()];
+        let update = |input: &FrozenInput, record: &mut RequirementRecord| {
+            record.evidence = vec![EvidenceRef::Text {
+                input_digest: input_digest(input).unwrap(),
+                unit_id: "source".into(),
+                start_byte: 0,
+                end_byte: 5,
+            }];
+        };
+        update(&input, &mut record);
+        let unit = build(&input, "r", &record).unwrap();
+        let has = |unit: &ReviewUnit, id: &str| {
+            unit.evidence_units
+                .iter()
+                .flat_map(|u| &u.excerpts)
+                .any(|e| matches!(&e.evidence,EvidenceRef::Text {unit_id,..} if unit_id == id))
+        };
+        assert!(
+            has(&unit, "candidate-c"),
+            "fixture must actually select the semantic candidate"
+        );
+        assert!(
+            !has(&unit, "other-d"),
+            "candidate relation is not an original requirement dependency"
+        );
+        input.document_relations[0].from.unit_id = Some("a".into());
+        update(&input, &mut record);
+        assert!(
+            has(&build(&input, "r", &record).unwrap(), "other-d"),
+            "a direct original dependency remains visible"
+        );
     }
 }

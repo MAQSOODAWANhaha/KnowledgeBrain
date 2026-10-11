@@ -46,6 +46,7 @@ impl PlanningFit {
     }
 }
 pub type PlanningFits<'a> = dyn Fn(&[Value]) -> Result<PlanningFit, String> + 'a;
+pub type PlanningProbeFits<'a> = dyn Fn(&[Value], &ParsePack) -> Result<PlanningFit, String> + 'a;
 
 pub const DEFAULT_PACK_CONCURRENCY: usize = 4;
 
@@ -365,7 +366,10 @@ impl DiscoverWork {
         })
     }
     pub fn plan_with_measured_budget(input: &FrozenInput, fits: &PlanningFits<'_>) -> Self {
-        let result = planner::plan_packs_with_measured_budget(input, fits);
+        Self::plan_with_support_budget(input, &|sessions, _| fits(sessions))
+    }
+    pub fn plan_with_support_budget(input: &FrozenInput, fits: &PlanningProbeFits<'_>) -> Self {
+        let result = planner::plan_packs_with_support_budget(input, fits);
         let planning_error = result.as_ref().err().cloned();
         let packs = result.unwrap_or_default();
         let plan_sha256 = super::canonical_sha256(&packs).expect("serializable pack plan");
@@ -938,7 +942,7 @@ impl DiscoverWork {
         submit: &PackSubmit,
     ) -> Vec<FieldError> {
         let receipts = &self.packs[&pack.id].visual_receipts;
-        let scope = pack_scope(pack, true)
+        let scope = pack_scope(pack, false)
             .into_iter()
             .filter(|reference| match reference {
                 EvidenceRef::ImageRegion { image_id, .. } => receipts.contains_key(image_id),
@@ -949,15 +953,9 @@ impl DiscoverWork {
         // Structural context is a reading prerequisite, not an applicability
         // conclusion or primary ownership. Only this claim's delivered ranges
         // count; separate continuation pages may jointly cover the original.
-        for source in pack_section_context(input, pack) {
-            if !section_context_delivered(pack, source) {
-                errors.push(field(
-                    "/pack_id",
-                    "structural_context_not_delivered",
-                    "Read every structural_context_candidate completely through read_evidence and its continuation pages in completed worker requests before submitting any result; determine applicability separately without treating support as primary ownership or Check approval",
-                ));
-                break;
-            }
+        if !matches!(missing_pack_support(input, pack), Ok(ref missing) if missing.is_empty()) {
+            errors.push(field("/pack_id", "structural_context_not_delivered",
+                "Read the required native structural support completely in completed worker requests before submitting; optional section candidates do not grant ownership or Check approval"));
         }
         for atom in &pack.atoms {
             if let PackCarrier::Image {
@@ -1194,6 +1192,7 @@ impl DiscoverWork {
         let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
         let excerpts = resolve_evidence(input, refs)?;
         let context = pack_section_context(input, pack);
+        let required = required_pack_support(input, pack)?;
         let mut grouped = BTreeMap::<String, Vec<EvidenceRef>>::new();
         let mut reviewed = Vec::<ConditionSupport>::new();
         for reference in refs {
@@ -1231,10 +1230,11 @@ impl DiscoverWork {
                 .iter()
                 .find(|source| source.source_unit_revision_id == unit_id)
                 .ok_or("related source missing")?;
-            if matches!(reference, EvidenceRef::Text { .. })
-                && context.iter().any(|candidate| {
-                    candidate.source_unit_revision_id == source.source_unit_revision_id
-                })
+            if super::evidence::covered_by_union(reference, &required)
+                || (matches!(reference, EvidenceRef::Text { .. })
+                    && context.iter().any(|candidate| {
+                        candidate.source_unit_revision_id == source.source_unit_revision_id
+                    }))
             {
                 let origin = ConditionSupportOrigin::StructuralContext {
                     source_unit_revision_id: source.source_unit_revision_id.clone(),
@@ -1322,13 +1322,9 @@ impl DiscoverWork {
         if super::evidence::input_digest(input)? != pack.input_digest {
             return Err("dependency input changed".into());
         }
-        for source in pack_section_context(input, pack) {
-            let mut coverage = section_context_delivered_evidence(pack, source);
-            coverage.extend_from_slice(queued);
-            if !super::evidence::covered_by_union(&section_context_ref(pack, source), &coverage) {
-                return Ok(
-                    json!({"tool":"read_evidence","args":{"dependency_id":section_context_key(pack, source)?}}),
-                );
+        for reference in missing_pack_support(input, pack)? {
+            if !super::evidence::covered_by_union(&reference, queued) {
+                return Ok(json!({"tool":"read_evidence","args":{"refs":[reference]}}));
             }
         }
         Ok(Value::Null)
@@ -1498,6 +1494,27 @@ impl DiscoverWork {
                     .unwrap_or_else(|e| json!({"pack_id":r.pack.id,"error":e}))
             })
             .collect()
+    }
+    #[cfg(test)]
+    pub(crate) fn required_support_refs(
+        &self,
+        input: &FrozenInput,
+        pack_id: &str,
+    ) -> Result<Vec<EvidenceRef>, String> {
+        if input_digest(input)? != self.input_digest {
+            return Err("frozen input changed".into());
+        }
+        required_pack_support(input, &self.packs.get(pack_id).ok_or("unknown pack")?.pack)
+    }
+    pub(crate) fn missing_required_support(
+        &self,
+        input: &FrozenInput,
+        pack_id: &str,
+    ) -> Result<Vec<EvidenceRef>, String> {
+        if input_digest(input)? != self.input_digest {
+            return Err("frozen input changed".into());
+        }
+        missing_pack_support(input, &self.packs.get(pack_id).ok_or("unknown pack")?.pack)
     }
     pub fn pack_evidence(
         &self,
@@ -1797,7 +1814,7 @@ fn resolve_evidence_keys(
     Ok(())
 }
 
-fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> Result<(), String> {
+pub(crate) fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> Result<(), String> {
     let mut keys = BTreeMap::new();
     let mut atoms = BTreeMap::new();
     for atom in &pack.atoms {
@@ -2065,6 +2082,84 @@ fn support_directory(pack: &ParsePack, cursor: Option<&str>) -> Result<Value, St
     )
 }
 
+/// Pure first-page construction shared by admission planning and live workers.
+pub(crate) fn automatic_support_page(
+    input: &FrozenInput,
+    pack: &ParsePack,
+    selected: &[EvidenceRef],
+) -> Result<(Value, Vec<ConditionSupport>), String> {
+    let required = required_pack_support(input, pack)?;
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|r| !super::evidence::covered_by_union(r, &required))
+    {
+        return Err("automatic support outside required selection".into());
+    }
+    let excerpts = resolve_evidence(input, selected)?;
+    let mut options = Vec::<ConditionSupport>::new();
+    for reference in selected {
+        let source =
+            super::source_support::source_for(input, reference).ok_or("support source missing")?;
+        let origin = ConditionSupportOrigin::StructuralContext {
+            source_unit_revision_id: source.source_unit_revision_id.clone(),
+        };
+        if let Some(option) = options.iter_mut().find(|o| o.origin == origin) {
+            option.evidence.push(reference.clone());
+        } else {
+            options.push(ConditionSupport {
+                origin,
+                review_version: section_context_key(pack, source)?,
+                evidence: vec![reference.clone()],
+            });
+        }
+    }
+    let handles = options
+        .iter()
+        .map(|o| Ok(json!({"support_key":support_key(pack,o)?,"origin":o.origin})))
+        .collect::<Result<Vec<_>, String>>()?;
+    let page_id = super::canonical_sha256(&(
+        &pack.input_digest,
+        &pack.id,
+        pack.pack_revision,
+        &pack.claim_token,
+        selected,
+    ))?;
+    let read = json!({"excerpts":excerpts,"condition_support_options":handles,"delivery_policy":"These options become usable only after this exact read output is delivered in a completed request for the same worker."});
+    Ok((
+        json!({"automatic_support_page":{"id":page_id,"read":read},"instruction":"Read this host-selected structural support. It grants no primary ownership or semantic applicability; further required pages are supplied automatically."}),
+        options,
+    ))
+}
+pub(crate) fn planning_required_support(
+    input: &FrozenInput,
+    pack: &ParsePack,
+) -> Result<Vec<EvidenceRef>, String> {
+    required_pack_support(input, pack)
+}
+
+fn required_pack_support(
+    input: &FrozenInput,
+    pack: &ParsePack,
+) -> Result<Vec<EvidenceRef>, String> {
+    Ok(
+        super::source_support::select(input, &pack_scope(pack, false))?
+            .into_iter()
+            .map(|r| r.evidence)
+            .collect(),
+    )
+}
+fn missing_pack_support(input: &FrozenInput, pack: &ParsePack) -> Result<Vec<EvidenceRef>, String> {
+    let mut missing = Vec::new();
+    for reference in required_pack_support(input, pack)? {
+        let source =
+            super::source_support::source_for(input, &reference).ok_or("support source missing")?;
+        let coverage = section_context_delivered_evidence(pack, source);
+        missing.extend(super::source_support::uncovered(&reference, &coverage));
+    }
+    Ok(missing)
+}
+
 // Navigation and submission use the same current-claim receipt union. A
 // directory preview or pending delivery never marks an original as read.
 fn section_context_delivered_evidence(pack: &ParsePack, source: &Source) -> Vec<EvidenceRef> {
@@ -2137,16 +2232,11 @@ fn dependency_directory(
             "original_read_complete":section_context_delivered(pack, source),
             "evidence_preview":section_context_ref(pack, source),
             "read":{"tool":"read_evidence","args":{"dependency_id":section_context_key(pack, source)?}},
-            "read_policy":"Earlier prose in the same native section or an ancestor section may qualify these rows. Read all structural context originals completely in completed worker requests before submitting any result; decide applicability separately. This directory grants no reading credit, no primary evidence ownership, and no completion of another pack."}));
+            "read_policy":"Earlier prose in the same native section or an ancestor section may qualify these rows. This is an optional semantic candidate, not a mandatory reading prerequisite; decide applicability separately. This directory grants no reading credit, no primary evidence ownership, and no completion of another pack."}));
     }
-    let next_required_read = context
-        .iter()
-        .find(|source| !section_context_delivered(pack, source))
-        .map(|source| {
-            section_context_key(pack, source)
-                .map(|key| json!({"tool":"read_evidence","args":{"dependency_id":key}}))
-        })
-        .transpose()?;
+    let next_required_read = missing_pack_support(input, pack)?
+        .first()
+        .map(|reference| json!({"tool":"read_evidence","args":{"refs":[reference]}}));
     Ok(
         json!({"read_dependencies":rows,"next_required_read":next_required_read,"next_dependency_cursor":if index + 1 < total { Some(dependency_cursor(pack,index+1)?) } else { None },"directory_complete":index + 1 >= total}),
     )
@@ -2519,9 +2609,105 @@ pub(crate) fn fixture_key_submission(
     Ok(args)
 }
 
+pub(crate) fn project_owned_pack_headers(session: &mut Value) {
+    for atom in session["pack"]["atoms"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        let contexts = atom
+            .as_object_mut()
+            .and_then(|a| a.remove("header_context"))
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        for context in contexts {
+            let owned = atom["cells"].as_array().is_some_and(|cells| {
+                cells.iter().any(|cell| {
+                    ["anchor_row", "anchor_column", "start_byte", "end_byte"]
+                        .iter()
+                        .all(|key| cell[*key] == context[*key])
+                })
+            });
+            if owned {
+                continue;
+            }
+            let anchor = format!("{},{}", context["anchor_row"], context["anchor_column"]);
+            let range = format!("{},{}", context["start_byte"], context["end_byte"]);
+            if let Some(fragments) =
+                atom["table_structure"]["anchors"][&anchor]["header_fragments"].as_object_mut()
+            {
+                fragments.remove(&range);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_owned_and_support_primary_is_rejected_before_check() {
+        let input = input(
+            vec![source("t", 0, "", "one")],
+            vec![
+                json!({"source_unit_revision_id":"t","form_definition_revision_id":"table","definition":{"row_count":2,"column_count":1,"cells":[
+                    {"row":0,"column":0,"header_role":"column_header","text":"Condition"},
+                    {"row":1,"column":0,"header_role":"none","text":"Submit declaration"}
+                ]}}),
+            ],
+        );
+        let mut work = DiscoverWork::plan(&input, 8192);
+        let id = work.pack_ids().iter().next().unwrap().clone();
+        let pack = &mut work.packs.get_mut(&id).unwrap().pack;
+        for atom in &mut pack.atoms {
+            if let PackCarrier::Grid {
+                cells,
+                header_context,
+                ..
+            } = &mut atom.carrier
+            {
+                *header_context = cells
+                    .iter()
+                    .filter(|c| c.anchor_row == 0)
+                    .cloned()
+                    .collect();
+                cells.retain(|c| c.anchor_row == 1);
+            }
+        }
+        let pack = work.claim(1).remove(0);
+        let required = work.required_support_refs(&input, &id).unwrap();
+        assert_eq!(required.len(), 1);
+        let (_, options) = work.related_read(&input, &id, &required).unwrap();
+        work.confirm_related_read(&input, &id, &options).unwrap();
+        assert!(
+            work.missing_required_support(&input, &id)
+                .unwrap()
+                .is_empty()
+        );
+        let owned = work.pack_evidence(&input, &id).unwrap();
+        let mut mixed = owned.clone();
+        mixed.extend(required);
+        let requirement = PackRequirement {
+            condition_support: vec![],
+            description: "Submit declaration".into(),
+            evidence: mixed,
+            source_section_id: pack.atoms[0].section_id.clone(),
+            kind: "material".into(),
+            obligation_strength: "mandatory".into(),
+            extraction_quality: "explicit".into(),
+        };
+        assert!(
+            work.submit(&input, &id, submission(&pack, "mixed", vec![requirement]))
+                .is_err()
+        );
+        assert!(
+            work.requirement_records().is_empty(),
+            "Check must never receive support promoted to canonical primary"
+        );
+        let reloaded: DiscoverWork = serde_json::from_value(json!(work)).unwrap();
+        assert!(reloaded.requirement_records().is_empty());
+    }
+
     #[test]
     fn failed_repair_feedback_owner_handles_are_current_and_actionable() {
         let input = input(
@@ -3155,12 +3341,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["B", "H"]
         );
+        let refs = work.required_support_refs(&input, &packs[1].id).unwrap();
+        let (_, options) = work.related_read(&input, &packs[1].id, &refs).unwrap();
+        work.confirm_related_read(&input, &packs[1].id, &options)
+            .unwrap();
         let requirement = PackRequirement {
-            condition_support: Vec::new(),
+            condition_support: options,
             obligation_strength: "mandatory".into(),
             extraction_quality: "explicit".into(),
             description: "Header-scoped row".into(),
-            evidence: displayed,
+            evidence: owned,
             source_section_id: "一".into(),
             kind: "technical".into(),
         };

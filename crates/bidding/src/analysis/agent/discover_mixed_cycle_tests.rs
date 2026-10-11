@@ -2,11 +2,21 @@
 struct MixedCycleModel {
     discover: MixedNativeDiscoveryModel,
     organize_step: AtomicUsize,
+    total_calls: AtomicUsize,
+    repeat_actions: Mutex<std::collections::BTreeMap<String, usize>>,
     compared: Mutex<BTreeSet<String>>,
 }
 #[async_trait]
 impl Model for MixedCycleModel {
     async fn turn(&self, config: &Config, bytes: &[u8]) -> Result<ChatTurn, AgentError> {
+        // This synthetic oracle must fail finitely if its protocol decisions
+        // become incompatible with the production contract. This is not a
+        // production retry limit or a semantic acceptance claim.
+        let call = self.total_calls.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            call < 128,
+            "mixed fixture oracle exceeded 128 total model turns; inspect its last protocol decision"
+        );
         let wire: Value = serde_json::from_slice(bytes).unwrap();
         if wire["tools"]
             .as_array()
@@ -167,22 +177,65 @@ impl Model for MixedCycleModel {
                     )
                 }
             } else if let Some(id) = work["requirement_id"].as_str() {
-                let compared = self.compared.lock().unwrap().contains(id);
-                if !compared {
+                if work["stage"] == "compare_claims" {
                     if let Some(unit) = results.iter().rev().find(|r| {
                         r["requirement_id"] == id && r["original_requirement"].is_string()
                     }) {
-                        let handles = unit["items"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|i| i["quote_handle"].clone())
-                            .collect::<Vec<_>>();
-                        self.compared.lock().unwrap().insert(id.into());
-                        (
-                            "submit_claim_comparison",
-                            json!({"requirement_id":id,"version":unit["version"],"declared_claims":[{"claim_handle":"fixture-claim","obligation":unit["original_requirement"],"applicability":"synthetic native fixture","original_fragments":[unit["original_requirement"]],"primary_handles":handles,"support_handles":[]}],"observations":handles.iter().map(|h|json!({"quote_handle":h,"polarity":"required","applicability":"relevant","condition":"fixture requirement"})).collect::<Vec<_>>(),"decisions":[{"claim_handle":"fixture-claim","evidence_handles":handles,"verdict":"supports","action":"retain","resulting_claim":unit["original_requirement"]}]}),
-                        )
+                        if let Some(cursor) = unit["next_cursor"].as_str() {
+                            assert_eq!(unit["selection_complete"], false);
+                            ("read_claim_evidence", json!({"cursor":cursor}))
+                        } else {
+                            assert_eq!(
+                                unit["selection_complete"], true,
+                                "claim comparison requires the complete selection"
+                            );
+                            // Every historical payload in this request has been projected
+                            // into this request's one scope. Never retain these handles
+                            // as cross-request identities in the oracle.
+                            let mut roles = std::collections::BTreeMap::<String, String>::new();
+                            for page in results.iter().filter(|p| {
+                                p["requirement_id"] == id
+                                    && p["version"] == unit["version"]
+                                    && p["items"].is_array()
+                            }) {
+                                for item in page["items"].as_array().unwrap() {
+                                    let key = item["quote_handle"].as_str().unwrap().to_owned();
+                                    let role = item["role"].as_str().unwrap().to_owned();
+                                    if let Some(prior) = roles.insert(key, role.clone()) {
+                                        assert_eq!(prior, role);
+                                    }
+                                }
+                            }
+                            assert_eq!(
+                                roles.len() as u64,
+                                unit["total_units"].as_u64().unwrap(),
+                                "all complete quote units must be present across the claim pages"
+                            );
+                            let handles = roles.keys().map(|key| json!(key)).collect::<Vec<_>>();
+                            let primary = roles
+                                .iter()
+                                .filter(|(_, role)| role.as_str() == "requirement_source")
+                                .map(|(key, _)| json!(key))
+                                .collect::<Vec<_>>();
+                            let support = roles
+                                .iter()
+                                .filter(|(_, role)| role.as_str() != "requirement_source")
+                                .map(|(key, _)| json!(key))
+                                .collect::<Vec<_>>();
+                            assert!(
+                                !primary.is_empty(),
+                                "fixture comparison must include an original primary carrier"
+                            );
+                            // Diagnostic only. The production host stage is authoritative.
+                            self.compared
+                                .lock()
+                                .unwrap()
+                                .insert(unit["original_requirement"].as_str().unwrap().to_owned());
+                            (
+                                "submit_claim_comparison",
+                                json!({"requirement_id":id,"version":unit["version"],"declared_claims":[{"claim_handle":"fixture-claim","obligation":unit["original_requirement"],"applicability":"synthetic native fixture","original_fragments":[unit["original_requirement"]],"primary_handles":primary,"support_handles":support}],"observations":handles.iter().map(|h|json!({"quote_handle":h,"polarity":"required","applicability":"relevant","condition":"fixture requirement"})).collect::<Vec<_>>(),"decisions":[{"claim_handle":"fixture-claim","evidence_handles":handles,"verdict":"supports","action":"retain","resulting_claim":unit["original_requirement"]}]}),
+                            )
+                        }
                     } else {
                         ("read_claim_evidence", json!({"requirement_id":id}))
                     }
@@ -213,6 +266,26 @@ impl Model for MixedCycleModel {
                 ("finish_outline", json!({}))
             }
         };
+        let action_key = crate::outline::canonical_sha256(&(name, &args)).unwrap();
+        let repeat_count = {
+            let mut actions = self.repeat_actions.lock().unwrap();
+            let count = actions.entry(action_key).or_default();
+            *count += 1;
+            *count
+        };
+        eprintln!(
+            "MIXED_ORACLE call={} organize_step={} tool={} repeats={} compared={} remaining_comparisons={} remaining_packs={}",
+            call,
+            step,
+            name,
+            repeat_count,
+            self.compared.lock().unwrap().len(),
+            host["check_work"]["remaining_comparisons"],
+            host["check_work"]["remaining_unreviewed_packs"]
+        );
+        // Opaque argument strings can change or be reused in another scope;
+        // this count is diagnostic only, never an identity/progress decision.
+        // The total-call assertion above bounds this synthetic oracle.
         args["wire_scope"] = host["wire_scope"].clone();
         Ok(ChatTurn {
             content: String::new(),
@@ -245,6 +318,8 @@ async fn mixed_native_complete_organize_and_fresh_check_with_original_pixels() {
             expected_image_urls,
         },
         organize_step: AtomicUsize::new(0),
+        total_calls: AtomicUsize::new(0),
+        repeat_actions: Mutex::new(std::collections::BTreeMap::new()),
         compared: Mutex::new(BTreeSet::new()),
     };
     super::super::run(&input, &config, &journal, &model, &CancellationToken::new())
@@ -383,4 +458,47 @@ fn mixed_native_identical_pixels_never_credit_another_source_occurrence() {
         state.outline_run.tool_draft.check_reads.evidence.is_empty(),
         "Discover image delivery never grants Check credit"
     );
+}
+
+#[tokio::test]
+async fn mixed_oracle_uses_host_stage_and_complete_claim_pages_not_saved_opaque_ids() {
+    let model = MixedCycleModel {
+        discover: MixedNativeDiscoveryModel {
+            fallback: Delayed::default(),
+            image_requests: AtomicUsize::new(0),
+            word_grid_requests: AtomicUsize::new(0),
+            expected_image_urls: BTreeSet::new(),
+        },
+        organize_step: AtomicUsize::new(7),
+        total_calls: AtomicUsize::new(0),
+        repeat_actions: Mutex::new(std::collections::BTreeMap::new()),
+        compared: Mutex::new(BTreeSet::from(["r-old".into()])),
+    };
+    let config = crate::analysis::tests::config();
+    let page = |id: &str, handle: &str, role: &str, cursor: Option<&str>| json!({
+        "requirement_id":id,"version":"z-current","original_requirement":"Synthetic response obligation.",
+        "items":[{"quote_handle":handle,"role":role,"excerpts":[],"unit_complete_in_this_page":cursor.is_none()}],
+        "total_units":2,"next_cursor":cursor,"selection_complete":cursor.is_none()
+    });
+    let wire = |id: &str, pages: Vec<Value>| {
+        let mut messages=pages.into_iter().map(|page|json!({"role":"tool","content":json!({"ok":true,"result":page}).to_string()})).collect::<Vec<_>>();
+        messages.push(json!({"role":"user","content":json!({"wire_scope":"w0000000000000001","requirements":{"omitted":0,"items":[{"requirement_id":id,"requirement":{"description":"Synthetic response obligation.","evidence":[]}}]},"check_work":{"stage":"compare_claims","requirement_id":id},"progress":{"turn":1}}).to_string()}));
+        serde_json::to_vec(&json!({"tools":[],"messages":messages})).unwrap()
+    };
+    let first=model.turn(&config,&wire("r-old",vec![page("r-old","q1","requirement_source",Some("u-first"))])).await.unwrap();
+    assert_eq!(first.tool_calls[0].name,"read_claim_evidence");
+    let args:Value=serde_json::from_str(&first.tool_calls[0].arguments).unwrap();
+    assert_eq!(args["cursor"],"u-first","a remembered opaque ID is not proof of comparison");
+    // The next request uses another issued alias. All of its historical pages
+    // are already projected into that one scope, including split quote q2.
+    let complete=model.turn(&config,&wire("r-new",vec![
+        page("r-new","q1","requirement_source",Some("u-first")),
+        page("r-new","q2","related_structural_context",Some("u-second")),
+        page("r-new","q2","related_structural_context",None),
+    ])).await.unwrap();
+    assert_eq!(complete.tool_calls[0].name,"submit_claim_comparison");
+    let args:Value=serde_json::from_str(&complete.tool_calls[0].arguments).unwrap();
+    assert_eq!(args["declared_claims"][0]["primary_handles"],json!(["q1"]));
+    assert_eq!(args["declared_claims"][0]["support_handles"],json!(["q2"]));
+    assert_eq!(args["observations"].as_array().unwrap().len(),2);
 }
