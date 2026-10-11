@@ -7,6 +7,23 @@ use crate::outline::{agent::Duty, discover::PackStatus};
 use serde_json::json;
 use std::collections::BTreeSet;
 
+#[derive(Debug)]
+enum ReadPageFailure {
+    Business(String),
+    Capacity(String),
+    Host(AgentError),
+}
+impl From<String> for ReadPageFailure {
+    fn from(message: String) -> Self {
+        Self::Business(message)
+    }
+}
+impl From<&str> for ReadPageFailure {
+    fn from(message: &str) -> Self {
+        Self::Business(message.into())
+    }
+}
+
 struct PackProvider<'a, M> {
     config: &'a Config,
     model: &'a M,
@@ -81,7 +98,7 @@ impl<J: Journal> PackHost<'_, J> {
         request: &Request,
         response: &ChatTurn,
         cursor: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ReadPageFailure> {
         validate_worker_scope(self.input, self.state, request)?;
         let id = &request.scope.pack;
         let work = self
@@ -133,7 +150,13 @@ impl<J: Journal> PackHost<'_, J> {
         }
         .prepare_inner(id, false)
         .await
-        .map_err(|e| e.message)?;
+        .map_err(|error| {
+            if error.code == "AGENT_TURN_BUDGET_EXCEEDED" {
+                ReadPageFailure::Capacity("The indivisible dependency directory page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into())
+            } else {
+                ReadPageFailure::Host(error)
+            }
+        })?;
         self.worker_mut(id)
             .map_err(|e| e.message)?
             .related_read_frames
@@ -141,12 +164,27 @@ impl<J: Journal> PackHost<'_, J> {
         Ok(result)
     }
 
+    #[cfg(test)]
     async fn related_page(
         &mut self,
         request: &Request,
         response: &ChatTurn,
         args: &Value,
     ) -> Result<Value, String> {
+        self.related_page_typed(request, response, args)
+            .await
+            .map_err(|failure| match failure {
+                ReadPageFailure::Business(message) | ReadPageFailure::Capacity(message) => message,
+                ReadPageFailure::Host(error) => error.message,
+            })
+    }
+
+    async fn related_page_typed(
+        &mut self,
+        request: &Request,
+        response: &ChatTurn,
+        args: &Value,
+    ) -> Result<Value, ReadPageFailure> {
         use crate::outline::evidence::{self, EvidenceRef};
         validate_worker_scope(self.input, self.state, request)?;
         if let Some(cursor) = args["dependency_cursor"].as_str() {
@@ -248,6 +286,17 @@ impl<J: Journal> PackHost<'_, J> {
                 .get_mut(id)
                 .ok_or("worker missing")?;
             worker.related_read_frames.push(frame.clone());
+            // Probe the exact continuation state the successful commit will
+            // expose in dependency_progress.pending_cursors on the next turn.
+            if let Some(cursor) = cursor {
+                worker.related_continuations.remove(cursor);
+            }
+            if let Some(next) = &next {
+                worker
+                    .related_continuations
+                    .insert(next.clone(), continuation.clone());
+            }
+
             worker.history.push(json!({"role":"assistant","content":response.content,"tool_calls":response.tool_calls.iter().map(|call|json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}})).collect::<Vec<_>>()}));
             worker.history.push(json!({"role":"tool","tool_call_id":call.id,"content":super::tool_result_envelope(result.clone()).to_string()}));
             let mut probe = PackHost {
@@ -270,9 +319,11 @@ impl<J: Journal> PackHost<'_, J> {
                     return Ok(result);
                 }
                 Err(error) if error.code == "AGENT_TURN_BUDGET_EXCEEDED" => {
-                    evidence::shrink_selection(self.input, &mut selected)?
+                    evidence::shrink_selection(self.input, &mut selected)
+                        .map_err(|_| ReadPageFailure::Capacity(
+                            "The minimum UTF-8 source page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into()))?
                 }
-                Err(error) => return Err(error.message),
+                Err(error) => return Err(ReadPageFailure::Host(error)),
             }
         }
     }
@@ -349,7 +400,7 @@ impl<J: Journal> PackHost<'_, J> {
             json!({"role":"user","content":json!({"reading_packs":[session], "semantic_contract":crate::outline::agent::semantic_guidance(Duty::Discover), "repair_context":self.state.outline_run.repair_events.iter().rev().find(|event|event["pack_id"]==id && event["status"]=="reopened" && event["pack_revision"]==identity["revision"])}).to_string()}),
         ];
         messages.push(json!({"role":"user","content":json!({"dependency_progress":{"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain accessible through condition_support_options and next_support_cursor (read_evidence dependency_cursor). Directory pages grant no original reading credit. Follow pending body cursors until selection_complete; reread original source keys or a support dependency_id when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
-        messages.extend(project_settled_submission_history(&worker.history));
+        messages.extend(project_worker_history(&worker.history));
         for view in &views {
             messages.push(view.message());
         }
@@ -704,14 +755,28 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 Duty::Discover,
             )
         })();
+        let mut host_failure_code = None;
         let outcome = match outcome {
-            Ok(value) if value["status"] == "read_request" => {
-                self.related_page(request, &response, &value["args"]).await
-            }
+            Ok(value) if value["status"] == "read_request" => self
+                .related_page_typed(request, &response, &value["args"])
+                .await
+                .map_err(|failure| match failure {
+                    ReadPageFailure::Business(message) => message,
+                    ReadPageFailure::Capacity(message) => {
+                        host_failure_code = Some("DISCOVER_READ_CAPACITY_EXCEEDED".to_owned());
+                        message
+                    }
+                    ReadPageFailure::Host(error) => {
+                        host_failure_code = Some(error.code);
+                        error.message
+                    }
+                }),
             other => other,
         };
         let receipt = match outcome {
             Ok(value) => super::tool_result_envelope(value),
+            Err(message) if host_failure_code.is_some() => json!({"ok":false,"error":message,
+                "code":host_failure_code,"retryable":false}),
             Err(message) if confirmation_failed => json!({"ok":false,"error":message,
                 "code":"DISCOVER_SOURCE_CONFIRMATION_FAILED",
                 "retryable":false}),
@@ -745,17 +810,18 @@ impl<J: Journal> Host for PackHost<'_, J> {
             // A host delivery confirmation cannot be repaired by changing the
             // model's submission. Preserve the failed frame and settled audit,
             // but never purchase another response to the same host failure.
-            if !confirmation_failed {
+            if !confirmation_failed && host_failure_code.is_none() {
                 worker.rejected_turns += 1;
             }
             worker.pending = Some(Pending::Failed {
                 request: request.clone(),
-                code: if confirmation_failed {
-                    "DISCOVER_SOURCE_CONFIRMATION_FAILED"
+                code: if let Some(code) = host_failure_code {
+                    code
+                } else if confirmation_failed {
+                    "DISCOVER_SOURCE_CONFIRMATION_FAILED".into()
                 } else {
-                    "BUSINESS_REJECTED"
-                }
-                .into(),
+                    "BUSINESS_REJECTED".into()
+                },
             });
         }
         self.state.turn = self
@@ -832,6 +898,18 @@ pub(super) fn project_settled_submission_history(history: &[Value]) -> Vec<Value
         }
     }
     result
+}
+
+// Worker-only projection: preserve the audit and every unconsumed tool group.
+fn project_worker_history(history: &[Value]) -> Vec<Value> {
+    let mut projected = project_settled_submission_history(history);
+    projected.dedup_by(|later, earlier| {
+        later == earlier
+            && later["role"] == "assistant"
+            && later["content"].is_string()
+            && later.as_object().is_some_and(|fields| fields.len() == 2)
+    });
+    projected
 }
 
 fn retire_delivered_related_history(history: &[Value], delivered: &BTreeSet<String>) -> Vec<Value> {

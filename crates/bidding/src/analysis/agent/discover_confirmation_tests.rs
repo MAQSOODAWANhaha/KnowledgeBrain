@@ -283,3 +283,110 @@ async fn repeated_pending_related_frame_is_not_new_host_coverage() {
         "delivered prefix plus pending suffix jointly cover the selected range"
     );
 }
+
+#[tokio::test]
+async fn worker_wire_deduplicates_only_adjacent_identical_plain_observations() {
+    let (input, config, mut journal) = fixture(1);
+    journal.stop_barrier = false;
+    let mut state = journal.state.lock().unwrap().clone();
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let first = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+    let plain = json!({"role":"assistant","content":"Synthetic identical observation."});
+    let unique = json!({"role":"assistant","content":"Synthetic distinct observation."});
+    let group = json!({"role":"assistant","content":"Synthetic identical observation.","tool_calls":[{"id":"unconsumed","type":"function","function":{"name":"read_evidence","arguments":"{}"}}]});
+    let result = json!({"role":"tool","tool_call_id":"unconsumed","content":"{\"ok\":true}"});
+    let spaced = json!({"role":"assistant","content":"Synthetic identical observation. "});
+    let composed = json!({"role":"assistant","content":"Synthetic café"});
+    let decomposed = json!({"role":"assistant","content":"Synthetic cafe\u{301}"});
+    let history = vec![
+        plain.clone(),
+        plain.clone(),
+        unique.clone(),
+        plain.clone(),
+        spaced.clone(),
+        composed.clone(),
+        decomposed.clone(),
+        group.clone(),
+        result.clone(),
+    ];
+    host.state
+        .outline_run
+        .discover_workers
+        .get_mut(&first.scope.pack)
+        .unwrap()
+        .history = history.clone();
+    let request = host.prepare_inner(&first.scope.pack, false).await.unwrap();
+    let wire: Value = serde_json::from_slice(&request.body).unwrap();
+    let messages = wire["messages"].as_array().unwrap();
+    let observations = messages
+        .iter()
+        .filter_map(synthetic_plain_assistant_text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observations,
+        vec![
+            "Synthetic identical observation.",
+            "Synthetic distinct observation.",
+            "Synthetic identical observation.",
+            "Synthetic identical observation. ",
+            "Synthetic café",
+            "Synthetic cafe\u{301}",
+        ],
+        "complete text and order, including Unicode and whitespace distinctions, must survive final wire"
+    );
+    assert!(messages.iter().any(|m| {
+        m["tool_calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call["id"] == "unconsumed"))
+    }));
+    assert!(messages.iter().any(|m| m["tool_call_id"] == "unconsumed"));
+    assert_eq!(
+        host.state.outline_run.discover_workers[&first.scope.pack].history,
+        history
+    );
+    assert_eq!(
+        project_settled_submission_history(&history),
+        history,
+        "shared main projection semantics are unchanged"
+    );
+}
+
+// SDK wire may represent text as typed content blocks and emit empty tool_calls.
+// Fail loudly on unexpected content instead of silently dropping observations.
+fn synthetic_plain_assistant_text(message: &Value) -> Option<String> {
+    if message["role"] != "assistant" {
+        return None;
+    }
+    if message
+        .get("tool_calls")
+        .is_some_and(|calls| !calls.is_null() && !calls.as_array().is_some_and(Vec::is_empty))
+    {
+        return None;
+    }
+    match &message["content"] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => Some(
+            blocks
+                .iter()
+                .map(|block| {
+                    assert_eq!(
+                        block["type"], "text",
+                        "synthetic observation must contain only text blocks"
+                    );
+                    block["text"]
+                        .as_str()
+                        .expect("text block string")
+                        .to_owned()
+                })
+                .collect::<String>(),
+        ),
+        other => panic!("unexpected synthetic assistant content shape: {other}"),
+    }
+}

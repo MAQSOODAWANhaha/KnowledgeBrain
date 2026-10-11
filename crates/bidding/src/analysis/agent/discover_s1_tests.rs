@@ -678,6 +678,46 @@ impl Journal for S1Journal {
 
 #[tokio::test]
 async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requires_fresh_check() {
+    s1_worker_observation_lifecycle(false).await;
+}
+
+#[tokio::test]
+async fn s1_unique_observations_stop_at_capacity_without_losing_notes_or_retrying_after_reload() {
+    s1_worker_observation_lifecycle(true).await;
+}
+
+fn s1_plain_assistant_text(message: &Value) -> Option<String> {
+    if message["role"] != "assistant" {
+        return None;
+    }
+    if message
+        .get("tool_calls")
+        .is_some_and(|calls| !calls.is_null() && !calls.as_array().is_some_and(Vec::is_empty))
+    {
+        return None;
+    }
+    match &message["content"] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => Some(
+            blocks
+                .iter()
+                .map(|block| {
+                    assert_eq!(
+                        block["type"], "text",
+                        "synthetic observation must contain only text blocks"
+                    );
+                    block["text"]
+                        .as_str()
+                        .expect("text block string")
+                        .to_owned()
+                })
+                .collect::<String>(),
+        ),
+        other => panic!("unexpected synthetic assistant content shape: {other}"),
+    }
+}
+
+async fn s1_worker_observation_lifecycle(unique_observations: bool) {
     // The source is derived from the synthetic native DOCX, with a longer
     // synthetic introduction solely to force production source pagination.
     let (mut input, _, _) = fixture();
@@ -689,6 +729,11 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
     intro.text = intro.text.repeat(128);
     let intro_id = intro.source_unit_revision_id.clone();
     let intro_text = intro.text.clone();
+    assert_eq!(
+        intro_text.len(),
+        22_528,
+        "use the same source in both capacity scenarios"
+    );
     let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(serde_json::to_vec(sessions).unwrap().len() <= 20_000)
     });
@@ -769,11 +814,10 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
     .prepare_inner(&target.id, false)
     .await
     .unwrap();
-    // Leave room for current repair feedback, the support directory, and
-    // retained observations as delivery advances. The enlarged source still
-    // exceeds this window; the assertion below requires actual body paging.
+    // Keep the original failing window. A larger window must not mask linear
+    // duplicate-observation growth or discard distinct notes to make progress.
     config.limits.max_context_tokens =
-        baseline.input_reserve as usize + baseline.output_reserve as usize + 4096;
+        baseline.input_reserve as usize + baseline.output_reserve as usize + 1300;
     state.config_sha256 = digest(&config).unwrap();
     let journal = S1Journal(std::sync::Mutex::new(state.clone()));
     let mut body_cursor: Option<String> = None;
@@ -783,6 +827,9 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
     let mut delivered_intro = String::new();
     let mut finished = false;
     let mut physical_calls = 0;
+    let mut capacity_stopped = false;
+    let mut saw_repeated_retired = false;
+    let mut emitted_observations = Vec::<String>::new();
     for step in 0..64 {
         // Recreate the borrowing adapter over the same persisted checkpoint;
         // no frame, request identity or worker status is manually injected.
@@ -803,6 +850,30 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
             request.input_reserve + request.output_reserve
                 <= config.limits.max_context_tokens as u64
         );
+        let wire: Value = serde_json::from_slice(&request.body).unwrap();
+        if !unique_observations {
+            let observation = "Synthetic offline lifecycle response.";
+            let canonical_count = host.state.outline_run.discover_workers[&target.id]
+                .history
+                .iter()
+                .filter_map(s1_plain_assistant_text)
+                .filter(|text| text == observation)
+                .count();
+            saw_repeated_retired |= canonical_count > 1;
+            let retired_count = wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(s1_plain_assistant_text)
+                .filter(|text| text == observation)
+                .count();
+            assert_eq!(
+                retired_count,
+                usize::from(canonical_count > 0),
+                "actual wire must retain exactly one observation when canonical retired observations exist, step {step}"
+            );
+        }
+        let rejected_before = host.state.outline_run.discover_workers[&target.id].rejected_turns;
         let canonical = host
             .state
             .outline_run
@@ -874,8 +945,17 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
         } else {
             args
         };
+        let observation = if unique_observations && name == "read_evidence" {
+            format!(
+                "Unique observation {step}: {}",
+                "Synthetic evidence observation retained in its original sequence. ".repeat(3)
+            )
+        } else {
+            "Synthetic offline lifecycle response.".into()
+        };
+        emitted_observations.push(observation.clone());
         let response = ChatTurn {
-            content: "Synthetic offline lifecycle response.".into(),
+            content: observation,
             finish_reason: "tool_calls".into(),
             usage: Some(knowledge::models::ChatUsage {
                 prompt_tokens: Some(10),
@@ -916,6 +996,16 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
         ));
         host.commit(&request, response).await.unwrap();
         let worker = &host.state.outline_run.discover_workers[&target.id];
+        let audit_observations = worker
+            .history
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .map(|message| message["content"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            audit_observations, emitted_observations,
+            "request projection must preserve every original audit observation in order"
+        );
         let result: Value =
             serde_json::from_str(worker.history.last().unwrap()["content"].as_str().unwrap())
                 .unwrap();
@@ -936,6 +1026,19 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
                 Some(PackStatus::Failed)
             );
             assert!(matches!(worker.pending, Some(Pending::Failed { .. })));
+        } else if unique_observations
+            && matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "DISCOVER_READ_CAPACITY_EXCEEDED")
+        {
+            assert_eq!(result["ok"], false);
+            assert_eq!(
+                worker.rejected_turns, rejected_before,
+                "host capacity is not another business rejection"
+            );
+            assert!(
+                emitted_observations.len() > 2,
+                "exercise several distinct observations before capacity stop"
+            );
+            capacity_stopped = true;
         } else {
             assert_eq!(
                 result["ok"],
@@ -975,11 +1078,66 @@ async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requir
         let saved = journal.load().await.unwrap().unwrap();
         assert_eq!(json!(saved), json!(host.state));
         state = saved;
-        if finished {
+        if finished || capacity_stopped {
             break;
         }
     }
+    if unique_observations {
+        assert!(
+            capacity_stopped && !finished,
+            "distinct observations must be preserved and produce an explicit bounded host stop"
+        );
+        let work = state.outline_run.reading_packs.as_ref().unwrap();
+        assert_eq!(work.status(&target.id), Some(PackStatus::Failed));
+        let delivered = work
+            .canonical_pack(&target.id)
+            .unwrap()
+            .condition_support_options
+            .iter()
+            .flat_map(|option| option.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        assert!(
+            structural_refs(&input, &target).iter().any(|reference| {
+                !crate::outline::evidence::covered_by_union(reference, &delivered)
+            }),
+            "capacity stop cannot grant unconsumed source coverage"
+        );
+        assert!(work.requirement_records().is_empty());
+        assert!(!work.complete());
+        assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+        let audit = json!(state.outline_run.discover_workers[&target.id]);
+        let accounting = json!(state.journal.accounting);
+        let mut restored = journal.load().await.unwrap().unwrap();
+        let mut host = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut restored,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        host.replay_received().await.unwrap();
+        assert!(
+            host.next(&BTreeSet::new()).await.unwrap().is_none(),
+            "capacity-stopped worker must not be selected after reload"
+        );
+        assert_eq!(
+            json!(host.state.journal.accounting),
+            accounting,
+            "reload must not reserve another request"
+        );
+        assert_eq!(
+            json!(host.state.outline_run.discover_workers[&target.id]),
+            audit
+        );
+        assert_eq!(host.state.journal.accounting.physical_calls, physical_calls);
+        assert!(!host.state.done);
+        return;
+    }
     assert!(finished, "bounded lifecycle must commit");
+    assert!(
+        saw_repeated_retired,
+        "fixture must actually exercise repeated canonical observations"
+    );
     assert!(
         continuation_calls > 0,
         "source body must use production continuation pages"
