@@ -3,6 +3,7 @@
 mod chat;
 mod language;
 mod ocr;
+mod oriented_image;
 mod pending;
 mod prompts;
 mod regions;
@@ -744,7 +745,8 @@ fn recognize_image_regions(image_key: &str, prompt: &str) -> Result<regions::Rec
         .strip_prefix("objects/")
         .ok_or("required OCR image is not a persisted object")?;
     let bytes = platform::read_blob(hash).map_err(|e| e.to_string())?;
-    let image = image::load_from_memory(&bytes).map_err(|e| format!("decode OCR image: {e}"))?;
+    let image = oriented_image::decode(&bytes, image::Limits::default())
+        .map_err(|e| format!("decode OCR image: {e}"))?;
     let depth = std::env::var("KNOWLEDGEBRAIN_OCR_MAX_REGION_DEPTH")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -800,7 +802,7 @@ pub async fn literal_ocr_regions_async(
             "invalid OCR image media".into(),
         ));
     }
-    let image = image::load_from_memory(image_bytes)
+    let image = oriented_image::decode(image_bytes, image::Limits::default())
         .map_err(|e| ChatTransportError::Response(format!("decode OCR image: {e}")))?;
     let depth = std::env::var("KNOWLEDGEBRAIN_OCR_MAX_REGION_DEPTH")
         .ok()

@@ -38,10 +38,52 @@ pub struct SourceExcerpt {
     pub completeness: String,
 }
 
-pub fn input_digest(input: &FrozenInput) -> Result<String, String> {
+struct BorrowedInputDigest {
+    address: usize,
+    digest: String,
+}
+
+tokio::task_local! {
+    // Entries exist only while with_input_digest polls its borrowed future.
+    // This is not a cross-run or thread-global cache.
+    static INPUT_DIGEST: BorrowedInputDigest;
+}
+
+/// Reuse only the digest of this immutable borrow, for this invocation. The
+/// borrow lasts until the future completes or is dropped, so its address
+/// cannot be reused or its contents changed while the entry is accessible.
+/// Tokio restores the enclosing scope on every poll, including unwind/cancel;
+/// another input, task, or later run cannot inherit this entry.
+pub(crate) async fn with_input_digest<T>(
+    input: &FrozenInput,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    let entry = BorrowedInputDigest {
+        address: std::ptr::from_ref(input) as usize,
+        digest: compute_input_digest(input)?,
+    };
+    Ok(INPUT_DIGEST.scope(entry, future).await)
+}
+
+fn compute_input_digest(input: &FrozenInput) -> Result<String, String> {
     #[cfg(test)]
     let _profile = crate::analysis::agent::profile::enter("frozen_input_digest");
     super::canonical_sha256(input)
+}
+
+pub fn input_digest(input: &FrozenInput) -> Result<String, String> {
+    if let Some(digest) = INPUT_DIGEST
+        .try_with(|entry| {
+            (entry.address == std::ptr::from_ref(input) as usize).then(|| entry.digest.clone())
+        })
+        .ok()
+        .flatten()
+    {
+        #[cfg(test)]
+        crate::analysis::agent::profile::observe("frozen_input_digest_reused", 1);
+        return Ok(digest);
+    }
+    compute_input_digest(input)
 }
 
 impl EvidenceRef {
@@ -422,6 +464,117 @@ pub(crate) fn shrink_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn input_digest_scope_reuses_only_the_live_borrow() {
+        let input = crate::outline::frozen::tests::related_native_input();
+        let expected = super::super::canonical_sha256(&input).unwrap();
+        crate::analysis::agent::profile::reset();
+        with_input_digest(&input, async {
+            for _ in 0..8 {
+                assert_eq!(input_digest(&input).unwrap(), expected);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let timings = crate::analysis::agent::profile::finish();
+        let counts = crate::analysis::agent::profile::finish_counters();
+        assert_eq!(timings["frozen_input_digest"].0, 1);
+        assert_eq!(counts["frozen_input_digest_reused"], 8);
+        assert!(INPUT_DIGEST.try_with(|_| ()).is_err());
+        assert_eq!(input_digest(&input).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn input_digest_scopes_isolate_nested_and_interleaved_inputs() {
+        let first = crate::outline::frozen::tests::related_native_input();
+        let mut second = first.clone();
+        second.project_id.push_str("-other");
+        let a = super::super::canonical_sha256(&first).unwrap();
+        let b = super::super::canonical_sha256(&second).unwrap();
+        assert_ne!(a, b);
+        with_input_digest(&first, async {
+            assert_eq!(input_digest(&first).unwrap(), a);
+            assert_eq!(
+                input_digest(&second).unwrap(),
+                b,
+                "different object must fall back"
+            );
+            with_input_digest(&second, async {
+                tokio::task::yield_now().await;
+                assert_eq!(input_digest(&second).unwrap(), b);
+                assert_eq!(input_digest(&first).unwrap(), a);
+            })
+            .await
+            .unwrap();
+            assert_eq!(input_digest(&first).unwrap(), a, "outer scope restored");
+        })
+        .await
+        .unwrap();
+        let (left, right) = tokio::join!(
+            with_input_digest(&first, async {
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                    assert_eq!(input_digest(&first).unwrap(), a);
+                    assert_eq!(input_digest(&second).unwrap(), b);
+                }
+            }),
+            with_input_digest(&second, async {
+                for _ in 0..4 {
+                    tokio::task::yield_now().await;
+                    assert_eq!(input_digest(&second).unwrap(), b);
+                    assert_eq!(input_digest(&first).unwrap(), a);
+                }
+            })
+        );
+        left.unwrap();
+        right.unwrap();
+        assert!(INPUT_DIGEST.try_with(|_| ()).is_err());
+    }
+
+    #[tokio::test]
+    async fn input_digest_scope_drops_on_cancel_and_panic_and_recomputes_after_mutation() {
+        use futures::FutureExt;
+        let mut input = crate::outline::frozen::tests::related_native_input();
+        let old = input_digest(&input).unwrap();
+        {
+            let scoped = with_input_digest(&input, async {
+                assert_eq!(input_digest(&input).unwrap(), old);
+                std::future::pending::<()>().await;
+            });
+            tokio::pin!(scoped);
+            tokio::select! {
+                biased;
+                _ = &mut scoped => panic!("fixture must remain pending"),
+                _ = std::future::ready(()) => {}
+            }
+            assert!(
+                INPUT_DIGEST.try_with(|_| ()).is_err(),
+                "scope restored between polls"
+            );
+        }
+        assert!(INPUT_DIGEST.try_with(|_| ()).is_err());
+        input.source_units[0].text.push_str("changed source");
+        input.schema_version += 1;
+        let changed = super::super::canonical_sha256(&input).unwrap();
+        assert_ne!(old, changed);
+        assert_eq!(
+            with_input_digest(&input, async { input_digest(&input).unwrap() })
+                .await
+                .unwrap(),
+            changed
+        );
+        let panic = std::panic::AssertUnwindSafe(with_input_digest(&input, async {
+            assert_eq!(input_digest(&input).unwrap(), changed);
+            panic!("fixture unwind");
+        }))
+        .catch_unwind()
+        .await;
+        assert!(panic.is_err());
+        assert!(INPUT_DIGEST.try_with(|_| ()).is_err());
+        assert_eq!(input_digest(&input).unwrap(), changed);
+    }
     #[test]
     fn borrowed_resolver_keeps_input_and_range_validation() {
         let input = crate::outline::frozen::tests::related_native_input();

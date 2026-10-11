@@ -6,12 +6,8 @@ use async_trait::async_trait;
 use knowledge::models::ChatTurn;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
-
-// Three attempts already bound the boundary. Space its two retries by 1s/2s;
-// keep retry ownership here, never in the SDK or HTTP client.
-const PROVIDER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Read-only view of an existing domain checkpoint, not another saved state.
 pub(crate) struct Status<'a> {
@@ -96,72 +92,128 @@ pub(crate) async fn drive<D: Driver>(
             request_bytes = body.len(),
             elapsed_ms = started.elapsed().as_millis() as u64
         );
+        let request_id = format!("serial:{}", host.status().journal.sequence);
         let response = if let Some(response) = host.status().journal.response() {
             response.clone()
         } else {
             let mut local_attempt = 0;
             let response = loop {
                 check_cancel(cancel)?;
-                local_attempt += 1;
-                let started = Instant::now();
-                host.admit(&body).await?;
-                let pending = host
-                    .journal_mut()
+                let charged = host
+                    .status()
+                    .journal
                     .pending
-                    .as_mut()
-                    .ok_or_else(|| super::invalid("pending request missing"))?;
-                if pending.physical_attempts >= 3 {
+                    .as_ref()
+                    .ok_or_else(|| super::invalid("pending request missing"))?
+                    .physical_attempts;
+                host.journal_mut().retry.recover(&request_id, charged);
+                if charged >= super::retry::MAX_ATTEMPTS {
+                    let code = host
+                        .status()
+                        .journal
+                        .retry
+                        .last_outcome(&request_id)
+                        .unwrap_or("AGENT_RETRY_EXHAUSTED")
+                        .to_owned();
                     return Err(AgentError::new(
-                        "AGENT_OUTPUT_INVALID",
-                        "pending request transport attempts exhausted; checkpoint retained",
+                        &code,
+                        "pending request physical attempts exhausted; possible prior charges and checkpoint retained",
                     ));
                 }
-                pending.physical_attempts += 1;
-                let attempt = host.reserve(&body, local_attempt).await?;
-                let reserve_ms = started.elapsed().as_millis() as u64;
-                check_cancel(cancel)?;
-                let started = Instant::now();
-                let result = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(AgentError::new("INTERNAL", "Agent run cancelled")),
-                    result = host.call_model(&body) => result,
-                };
-                tracing::info!(
-                    event = "agent_provider_completed",
-                    turn = host.status().turn,
-                    role = host.status().role,
-                    attempt,
-                    reserve_ms,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    error_code = result.as_ref().err().map(|e| e.code.as_str()),
-                    valid_tool_turn = result.as_ref().is_ok_and(valid_tool_turn)
-                );
-                match result {
-                    // Yield the prepared checkpoint before consuming all
-                    // physical reservations in a tight transport retry loop.
-                    Err(error) if error.code == "AGENT_TRANSPORT_INTERRUPTED" => return Err(error),
-                    Ok(response) if valid_tool_turn(&response) => break response,
-                    Ok(_) if attempt >= 3 => {
+                if charged > 0 {
+                    let last = host
+                        .status()
+                        .journal
+                        .retry
+                        .last_outcome(&request_id)
+                        .unwrap_or("AGENT_SEND_OUTCOME_UNKNOWN")
+                        .to_owned();
+                    if !super::retry::retryable(&last) {
                         return Err(AgentError::new(
-                            "AGENT_OUTPUT_INVALID",
-                            "Agent must return complete unique tool calls",
+                            &last,
+                            "saved provider failure is not automatically retryable",
                         ));
                     }
-                    Err(error) if attempt >= 3 => return Err(error),
-                    _ => {}
+                    if host.status().journal.retry.not_before_ms == 0 {
+                        host.journal_mut().retry.schedule(
+                            &request_id,
+                            &AgentError::new(&last, "resume reserved request"),
+                        );
+                        host.save().await?;
+                    }
+                    let delay = host.status().journal.retry.remaining();
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => check_cancel(cancel)?,
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                 }
-                let delay = PROVIDER_RETRY_INTERVAL * attempt as u32;
-                tracing::info!(
-                    event = "agent_provider_retry_wait",
-                    turn = host.status().turn,
-                    role = host.status().role,
-                    attempt,
-                    delay_ms = delay.as_millis() as u64
-                );
-                tokio::select! {
+                local_attempt += 1;
+                host.admit(&body).await?;
+                host.journal_mut()
+                    .pending
+                    .as_mut()
+                    .unwrap()
+                    .physical_attempts += 1;
+                host.journal_mut().retry.reserve(&request_id);
+                host.reserve(&body, local_attempt).await?;
+                check_cancel(cancel)?;
+                let result = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => check_cancel(cancel)?,
-                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancel.cancelled() => return Err(AgentError::new("INTERNAL", "Agent run cancelled; reserved provider outcome and possible charge retained")),
+                    result = host.call_model(&body) => result,
+                };
+                match result {
+                    Ok(response) if valid_tool_turn(&response) => {
+                        host.journal_mut().retry.complete(
+                            &request_id,
+                            "received",
+                            crate::agent_runtime::retry::usage_known(response.usage.as_ref()),
+                        );
+                        break response;
+                    }
+                    result => {
+                        let error = match result {
+                            Err(error) => error,
+                            Ok(response) => AgentError::new(
+                                "AGENT_RESPONSE_INCOMPLETE",
+                                "provider did not return complete unique tool calls",
+                            )
+                            .with_usage(response.usage),
+                        };
+                        if let Some(usage) = error.usage.as_deref() {
+                            let observed = ChatTurn {
+                                usage: Some(usage.clone()),
+                                ..Default::default()
+                            };
+                            if let Some(session) = host.journal_mut().session.as_mut() {
+                                session.note_provider_usage(&observed);
+                            }
+                            host.journal_mut().note_usage(&observed);
+                        }
+                        host.journal_mut().retry.complete(
+                            &request_id,
+                            &error.code,
+                            crate::agent_runtime::retry::usage_known(error.usage.as_deref()),
+                        );
+                        host.journal_mut().retry.schedule(&request_id, &error);
+                        host.save().await?;
+                        // A stop observed alongside provider failure wins after
+                        // persisting its actual outcome and any reported usage.
+                        check_cancel(cancel)?;
+                        if !super::retry::retryable(&error.code)
+                            || host
+                                .status()
+                                .journal
+                                .pending
+                                .as_ref()
+                                .unwrap()
+                                .physical_attempts
+                                >= super::retry::MAX_ATTEMPTS
+                        {
+                            return Err(error);
+                        }
+                    }
                 }
             };
             if let Some(session) = host.journal_mut().session.as_mut() {
@@ -241,6 +293,8 @@ mod tests {
         reserved: Mutex<usize>,
         sent: Mutex<Vec<(Instant, Vec<u8>)>>,
         first_send: Arc<tokio::sync::Notify>,
+        error_code: Option<&'static str>,
+        cancel_on_send: Option<CancellationToken>,
     }
 
     #[async_trait]
@@ -261,7 +315,17 @@ mod tests {
         }
 
         async fn prepare_request(&mut self) -> Result<Vec<u8>, AgentError> {
-            Ok(br#"{"messages":[{"content":"synthetic","role":"system"}]}"#.to_vec())
+            let body = super::super::session::test_window_body(
+                super::super::session::test_system_evidence("main"),
+                "progress",
+            );
+            self.journal.prepare_session(
+                &body,
+                crate::agent_runtime::SESSION_PREFIX,
+                crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+                16384,
+            )?;
+            Ok(body)
         }
 
         async fn reserve(&mut self, body: &[u8], _: usize) -> Result<usize, AgentError> {
@@ -281,8 +345,11 @@ mod tests {
                 .unwrap()
                 .push((Instant::now(), body.to_vec()));
             self.first_send.notify_one();
+            if let Some(cancel) = &self.cancel_on_send {
+                cancel.cancel();
+            }
             Err(AgentError::new(
-                "AGENT_PROVIDER_UNAVAILABLE",
+                self.error_code.unwrap_or("AGENT_PROVIDER_TRANSIENT"),
                 "synthetic failure",
             ))
         }
@@ -307,7 +374,7 @@ mod tests {
         let error = drive(&mut host, &CancellationToken::new())
             .await
             .unwrap_err();
-        assert_eq!(error.code, "AGENT_PROVIDER_UNAVAILABLE");
+        assert_eq!(error.code, "AGENT_PROVIDER_TRANSIENT");
         {
             let sent = host.sent.lock().unwrap();
             assert_eq!(sent.len(), 3);
@@ -325,6 +392,10 @@ mod tests {
             reserved: Mutex::new(2),
             ..Default::default()
         };
+        resumed.journal = host.journal.clone();
+        resumed.journal.pending.as_mut().unwrap().physical_attempts = 2;
+        resumed.journal.retry.attempts.truncate(2);
+        resumed.journal.retry.not_before_ms = 0;
         drive(&mut resumed, &CancellationToken::new())
             .await
             .unwrap_err();
@@ -349,7 +420,48 @@ mod tests {
         assert!(host.journal.response().is_none());
     }
 
+    #[tokio::test]
+    async fn cancellation_with_provider_failure_preserves_outcome_but_returns_stop() {
+        let cancel = CancellationToken::new();
+        let mut host = FailedProvider {
+            error_code: Some("AGENT_PROVIDER_UNAVAILABLE"),
+            cancel_on_send: Some(cancel.clone()),
+            ..Default::default()
+        };
+        let error = drive(&mut host, &cancel).await.unwrap_err();
+        assert_eq!(error.code, "INTERNAL");
+        assert_eq!(error.message, "Agent run cancelled");
+        assert_eq!(host.sent.lock().unwrap().len(), 1);
+        assert_eq!(host.journal.retry.attempts.len(), 1);
+        assert_eq!(
+            host.journal.retry.attempts[0].outcome,
+            "AGENT_PROVIDER_UNAVAILABLE"
+        );
+        assert!(host.journal.retry.attempts[0].usage_unknown);
+    }
+
+    #[tokio::test]
+    async fn permanent_provider_failure_is_not_retried_even_after_reload() {
+        let mut host = FailedProvider {
+            error_code: Some("AGENT_PROVIDER_UNAVAILABLE"),
+            ..Default::default()
+        };
+        assert!(drive(&mut host, &CancellationToken::new()).await.is_err());
+        host.journal =
+            serde_json::from_value(serde_json::to_value(&host.journal).unwrap()).unwrap();
+        assert_eq!(
+            drive(&mut host, &CancellationToken::new())
+                .await
+                .unwrap_err()
+                .code,
+            "AGENT_PROVIDER_UNAVAILABLE"
+        );
+        assert_eq!(host.sent.lock().unwrap().len(), 1);
+        assert_eq!(*host.reserved.lock().unwrap(), 1);
+    }
+
     struct ScriptedHost {
+        http_endpoint: Option<String>,
         operator_paused: bool,
         journal: TurnJournal,
         interrupt_call: Option<usize>,
@@ -366,6 +478,7 @@ mod tests {
     impl Default for ScriptedHost {
         fn default() -> Self {
             Self {
+                http_endpoint: None,
                 operator_paused: false,
                 journal: TurnJournal::default(),
                 interrupt_call: None,
@@ -403,25 +516,15 @@ mod tests {
         );
         assert_eq!(serde_json::to_value(&host.journal).unwrap(), prepared);
         host.operator_paused = false;
-        assert_eq!(
-            drive(&mut host, &cancel).await.unwrap_err().code,
-            "AGENT_TRANSPORT_INTERRUPTED"
-        );
-        assert_eq!(*host.calls.lock().unwrap(), 1);
-        assert_eq!(host.journal.accounting.physical_calls, 1);
-        assert_eq!(host.journal.pending.as_ref().unwrap().physical_attempts, 1);
-        host.operator_paused = true;
-        let unknown = serde_json::to_value(&host.journal).unwrap();
-        assert_eq!(
-            drive(&mut host, &cancel).await.unwrap_err().code,
-            "AGENT_PAUSED_OPERATOR"
-        );
-        assert_eq!(serde_json::to_value(&host.journal).unwrap(), unknown);
-        host.operator_paused = false;
         drive(&mut host, &cancel).await.unwrap();
         assert_eq!(*host.calls.lock().unwrap(), 2);
         assert_eq!(host.journal.accounting.physical_calls, 2);
         assert_eq!(*host.executes.lock().unwrap(), 1);
+        assert_eq!(
+            host.journal.retry.attempts[0].outcome,
+            "AGENT_TRANSPORT_INTERRUPTED"
+        );
+        assert!(host.journal.retry.attempts[0].usage_unknown);
     }
 
     fn tool_response(id: &str) -> ChatTurn {
@@ -509,7 +612,10 @@ mod tests {
             Ok(local_attempt)
         }
 
-        async fn call_model(&self, _: &[u8]) -> Result<ChatTurn, AgentError> {
+        async fn call_model(&self, body: &[u8]) -> Result<ChatTurn, AgentError> {
+            if let Some(endpoint) = &self.http_endpoint {
+                return super::super::chat::fixture_send(endpoint, body).await;
+            }
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
             if self.interrupt_call == Some(*calls) {
@@ -539,6 +645,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_http_retry_after_empty_tools_then_success_preserves_exact_wire() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut block = [0u8; 4096];
+                let header_end = loop {
+                    let read = socket.read(&mut block).await.unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&block[..read]);
+                    if let Some(offset) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                        break offset + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]).to_ascii_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                while bytes.len() < header_end + length {
+                    let read = socket.read(&mut block).await.unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&block[..read]);
+                }
+                requests.push((
+                    Instant::now(),
+                    bytes[header_end..header_end + length].to_vec(),
+                ));
+                let (status, retry_after, response) = match index {
+                    0 => (429, "Retry-After: 2\r\n", String::new()),
+                    1 => (
+                        200,
+                        "",
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}})
+                        ),
+                    ),
+                    _ => (
+                        200,
+                        "",
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"accepted","function":{"name":"read_source","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}})
+                        ),
+                    ),
+                };
+                let header = format!(
+                    "HTTP/1.1 {status} Fixture\r\n{retry_after}Content-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                );
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let mut host = ScriptedHost {
+            http_endpoint: Some(endpoint),
+            complete_after: 1,
+            ..Default::default()
+        };
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            drive(&mut host, &CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|(_, body)| body == &requests[0].1));
+        assert!(requests[1].0.duration_since(requests[0].0) >= Duration::from_secs(2));
+        assert_eq!(*host.reserved.lock().unwrap(), 3);
+        assert_eq!(host.journal.accounting.physical_calls, 3);
+        assert_eq!(*host.executes.lock().unwrap(), 1);
+        assert_eq!(host.journal.usage.total_tokens, 19);
+        assert_eq!(
+            host.journal
+                .retry
+                .attempts
+                .iter()
+                .map(|a| a.outcome.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "AGENT_PROVIDER_TRANSIENT",
+                "AGENT_RESPONSE_INCOMPLETE",
+                "received"
+            ]
+        );
+        assert!(host.journal.retry.attempts[0].usage_unknown);
+        assert!(!host.journal.retry.attempts[1].usage_unknown);
+        assert!(!host.journal.retry.attempts[2].usage_unknown);
+        assert!(host.journal.pending.is_none());
+        drive(&mut host, &CancellationToken::new()).await.unwrap();
+        assert_eq!(
+            *host.executes.lock().unwrap(),
+            1,
+            "completed tools must not execute again"
+        );
+    }
+
+    #[tokio::test]
     async fn drive_commits_two_turns_with_request_scoped_sdk_and_cumulative_usage() {
         let mut host = ScriptedHost::default();
         drive(&mut host, &CancellationToken::new()).await.unwrap();
@@ -556,26 +774,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_stream_yields_prepared_boundary_then_resumes_without_reexecuting() {
+    async fn interrupted_stream_retries_exact_boundary_without_reexecuting() {
         let mut host = ScriptedHost {
             interrupt_call: Some(2),
             ..Default::default()
         };
-        let error = drive(&mut host, &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "AGENT_TRANSPORT_INTERRUPTED");
-        assert_eq!(host.turn, 1);
-        assert_eq!(*host.executes.lock().unwrap(), 1);
-        assert_eq!(*host.calls.lock().unwrap(), 2);
-        let body = host.journal.body().unwrap().to_vec();
-        host.journal =
-            serde_json::from_value(serde_json::to_value(&host.journal).unwrap()).unwrap();
-        assert_eq!(host.journal.body().unwrap(), body);
         drive(&mut host, &CancellationToken::new()).await.unwrap();
         assert_eq!(host.turn, 2);
         assert_eq!(*host.executes.lock().unwrap(), 2);
         assert_eq!(*host.calls.lock().unwrap(), 3);
+        let restored: TurnJournal =
+            serde_json::from_value(serde_json::to_value(&host.journal).unwrap()).unwrap();
+        assert_eq!(restored.retry.attempts.len(), 3);
+        assert_eq!(
+            restored.retry.attempts[1].outcome,
+            "AGENT_TRANSPORT_INTERRUPTED"
+        );
     }
 
     #[tokio::test]

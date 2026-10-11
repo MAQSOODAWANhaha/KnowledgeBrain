@@ -665,17 +665,33 @@ impl<J: Journal> Host for PackHost<'_, J> {
             self.commit(&request, serde_json::from_value(response).map_err(invalid)?)
                 .await?;
         }
-        if self
-            .state
-            .outline_run
-            .discover_workers
-            .values()
-            .any(|worker| matches!(worker.pending, Some(Pending::Sending { .. })))
-        {
-            return Err(error(
-                "AGENT_SEND_OUTCOME_UNKNOWN",
-                "interrupted worker send outcome unknown; reservation retained; explicit resolution required",
-            ));
+        let mut recovered = false;
+        for worker in self.state.outline_run.discover_workers.values_mut() {
+            if let Some(Pending::Sending { request }) = worker.pending.clone() {
+                let id = &request.scope.request;
+                worker.retry.recover(id, 1);
+                // The reserved request may already have incurred provider cost.
+                // Preserve that unknown outcome before starting a fresh attempt.
+                if worker.retry.count(id) < crate::agent_runtime::retry::MAX_ATTEMPTS {
+                    worker.retry.schedule(
+                        id,
+                        &error(
+                            "AGENT_SEND_OUTCOME_UNKNOWN",
+                            "recovered reserved send; provider charge is unknown",
+                        ),
+                    );
+                    worker.pending = Some(Pending::Prepared { request });
+                } else {
+                    worker.pending = Some(Pending::Failed {
+                        request,
+                        code: "AGENT_RETRY_EXHAUSTED".into(),
+                    });
+                }
+                recovered = true;
+            }
+        }
+        if recovered {
+            self.save().await?;
         }
         Ok(())
     }
@@ -693,6 +709,12 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 let Some(worker) = self.state.outline_run.discover_workers.get(&id) else {
                     continue;
                 };
+                if matches!(worker.pending, Some(Pending::Prepared { .. }))
+                    && !worker.retry.remaining().is_zero()
+                {
+                    settled.insert(id.clone());
+                    continue;
+                }
                 let Some(Pending::Failed { request, code }) = &worker.pending else {
                     continue;
                 };
@@ -767,7 +789,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
                         let history_revision_start = history.len();
                         let retired_read_calls = worker.retired_read_calls.clone();
                         let registry = worker.registry.clone();
+                        let retry = worker.retry.clone();
                         *worker = Worker {
+                            retry,
                             rejected_turns,
                             failure_signatures,
                             progress_evidence,
@@ -782,7 +806,12 @@ impl<J: Journal> Host for PackHost<'_, J> {
                     }
                 }
                 match &worker.pending {
-                    Some(Pending::Prepared { request }) => return Ok(Some(request.clone())),
+                    Some(Pending::Prepared { request }) => {
+                        if worker.retry.remaining().is_zero() {
+                            return Ok(Some(request.clone()));
+                        }
+                        continue;
+                    }
                     Some(Pending::Sending { request })
                         if active.contains(&request.scope.request) =>
                     {
@@ -820,6 +849,17 @@ impl<J: Journal> Host for PackHost<'_, J> {
         {
             return Err(invalid("worker request changed before reservation"));
         }
+        if self
+            .worker(&request.scope.pack)?
+            .retry
+            .count(&request.scope.request)
+            >= crate::agent_runtime::retry::MAX_ATTEMPTS
+        {
+            return Err(error(
+                "AGENT_RETRY_EXHAUSTED",
+                "Discover physical attempts exhausted",
+            ));
+        }
         let prior = self.state.journal.accounting.clone();
         self.state.journal.accounting.record(
             request.input_reserve,
@@ -831,7 +871,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
             self.save().await?;
             return Err(error);
         }
-        self.worker_mut(&request.scope.pack)?.pending = Some(Pending::Sending {
+        let worker = self.worker_mut(&request.scope.pack)?;
+        worker.retry.reserve(&request.scope.request);
+        worker.pending = Some(Pending::Sending {
             request: request.clone(),
         });
         self.journal
@@ -843,7 +885,13 @@ impl<J: Journal> Host for PackHost<'_, J> {
         {
             return Err(invalid("response outside worker reservation"));
         }
-        self.worker_mut(&request.scope.pack)?.pending = Some(Pending::Received {
+        let worker = self.worker_mut(&request.scope.pack)?;
+        worker.retry.complete(
+            &request.scope.request,
+            "received",
+            crate::agent_runtime::retry::usage_known(response.usage.as_ref()),
+        );
+        worker.pending = Some(Pending::Received {
             request: request.clone(),
             response: serde_json::to_value(response).map_err(invalid)?,
         });
@@ -1058,14 +1106,48 @@ impl<J: Journal> Host for PackHost<'_, J> {
         self.save().await
     }
     async fn failed(&mut self, request: &Request, error: &AgentError) -> Result<(), AgentError> {
-        self.worker_mut(&request.scope.pack)?.pending = Some(Pending::Failed {
-            request: request.clone(),
-            code: error.code.clone(),
-        });
+        if let Some(usage) = error.usage.as_deref() {
+            self.state.journal.note_usage(&ChatTurn {
+                usage: Some(usage.clone()),
+                ..Default::default()
+            });
+        }
+        let worker = self.worker_mut(&request.scope.pack)?;
+        worker.retry.complete(
+            &request.scope.request,
+            &error.code,
+            crate::agent_runtime::retry::usage_known(error.usage.as_deref()),
+        );
+        if crate::agent_runtime::retry::retryable(&error.code)
+            && worker.retry.count(&request.scope.request)
+                < crate::agent_runtime::retry::MAX_ATTEMPTS
+        {
+            worker.retry.schedule(&request.scope.request, error);
+            worker.pending = Some(Pending::Prepared {
+                request: request.clone(),
+            });
+        } else {
+            worker.pending = Some(Pending::Failed {
+                request: request.clone(),
+                code: error.code.clone(),
+            });
+        }
         self.save().await
     }
     async fn cancelled(&mut self, _: &BTreeSet<String>) -> Result<(), AgentError> {
         self.save().await
+    }
+    fn retry_delay(&self) -> Option<std::time::Duration> {
+        self.state
+            .outline_run
+            .discover_workers
+            .values()
+            .filter(|worker| {
+                matches!(worker.pending, Some(Pending::Prepared { .. }))
+                    && worker.retry.not_before_ms != 0
+            })
+            .map(|worker| worker.retry.remaining())
+            .min()
     }
     fn all_committed(&self) -> bool {
         self.state

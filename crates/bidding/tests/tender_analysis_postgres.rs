@@ -368,9 +368,11 @@ async fn frozen_identity_is_project_scoped_and_mismatch_cannot_be_reregistered()
         .await
         .unwrap();
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bid_frozen_inputs WHERE input_sha256=$1::kb_sha256",
+        "SELECT count(*) FROM bid_frozen_inputs WHERE input_sha256=$1::kb_sha256 AND project_id IN ($2,$3)",
     )
     .bind(sha)
+    .bind(first)
+    .bind(second)
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -564,4 +566,155 @@ async fn distinct_valid_runs_can_share_content_without_borrowing_operation_repla
     .unwrap();
     assert_eq!(count, 1);
     assert_eq!(completed, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated fresh KB_TENDER_AGENT_TEST_DATABASE_URL"]
+async fn exhausted_outline_failure_is_fenced_terminal_and_preserves_checkpoint() {
+    let pool = pool().await;
+    let project = project(&pool).await;
+    let run = Uuid::new_v4();
+    let sha = "ef".repeat(32);
+    register_frozen_fixture(&pool, project, &sha, None)
+        .await
+        .unwrap();
+    let input = frozen_fixture::valid_text_input(&project.to_string(), "Response");
+    let first_journal =
+        bidding::journal_db::DbJournal::acquire(pool.clone(), project, run, &input, &sha)
+            .await
+            .unwrap()
+            .unwrap();
+    let first = &first_journal.lease;
+    let checkpoint = json!({"audit":"synthetic failure fixture", "physical_calls":4});
+    sqlx::query("SELECT kb_bid_v2_outline_checkpoint($1,$2,$3,$4)")
+        .bind(run)
+        .bind(first.lease_token)
+        .bind(first.lease_epoch)
+        .bind(&checkpoint)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // An ordinary retry releases its own lease and preserves every checkpoint byte.
+    first_journal.settle_failure(false, false).await.unwrap();
+    let state: (String, Value) =
+        sqlx::query_as("SELECT status,checkpoint FROM bid_outline_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, ("pending".into(), checkpoint.clone()));
+    let current = claim(&pool, project, run, &sha).await;
+    // Both production settlement paths must report a rejected old fence,
+    // without touching the new owner's row or checkpoint.
+    let before: Value =
+        sqlx::query_scalar("SELECT to_jsonb(r) FROM bid_outline_runs r WHERE id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for cancelled in [false, true] {
+        let error = first_journal
+            .settle_failure(true, cancelled)
+            .await
+            .unwrap_err();
+        assert!(error.contains("acquisition was not settled"));
+        let after: Value =
+            sqlx::query_scalar("SELECT to_jsonb(r) FROM bid_outline_runs r WHERE id=$1")
+                .bind(run)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+    }
+    for (target, token, epoch) in [
+        (run, first.lease_token, first.lease_epoch),
+        (run, Uuid::new_v4(), current.lease_epoch),
+        (run, current.lease_token, current.lease_epoch - 1),
+        (Uuid::new_v4(), current.lease_token, current.lease_epoch),
+    ] {
+        let before: Value =
+            sqlx::query_scalar("SELECT to_jsonb(r) FROM bid_outline_runs r WHERE id=$1")
+                .bind(run)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let changed: bool = sqlx::query_scalar("SELECT kb_bid_v2_outline_fail($1,$2,$3)")
+            .bind(target)
+            .bind(token)
+            .bind(epoch)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(!changed);
+        let after: Value =
+            sqlx::query_scalar("SELECT to_jsonb(r) FROM bid_outline_runs r WHERE id=$1")
+                .bind(run)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+    }
+    sqlx::query(
+        "UPDATE bid_outline_runs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+    )
+    .bind(run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let changed: bool = sqlx::query_scalar("SELECT kb_bid_v2_outline_fail($1,$2,$3)")
+        .bind(run)
+        .bind(current.lease_token)
+        .bind(current.lease_epoch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!changed, "expired acquisition must not terminalize the run");
+    let cancelled_journal =
+        bidding::journal_db::DbJournal::acquire(pool.clone(), project, run, &input, &sha)
+            .await
+            .unwrap()
+            .unwrap();
+    // Graceful shutdown on the final queue attempt is resumable, not a
+    // terminal business failure. Exercise the same method the worker calls.
+    cancelled_journal.settle_failure(true, true).await.unwrap();
+    let state: (String, Value, Option<Uuid>) =
+        sqlx::query_as("SELECT status,checkpoint,lease_token FROM bid_outline_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, ("pending".into(), checkpoint.clone(), None));
+    let final_journal =
+        bidding::journal_db::DbJournal::acquire(pool.clone(), project, run, &input, &sha)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(final_journal.lease.lease_epoch > cancelled_journal.lease.lease_epoch);
+    final_journal.settle_failure(true, false).await.unwrap();
+    let state: (String, Value, Option<Uuid>) =
+        sqlx::query_as("SELECT status,checkpoint,lease_token FROM bid_outline_runs WHERE id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, ("failed".into(), checkpoint, None));
+    assert!(
+        bidding::journal_db::DbJournal::acquire(pool.clone(), project, run, &input, &sha)
+            .await
+            .unwrap()
+            .is_none(),
+        "terminal replay must stop before any agent work"
+    );
+    // A revived queue envelope must not silently reactivate an exhausted run.
+    assert!(
+        sqlx::query("SELECT kb_bid_v2_outline_claim($1,$2,$3::kb_sha256,$4,120)")
+            .bind(run)
+            .bind(project)
+            .bind(&sha)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    pool.close().await;
 }

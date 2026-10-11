@@ -757,6 +757,11 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             if let Some(pending) = self.state.journal.pending.as_mut() {
                 pending.physical_attempts = pending.physical_attempts.saturating_sub(1);
             }
+            self.state.journal.retry.complete(
+                &format!("serial:{}", self.state.journal.sequence),
+                "not_sent",
+                true,
+            );
             self.journal
                 .save(self.state, &self.state.progress(self.input))
                 .await?;
@@ -843,6 +848,21 @@ async fn run_seeded<J: Journal, M: Model>(
             "this frozen tender requires original-image evidence; configure the same authoring provider with an image-capable model and vision_enabled=true before starting the run",
         ));
     }
+    crate::outline::evidence::with_input_digest(
+        input,
+        run_validated(input, config, journal, model, cancel),
+    )
+    .await
+    .map_err(invalid)?
+}
+
+async fn run_validated<J: Journal, M: Model>(
+    input: &FrozenInput,
+    config: &Config,
+    journal: &J,
+    model: &M,
+    cancel: &CancellationToken,
+) -> Result<AnalysisResult, AgentError> {
     let started = Instant::now();
     let input_sha256 = digest(input).map_err(invalid)?;
     let config_sha256 = digest(config).map_err(invalid)?;
@@ -1872,6 +1892,13 @@ fn deferred_message(id: &str) -> Value {
     json!({"role":"tool","tool_call_id":id,"content":json!({"ok":false,"error":BATCH_OUTPUT_DEFERRED}).to_string()})
 }
 
+fn sizing_message(id: &str) -> Value {
+    // An unexecuted operation reserves the full deferral message but has no
+    // failure authority. This clone-only placeholder is never persisted/sent.
+    // Keep a string value (rather than a shorter null) for conservative sizing.
+    json!({"role":"tool","tool_call_id":id,"content":json!({"ok":"pending","error":BATCH_OUTPUT_DEFERRED}).to_string()})
+}
+
 /// Reserve serialized space for every outstanding tool response, not only for
 /// the current tool. This never sends, reserves a call, or confirms delivery.
 async fn fit_batch(
@@ -1890,7 +1917,7 @@ async fn fit_batch(
     let mut sizing = state.clone();
     sizing
         .transcript
-        .extend(remaining.iter().map(|c| deferred_message(&c.id)));
+        .extend(remaining.iter().map(|c| sizing_message(&c.id)));
     if !views.is_empty() {
         sizing
             .transcript

@@ -33,9 +33,12 @@ impl oxana::Worker<platform::TenderDocumentProcessJobV2> for TenderDocumentProce
     async fn process(
         &self,
         job: platform::TenderDocumentProcessJobV2,
-        _ctx: &oxana::JobContext,
+        ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
-        self.inner.run(&job).await.map_err(JobErr)
+        // Oxana retries starts at zero and kills a failed envelope once it
+        // reaches max_retries. Persist the domain terminal state first.
+        let final_attempt = ctx.meta.retries >= self.max_retries(&job);
+        self.inner.run(&job, final_attempt).await.map_err(JobErr)
     }
 }
 

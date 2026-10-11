@@ -192,7 +192,7 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
     if let Err(errors) = schema.validate(args) {
         use jsonschema::error::ValidationErrorKind;
         let parameters = &spec.schema["function"]["parameters"];
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = SchemaDiagnostics::default();
         for error in errors {
             let schema_path = error.schema_path.to_string();
             let code = schema_path.rsplit('/').next().unwrap_or("constraint");
@@ -208,15 +208,21 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
                         .unwrap_or("")
                         .replace('~', "~0")
                         .replace('/', "~1");
-                    diagnostics.push(json!({"code":code,"path":format!("{path}/{field}"),
-                        "received":{"missing":true},"allowed":{"required":true}}));
+                    diagnostics.push(
+                        format!("{schema_path}/{field}"),
+                        json!({"code":code,"path":format!("{path}/{field}"),
+                        "received":{"missing":true},"allowed":{"required":true}}),
+                    );
                 }
                 ValidationErrorKind::AdditionalProperties { unexpected } => {
                     for field in unexpected {
                         let escaped = field.replace('~', "~0").replace('/', "~1");
-                        diagnostics.push(json!({"code":code,"path":format!("{path}/{escaped}"),
+                        diagnostics.push(
+                            schema_path.clone(),
+                            json!({"code":code,"path":format!("{path}/{escaped}"),
                             "received":schema_received_value(&error.instance[field]),
-                            "allowed":{"additional_property":false}}));
+                            "allowed":{"additional_property":false}}),
+                        );
                     }
                 }
                 _ => {
@@ -232,25 +238,96 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
                         }
                         _ => constraint,
                     };
-                    diagnostics.push(json!({"code":code,"path":path,
-                        "received":schema_received_value(&error.instance),"allowed":allowed}));
+                    diagnostics.push(
+                        schema_path.clone(),
+                        json!({"code":code,"path":path,
+                        "received":schema_received_value(&error.instance),"allowed":allowed}),
+                    );
                 }
             }
         }
-        // Collect every rejection without repairing, coercing, or interpreting
-        // candidate meaning. A compact value summary bounds private large text.
+        // Inspect every rejection, but bound model-facing feedback independently
+        // of candidate size. The unchanged original arguments in the durable
+        // tool-call audit plus this revision's schema reproduce all diagnostics.
         let hint = if name == "put_slots" {
             slot_text_layer_feedback(args)
         } else {
             None
         };
-        return Err(format!(
-            "SCHEMA/validation {}",
-            json!({"tool":name,
-            "state_changed":false,"errors":diagnostics,"hint":hint})
-        ));
+        return Err(diagnostics.feedback(name, hint));
     }
     Ok(())
+}
+
+// Limits apply only to host diagnostics, never to the submitted candidate.
+const SCHEMA_FEEDBACK_MAX_BYTES: usize = 8192;
+const SCHEMA_FEEDBACK_MAX_GROUPS: usize = 24;
+const SCHEMA_FEEDBACK_PATHS_PER_GROUP: usize = 3;
+
+#[derive(Default)]
+struct SchemaDiagnostics {
+    total: usize,
+    groups: Vec<(String, Value)>,
+}
+
+impl SchemaDiagnostics {
+    fn push(&mut self, schema_path: String, mut diagnostic: Value) {
+        self.total += 1;
+        if let Some(path) = diagnostic["path"].as_str().filter(|path| path.len() > 256) {
+            let mut end = 256;
+            while !path.is_char_boundary(end) {
+                end -= 1;
+            }
+            diagnostic["path"] = json!(format!("{}...", &path[..end]));
+            diagnostic["path_truncated"] = json!(true);
+        }
+        let matching = self.groups.iter_mut().find(|(key, existing)| {
+            key == &schema_path
+                && existing["code"] == diagnostic["code"]
+                && existing["received"] == diagnostic["received"]
+                && existing["allowed"] == diagnostic["allowed"]
+        });
+        if let Some((_, existing)) = matching {
+            existing["count"] = json!(existing["count"].as_u64().unwrap() + 1);
+            let samples = existing["other_paths"].as_array_mut().unwrap();
+            if samples.len() + 1 < SCHEMA_FEEDBACK_PATHS_PER_GROUP {
+                // Keep truncation explicit for each sampled path.
+                samples.push(json!({"path":diagnostic["path"],
+                    "path_truncated":diagnostic["path_truncated"] == true}));
+            }
+        } else if self.groups.len() < SCHEMA_FEEDBACK_MAX_GROUPS {
+            diagnostic["count"] = json!(1);
+            diagnostic["other_paths"] = json!([]);
+            self.groups.push((schema_path, diagnostic));
+        }
+    }
+
+    fn feedback(mut self, tool: &str, hint: Option<String>) -> String {
+        loop {
+            let shown: usize = self
+                .groups
+                .iter()
+                .map(|(_, group)| 1 + group["other_paths"].as_array().unwrap().len())
+                .sum();
+            let feedback = format!(
+                "SCHEMA/validation {}",
+                json!({
+                    "tool":tool,"state_changed":false,
+                    "errors":self.groups.iter().map(|(_, group)|group).collect::<Vec<_>>(),
+                    "total_errors":self.total,"shown_errors":shown,
+                    "omitted_errors":self.total - shown,
+                    "hint":hint
+                })
+            );
+            if feedback.len() <= SCHEMA_FEEDBACK_MAX_BYTES {
+                return feedback;
+            }
+            // Tool names and hints are host-defined and fit even without groups.
+            self.groups
+                .pop()
+                .expect("schema feedback header fits byte limit");
+        }
+    }
 }
 
 fn schema_received_value(value: &Value) -> Value {

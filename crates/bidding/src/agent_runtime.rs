@@ -9,6 +9,7 @@ pub(crate) mod chat;
 pub use chat::{TokenEncoding, TokenizerCalibration, TokenizerProfile};
 mod driver;
 pub mod progress;
+pub mod retry;
 mod session;
 pub(crate) use driver::{Driver, Status, drive};
 
@@ -63,6 +64,8 @@ impl TokenUsage {
 #[serde(deny_unknown_fields)]
 pub struct TurnJournal {
     pub sequence: usize,
+    #[serde(default)]
+    pub retry: retry::RetryJournal,
     pub accounting: budget::ModelAccounting,
     pub publication_receipt: Option<PublicationReceipt>,
     pub pending: Option<PendingTurn>,

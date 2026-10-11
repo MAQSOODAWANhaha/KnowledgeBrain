@@ -21,7 +21,7 @@ pub struct DbJournal {
 }
 
 impl DbJournal {
-    /// Completed or budget-paused jobs are acknowledged without new model work.
+    /// Completed, failed or budget-paused jobs are acknowledged without new model work.
     /// A live or expired acquisition never reuses another worker's fence.
     pub async fn acquire(
         pool: PgPool,
@@ -32,7 +32,7 @@ impl DbJournal {
     ) -> Result<Option<Self>, String> {
         let terminal: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM bid_outline_runs WHERE id=$1 AND project_id=$2
-             AND frozen_input_sha256=$3::kb_sha256 AND status IN ('published','paused_budget'))",
+             AND frozen_input_sha256=$3::kb_sha256 AND status IN ('published','failed','paused_budget'))",
         )
         .bind(run_id)
         .bind(project_id)
@@ -75,13 +75,46 @@ impl DbJournal {
     }
 
     pub async fn release(&self) -> Result<(), String> {
-        sqlx::query("SELECT kb_bid_v2_outline_release($1,$2,$3)")
+        let released: bool = sqlx::query_scalar("SELECT kb_bid_v2_outline_release($1,$2,$3)")
             .bind(self.run_id)
             .bind(self.lease.lease_token)
             .bind(self.lease.lease_epoch)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await
             .map_err(|error| format!("outline lease release: {error}"))?;
+        if !released {
+            return Err(
+                "outline lease release: acquisition was not settled (lease fence rejected)".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Shutdown cancellation remains resumable even on the final queue attempt.
+    pub async fn settle_failure(&self, final_attempt: bool, cancelled: bool) -> Result<(), String> {
+        if final_attempt && !cancelled {
+            self.fail().await
+        } else {
+            self.release().await
+        }
+    }
+
+    /// Queue retry exhaustion settles only this exact live acquisition. The
+    /// saved checkpoint, including physical call reservations, is preserved.
+    pub async fn fail(&self) -> Result<(), String> {
+        let failed: bool = sqlx::query_scalar("SELECT kb_bid_v2_outline_fail($1,$2,$3)")
+            .bind(self.run_id)
+            .bind(self.lease.lease_token)
+            .bind(self.lease.lease_epoch)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("outline terminal failure: {error}"))?;
+        if !failed {
+            return Err(
+                "outline terminal failure: acquisition was not settled (lease fence rejected)"
+                    .into(),
+            );
+        }
         Ok(())
     }
 
