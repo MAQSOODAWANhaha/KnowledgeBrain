@@ -160,6 +160,21 @@ impl Session {
         ))
     }
 
+    pub(super) fn validate_unsent(&self, body: &Value) -> Result<(), AgentError> {
+        // rig-agent 0.42 exposes no stage getter. Its serialized RunState is
+        // part of our pinned adapter contract; model_response accepts only
+        // AwaitingModel without an already recorded streamed completion.
+        let run = serde_json::to_value(&self.run).map_err(|_| failure())?;
+        if self.usage_noted
+            || run["state"] != "AwaitingModel"
+            || run["streamed_completion_call_recorded"] != false
+            || run["rollback_pending"] != false
+        {
+            return Err(failure());
+        }
+        self.validate(body)
+    }
+
     pub(super) fn validate(&self, body: &Value) -> Result<(), AgentError> {
         if projected(self.run.full_history())?
             != projected(Self::context(body, self.prefix, self.suffix)?)?

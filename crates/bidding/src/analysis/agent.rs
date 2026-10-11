@@ -831,6 +831,19 @@ async fn run_seeded<J: Journal, M: Model>(
             "retired reviewer checkpoint; start the current Discover/Organize/Check runtime",
         ));
     }
+    if state.done && state.journal.pending.is_some() {
+        return Err(error(
+            "AGENT_CHECKPOINT_INVALID",
+            "completed analysis has a pending turn",
+        ));
+    }
+    if state
+        .journal
+        .recover_unsent_canonical_request(state.turn, "main")?
+    {
+        // Persist the serialization-only recovery before admit/reserve/model.
+        journal.save(&state, &state.progress(input)).await?;
+    }
     state.journal.validate(
         state.turn,
         if state.role == Role::Main {
@@ -839,12 +852,6 @@ async fn run_seeded<J: Journal, M: Model>(
             "reviewer"
         },
     )?;
-    if state.done && state.journal.pending.is_some() {
-        return Err(error(
-            "FROZEN_INPUT_DIGEST_MISMATCH",
-            "completed analysis has a pending turn",
-        ));
-    }
     state.outline_config_sha256 = Some(config.tools_sha256.clone());
     if state.draft_stage == crate::analysis::draft::DraftStage::None {
         state.draft_stage = crate::analysis::draft::DraftStage::Outline;
@@ -2171,7 +2178,7 @@ async fn prepare_fitted_request(
             crate::outline::model_wire::project(state, &mut body).map_err(invalid)?;
         #[cfg(test)]
         drop(wire_profile);
-        let bytes = serde_json::to_vec(&body).map_err(invalid)?;
+        let bytes = crate::agent_runtime::canonical_request_bytes(&body)?;
         if needs_discovery && state.outline_run.reading_packs.is_none() {
             // The initial reading plan is fitted to this complete real request
             // envelope, not to a second byte/character/cell threshold.
@@ -2638,3 +2645,6 @@ mod provider_defaults_tests {
 
 #[cfg(test)]
 mod partial_source_runtime_tests;
+
+#[cfg(test)]
+mod canonical_recovery_tests;

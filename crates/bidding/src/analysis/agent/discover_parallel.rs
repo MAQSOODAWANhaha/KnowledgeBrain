@@ -383,7 +383,7 @@ impl<J: Journal> PackHost<'_, J> {
         let body = {
             #[cfg(test)]
             let _profile = super::profile::enter("worker_request_serialization");
-            serde_json_canonicalizer::to_vec(&body).map_err(invalid)?
+            crate::agent_runtime::canonical_request_bytes(&body)?
         };
         let request = Request {
             scope: Scope {

@@ -685,7 +685,7 @@ mod tests {
             let error = drive(&mut host, &CancellationToken::new())
                 .await
                 .unwrap_err();
-            assert_eq!(error.code, "FROZEN_INPUT_DIGEST_MISMATCH", "{corruption}");
+            assert_eq!(error.code, "AGENT_CHECKPOINT_INVALID", "{corruption}");
             assert_eq!(*host.executes.lock().unwrap(), 0);
             assert_eq!(*host.reserved.lock().unwrap(), 0);
             assert_eq!(*host.calls.lock().unwrap(), 0);
