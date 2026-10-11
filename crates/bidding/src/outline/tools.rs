@@ -22,6 +22,8 @@ use std::collections::{BTreeSet, HashSet};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckReads {
+    pub pending_manual_tasks: Vec<(usize, String)>,
+    pub manual_tasks: BTreeSet<String>,
     pub pending_evidence: Vec<(usize, super::evidence::EvidenceRef)>,
     pub evidence: Vec<super::evidence::EvidenceRef>,
     pub pending_empty_pack_ids: Vec<(usize, String)>,
@@ -382,7 +384,7 @@ fn parse_slot(
     let content: TemplateBody = serde_json::from_value(slot["content"].clone())
         .map_err(|error| format!("slot {slot_id} content: {error}"))?;
     let (kind, text, match_query) = match &content {
-        TemplateBody::SourceCopy { refs } => {
+        TemplateBody::SourceCopy { refs, .. } => {
             if slot.get("text").is_some()
                 || slot.get("match_query").is_some()
                 || slot.get("blank_kind").is_some()
@@ -607,7 +609,12 @@ fn invalidate_review(draft: &mut Draft) {
     draft.reviewed_requirement_ids.clear();
     draft.reviewed_pack_ids.clear();
     draft.source_dispositions.clear();
-    draft.review_issues.clear();
+    // Editing a response target does not resolve a missing/conflicting source.
+    // Preserve explicit document findings from Discover and Check as pending
+    // observations; the epoch and all delivery/disposition proof above expire.
+    draft
+        .review_issues
+        .retain(super::source_review::is_document_issue);
 }
 
 fn put_fulfillments(
@@ -784,7 +791,7 @@ fn validate_targets(
             return Err("duplicate or empty slot identity".into());
         }
         match &slot.content {
-            TemplateBody::SourceCopy { refs } => {
+            TemplateBody::SourceCopy { refs, .. } => {
                 if slot.text != source_copy(input, refs)?
                     || slot.kind != SlotKind::FixedText
                     || slot.response_required
@@ -862,7 +869,11 @@ fn validate_targets(
                         })?;
                     actual_response |= matches!(
                         slot.content,
-                        TemplateBody::EditableBlank | TemplateBody::SourceCopy { .. }
+                        TemplateBody::EditableBlank
+                            | TemplateBody::SourceCopy {
+                                purpose: super::SourceCopyPurpose::MandatedResponse,
+                                ..
+                            }
                     );
                 }
                 TargetRef::FormBinding { form_id } => {
@@ -1772,6 +1783,7 @@ mod tests {
             &input,
             &pack.id,
             super::super::discover::PackSubmit {
+                issues: vec![],
                 call_id: "synthetic-organize".into(),
                 claim_token: pack.claim_token.clone(),
                 pack_revision: pack.pack_revision,
@@ -1847,7 +1859,7 @@ mod tests {
         .unwrap();
         assert_eq!(partial.bindings, draft.bindings);
         let slots = json!([
-            {"slot_id":"copy","chapter_id":"leaf-a","content":{"type":"source_copy","refs":[reference]}},
+            {"slot_id":"copy","chapter_id":"leaf-a","content":{"type":"source_copy","purpose":"mandated_response","refs":[reference]}},
             {"slot_id":"blank-a","chapter_id":"leaf-a","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"材料A"},
             {"slot_id":"sign","chapter_id":"leaf-a","content":{"type":"editable_blank"},"blank_kind":"signature","match_query":"签署人"},
             {"slot_id":"explain","chapter_id":"leaf-a","content":{"type":"generated_explanation","supporting_refs":[reference]},"text":"填写说明"},
@@ -1995,7 +2007,7 @@ mod tests {
         };
         let wire_ref = json!({"source_key":format!("src_{}","a".repeat(64))});
         let variants = [
-            json!({"slot_id":"copy","chapter_id":"leaf","content":{"type":"source_copy","refs":[wire_ref.clone()]}}),
+            json!({"slot_id":"copy","chapter_id":"leaf","content":{"type":"source_copy","purpose":"mandated_response","refs":[wire_ref.clone()]}}),
             json!({"slot_id":"blank","chapter_id":"leaf","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}),
             json!({"slot_id":"signature","chapter_id":"leaf","content":{"type":"editable_blank"},"blank_kind":"signature","match_query":"签署人"}),
             json!({"slot_id":"explanation","chapter_id":"leaf","content":{"type":"generated_explanation","supporting_refs":[wire_ref]},"text":"说明"}),

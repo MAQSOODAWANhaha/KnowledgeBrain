@@ -44,7 +44,7 @@ pub fn project_draft(
             .iter()
             .map(|slot| {
                 let mut slot = slot.clone();
-                if let TemplateBody::SourceCopy { refs } = &slot.content {
+                if let TemplateBody::SourceCopy { refs, .. } = &slot.content {
                     slot.text = super::tools::source_copy(input, refs)?;
                 }
                 Ok(slot)

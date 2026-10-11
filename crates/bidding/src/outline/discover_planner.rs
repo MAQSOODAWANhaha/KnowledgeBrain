@@ -179,7 +179,7 @@ fn fits_pack(
 ) -> Result<bool, String> {
     let mut running = pack.clone();
     running.claim_token = claim_token(&running, 1, false);
-    let mut session = json!({"duty":"discover","pack":materialize_pack(input,&running)?,"status":"running","feedback":null,"no_requirement_reason":null});
+    let mut session = json!({"duty":"discover","pack":materialize_pack(input,&running)?,"status":"running","feedback":null,"no_requirement_reason":null,"issues":[]});
     add_submission_identity(&mut session, &running, None)?;
     session["submission_instruction"] = json!(SUBMISSION_INSTRUCTION);
     fits(std::slice::from_ref(&session))
@@ -329,6 +329,36 @@ fn split_carrier(input: &FrozenInput, carrier: &PackCarrier) -> Result<Vec<PackC
     }
 }
 
+/// Cross-document co-location follows actual native endpoint ownership, not
+/// another relation elsewhere in either file. Same-document adjacency remains.
+fn related_atoms(input: &FrozenInput, owned: &[PackAtom], incoming: &[PackAtom]) -> bool {
+    let matches = |endpoint: &crate::analysis::source_manifest::RelationEndpoint,
+                   atom: &PackAtom| {
+        endpoint.document_id == atom.document_id
+            && endpoint.unit_id.as_ref().is_none_or(|key| {
+                input.source_units.iter().any(|source| {
+                    source.source_unit_revision_id == atom.source_unit_revision_id
+                        && source.locator["unit_id"] == *key
+                })
+            })
+    };
+    owned.iter().any(|left| {
+        incoming.iter().any(|right| {
+            left.document_id == right.document_id
+                || input.document_relations.iter().any(|relation| {
+                    relation.kind
+                        == crate::analysis::source_manifest::DocumentRelationKind::ExplicitReference
+                        && relation.status
+                            == crate::analysis::source_manifest::DocumentRelationStatus::Confirmed
+                        && relation.to.as_ref().is_some_and(|target| {
+                            (matches(&relation.from, left) && matches(target, right))
+                                || (matches(target, left) && matches(&relation.from, right))
+                        })
+                })
+        })
+    })
+}
+
 /// Merge complete adjacent chapters when the *real request* predicate admits
 /// them. Large chapters preserve atom order and split only failed carriers.
 pub fn plan_packs_with_budget(
@@ -360,30 +390,23 @@ pub fn plan_packs_with_budget(
         let mut out = Vec::new();
         let mut current: Option<ParsePack> = None;
         for chapter in chapters {
-            let document = &units[chapter[0].0].document_id;
             let atoms = chapter
                 .iter()
                 .map(|&(unit, part)| units[unit].atoms[part].clone())
                 .collect::<Vec<_>>();
             let mut candidate = current
                 .clone()
-                .filter(|pack| {
-                    pack.document_ids
-                        .iter()
-                        .any(|id| input.related_documents(id, document))
-                })
+                .filter(|pack| related_atoms(input, &pack.atoms, &atoms))
                 .unwrap_or_else(|| {
                     pack(&digest, out.len() + usize::from(current.is_some()), vec![])
                 });
             candidate.atoms.extend(atoms.clone());
             candidate = pack(&digest, candidate.order, candidate.atoms);
             if fits_pack(input, &candidate, fits)? {
-                if current.as_ref().is_some_and(|pack| {
-                    !pack
-                        .document_ids
-                        .iter()
-                        .any(|id| input.related_documents(id, document))
-                }) {
+                if current
+                    .as_ref()
+                    .is_some_and(|pack| !related_atoms(input, &pack.atoms, &atoms))
+                {
                     out.push(current.take().unwrap());
                 }
                 current = Some(candidate);
@@ -431,5 +454,49 @@ pub fn plan_packs_with_budget(
             out.push(pack);
         }
         return Ok(out);
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn cross_document_co_location_requires_the_native_relation_endpoints() {
+        let input = crate::outline::frozen::tests::related_native_input();
+        let packs = plan_packs_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        })
+        .unwrap();
+        let left = &packs[0].atoms;
+        let right = &packs[1].atoms;
+        assert!(related_atoms(&input, left, right));
+        let mut wrong = left[0].clone();
+        wrong.source_unit_revision_id = "another-unit-in-same-file".into();
+        let mut precise = input.clone();
+        let from = precise.document_relations[0].from.clone();
+        let original = precise
+            .source_units
+            .iter()
+            .find(|source| {
+                source.document_id == from.document_id
+                    && left
+                        .iter()
+                        .any(|atom| atom.source_unit_revision_id == source.source_unit_revision_id)
+            })
+            .unwrap();
+        precise.document_relations[0].from.unit_id =
+            Some(original.locator["unit_id"].as_str().unwrap().to_owned());
+        assert!(
+            !related_atoms(&precise, &[wrong], right),
+            "another unit's relation cannot co-locate this chapter"
+        );
+        let mut wrong_target = right[0].clone();
+        wrong_target.source_unit_revision_id = "other-native-grid".into();
+        assert!(
+            !related_atoms(&precise, left, &[wrong_target]),
+            "target endpoint must also match"
+        );
     }
 }

@@ -30,6 +30,14 @@ fn apply(
     let duty = current(input, state);
     let mut args = args.clone();
     if name == "submit_review" {
+        if let Some(issues) = args["issues"].as_array_mut() {
+            for issue in issues {
+                if issue.get("requested_information").is_none() {
+                    issue["requested_information"] =
+                        json!("Confirm the cited synthetic fixture issue");
+                }
+            }
+        }
         if args.get("source_dispositions").is_none() {
             let draft = &state.outline_run.tool_draft;
             args["source_dispositions"] = json!(args["pack_ids"].as_array().unwrap().iter().map(|id| {
@@ -192,6 +200,7 @@ fn discovered_with_quality(
         }]
     };
     let submit = PackSubmit {
+        issues: vec![],
         call_id: "submission".into(),
         claim_token: pack.claim_token.clone(),
         pack_revision: pack.pack_revision,
@@ -243,7 +252,7 @@ fn organized_with_quality(
     )
     .unwrap();
     state.deliver_fixture_reads(); // The next complete model response has seen read_evidence.
-    apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[refs[0]]}},{"slot_id":"blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}]})).unwrap();
+    apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[refs[0]]}},{"slot_id":"blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}]})).unwrap();
     if !negative {
         assert_eq!(current(&input, &state), Duty::Organize);
         apply(&input,&mut state,"put_fulfillments",&json!({"fulfillments":[{"requirement_id":ids[0],"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"blank"},{"type":"text_slot","slot_id":"fixed"}]}]})).unwrap();
@@ -549,6 +558,7 @@ fn real_python_pdf_fixture_runs_through_freeze_discovery_targets_and_publication
                     &input,
                     &pack.id,
                     PackSubmit {
+                        issues: vec![],
                         call_id: format!("fixture:{}", pack.id),
                         claim_token: pack.claim_token.clone(),
                         pack_revision: pack.pack_revision,
@@ -612,7 +622,7 @@ fn real_python_pdf_fixture_runs_through_freeze_discovery_targets_and_publication
             .find(|reference| !matches!(reference, evidence::EvidenceRef::ImageRegion { .. }))
             .unwrap();
         apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[
-        {"slot_id":"source-copy","chapter_id":"response","content":{"type":"source_copy","refs":[first]}},
+        {"slot_id":"source-copy","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[first]}},
         {"slot_id":"response-slot","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"Fixture response evidence"}]})).unwrap();
         let fulfillments=ids.iter().map(|id|json!({"requirement_id":id,"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"response-slot"}]})).collect::<Vec<_>>();
         apply(
@@ -671,7 +681,7 @@ fn reads_in_same_model_response_do_not_authorize_source_copy_or_review() {
     apply(&input,&mut state,"put_chapters",&json!({"mode":"replace","chapters":[{"id":"response","parent_id":null,"order":0,"title":"Response","purpose":"response","requirement_ids":ids}]})).unwrap();
     apply(&input, &mut state, "read_evidence", &json!({"refs":refs})).unwrap();
     assert!(state.outline_run.tool_draft.delivered_evidence.is_empty());
-    assert!(apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"copy","chapter_id":"response","content":{"type":"source_copy","refs":refs}}]})).unwrap_err().contains("outside_scope"));
+    assert!(apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"copy","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":refs}}]})).unwrap_err().contains("outside_scope"));
 }
 
 #[test]
@@ -808,7 +818,10 @@ fn host_reopen_invalidates_downstream_once_and_is_not_an_llm_tool() {
         agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "authorized-reopen")
             .unwrap();
     assert_eq!(claim, replay);
-    assert_eq!(state.outline_run.tool_draft.chapters.len(), retained_chapters + 1);
+    assert_eq!(
+        state.outline_run.tool_draft.chapters.len(),
+        retained_chapters + 1
+    );
     assert!(!agent::handles("reopen_discovery_pack"));
 }
 
@@ -833,6 +846,7 @@ fn mixed_text_and_empty_grid_pack_requires_every_structural_receipt() {
         &input,
         &pack.id,
         PackSubmit {
+            issues: vec![],
             call_id: "mixed-empty".into(),
             claim_token: pack.claim_token.clone(),
             pack_revision: pack.pack_revision,
@@ -1898,13 +1912,42 @@ fn unresolved_reviews_remain_actionable_after_reload_without_history() {
 fn local_repair_reload_requires_fresh_reads_and_completes_check() {
     let (input, mut state, pack, refs) = organized(false);
     fresh_check_reads(&input, &mut state, &refs);
-    let ids = state.outline_run.reading_packs.as_ref().unwrap().requirement_ids();
-    apply(&input, &mut state, "submit_review", &json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]})).unwrap();
+    let ids = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_ids();
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]}),
+    )
+    .unwrap();
     apply(&input, &mut state, "finish_outline", &json!({})).unwrap();
     let old_key = agent::review_evidence_key(&state, &refs[0]).unwrap();
-    let original = state.outline_run.reading_packs.as_ref().unwrap().requirement_records().values().next().unwrap().clone();
-    let revision = state.outline_run.reading_packs.as_ref().unwrap().session(&input, &pack).unwrap()["pack"]["pack_revision"].as_u64().unwrap();
-    let reopened = agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "repair-reload").unwrap();
+    let original = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let revision = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .session(&input, &pack)
+        .unwrap()["pack"]["pack_revision"]
+        .as_u64()
+        .unwrap();
+    let reopened =
+        agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "repair-reload").unwrap();
     assert!(state.outline_run.tool_draft.claim_comparisons.is_empty());
     assert!(state.outline_run.tool_draft.template_reviews.is_empty());
     assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
@@ -1913,31 +1956,960 @@ fn local_repair_reload_requires_fresh_reads_and_completes_check() {
     state.transcript.clear();
     let before = state.outline_run.tool_draft.clone();
     agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "repair-reload").unwrap();
-    assert_eq!(before, state.outline_run.tool_draft, "replay cannot clear newly rebuilt work");
-    state.outline_run.reading_packs.as_mut().unwrap().submit(&input, &pack, PackSubmit {
-        call_id: "repair-replacement".into(), claim_token: reopened.claim_token,
-        pack_revision: reopened.pack_revision,
-        requirements: vec![PackRequirement { description: original.description, kind: original.kind,
-            obligation_strength: original.obligation_strength, extraction_quality: original.extraction_quality,
-            source_section_id: original.source_section_id, evidence: original.evidence,
-            condition_support: original.condition_support }],
-        no_requirement_reason: None, inspected_atom_ids: vec![],
-    }).unwrap();
-    let ids = state.outline_run.reading_packs.as_ref().unwrap().requirement_ids().into_iter().collect::<Vec<_>>();
+    assert_eq!(
+        before, state.outline_run.tool_draft,
+        "replay cannot clear newly rebuilt work"
+    );
+    state
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .submit(
+            &input,
+            &pack,
+            PackSubmit {
+                issues: vec![],
+                call_id: "repair-replacement".into(),
+                claim_token: reopened.claim_token,
+                pack_revision: reopened.pack_revision,
+                requirements: vec![PackRequirement {
+                    description: original.description,
+                    kind: original.kind,
+                    obligation_strength: original.obligation_strength,
+                    extraction_quality: original.extraction_quality,
+                    source_section_id: original.source_section_id,
+                    evidence: original.evidence,
+                    condition_support: original.condition_support,
+                }],
+                no_requirement_reason: None,
+                inspected_atom_ids: vec![],
+            },
+        )
+        .unwrap();
+    let ids = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_ids()
+        .into_iter()
+        .collect::<Vec<_>>();
     apply(&input,&mut state,"put_chapters",&json!({"mode":"replace","chapters":[{"id":"response","parent_id":null,"order":0,"title":"资格响应","purpose":"response","requirement_ids":ids}]})).unwrap();
-    assert!(apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[refs[0]]}}]})).is_err(), "old delivery cannot authorize fixed source copy");
-    apply(&input,&mut state,"read_evidence",&json!({"refs":refs,"max_bytes":4096})).unwrap();
+    assert!(apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[refs[0]]}}]})).is_err(), "old delivery cannot authorize fixed source copy");
+    apply(
+        &input,
+        &mut state,
+        "read_evidence",
+        &json!({"refs":refs,"max_bytes":4096}),
+    )
+    .unwrap();
     state.deliver_fixture_reads();
-    apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[refs[0]]}},{"slot_id":"blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}]})).unwrap();
+    apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[refs[0]]}},{"slot_id":"blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"资格材料"}]})).unwrap();
     apply(&input,&mut state,"put_fulfillments",&json!({"fulfillments":[{"requirement_id":ids[0],"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"blank"},{"type":"text_slot","slot_id":"fixed"}]}]})).unwrap();
-    assert_eq!(current(&input,&state),Duty::Check);
-    assert!(apply(&input,&mut state,"finish_outline",&json!({})).is_err());
+    assert_eq!(current(&input, &state), Duty::Check);
+    assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
     assert!(agent::apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":[{"review_evidence_key":old_key}],"issues":[]})).is_err());
     state.transcript.clear();
-    fresh_check_reads(&input,&mut state,&refs);
-    apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]})).unwrap();
-    apply(&input,&mut state,"finish_outline",&json!({})).unwrap();
+    fresh_check_reads(&input, &mut state, &refs);
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]}),
+    )
+    .unwrap();
+    apply(&input, &mut state, "finish_outline", &json!({})).unwrap();
     assert!(state.outline_run.tool_draft.finished);
-    let published = project_draft(&input,&state.input_sha256,&state.outline_run.tool_draft).unwrap();
-    validate_publication(&input,&published.artifact,&published.bindings).unwrap();
+    let published =
+        project_draft(&input, &state.input_sha256, &state.outline_run.tool_draft).unwrap();
+    validate_publication(&input, &published.artifact, &published.bindings).unwrap();
+}
+
+#[test]
+fn bounded_check_scope_waits_for_linked_target_review() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":[],"pack_ids":[pack],"inspected_evidence":refs,"issues":[]}),
+    )
+    .unwrap();
+    assert!(source_review::complete(&input, &state.outline_run.tool_draft, &pack).unwrap());
+    assert_eq!(
+        source_review::next_scope(&input, &state.outline_run.tool_draft),
+        Some(&pack)
+    );
+    let ids = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_ids();
+    apply(
+        &input,
+        &mut state,
+        "submit_review",
+        &json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[]}),
+    )
+    .unwrap();
+    assert_eq!(
+        source_review::next_scope(&input, &state.outline_run.tool_draft),
+        None
+    );
+}
+
+#[test]
+fn source_omission_reopens_empty_pack_once_without_inventing_requirement() {
+    let (input, mut state, pack, refs) = organized(true);
+    fresh_check_reads(&input, &mut state, &refs);
+    let version = source_review::version(
+        &input,
+        &state.outline_run.tool_draft,
+        &pack,
+        &state.outline_run.tool_draft.source_scopes[&pack],
+    )
+    .unwrap();
+    apply(&input,&mut state,"submit_review",&json!({"requirement_ids":[],"pack_ids":[pack],"inspected_evidence":refs,"issues":[],"source_dispositions":[{"pack_id":pack,"version":version,"evidence":refs,"verdict":"unresolved","requirement_ids":[],"reason":"Synthetic observed obligation omitted from extraction"}]})).unwrap();
+    assert!(agent::finish_check_repair_batch(&input, &mut state).unwrap());
+    assert_eq!(current(&input, &state), Duty::Discover);
+    assert_eq!(
+        state.outline_run.repair_events[0]["finding_kind"],
+        "source_omission"
+    );
+    assert!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .requirement_records()
+            .is_empty()
+    );
+    assert!(!agent::finish_check_repair_batch(&input, &mut state).unwrap());
+}
+
+#[test]
+fn explicit_document_issue_is_reported_without_granting_clean_source_credit() {
+    let (input, mut state, pack, refs) = organized(true);
+    fresh_check_reads(&input, &mut state, &refs);
+    let version = source_review::version(
+        &input,
+        &state.outline_run.tool_draft,
+        &pack,
+        &state.outline_run.tool_draft.source_scopes[&pack],
+    )
+    .unwrap();
+    apply(&input,&mut state,"submit_review",&json!({"requirement_ids":[],"pack_ids":[pack],"inspected_evidence":refs,
+        "issues":[{"id":"missing-fixture","code":"document_missing","description":"Synthetic referenced document unavailable","requirement_ids":[],"evidence":refs,"requested_information":"Provide the referenced complete fixture source"}],
+        "source_dispositions":[{"pack_id":pack,"version":version,"evidence":refs,"verdict":"unresolved","requirement_ids":[],"reason":"Synthetic missing referenced document"}]})).unwrap();
+    assert!(!agent::finish_check_repair_batch(&input, &mut state).unwrap());
+    assert!(!source_review::complete(&input, &state.outline_run.tool_draft, &pack).unwrap());
+    assert!(
+        source_review::execution_complete(&input, &state.outline_run.tool_draft, &pack).unwrap()
+    );
+    assert!(source_review::ready(&input, &state.outline_run.tool_draft).is_err());
+    assert!(source_review::document_issue_report_ready(
+        &input,
+        &state.outline_run.tool_draft
+    ));
+    let report = state.review_report(&input);
+    assert_eq!(
+        report["issues"][0]["issue"]["requested_information"],
+        "Provide the referenced complete fixture source"
+    );
+    assert_eq!(report["issues"][0]["resolved"], false);
+    assert_eq!(report["issues"][0]["affected_pack_ids"], json!([pack]));
+    assert_eq!(report["template_ready"], false);
+    assert_eq!(state.progress(&input)["outline_review_report"], report);
+    let mut system = state.outline_run.tool_draft.clone();
+    system.review_issues[0].code = "system_source_omission".into();
+    assert!(!source_review::document_issue_report_ready(&input, &system));
+    system = state.outline_run.tool_draft.clone();
+    system.check_reads.evidence.clear();
+    assert!(!source_review::document_issue_report_ready(&input, &system));
+    assert!(apply(&input, &mut state, "finish_outline", &json!({})).is_err());
+    let restored: Checkpoint =
+        serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+    assert_eq!(
+        restored.outline_run.tool_draft.review_issues[0].requested_information,
+        "Provide the referenced complete fixture source"
+    );
+}
+
+#[test]
+fn template_insufficiency_repairs_targets_without_reextracting_sources() {
+    let (input, mut state, pack, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let ids = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_ids();
+    let mut reviews = scripted_template_reviews(&input, &state, &json!(ids));
+    reviews[0]["claims"][0]["verdict"] = json!("insufficient");
+    reviews[0]["claims"][0]["reason"] =
+        json!("Synthetic response field does not cover the declared obligation");
+    apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[pack],"inspected_evidence":refs,"issues":[],"template_reviews":reviews})).unwrap();
+    let canonical = state.outline_run.reading_packs.clone();
+    assert!(agent::finish_check_repair_batch(&input, &mut state).unwrap());
+    assert_eq!(state.outline_run.reading_packs, canonical);
+    assert_eq!(current(&input, &state), Duty::Organize);
+    assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+    assert_eq!(
+        state.outline_run.repair_events[0]["finding_kind"],
+        "template_insufficiency"
+    );
+    assert!(!agent::finish_check_repair_batch(&input, &mut state).unwrap());
+}
+
+#[test]
+fn condition_dependent_pack_reopens_before_origin_can_be_deleted_or_reused() {
+    let input = super::frozen::tests::related_native_input();
+    let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    let packs = work.claim(8);
+    assert_eq!(packs.len(), 2);
+    let origin_id = format!("{}:0", packs[0].id);
+    let origin_refs = work.pack_evidence(&input, &packs[0].id).unwrap();
+    for (index, pack) in packs.iter().enumerate() {
+        let refs = work.pack_evidence(&input, &pack.id).unwrap();
+        let supports = if index == 1 {
+            vec![discover::ConditionSupport {
+                origin: discover::ConditionSupportOrigin::ReviewedRequirement {
+                    requirement_id: origin_id.clone(),
+                },
+                review_version: "synthetic-prior-reviewed-condition".into(),
+                evidence: origin_refs.clone(),
+            }]
+        } else {
+            vec![]
+        };
+        if index == 1 {
+            work.bind_condition_support(&pack.id, supports.clone())
+                .unwrap();
+        }
+        work.submit(
+            &input,
+            &pack.id,
+            PackSubmit {
+                issues: vec![],
+                call_id: format!("seed-{index}"),
+                claim_token: pack.claim_token.clone(),
+                pack_revision: pack.pack_revision,
+                requirements: vec![PackRequirement {
+                    description: "Synthetic linked response".into(),
+                    kind: "technical".into(),
+                    obligation_strength: "mandatory".into(),
+                    extraction_quality: "explicit".into(),
+                    source_section_id: pack.atoms[0].section_id.clone(),
+                    evidence: vec![refs[0].clone()],
+                    condition_support: supports,
+                }],
+                no_requirement_reason: None,
+                inspected_atom_ids: vec![],
+            },
+        )
+        .unwrap();
+    }
+    let mut state = checkpoint(&input);
+    state.outline_run.reading_packs = Some(work);
+    let reopened = agent::reopen_discovery_pack(
+        &input,
+        &mut state,
+        &packs[0].id,
+        packs[0].pack_revision,
+        "condition-origin-repair",
+    )
+    .unwrap();
+    let work = state.outline_run.reading_packs.as_ref().unwrap();
+    assert!(!work.complete());
+    assert_eq!(
+        work.status(&packs[1].id),
+        Some(discover::PackStatus::Running)
+    );
+    let dependent = work.session(&input, &packs[1].id).unwrap();
+    assert_eq!(
+        dependent["pack"]["pack_revision"],
+        packs[1].pack_revision + 1
+    );
+    assert!(
+        dependent["pack"]["condition_support_options"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let saved = state.clone();
+    agent::reopen_discovery_pack(
+        &input,
+        &mut state,
+        &packs[0].id,
+        packs[0].pack_revision,
+        "condition-origin-repair",
+    )
+    .unwrap();
+    assert_eq!(
+        state.outline_run.reading_packs,
+        saved.outline_run.reading_packs
+    );
+    assert_eq!(state.outline_run.tool_draft, saved.outline_run.tool_draft);
+    assert_eq!(reopened.pack_revision, packs[0].pack_revision + 1);
+    // Historical source handoff records where a candidate was found. It is not
+    // current semantic support for a deleted or reused requirement identity.
+    let old_origin = saved
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()[&origin_id]
+        .clone();
+    let dependent_id = format!("{}:0", packs[1].id);
+    let old_dependent = saved
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()[&dependent_id]
+        .clone();
+    let as_requirement = |record: &discover::RequirementRecord| PackRequirement {
+        description: record.description.clone(),
+        kind: record.kind.clone(),
+        obligation_strength: record.obligation_strength.clone(),
+        extraction_quality: record.extraction_quality.clone(),
+        source_section_id: record.source_section_id.clone(),
+        evidence: record.evidence.clone(),
+        condition_support: record.condition_support.clone(),
+    };
+    let comparison_for = |unit: &claim_review::ReviewUnit| -> claim_review::Comparison {
+        let handles = unit
+            .evidence_units
+            .iter()
+            .map(|u| u.quote_handle.clone())
+            .collect::<Vec<_>>();
+        serde_json::from_value(json!({"requirement_id":unit.requirement_id,"version":unit.version,
+            "declared_claims":[{"claim_handle":"requirement","obligation":unit.original_requirement.description,
+                "applicability":"explicit synthetic fixture scope","original_fragments":[unit.original_requirement.description],
+                "primary_handles":[handles[0]],"support_handles":&handles[1..]}],
+            "observations":handles.iter().map(|h|json!({"quote_handle":h,"polarity":"mixed","applicability":"relevant","condition":"synthetic source conditions"})).collect::<Vec<_>>(),
+            "decisions":[{"claim_handle":"requirement","evidence_handles":handles,"verdict":"supports","action":"retain","resulting_claim":unit.original_requirement.description}]})).unwrap()
+    };
+    let old_unit = claim_review::build(&input, &origin_id, &old_origin).unwrap();
+    let old_comparison = comparison_for(&old_unit);
+    assert!(claim_review::validate(&old_unit, &old_comparison).unwrap());
+    for reuse in [false, true] {
+        let mut case = saved.clone();
+        let work = case.outline_run.reading_packs.as_mut().unwrap();
+        let mut replacement = as_requirement(&old_origin);
+        replacement.description =
+            "Different synthetic obligation after explicit source reconsideration".into();
+        work.submit(
+            &input,
+            &packs[0].id,
+            PackSubmit {
+                issues: vec![],
+                call_id: format!("replace-origin-{reuse}"),
+                claim_token: reopened.claim_token.clone(),
+                pack_revision: reopened.pack_revision,
+                requirements: if reuse { vec![replacement] } else { vec![] },
+                no_requirement_reason: (!reuse)
+                    .then(|| "Synthetic independent reread found no response obligation".into()),
+                inspected_atom_ids: if reuse {
+                    vec![]
+                } else {
+                    reopened
+                        .atoms
+                        .iter()
+                        .filter(|a| !a.context_only)
+                        .map(|a| a.id.clone())
+                        .collect()
+                },
+            },
+        )
+        .unwrap();
+        if reuse {
+            let current = &work.requirement_records()[&origin_id];
+            assert_ne!(current.description, old_origin.description);
+            let unit = claim_review::build(&input, &origin_id, current).unwrap();
+            assert_ne!(unit.version, old_unit.version);
+            assert!(claim_review::validate(&unit, &old_comparison).is_err());
+            let reads = unit
+                .evidence_units
+                .iter()
+                .flat_map(|u| u.excerpts.iter().map(|e| e.evidence.clone()))
+                .collect::<Vec<_>>();
+            assert!(
+                evidence::validate_evidence(
+                    &reads,
+                    &input,
+                    &case.outline_run.tool_draft.check_reads.evidence
+                )
+                .is_err(),
+                "replacement cannot reuse old Check delivery"
+            );
+            assert!(evidence::validate_evidence(&reads, &input, &reads).is_ok());
+            assert!(
+                claim_review::validate(&unit, &comparison_for(&unit)).unwrap(),
+                "only a freshly constructed judgment matches the replacement unit; this seam does not grant delivery credit"
+            );
+        } else {
+            assert!(
+                !work.requirement_records().contains_key(&origin_id),
+                "deleted origin must not survive in canonical requirements"
+            );
+        }
+        let dependent_claim = work
+            .reopen_committed(
+                &input,
+                &packs[1].id,
+                packs[1].pack_revision,
+                &format!("condition-origin-repair:condition:{}", packs[1].id),
+            )
+            .unwrap()
+            .pack;
+        let stale_submission = PackSubmit {
+            issues: vec![],
+            call_id: format!("stale-dependent-{reuse}"),
+            claim_token: dependent_claim.claim_token.clone(),
+            pack_revision: dependent_claim.pack_revision,
+            requirements: vec![as_requirement(&old_dependent)],
+            no_requirement_reason: None,
+            inspected_atom_ids: vec![],
+        };
+        assert!(
+            work.submit(&input, &packs[1].id, stale_submission).is_err(),
+            "deleted or reused origin cannot revive the dependent old support grant"
+        );
+        assert!(!work.complete());
+        assert!(case.outline_run.tool_draft.check_reads.evidence.is_empty());
+        assert!(case.outline_run.tool_draft.claim_comparisons.is_empty());
+    }
+}
+
+#[test]
+fn manual_task_projection_queues_only_complete_target_rows() {
+    let (input, mut state, _, _) = organized(false);
+    let id = state.outline_run.tool_draft.fulfillments[0]
+        .requirement_id
+        .clone();
+    state.outline_run.tool_draft.fulfillments[0].target_refs = vec![TargetRef::ManualTask {
+        task_id: "manual-original".into(),
+        description: "Provide the original signed evidence at submission".into(),
+    }];
+    let args = json!({"mode":"manual_task","requirement_id":id,"task_id":"manual-original"});
+    let projected = agent::full_read_projection(&input, &state, "read_outline", &args).unwrap();
+    assert_eq!(
+        projected["target"]["description"],
+        "Provide the original signed evidence at submission"
+    );
+    let mut partial = projected.clone();
+    partial["field_fragments"] = json!([]);
+    agent::queue_read_projection(
+        &mut state,
+        "read_outline",
+        &json!({"items":[partial]}),
+        Duty::Check,
+    );
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .pending_manual_tasks
+            .is_empty()
+    );
+    let mut truncated = projected.clone();
+    truncated["target"]["description"] = json!("Provide");
+    agent::queue_read_projection(
+        &mut state,
+        "read_outline",
+        &json!({"items":[truncated]}),
+        Duty::Check,
+    );
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .pending_manual_tasks
+            .is_empty()
+    );
+    agent::queue_read_projection(
+        &mut state,
+        "read_outline",
+        &json!({"items":[projected.clone()]}),
+        Duty::Check,
+    );
+    assert_eq!(
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .pending_manual_tasks,
+        vec![(
+            state.turn,
+            projected["version"].as_str().unwrap().to_owned()
+        )]
+    );
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .manual_tasks
+            .is_empty(),
+        "projection is not delivery"
+    );
+}
+
+#[test]
+fn discovery_sync_restores_check_scopes_before_any_mutating_tool_after_repair() {
+    let (input, mut state, pack, _) = organized(true);
+    let retained_slots = state.outline_run.tool_draft.slots.clone();
+    let revision = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .session(&input, &pack)
+        .unwrap()["pack"]["pack_revision"]
+        .as_u64()
+        .unwrap();
+    let reopened =
+        agent::reopen_discovery_pack(&input, &mut state, &pack, revision, "restore-empty-scope")
+            .unwrap();
+    assert!(state.outline_run.tool_draft.source_scopes.is_empty());
+    state
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .submit(
+            &input,
+            &pack,
+            PackSubmit {
+                issues: vec![],
+                call_id: "restored-empty".into(),
+                claim_token: reopened.claim_token,
+                pack_revision: reopened.pack_revision,
+                requirements: vec![],
+                no_requirement_reason: Some(
+                    "Synthetic source-only scope still has no obligations".into(),
+                ),
+                inspected_atom_ids: reopened
+                    .atoms
+                    .iter()
+                    .filter(|atom| !atom.context_only)
+                    .map(|atom| atom.id.clone())
+                    .collect(),
+            },
+        )
+        .unwrap();
+    state.transcript.clear();
+    agent::synchronize_discovery(&input, &mut state).unwrap();
+    assert_eq!(current(&input, &state), Duty::Check);
+    assert_eq!(state.outline_run.tool_draft.slots, retained_slots);
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .source_scopes
+            .contains_key(&pack)
+    );
+    let page = agent::full_read_projection(
+        &input,
+        &state,
+        "read_requirements",
+        &json!({"mode":"packs"}),
+    )
+    .unwrap();
+    assert!(!page["items"].as_array().unwrap().is_empty());
+    let synced = state.outline_run.tool_draft.clone();
+    agent::synchronize_discovery(&input, &mut state).unwrap();
+    assert_eq!(
+        state.outline_run.tool_draft, synced,
+        "same-revision synchronization is idempotent"
+    );
+}
+
+#[test]
+fn mixed_normal_review_and_document_issue_continue_independent_scopes_after_reload() {
+    let input = super::frozen::tests::related_native_input();
+    let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|session| session["pack"]["atoms"].as_array().unwrap().len() <= 1))
+    });
+    let mut selected = Vec::new();
+    let mut all_refs = Vec::new();
+    while !work.complete() {
+        let packs = work.claim(32);
+        assert!(!packs.is_empty());
+        for pack in packs {
+            let refs = work.pack_evidence(&input, &pack.id).unwrap();
+            let healthy = selected.is_empty();
+            work.submit(&input,&pack.id,PackSubmit {
+                issues: vec![],
+                call_id:format!("mixed-seed-{}",pack.id),claim_token:pack.claim_token.clone(),pack_revision:pack.pack_revision,
+                requirements:if healthy {vec![PackRequirement { description:"Synthetic signed response must be supplied".into(),
+                    kind:"material".into(),obligation_strength:"mandatory".into(),extraction_quality:"explicit".into(),
+                    source_section_id:pack.atoms[0].section_id.clone(),evidence:refs.clone(),condition_support:vec![] }]} else {vec![]},
+                no_requirement_reason:(!healthy).then(||"Synthetic scope with no extracted obligation; independent Check remains required".into()),
+                inspected_atom_ids:if healthy {vec![]} else {pack.atoms.iter().filter(|a|!a.context_only).map(|a|a.id.clone()).collect()},
+            }).unwrap();
+            all_refs.extend(refs.clone());
+            selected.push((pack.id, refs));
+        }
+    }
+    assert!(
+        selected.len() >= 3,
+        "fixture must exercise healthy, problem and independently unfinished scopes"
+    );
+    let canonical = work.requirement_records().clone();
+    let ids = work.requirement_ids();
+    let mut state = checkpoint(&input);
+    state.analysis.outline.phase = crate::analysis::outline_flow::Phase::Outline;
+    state.outline_run.reading_packs = Some(work);
+    apply(&input,&mut state,"put_chapters",&json!({"mode":"replace","chapters":[{"id":"response","parent_id":null,"order":0,"title":"Synthetic response","purpose":"response","requirement_ids":ids}]})).unwrap();
+    let bindings = super::chapters::attachment_chains(&input)
+        .into_iter()
+        .flatten()
+        .map(|id| json!({"form_id":id,"chapter_id":"response"}))
+        .collect::<Vec<_>>();
+    apply(
+        &input,
+        &mut state,
+        "bind_forms",
+        &json!({"mode":"replace","bindings":bindings}),
+    )
+    .unwrap();
+    apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"response-blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"Synthetic signed response"}]})).unwrap();
+    apply(&input,&mut state,"put_fulfillments",&json!({"fulfillments":ids.iter().map(|id|json!({"requirement_id":id,"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"response-blank"}]})).collect::<Vec<_>>()})).unwrap();
+    fresh_check_reads(&input, &mut state, &all_refs);
+    let keys_for = |refs: &[evidence::EvidenceRef]| {
+        refs.iter().map(|reference|json!({"review_evidence_key":agent::review_evidence_key(&state,reference).unwrap()})).collect::<Vec<_>>()
+    };
+    let healthy = &selected[0];
+    let problem = &selected[1];
+    let mixed_refs = healthy
+        .1
+        .iter()
+        .chain(&problem.1)
+        .cloned()
+        .collect::<Vec<_>>();
+    let draft = &state.outline_run.tool_draft;
+    let payload = json!({"requirement_ids":ids,"pack_ids":[healthy.0,problem.0],"inspected_evidence":keys_for(&mixed_refs),
+        "issues":[{"id":"synthetic-reference-missing","code":"document_missing","description":"Synthetic referenced supplement is absent; this observation does not remove the healthy obligation",
+            "requirement_ids":[],"evidence":keys_for(&problem.1),"requested_information":"Provide the complete synthetic supplement cited by this source range"}],
+        "source_dispositions":[
+            {"pack_id":healthy.0,"version":source_review::version(&input,draft,&healthy.0,&draft.source_scopes[&healthy.0]).unwrap(),"evidence":keys_for(&healthy.1),"verdict":"contains_obligations","requirement_ids":ids,"reason":"Synthetic source supports the retained response obligation"},
+            {"pack_id":problem.0,"version":source_review::version(&input,draft,&problem.0,&draft.source_scopes[&problem.0]).unwrap(),"evidence":keys_for(&problem.1),"verdict":"unresolved","requirement_ids":[],"reason":"Synthetic referenced supplement needs confirmation"}],
+        "template_reviews":scripted_template_reviews(&input,&state,&json!(ids))});
+    agent::validate_arguments("submit_review", &payload).unwrap();
+    println!("SYNTHETIC_MIXED_REVIEW_PAYLOAD={payload}");
+    agent::apply(&input, &mut state, "submit_review", &payload).unwrap();
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .requirement_records(),
+        &canonical
+    );
+    assert_eq!(state.outline_run.tool_draft.review_issues.len(), 1);
+    assert_eq!(state.outline_run.tool_draft.reviewed_requirement_ids, ids);
+    assert!(!source_review::document_issue_report_ready(
+        &input,
+        &state.outline_run.tool_draft
+    ));
+    state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+    state.transcript.clear();
+    let next = source_review::next_scope(&input, &state.outline_run.tool_draft)
+        .unwrap()
+        .clone();
+    assert!(selected[2..].iter().any(|(pack, _)| pack == &next));
+    for (pack, refs) in &selected[2..] {
+        apply(
+            &input,
+            &mut state,
+            "submit_review",
+            &json!({"requirement_ids":[],"pack_ids":[pack],"inspected_evidence":refs,"issues":[]}),
+        )
+        .unwrap();
+    }
+    assert!(source_review::next_scope(&input, &state.outline_run.tool_draft).is_none());
+    assert!(source_review::document_issue_report_ready(
+        &input,
+        &state.outline_run.tool_draft
+    ));
+    assert!(tools::template_ready(&input, &state.outline_run.tool_draft).is_err());
+    assert!(!state.outline_run.tool_draft.finished);
+    assert_eq!(
+        state.outline_run.tool_draft.review_issues[0].requested_information,
+        "Provide the complete synthetic supplement cited by this source range"
+    );
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .requirement_records(),
+        &canonical
+    );
+    let report = state.review_report(&input);
+    assert_eq!(
+        report["results"]["requirements"],
+        serde_json::to_value(&canonical).unwrap()
+    );
+    assert_eq!(
+        report["results"]["reviewed_requirement_ids"],
+        serde_json::to_value(&ids).unwrap()
+    );
+    assert_eq!(
+        report["issues"][0]["issue"]["id"],
+        "synthetic-reference-missing"
+    );
+    assert_eq!(report["issues"][0]["affected_pack_ids"], json!([problem.0]));
+    assert_eq!(report["document_issues_reported"], true);
+    assert_eq!(report["template_ready"], false);
+}
+
+#[test]
+fn discover_normal_or_empty_results_with_issues_survive_reload_without_stopping_other_packs() {
+    for with_requirement in [false, true] {
+        let input = super::frozen::tests::related_native_input();
+        let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|session| session["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        });
+        let packs = work.claim(8);
+        assert_eq!(packs.len(), 2);
+        let refs = work.pack_evidence(&input, &packs[0].id).unwrap();
+        let issue = ReviewIssue {
+            id: "missing-synthetic-reference".into(),
+            code: "document_missing".into(),
+            description:
+                "Synthetic source reports a referenced supplement unavailable for this test".into(),
+            requirement_ids: vec![],
+            evidence: vec![refs[0].clone()],
+            requested_information: "Provide the referenced synthetic supplement".into(),
+        };
+        work.submit(
+            &input,
+            &packs[0].id,
+            PackSubmit {
+                issues: vec![issue],
+                call_id: format!("discovery-issue-{with_requirement}"),
+                claim_token: packs[0].claim_token.clone(),
+                pack_revision: packs[0].pack_revision,
+                requirements: if with_requirement {
+                    vec![PackRequirement {
+                        description: "Independent synthetic response obligation remains valid"
+                            .into(),
+                        kind: "material".into(),
+                        obligation_strength: "mandatory".into(),
+                        extraction_quality: "explicit".into(),
+                        source_section_id: packs[0].atoms[0].section_id.clone(),
+                        evidence: vec![refs[0].clone()],
+                        condition_support: vec![],
+                    }]
+                } else {
+                    vec![]
+                },
+                no_requirement_reason: None,
+                inspected_atom_ids: packs[0]
+                    .atoms
+                    .iter()
+                    .filter(|atom| !atom.context_only)
+                    .map(|atom| atom.id.clone())
+                    .collect(),
+            },
+        )
+        .unwrap();
+        let mut state = checkpoint(&input);
+        state.outline_run.reading_packs = Some(work);
+        agent::synchronize_discovery(&input, &mut state).unwrap();
+        assert_eq!(current(&input, &state), Duty::Discover);
+        assert_eq!(state.outline_run.tool_draft.review_issues.len(), 1);
+        assert!(
+            state.outline_run.tool_draft.review_issues[0]
+                .id
+                .starts_with(&format!("discover:{}:", packs[0].id))
+        );
+        assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+        assert!(state.outline_run.tool_draft.discovery_revision.is_none());
+        assert!(state.outline_run.tool_draft.required_pack_ids.is_empty());
+        assert!(state.outline_run.tool_draft.source_scopes.is_empty());
+        assert_eq!(
+            state.review_report(&input)["document_issues_reported"],
+            false,
+            "Discover must continue independent packs before a document-issue control stop is possible"
+        );
+        assert!(!source_review::document_issue_report_ready(
+            &input,
+            &state.outline_run.tool_draft
+        ));
+        state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        state.transcript.clear();
+        let work = state.outline_run.reading_packs.as_mut().unwrap();
+        assert_eq!(
+            work.status(&packs[1].id),
+            Some(discover::PackStatus::Running)
+        );
+        work.submit(
+            &input,
+            &packs[1].id,
+            PackSubmit {
+                issues: vec![],
+                call_id: format!("independent-after-issue-{with_requirement}"),
+                claim_token: packs[1].claim_token.clone(),
+                pack_revision: packs[1].pack_revision,
+                requirements: vec![],
+                no_requirement_reason: Some(
+                    "Synthetic independent pack has no response obligation".into(),
+                ),
+                inspected_atom_ids: packs[1]
+                    .atoms
+                    .iter()
+                    .filter(|atom| !atom.context_only)
+                    .map(|atom| atom.id.clone())
+                    .collect(),
+            },
+        )
+        .unwrap();
+        assert!(work.complete());
+        assert_eq!(work.requirement_count(), usize::from(with_requirement));
+        agent::synchronize_discovery(&input, &mut state).unwrap();
+        let report = state.review_report(&input);
+        assert_eq!(report["issues"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            report["issues"][0]["issue"]["requested_information"],
+            "Provide the referenced synthetic supplement"
+        );
+        assert!(
+            report["issues"][0]["affected_pack_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(packs[0].id))
+        );
+        assert_eq!(
+            report["document_issues_reported"], false,
+            "Discover findings do not replace independent Check"
+        );
+        assert_eq!(report["template_ready"], false);
+        if with_requirement {
+            let ids = state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .requirement_ids();
+            apply(&input,&mut state,"put_chapters",&json!({"mode":"replace","chapters":[{"id":"response","parent_id":null,"order":0,"title":"Synthetic response","purpose":"response","requirement_ids":ids}]})).unwrap();
+            let bindings = super::chapters::attachment_chains(&input)
+                .into_iter()
+                .flatten()
+                .map(|id| json!({"form_id":id,"chapter_id":"response"}))
+                .collect::<Vec<_>>();
+            apply(
+                &input,
+                &mut state,
+                "bind_forms",
+                &json!({"mode":"replace","bindings":bindings}),
+            )
+            .unwrap();
+            apply(&input,&mut state,"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"blank","chapter_id":"response","content":{"type":"editable_blank"},"blank_kind":"bidder_blank","match_query":"Synthetic response"}]})).unwrap();
+            apply(&input,&mut state,"put_fulfillments",&json!({"fulfillments":ids.iter().map(|id|json!({"requirement_id":id,"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"blank"}]})).collect::<Vec<_>>()})).unwrap();
+            let work = state.outline_run.reading_packs.as_ref().unwrap();
+            let all_refs = work
+                .pack_ids()
+                .iter()
+                .flat_map(|pack| work.pack_evidence(&input, pack).unwrap())
+                .collect::<Vec<_>>();
+            fresh_check_reads(&input, &mut state, &all_refs);
+            let mut enriched = state.outline_run.tool_draft.review_issues[0].clone();
+            enriched.requirement_ids = ids.iter().cloned().collect();
+            enriched.description = "Check independently connected the missing synthetic supplement to this response obligation".into();
+            enriched.requested_information =
+                "Confirm and provide the specific supplement for the current requirement".into();
+            apply(&input,&mut state,"submit_review",&json!({"requirement_ids":ids,"pack_ids":[packs[0].id],"inspected_evidence":all_refs,"issues":[enriched]})).unwrap();
+            agent::synchronize_discovery(&input, &mut state).unwrap();
+            state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+            state.transcript.clear();
+            agent::synchronize_discovery(&input, &mut state).unwrap();
+            assert_eq!(
+                state.outline_run.tool_draft.review_issues,
+                vec![enriched],
+                "same canonical revision must preserve Check enrichment of the original issue identity"
+            );
+            assert!(
+                state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .review_issues()[0]
+                    .requirement_ids
+                    .is_empty(),
+                "Check enrichment does not rewrite canonical Discover output"
+            );
+        }
+        agent::reopen_discovery_pack(
+            &input,
+            &mut state,
+            &packs[0].id,
+            packs[0].pack_revision,
+            "revisit-discovery-issue",
+        )
+        .unwrap();
+        assert!(
+            state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .review_issues()
+                .is_empty()
+        );
+        assert!(
+            state.outline_run.tool_draft.review_issues.is_empty(),
+            "reopened finding must not remain current"
+        );
+    }
+}
+
+#[test]
+fn organize_target_edit_preserves_check_document_finding_without_old_credit() {
+    let (input, mut state, _, refs) = organized(false);
+    fresh_check_reads(&input, &mut state, &refs);
+    let draft = &mut state.outline_run.tool_draft;
+    let issue = ReviewIssue {
+        id: "check-source-conflict".into(),
+        code: "document_conflict".into(),
+        description: "Synthetic source conflict needs confirmation regardless of template edits"
+            .into(),
+        requirement_ids: draft.required_requirement_ids.iter().cloned().collect(),
+        evidence: refs,
+        requested_information: "Confirm the authoritative synthetic source wording".into(),
+    };
+    draft.review_issues.push(issue.clone());
+    let epoch = draft.read_epoch;
+    let requirements = draft.required_requirement_ids.clone();
+    let args = json!({"fulfillments":draft.fulfillments});
+    tools::apply_canonical(&input, draft, &requirements, "put_fulfillments", &args).unwrap();
+    assert_eq!(draft.review_issues, vec![issue]);
+    assert_eq!(draft.read_epoch, epoch + 1);
+    assert!(draft.check_reads.evidence.is_empty());
+    assert!(draft.source_dispositions.is_empty());
+    assert!(draft.claim_comparisons.is_empty());
+    assert!(draft.template_reviews.is_empty());
+    assert!(!source_review::document_issue_report_ready(&input, draft));
+    assert!(tools::template_ready(&input, draft).is_err());
 }

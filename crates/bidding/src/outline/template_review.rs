@@ -78,6 +78,37 @@ pub fn version(input: &FrozenInput, draft: &Draft, id: &str) -> Result<String, S
     ))
 }
 
+/// Identity of the exact visible operation that must be delivered during Check.
+pub fn manual_task_version(
+    input: &FrozenInput,
+    draft: &Draft,
+    requirement_id: &str,
+    task_id: &str,
+) -> Result<String, String> {
+    let requirement = draft
+        .requirements
+        .get(requirement_id)
+        .ok_or("manual task requirement missing")?;
+    let fulfillment = draft
+        .fulfillments
+        .iter()
+        .find(|f| f.requirement_id == requirement_id)
+        .ok_or("manual task fulfillment missing")?;
+    let target = fulfillment
+        .target_refs
+        .iter()
+        .find(|target| matches!(target, TargetRef::ManualTask { task_id: id, .. } if id == task_id))
+        .ok_or("manual task target missing")?;
+    super::canonical_sha256(&(
+        super::evidence::input_digest(input)?,
+        draft.read_epoch,
+        &draft.discovery_revision,
+        requirement,
+        fulfillment,
+        target,
+    ))
+}
+
 pub fn validate(input: &FrozenInput, draft: &Draft, review: &Review) -> Result<bool, String> {
     if review.version != version(input, draft, &review.requirement_id)? {
         return Err("template review version is stale".into());
@@ -139,7 +170,11 @@ pub fn validate(input: &FrozenInput, draft: &Draft, review: &Review) -> Result<b
                     }
                     has_response_field |= matches!(
                         slot.content,
-                        super::TemplateBody::EditableBlank | super::TemplateBody::SourceCopy { .. }
+                        super::TemplateBody::EditableBlank
+                            | super::TemplateBody::SourceCopy {
+                                purpose: super::SourceCopyPurpose::MandatedResponse,
+                                ..
+                            }
                     );
                     if !super::tools::check_read_slot_complete(draft, slot) {
                         return Err("template field needs a complete fresh slot read".into());
@@ -243,6 +278,12 @@ pub fn validate(input: &FrozenInput, draft: &Draft, review: &Review) -> Result<b
                     if label.trim().is_empty() || !fulfillment.target_refs.iter().any(|t| matches!(t,
                         TargetRef::ManualTask { task_id: id, description } if id == task_id && description.contains(label))) {
                         return Err("manual field is outside its visible requirement task".into());
+                    }
+                    let key = manual_task_version(input, draft, &review.requirement_id, task_id)?;
+                    if !draft.check_reads.manual_tasks.contains(&key) {
+                        return Err(
+                            "manual task needs exact delivered current Check content".into()
+                        );
                     }
                     has_response_field = true;
                 }

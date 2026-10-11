@@ -168,18 +168,6 @@ impl super::FrozenInput {
             })
     }
 
-    pub fn related_documents(&self, left: &str, right: &str) -> bool {
-        left == right
-            || self.document_relations.iter().any(|relation| {
-                relation.kind == DocumentRelationKind::ExplicitReference
-                    && relation.status == DocumentRelationStatus::Confirmed
-                    && relation.to.as_ref().is_some_and(|target| {
-                        (relation.from.document_id == left && target.document_id == right)
-                            || (relation.from.document_id == right && target.document_id == left)
-                    })
-            })
-    }
-
     pub fn metadata_collection(&self, kind: &str) -> Result<Vec<Value>, String> {
         match kind {
             "documents" => self

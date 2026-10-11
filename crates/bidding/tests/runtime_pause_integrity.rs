@@ -8,6 +8,7 @@ fn committed_requirement_must_fit_the_largest_organize_page() {
     let mut work = DiscoverWork::plan_with_budget(&input, &|_| Ok(true));
     let pack = work.claim(1).remove(0);
     let submission = PackSubmit {
+        issues: vec![],
         call_id: "oversized-requirement".into(),
         claim_token: pack.claim_token.clone(),
         pack_revision: pack.pack_revision,

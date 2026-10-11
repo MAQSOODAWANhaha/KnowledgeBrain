@@ -83,7 +83,7 @@ impl Model for MixedCycleModel {
                                 .is_some_and(|q| q.contains("Keep this fixed wording."))
                         })
                         .unwrap();
-                    slots.push(json!({"slot_id":"mixed-fixed","chapter_id":"mixed-response","content":{"type":"source_copy","refs":[excerpt["evidence"]]}}));
+                    slots.push(json!({"slot_id":"mixed-fixed","chapter_id":"mixed-response","content":{"type":"source_copy","purpose":"mandated_response","refs":[excerpt["evidence"]]}}));
                     ("put_slots", json!({"mode":"replace","slots":slots}))
                 }
                 3 => (

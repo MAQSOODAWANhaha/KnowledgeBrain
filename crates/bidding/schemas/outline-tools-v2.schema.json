@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "submit_pack",
-      "description": "Submit the claimed reading pack. Set repair to true only when that same pack already failed.",
+      "description": "Submit the claimed reading pack, with extracted obligations and any source-document issues together. Set repair to true only when that same pack already failed.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -15,7 +15,8 @@
           "requirements",
           "no_requirement_reason",
           "inspected_atom_ids",
-          "repair"
+          "repair",
+          "issues"
         ],
         "properties": {
           "pack_id": {
@@ -128,14 +129,15 @@
                 }
               }
             },
-            "description": "Extract actual obligations with original evidence. An empty array is valid only when all owned atoms were actually inspected and no obligation exists; then a specific nonempty no_requirement_reason and complete distinct inspected_atom_ids are mandatory."
+            "description": "Extract actual obligations with original evidence; do not fabricate certainty to suppress a document problem. Empty requirements require every owned atom actually inspected and listed, plus either a specific nonempty no_requirement_reason or valid source-document issues. For empty extraction blocked by a cited document problem, no_requirement_reason may be null."
           },
           "no_requirement_reason": {
             "type": [
               "string",
               "null"
             ],
-            "maxLength": 2048
+            "maxLength": 2048,
+            "description": "Use null when requirements or document issues are present. A nonempty reason declares a genuinely empty inspected scope with no unresolved document issue."
           },
           "inspected_atom_ids": {
             "type": "array",
@@ -157,6 +159,81 @@
           "repair": {
             "type": "boolean",
             "description": "true only when reading session status is failed; false when running. Schema rejection does not change pack status."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "Explicit classification; document_missing, document_conflict, document_ambiguous, document_unreadable identify source-document problems. System omissions, wrong mapping and execution failures are not document problems.",
+                  "enum": [
+                    "document_missing",
+                    "document_conflict",
+                    "document_ambiguous",
+                    "document_unreadable"
+                  ]
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "maxItems": 0,
+                  "description": "Leave empty during Discover: canonical requirement identities are assigned after submission. The cited original source scope identifies the affected area; Check may explicitly associate verified requirements later."
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "evidence_key"
+                    ],
+                    "properties": {
+                      "evidence_key": {
+                        "type": "string",
+                        "pattern": "^ev_[0-9a-f]{24}$"
+                      }
+                    }
+                  },
+                  "maxItems": 128,
+                  "minItems": 1
+                },
+                "requested_information": {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "description": "Information or clarification needed. Required and nonempty for document_missing, document_conflict, document_ambiguous or document_unreadable; do not label API or system failures as document issues.",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "description",
+                "requirement_ids",
+                "evidence",
+                "requested_information"
+              ]
+            },
+            "maxItems": 128,
+            "description": "Report source-document problems alongside normal extracted requirements. Cite actual delivered owned evidence, including the place referring to a missing attachment; never invent absent text or classify API/parser/system failures as document problems. Discovery issues do not grant Check approval."
           }
         }
       }
@@ -285,7 +362,7 @@
     "type": "function",
     "function": {
       "name": "put_slots",
-      "description": "Write template slots from source_copy, editable_blank or supported generated_explanation. mode=replace replaces all slots; mode=upsert updates submitted slot IDs and preserves other slots. Source references must have been read. Slot fields depend on content.type: source_copy has exactly one refs entry and omits text, match_query and blank_kind; editable_blank requires blank_kind and nonempty match_query and omits text; generated_explanation requires text and nonempty supporting_refs and omits match_query and blank_kind. Upsert retains omitted items and existing positions and appends new ids; it cannot delete or reorder. For reordering, read the complete current list and use replace with all valid items. Form continuation chains must remain in source order.",
+      "description": "Write template slots from source_copy, editable_blank or supported generated_explanation. mode=replace replaces all slots; mode=upsert updates submitted slot IDs and preserves other slots. Source references must have been read. Slot fields depend on content.type: source_copy requires purpose=instruction or mandated_response and exactly one refs entry and omits text, match_query and blank_kind; editable_blank requires blank_kind and nonempty match_query and omits text; generated_explanation requires text and nonempty supporting_refs and omits match_query and blank_kind. Upsert retains omitted items and existing positions and appends new ids; it cannot delete or reorder. For reordering, read the complete current list and use replace with all valid items. Form continuation chains must remain in source order.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -332,11 +409,19 @@
                           },
                           "maxItems": 1,
                           "minItems": 1
+                        },
+                        "purpose": {
+                          "enum": [
+                            "instruction",
+                            "mandated_response"
+                          ],
+                          "description": "Explicit source role: ordinary instructions do not fulfill a response; mandated_response is prescribed response wording. Do not infer purpose from keywords."
                         }
                       },
                       "required": [
                         "type",
-                        "refs"
+                        "refs",
+                        "purpose"
                       ]
                     },
                     {
@@ -652,7 +737,8 @@
               "fulfillments",
               "issues",
               "forms",
-              "slot_body"
+              "slot_body",
+              "manual_task"
             ]
           },
           "chapter_id": {
@@ -663,9 +749,37 @@
           "slot_id": {
             "type": "string",
             "minLength": 1
+          },
+          "requirement_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task_id": {
+            "type": "string",
+            "minLength": 1
           }
         },
-        "required": []
+        "required": [],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "manual_task"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            },
+            "then": {
+              "required": [
+                "requirement_id",
+                "task_id"
+              ]
+            }
+          }
+        ]
       }
     }
   },
@@ -710,7 +824,7 @@
     "type": "function",
     "function": {
       "name": "read_evidence",
-      "description": "Read host data using current keys. Follow returned next_cursor unchanged until selection_complete; the host fits the full request token budget.",
+      "description": "Read source refs, continue a body cursor, select a host dependency_id (relation or granted support key), or continue the relation/support directory with dependency_cursor. Use exactly one selector. Follow returned cursors unchanged; complete requests must fit the configured token budget. Directory delivery is not original-source evidence.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -735,6 +849,16 @@
           "cursor": {
             "type": "string",
             "minLength": 1
+          },
+          "dependency_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Copy the current worker dependency directory value exactly."
+          },
+          "dependency_cursor": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Copy the current worker dependency directory value exactly."
           }
         },
         "required": [],
@@ -744,8 +868,22 @@
               "refs"
             ],
             "not": {
-              "required": [
-                "cursor"
+              "anyOf": [
+                {
+                  "required": [
+                    "cursor"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependency_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependency_cursor"
+                  ]
+                }
               ]
             }
           },
@@ -754,8 +892,70 @@
               "cursor"
             ],
             "not": {
-              "required": [
-                "refs"
+              "anyOf": [
+                {
+                  "required": [
+                    "refs"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependency_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependency_cursor"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "dependency_id"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "refs"
+                  ]
+                },
+                {
+                  "required": [
+                    "cursor"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependency_cursor"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "dependency_cursor"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "refs"
+                  ]
+                },
+                {
+                  "required": [
+                    "cursor"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependency_id"
+                  ]
+                }
               ]
             }
           }
@@ -787,7 +987,7 @@
     "type": "function",
     "function": {
       "name": "submit_review",
-      "description": "Submit a bounded independent review of source obligations, condition/negation/numeric fidelity and actual response adequacy. Every issue requires source evidence. Re-read source before reviewing. Submit one version-bound template review per requirement, judging each declared claim against concrete visible fields. Empty bidder blanks are allowed. For pack-only review submit template_reviews=[]. Source review requires explicit version-bound dispositions, including zero-requirement scopes. Dispositions reference RequirementRecord identities; unresolved blocks completion.",
+      "description": "Submit a bounded independent review of source obligations, condition/negation/numeric fidelity and actual response adequacy. Every issue requires source evidence. Re-read source before reviewing. Submit one version-bound template review per requirement, judging each declared claim against concrete visible fields. Empty bidder blanks are allowed. For pack-only review submit template_reviews=[]. Source review requires explicit version-bound dispositions, including zero-requirement scopes. Dispositions reference RequirementRecord identities; unresolved blocks clean template readiness. Document problems may be reported without claiming they were resolved. Normal review results and source-document issues may coexist. Report document problems with exact current source references, affected requirement_ids and requested_information; missing material must cite the real passage referring to it, never invented evidence. Reporting an issue does not resolve it.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -841,7 +1041,8 @@
                 "code": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 4096
+                  "maxLength": 4096,
+                  "description": "Explicit classification; document_missing, document_conflict, document_ambiguous, document_unreadable identify source-document problems. System omissions, wrong mapping and execution failures are not document problems."
                 },
                 "description": {
                   "type": "string",
@@ -872,7 +1073,13 @@
                       }
                     }
                   },
-                  "maxItems": 128
+                  "maxItems": 128,
+                  "minItems": 1
+                },
+                "requested_information": {
+                  "type": "string",
+                  "maxLength": 4096,
+                  "description": "Information or clarification needed. Required and nonempty for document_missing, document_conflict, document_ambiguous or document_unreadable; do not label API or system failures as document issues."
                 }
               },
               "required": [
@@ -880,7 +1087,8 @@
                 "code",
                 "description",
                 "requirement_ids",
-                "evidence"
+                "evidence",
+                "requested_information"
               ]
             },
             "maxItems": 128
@@ -1370,7 +1578,7 @@
     "type": "function",
     "function": {
       "name": "finish_outline",
-      "description": "Finish after independent source-backed review covers every pack and requirement. Unresolved issues remain needs_review.",
+      "description": "Finish only after independent source-backed review covers every pack and requirement and the template is ready. Unresolved issues block clean publication; report source-document problems through submit_review.issues for the host to preserve and return.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,

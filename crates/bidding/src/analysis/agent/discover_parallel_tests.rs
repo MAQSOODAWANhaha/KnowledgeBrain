@@ -124,7 +124,7 @@ impl Model for Delayed {
         let session = &packet["reading_packs"][0];
         let pack = &session["pack"];
         self.order.lock().unwrap().push(format!("{position}"));
-        Ok(ChatTurn{content:String::new(),finish_reason:"tool_calls".into(),usage:Some(knowledge::models::ChatUsage{prompt_tokens:Some(10),completion_tokens:Some(2),total_tokens:Some(12),..Default::default()}),tool_calls:vec![knowledge::models::ChatToolCall{id:format!("result-{position}"),name:"submit_pack".into(),arguments:json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"no_requirement_reason":"Synthetic protocol fixture only; no semantic model result.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()}).to_string()}]})
+        Ok(ChatTurn{content:String::new(),finish_reason:"tool_calls".into(),usage:Some(knowledge::models::ChatUsage{prompt_tokens:Some(10),completion_tokens:Some(2),total_tokens:Some(12),..Default::default()}),tool_calls:vec![knowledge::models::ChatToolCall{id:format!("result-{position}"),name:"submit_pack".into(),arguments:json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic protocol fixture only; no semantic model result.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()}).to_string()}]})
     }
 }
 fn fixture(packs: usize) -> (FrozenInput, Config, Durable) {
@@ -562,7 +562,11 @@ impl Model for CycleModel {
         // response draft. Follow the advertised duty instead of replaying
         // Organize mutations that are no longer legal in Check.
         let advertised = wire["tools"].as_array().unwrap();
-        let allows = |name: &str| advertised.iter().any(|tool| tool["function"]["name"] == name);
+        let allows = |name: &str| {
+            advertised
+                .iter()
+                .any(|tool| tool["function"]["name"] == name)
+        };
         if allows("submit_review") && !allows("put_chapters") {
             let _ = self.step.compare_exchange(
                 0,
@@ -719,7 +723,10 @@ async fn production_parallel_organize_check_reopen_fresh_check_persist_reload() 
         .unwrap();
     let final_state = journal.load().await.unwrap().unwrap();
     assert!(final_state.done);
-    assert_eq!(final_state.outline_run.tool_draft.chapters, retained_chapters);
+    assert_eq!(
+        final_state.outline_run.tool_draft.chapters,
+        retained_chapters
+    );
     assert_eq!(final_state.outline_run.tool_draft.slots, retained_slots);
     assert!(final_state.outline_run.tool_draft.finished);
     assert!(
@@ -1061,13 +1068,6 @@ impl Model for RelatedCycleModel {
                     .collect::<Vec<_>>();
                 let read = reads.last();
                 if read.is_none() {
-                    let refs = dependency["available_originals"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|source| source["evidence"].clone())
-                        .collect::<Vec<_>>();
-                    assert!(!refs.is_empty());
                     return Ok(ChatTurn {
                         content: String::new(),
                         finish_reason: "tool_calls".into(),
@@ -1075,7 +1075,7 @@ impl Model for RelatedCycleModel {
                         tool_calls: vec![knowledge::models::ChatToolCall {
                             id: "read-pricing".into(),
                             name: "read_evidence".into(),
-                            arguments: json!({"wire_scope":scope,"refs":refs}).to_string(),
+                            arguments: json!({"wire_scope":scope,"dependency_id":dependency["relation"]["id"]}).to_string(),
                         }],
                     });
                 }
@@ -1503,6 +1503,7 @@ fn related_read_credit_rejects_unknown_stale_foreign_and_modified_requests_atomi
     };
     let response = json!({"content":"","finish_reason":"tool_calls","usage":null,"tool_calls":[{"id":"submit","name":"submit_pack","arguments":"{}"}]});
     let frame = coordinator::RelatedReadFrame {
+        directory_page: None,
         call_id: "dependent-original".into(),
         pack_revision: 1,
         input_digest: input_digest(&input).unwrap(),
@@ -1667,22 +1668,15 @@ async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
     });
     work.claim(2);
     let identity = work.pack_wire_identity("pack-0").unwrap();
-    let source = input
-        .source_units
-        .iter()
-        .find(|source| source.document_id == "pricing" && !source.text.is_empty())
+    let selected = work
+        .dependency_selection(&input, "pack-0", "pricing-reference")
         .unwrap();
     let continuation = coordinator::RelatedContinuation {
         run: identity["run"].as_str().unwrap().into(),
         pack: "pack-0".into(),
         pack_revision: 1,
         input_digest: crate::outline::evidence::input_digest(&input).unwrap(),
-        refs: vec![crate::outline::evidence::EvidenceRef::Text {
-            input_digest: crate::outline::evidence::input_digest(&input).unwrap(),
-            unit_id: source.source_unit_revision_id.clone(),
-            start_byte: 0,
-            end_byte: source.text.len(),
-        }],
+        refs: vec![selected[0].clone()],
     };
     let cursor = format!(
         "page_{}",
@@ -1692,6 +1686,7 @@ async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
     state.outline_run.discover_workers.insert(
         "pack-0".into(),
         Worker {
+            generation: 1,
             related_continuations: std::collections::BTreeMap::from([(
                 cursor.clone(),
                 continuation,
@@ -1699,7 +1694,7 @@ async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
             ..Default::default()
         },
     );
-    let request = Request {
+    let mut request = Request {
         scope: Scope {
             run: identity["run"].as_str().unwrap().into(),
             pack: "pack-0".into(),
@@ -1711,6 +1706,10 @@ async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
         input_reserve: 1,
         output_reserve: 1,
     };
+    request.scope.request =
+        crate::outline::canonical_sha256(&(&identity, request.scope.generation, &request.body))
+            .unwrap();
+    validate_worker_scope(&input, &state, &request).unwrap();
     let response = ChatTurn {
         content: String::new(),
         finish_reason: "tool_calls".into(),
@@ -1728,6 +1727,18 @@ async fn dependency_cursor_cannot_change_worker_input_revision_or_selection() {
         call_limit: 0,
     };
     let cancel = CancellationToken::new();
+    let mut control = state.clone();
+    let read = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut control,
+        journal: &journal,
+        cancel: &cancel,
+    }
+    .related_page(&request, &response, &json!({"cursor":cursor}))
+    .await
+    .unwrap();
+    assert_eq!(read["status"], "read_pending_delivery");
     for mode in ["tampered-key", "run", "worker", "revision", "input"] {
         let mut candidate = state.clone();
         let mut key = cursor.clone();
@@ -2185,32 +2196,67 @@ async fn mixed_native_related_image_requires_exact_pixels_identity_and_completed
         journal: &journal,
         cancel: &cancel,
     };
-    let request = host.prepare_inner("pack-0", false).await.unwrap();
-    let body: Value = serde_json::from_slice(&request.body).unwrap();
-    let payloads = body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|m| m["content"].as_str())
-        .filter_map(|s| serde_json::from_str::<Value>(s).ok())
-        .collect::<Vec<_>>();
-    let packet = payloads
-        .iter()
-        .find(|p| p["reading_packs"].is_array())
-        .unwrap();
-    let reference = packet["reading_packs"][0]["pack"]["read_dependencies"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|d| d["available_originals"].as_array().unwrap())
-        .filter(|r| r["requires_original_pixels"] == true)
-        .next_back()
-        .unwrap()["evidence"]
-        .clone();
-    let scope = payloads
-        .iter()
-        .find_map(|p| p["wire_scope"].as_str())
-        .unwrap();
+    let mut request = host.prepare_inner("pack-0", false).await.unwrap();
+    let (scope, dependency_id) = loop {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let payloads = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .collect::<Vec<_>>();
+        let scope = payloads
+            .iter()
+            .find_map(|p| p["wire_scope"].as_str())
+            .unwrap()
+            .to_owned();
+        let directory = payloads
+            .iter()
+            .rev()
+            .find_map(|p| {
+                p["result"]["read"]["read_dependencies"]
+                    .is_array()
+                    .then_some(&p["result"]["read"])
+            })
+            .unwrap_or_else(|| {
+                &payloads
+                    .iter()
+                    .find(|p| p["reading_packs"].is_array())
+                    .unwrap()["reading_packs"][0]["pack"]
+            });
+        if let Some(row) = directory["read_dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                row["available_originals"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["requires_original_pixels"] == true)
+            })
+        {
+            break (scope, row["relation"]["id"].as_str().unwrap().to_owned());
+        }
+        let cursor = directory["next_dependency_cursor"]
+            .as_str()
+            .expect("image remains in directory");
+        let turn = ChatTurn {
+            content: String::new(),
+            finish_reason: "tool_calls".into(),
+            usage: None,
+            tool_calls: vec![knowledge::models::ChatToolCall {
+                id: format!("directory-{}", request.scope.generation),
+                name: "read_evidence".into(),
+                arguments: json!({"wire_scope":scope,"dependency_cursor":cursor}).to_string(),
+            }],
+        };
+        host.reserve(&request).await.unwrap();
+        host.received(&request, &turn).await.unwrap();
+        host.commit(&request, turn).await.unwrap();
+        request = host.prepare_inner("pack-0", false).await.unwrap();
+    };
     let response = ChatTurn {
         content: "Request original fixture pixels; OCR stub is not visual evidence.".into(),
         finish_reason: "tool_calls".into(),
@@ -2218,7 +2264,7 @@ async fn mixed_native_related_image_requires_exact_pixels_identity_and_completed
         tool_calls: vec![knowledge::models::ChatToolCall {
             id: "read-original-image".into(),
             name: "read_evidence".into(),
-            arguments: json!({"wire_scope":scope,"refs":[reference]}).to_string(),
+            arguments: json!({"wire_scope":scope,"dependency_id":dependency_id}).to_string(),
         }],
     };
     host.reserve(&request).await.unwrap();
@@ -2339,3 +2385,784 @@ async fn mixed_native_related_image_requires_exact_pixels_identity_and_completed
 }
 
 include!("discover_mixed_cycle_tests.rs");
+
+struct ColdNativeImages {
+    views: Vec<views::SourceView>,
+}
+#[async_trait]
+impl Journal for ColdNativeImages {
+    async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
+        Ok(None)
+    }
+    async fn reserve(&self, _: &Checkpoint, _: &[u8]) -> Result<Option<usize>, AgentError> {
+        Ok(Some(0))
+    }
+    async fn save(&self, _: &Checkpoint, _: &Value) -> Result<(), AgentError> {
+        Ok(())
+    }
+    async fn source_view(
+        &self,
+        source_id: &str,
+        _: &Limits,
+        _: &CancellationToken,
+    ) -> Result<views::SourceView, AgentError> {
+        self.views
+            .iter()
+            .find(|view| view.identity.source_id == source_id)
+            .cloned()
+            .ok_or_else(|| invalid("fixture image missing"))
+    }
+}
+
+#[tokio::test]
+async fn mixed_native_cold_image_cache_preserves_occurrences_and_exact_identity_delivery() {
+    let (input, config, mut state, _) = mixed_native_runtime_fixture();
+    let journal = ColdNativeImages {
+        views: state.source_views.values().cloned().collect(),
+    };
+    assert_eq!(journal.views.len(), 2);
+    assert_eq!(
+        journal.views[0].identity.image_sha256,
+        journal.views[1].identity.image_sha256
+    );
+    assert_ne!(
+        journal.views[0].identity.source_id,
+        journal.views[1].identity.source_id
+    );
+    state.source_views.clear();
+    let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|_| Ok(true));
+    work.claim(1);
+    state.outline_run.reading_packs = Some(work);
+    state.outline_run.discover_workers.clear();
+    state
+        .outline_run
+        .discover_workers
+        .insert("pack-0".into(), Worker::default());
+    let cancel = CancellationToken::new();
+    let request = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    }
+    .prepare_inner("pack-0", false)
+    .await
+    .unwrap();
+    assert_eq!(
+        state.source_views.len(),
+        2,
+        "same pixels must not collapse native occurrences"
+    );
+    for view in &journal.views {
+        assert!(state.source_views.contains_key(&view.id().unwrap()));
+    }
+    let response = json!({"content":"","finish_reason":"tool_calls","usage":null,"tool_calls":[{"id":"submit","name":"submit_pack","arguments":"{}"}]});
+    state
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap()
+        .pending = Some(Pending::Received {
+        request: request.clone(),
+        response: response.clone(),
+    });
+    for mode in ["identity_removed", "identity_changed", "unknown_response"] {
+        let mut altered = request.clone();
+        let mut candidate = state.clone();
+        let mut body: Value = serde_json::from_slice(&altered.body).unwrap();
+        if mode == "identity_removed" {
+            body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|message| message != &journal.views[0].message());
+        }
+        if mode == "identity_changed" {
+            let message = body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|message| **message == journal.views[0].message())
+                .unwrap();
+            message["content"][0]["text"] = json!("same image, wrong source identity");
+        }
+        altered.body = serde_json::to_vec(&body).unwrap();
+        candidate
+            .outline_run
+            .discover_workers
+            .get_mut("pack-0")
+            .unwrap()
+            .pending = Some(if mode == "unknown_response" {
+            Pending::Sending {
+                request: altered.clone(),
+            }
+        } else {
+            Pending::Received {
+                request: altered.clone(),
+                response: response.clone(),
+            }
+        });
+        let before = json!(candidate.outline_run.reading_packs);
+        assert!(
+            confirm_worker_images(&input, &config, &mut candidate, &altered).is_err(),
+            "{mode}"
+        );
+        assert_eq!(json!(candidate.outline_run.reading_packs), before, "{mode}");
+    }
+    confirm_worker_images(&input, &config, &mut state, &request).unwrap();
+}
+
+#[test]
+fn dependency_new_progress_uses_union_of_delivered_native_intervals() {
+    use crate::outline::{discover::DiscoverWork, evidence::EvidenceRef};
+    let input = crate::outline::frozen::tests::related_native_input();
+    let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    work.claim(2);
+    let relation =
+        work.session(&input, "pack-0").unwrap()["pack"]["read_dependencies"][0]["relation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let reference = work
+        .dependency_selection(&input, "pack-0", &relation)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.range().is_some_and(|(a, b)| b - a >= 3))
+        .unwrap();
+    let quote =
+        crate::outline::evidence::resolve_evidence(&input, std::slice::from_ref(&reference))
+            .unwrap()[0]
+            .quote
+            .clone();
+    let cut = quote.char_indices().nth(1).unwrap().0;
+    let mut first = reference.clone();
+    let mut second = reference.clone();
+    match (&mut first, &mut second) {
+        (
+            EvidenceRef::Text {
+                start_byte: a,
+                end_byte: b,
+                ..
+            },
+            EvidenceRef::Text { start_byte: c, .. },
+        )
+        | (
+            EvidenceRef::GridCell {
+                start_byte: a,
+                end_byte: b,
+                ..
+            },
+            EvidenceRef::GridCell { start_byte: c, .. },
+        ) => {
+            *b = *a + cut;
+            *c = *b;
+        }
+        _ => unreachable!(),
+    }
+    let (_, whole) = work
+        .related_read(&input, "pack-0", std::slice::from_ref(&reference))
+        .unwrap();
+    let (_, left) = work
+        .related_read(&input, "pack-0", std::slice::from_ref(&first))
+        .unwrap();
+    let (_, right) = work
+        .related_read(&input, "pack-0", std::slice::from_ref(&second))
+        .unwrap();
+    assert!(!work.related_read_already_delivered("pack-0", &left));
+    work.confirm_related_read(&input, "pack-0", &left).unwrap();
+    assert!(!work.related_read_already_delivered("pack-0", &whole));
+    work.confirm_related_read(&input, "pack-0", &right).unwrap();
+    assert!(
+        work.related_read_already_delivered("pack-0", &whole),
+        "adjacent completed reads cover the same original interval"
+    );
+    assert!(
+        work.related_read_already_delivered("pack-0", &left),
+        "overlap/subrange is not new progress"
+    );
+}
+
+#[test]
+fn dependency_directory_pages_do_not_expand_with_the_complete_relation_set() {
+    use crate::outline::discover::DiscoverWork;
+    let baseline = crate::outline::frozen::tests::related_native_input();
+    let plan = |input: &FrozenInput| {
+        let mut work = DiscoverWork::plan_with_budget(input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+        });
+        work.claim(2);
+        work
+    };
+    let original = plan(&baseline).session(&baseline, "pack-0").unwrap();
+    let mut input = baseline.clone();
+    let relation = input.document_relations[0].clone();
+    input.document_relations = (0..128)
+        .map(|index| {
+            let mut relation = relation.clone();
+            relation.id = format!("relation-{index}");
+            relation
+        })
+        .collect();
+    let work = plan(&input);
+    let session = work.session(&input, "pack-0").unwrap();
+    assert!(
+        serde_json::to_vec(&session).unwrap().len()
+            < serde_json::to_vec(&original).unwrap().len() + 1024,
+        "metadata for 128 dependencies must not accompany every owned atom"
+    );
+    let mut directory = session["pack"].clone();
+    let mut seen = BTreeSet::new();
+    let mut old_cursor = None;
+    loop {
+        let rows = directory["read_dependencies"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]["available_originals"].as_array().unwrap().len() <= 1);
+        assert_eq!(rows[0]["originals_preview_only"], true);
+        let id = rows[0]["relation"]["id"].as_str().unwrap();
+        assert!(seen.insert(id.to_owned()));
+        assert!(
+            work.dependency_selection(&input, "pack-0", id)
+                .unwrap()
+                .len()
+                > 1,
+            "body selection is complete despite a one-range preview"
+        );
+        let Some(cursor) = directory["next_dependency_cursor"]
+            .as_str()
+            .map(str::to_owned)
+        else {
+            break;
+        };
+        old_cursor = Some(cursor.clone());
+        directory = work
+            .dependency_directory_page(&input, "pack-0", &cursor)
+            .unwrap();
+    }
+    assert_eq!(seen.len(), 128);
+    assert!(
+        work.dependency_directory_page(&input, "pack-1", old_cursor.as_deref().unwrap())
+            .is_err(),
+        "cursor cannot cross workers"
+    );
+    assert!(
+        work.dependency_directory_page(&baseline, "pack-0", old_cursor.as_deref().unwrap())
+            .is_err(),
+        "cursor cannot cross frozen inputs"
+    );
+}
+
+#[test]
+fn support_directory_retains_every_grant_without_repeating_original_bodies() {
+    use crate::outline::discover::{ConditionSupport, ConditionSupportOrigin, DiscoverWork};
+    let input = crate::outline::frozen::tests::related_native_input();
+    let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    work.claim(2);
+    let relation =
+        work.session(&input, "pack-0").unwrap()["pack"]["read_dependencies"][0]["relation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let refs = work
+        .dependency_selection(&input, "pack-0", &relation)
+        .unwrap();
+    let grants = (0..128)
+        .map(|index| ConditionSupport {
+            origin: ConditionSupportOrigin::ReviewedRequirement {
+                requirement_id: format!("reviewed-{index}"),
+            },
+            review_version: format!("version-{index}"),
+            evidence: refs.clone(),
+        })
+        .collect::<Vec<_>>();
+    work.bind_condition_support("pack-0", vec![grants[0].clone()])
+        .unwrap();
+    let first = work.session(&input, "pack-0").unwrap();
+    work.bind_condition_support("pack-0", grants).unwrap();
+    let session = work.session(&input, "pack-0").unwrap();
+    assert!(
+        serde_json::to_vec(&session).unwrap().len()
+            < serde_json::to_vec(&first).unwrap().len() + 512
+    );
+    let mut page = session["pack"].clone();
+    let mut keys = BTreeSet::new();
+    let mut cursor_to_reject = None;
+    loop {
+        let rows = page["condition_support_options"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].get("excerpts").is_none());
+        assert!(rows[0].get("delivered_evidence").is_none());
+        let key = rows[0]["support_key"].as_str().unwrap();
+        assert!(keys.insert(key.to_owned()));
+        assert_eq!(
+            work.dependency_selection(&input, "pack-0", key).unwrap(),
+            refs,
+            "all ranges remain selectable independently of preview visibility"
+        );
+        let Some(cursor) = page["next_support_cursor"].as_str().map(str::to_owned) else {
+            break;
+        };
+        cursor_to_reject = Some(cursor.clone());
+        page = work
+            .dependency_directory_page(&input, "pack-0", &cursor)
+            .unwrap();
+    }
+    assert_eq!(keys.len(), 128);
+    assert!(
+        work.dependency_directory_page(&input, "pack-1", cursor_to_reject.as_deref().unwrap())
+            .is_err()
+    );
+    // These are directory/authorization views, never a fresh Check receipt.
+    let (read, _) = work.related_read(&input, "pack-0", &refs[..1]).unwrap();
+    assert_eq!(read["excerpts"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn dependency_selectors_validate_the_same_immutable_worker_scope_before_mutation() {
+    let input = crate::outline::frozen::tests::related_native_input();
+    let config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    work.claim(2);
+    state.outline_run.reading_packs = Some(work);
+    state
+        .outline_run
+        .discover_workers
+        .insert("pack-0".into(), Worker::default());
+    state
+        .outline_run
+        .discover_workers
+        .insert("pack-1".into(), Worker::default());
+    let journal = Durable {
+        state: Mutex::new(state.clone()),
+        stop_barrier: false,
+        crash_received: AtomicBool::new(false),
+        call_limit: 99,
+    };
+    let cancel = CancellationToken::new();
+    let request = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    }
+    .prepare_inner("pack-0", false)
+    .await
+    .unwrap();
+    validate_worker_scope(&input, &state, &request).unwrap();
+    let response = ChatTurn {
+        content: String::new(),
+        finish_reason: "tool_calls".into(),
+        usage: None,
+        tool_calls: vec![knowledge::models::ChatToolCall {
+            id: "read".into(),
+            name: "read_evidence".into(),
+            arguments: "{}".into(),
+        }],
+    };
+    for mode in [
+        "checkpoint_input",
+        "source",
+        "relation",
+        "run",
+        "pack",
+        "revision",
+        "generation",
+        "hash",
+        "body",
+        "claim",
+    ] {
+        let mut changed_input = input.clone();
+        let mut changed_state = state.clone();
+        let mut altered = request.clone();
+        match mode {
+            "checkpoint_input" => changed_state.input_sha256.push('x'),
+            "source" => changed_input.source_units[0].text.push('x'),
+            "relation" => changed_input.document_relations[0].required = false,
+            "run" => altered.scope.run.push('x'),
+            "pack" => altered.scope.pack = "pack-1".into(),
+            "revision" => altered.scope.revision += 1,
+            "generation" => altered.scope.generation += 1,
+            "hash" => altered.scope.request.push('x'),
+            "body" => altered.body.push(b' '),
+            "claim" => {
+                let mut value = json!(changed_state.outline_run.reading_packs.as_ref().unwrap());
+                value["packs"]["pack-0"]["pack"]["claim_token"] = json!("different-claim");
+                changed_state.outline_run.reading_packs =
+                    Some(serde_json::from_value(value).unwrap());
+            }
+            _ => unreachable!(),
+        }
+        for args in [
+            json!({"dependency_id":"pricing-reference"}),
+            json!({"dependency_cursor":"unissued"}),
+            json!({"cursor":"unissued"}),
+        ] {
+            let before = json!(changed_state);
+            let error = PackHost {
+                input: &changed_input,
+                config: &config,
+                state: &mut changed_state,
+                journal: &journal,
+                cancel: &cancel,
+            }
+            .related_page(&altered, &response, &args)
+            .await
+            .unwrap_err();
+            assert!(error.contains("stale or foreign worker"), "{mode}: {error}");
+            assert_eq!(json!(changed_state), before, "{mode}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn reviewed_support_authorization_is_not_worker_delivery_progress() {
+    use crate::outline::discover::{ConditionSupport, ConditionSupportOrigin, DiscoverWork};
+    let input = crate::outline::frozen::tests::related_native_input();
+    let config = crate::analysis::tests::config();
+    let mut state = super::super::retirement::checkpoint(&input);
+    let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|s| s["pack"]["document_ids"].as_array().unwrap().len() == 1))
+    });
+    work.claim(2);
+    let refs = work
+        .dependency_selection(&input, "pack-0", "pricing-reference")
+        .unwrap();
+    work.bind_condition_support(
+        "pack-0",
+        vec![ConditionSupport {
+            origin: ConditionSupportOrigin::ReviewedRequirement {
+                requirement_id: "previously-reviewed".into(),
+            },
+            review_version: "version".into(),
+            evidence: refs,
+        }],
+    )
+    .unwrap();
+    state.outline_run.reading_packs = Some(work);
+    state
+        .outline_run
+        .discover_workers
+        .insert("pack-0".into(), Worker::default());
+    let journal = Durable {
+        state: Mutex::new(state.clone()),
+        stop_barrier: false,
+        crash_received: AtomicBool::new(false),
+        call_limit: 99,
+    };
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let request = host.prepare_inner("pack-0", false).await.unwrap();
+    let response = ChatTurn {
+        content: String::new(),
+        finish_reason: "tool_calls".into(),
+        usage: None,
+        tool_calls: vec![knowledge::models::ChatToolCall {
+            id: "read-current-original".into(),
+            name: "read_evidence".into(),
+            arguments: "{}".into(),
+        }],
+    };
+    let key = host
+        .state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .session(&input, "pack-0")
+        .unwrap()["pack"]["condition_support_options"][0]["support_key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = host
+        .related_page(&request, &response, &json!({"dependency_id":key}))
+        .await
+        .unwrap();
+    assert_eq!(
+        first["read"]["new_coverage"], true,
+        "authorized original not yet delivered is a new read"
+    );
+    let worker = host
+        .state
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap();
+    assert!(
+        worker.delivered_related_evidence.is_empty(),
+        "queued page is not delivery"
+    );
+    worker.history.push(json!({"role":"assistant","content":"","tool_calls":[{"id":"read-current-original","type":"function","function":{"name":"read_evidence","arguments":"{}"}}]}));
+    worker.history.push(json!({"role":"tool","tool_call_id":"read-current-original","content":super::super::tool_result_envelope(first).to_string()}));
+    let delivered = host.prepare_inner("pack-0", false).await.unwrap();
+    host.reserve(&delivered).await.unwrap();
+    host.received(&delivered, &response).await.unwrap();
+    confirm_worker_related_reads(&input, host.state, &delivered).unwrap();
+    assert_eq!(
+        host.state.outline_run.discover_workers["pack-0"]
+            .delivered_related_evidence
+            .len(),
+        1
+    );
+    let repeated = host
+        .related_page(&delivered, &response, &json!({"dependency_id":key}))
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated["read"]["new_coverage"], false,
+        "only completed source delivery removes new progress"
+    );
+    let mut prefix =
+        host.state.outline_run.discover_workers["pack-0"].delivered_related_evidence[0].clone();
+    let quote = crate::outline::evidence::resolve_evidence(&input, std::slice::from_ref(&prefix))
+        .unwrap()[0]
+        .quote
+        .clone();
+    match &mut prefix {
+        crate::outline::evidence::EvidenceRef::Text {
+            start_byte,
+            end_byte,
+            ..
+        }
+        | crate::outline::evidence::EvidenceRef::GridCell {
+            start_byte,
+            end_byte,
+            ..
+        } => *end_byte = *start_byte + quote.chars().next().unwrap().len_utf8(),
+        _ => unreachable!(),
+    }
+    let subrange = host
+        .related_page(&delivered, &response, &json!({"refs":[prefix]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        subrange["read"]["new_coverage"], false,
+        "a delivered subrange is not progress"
+    );
+    assert!(
+        host.state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .evidence
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_unknown_sends() {
+    let (input, config, journal) = fixture(1);
+    let mut state = journal.state.lock().unwrap().clone();
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let mut last_request = None;
+    for _ in 0..2 {
+        let request = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let packet = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .find(|p| p["reading_packs"].is_array())
+            .unwrap();
+        let atom = &packet["reading_packs"][0]["pack"]["atoms"][0];
+        let mut response = Delayed::default()
+            .turn(&config, &request.body)
+            .await
+            .unwrap();
+        let mut args: Value = serde_json::from_str(&response.tool_calls[0].arguments).unwrap();
+        args["requirements"] = json!([{"description":" ","kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":atom["atom_key"]},"evidence":[{"evidence_key":atom["excerpts"][0]["evidence_key"]}]}]);
+        args["no_requirement_reason"] = Value::Null;
+        response.tool_calls[0].arguments = args.to_string();
+        host.reserve(&request).await.unwrap();
+        host.received(&request, &response).await.unwrap();
+        host.commit(&request, response).await.unwrap();
+        assert_eq!(
+            host.state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .status("pack-0"),
+            Some(PackStatus::Failed)
+        );
+        last_request = Some(request);
+    }
+    let request = last_request.unwrap();
+    let identity = host
+        .state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .pack_wire_identity("pack-0")
+        .unwrap();
+    assert!(
+        identity["revision"].as_u64().unwrap() > request.scope.revision,
+        "actual failed repair advanced the pack revision"
+    );
+    let worker = host
+        .state
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap();
+    assert_eq!(worker.rejected_turns, 2);
+    let reference = crate::outline::evidence::EvidenceRef::Text {
+        input_digest: host.state.input_sha256.clone(),
+        unit_id: input.source_units[0].source_unit_revision_id.clone(),
+        start_byte: 0,
+        end_byte: input.source_units[0].text.len(),
+    };
+    worker.delivered_related_evidence.push(reference.clone());
+    worker
+        .delivered_dependency_pages
+        .insert("old-directory".into());
+    worker
+        .source_keys
+        .insert("old-source-key".into(), reference);
+    worker
+        .history
+        .push(json!({"role":"assistant","content":"old owned scope"}));
+    worker
+        .related_read_frames
+        .push(coordinator::RelatedReadFrame {
+            directory_page: Some("old-directory".into()),
+            call_id: "old-read".into(),
+            pack_revision: request.scope.revision,
+            input_digest: host.state.input_sha256.clone(),
+            options: vec![],
+            sealed_sha256: None,
+        });
+    let snapshot = host.state.clone();
+    for pending_kind in [
+        "failed",
+        "prepared",
+        "prepared_other_run",
+        "committed",
+        "sending",
+        "received",
+    ] {
+        let mut candidate = snapshot.clone();
+        candidate
+            .outline_run
+            .discover_workers
+            .get_mut("pack-0")
+            .unwrap()
+            .pending = Some(match pending_kind {
+            "failed" => Pending::Failed {
+                request: request.clone(),
+                code: "BUSINESS_REJECTED".into(),
+            },
+            "prepared" => Pending::Prepared {
+                request: request.clone(),
+            },
+            "prepared_other_run" => {
+                let mut old = request.clone();
+                old.scope.revision = identity["revision"].as_u64().unwrap();
+                old.scope.run.push('x');
+                Pending::Prepared { request: old }
+            }
+            "committed" => Pending::Committed {
+                request: request.clone(),
+                receipt: json!({}),
+            },
+            "sending" => Pending::Sending {
+                request: request.clone(),
+            },
+            "received" => Pending::Received {
+                request: request.clone(),
+                response: json!({}),
+            },
+            _ => unreachable!(),
+        });
+        let old_workers = json!(candidate.outline_run.discover_workers);
+        let old_accounting = json!(candidate.journal.accounting);
+        let result = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut candidate,
+            journal: &journal,
+            cancel: &cancel,
+        }
+        .next(&BTreeSet::new())
+        .await;
+        if matches!(pending_kind, "sending" | "received") {
+            assert!(
+                result
+                    .unwrap_err()
+                    .message
+                    .contains("unresolved worker journal scope changed")
+            );
+            assert_eq!(json!(candidate.outline_run.discover_workers), old_workers);
+            assert_eq!(json!(candidate.journal.accounting), old_accounting);
+        } else {
+            let fresh = result.unwrap().unwrap();
+            assert_eq!(fresh.scope.revision, identity["revision"].as_u64().unwrap());
+            let worker = &candidate.outline_run.discover_workers["pack-0"];
+            assert!(worker.delivered_related_evidence.is_empty());
+            assert!(worker.delivered_dependency_pages.is_empty());
+            assert!(worker.related_read_frames.is_empty());
+            assert!(worker.history.is_empty());
+            assert!(!worker.source_keys.contains_key("old-source-key"));
+            assert_eq!(
+                worker.rejected_turns,
+                if pending_kind == "committed" { 0 } else { 2 }
+            );
+        }
+    }
+    let mut exhausted = snapshot;
+    exhausted
+        .outline_run
+        .discover_workers
+        .get_mut("pack-0")
+        .unwrap()
+        .rejected_turns = config.limits.max_no_progress_turns;
+    assert!(
+        PackHost {
+            input: &input,
+            config: &config,
+            state: &mut exhausted,
+            journal: &journal,
+            cancel: &cancel
+        }
+        .next(&BTreeSet::new())
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        exhausted.outline_run.discover_workers["pack-0"].rejected_turns,
+        config.limits.max_no_progress_turns
+    );
+}

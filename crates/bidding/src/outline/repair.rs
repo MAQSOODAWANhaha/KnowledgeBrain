@@ -39,6 +39,26 @@ fn response_chapters(draft: &Draft, affected: &BTreeSet<String>) -> BTreeSet<Str
             }
         }
     }
+    // Child response sections inherit the affected parent scope. Conservatively
+    // invalidate their targets, without pulling unrelated ancestors/siblings in.
+    loop {
+        let before = chapters.len();
+        let descendants = draft
+            .chapters
+            .iter()
+            .filter(|chapter| {
+                chapter
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|parent| chapters.contains(parent))
+            })
+            .map(|chapter| chapter.id.clone())
+            .collect::<Vec<_>>();
+        chapters.extend(descendants);
+        if chapters.len() == before {
+            break;
+        }
+    }
     chapters
 }
 
@@ -76,8 +96,8 @@ pub(crate) fn retain_independent(
             // A requirement can point into an affected chapter through a target
             // even when its primary response chapter is elsewhere. Include it
             // before removing that chapter's slots/bindings.
-            let shared_chapter = !response_chapters(draft, &BTreeSet::from([id.clone()]))
-                .is_disjoint(&chapters);
+            let shared_chapter =
+                !response_chapters(draft, &BTreeSet::from([id.clone()])).is_disjoint(&chapters);
             if dependency || shared_target || shared_chapter {
                 additions.insert(id.clone());
             }
@@ -133,6 +153,22 @@ pub(crate) fn retain_independent(
             .fulfillments
             .iter()
             .filter(|f| !affected.contains(&f.requirement_id))
+            .cloned()
+            .collect(),
+        // Findings are user-visible observations, not delivery/review credit.
+        // Keep independent findings; affected findings live in repair_events
+        // until the replacement scope reports its fresh outcome.
+        review_issues: draft
+            .review_issues
+            .iter()
+            .filter(|issue| {
+                !issue.requirement_ids.iter().any(|id| affected.contains(id))
+                    && !issue.evidence.iter().any(|reference| {
+                        changed_sources
+                            .iter()
+                            .any(|source| source.same_carrier(reference))
+                    })
+            })
             .cloned()
             .collect(),
         requirements: draft.requirements.clone(),
@@ -210,7 +246,9 @@ mod tests {
                 slot.slot_id = target.into();
                 slot.chapter_id = if id == "target-peer:0" {
                     draft.chapters[0].id.clone()
-                } else { chapter };
+                } else {
+                    chapter
+                };
                 draft.slots.push(slot);
             }
         }
@@ -228,7 +266,12 @@ mod tests {
         let affected = retain_independent(&mut draft, BTreeSet::from([seed.clone()]), &refs);
         assert_eq!(
             affected,
-            BTreeSet::from([seed, "peer:0".into(), "dependent:0".into(), "target-peer:0".into()])
+            BTreeSet::from([
+                seed,
+                "peer:0".into(),
+                "dependent:0".into(),
+                "target-peer:0".into()
+            ])
         );
         assert_eq!(draft.slots, vec![unrelated]);
         assert_eq!(draft.fulfillments.len(), 1);

@@ -62,7 +62,7 @@ Discover 包可包含相邻且有已确认关系的多个文档，各原子保�
 
 真实验收 runner 必须从原始文件重新解析并生成 schema 3 的新冻结输入；不得改写旧快照版本、迁移旧阅读回执或复用旧来源集合的 Check 信用。
 
-关联目标指定空正文的原生网格单元时，主机从该单元拥有的表格签发 GridCell 引用。并发工作者的 source key 绑定完整输入摘要和自身运行、包修订及 claim；其他包提交不使在途读取失效，自身 reopen 或依赖来源／关系变化仍拒绝旧信用。检查点契约 23 拒绝旧作用域合同；SQL 发布入口只接受 Frozen schema 3。
+关联目标指定空正文的原生网格单元时，主机从该单元拥有的表格签发 GridCell 引用。并发工作者的 source key 绑定完整输入摘要和自身运行、包修订及 claim；其他包提交不使在途读取失效，自身 reopen 或依赖来源／关系变化仍拒绝旧信用。检查点契约 26 拒绝旧作用域合同；SQL 发布入口只接受 FrozenInput schema 3。OutlineArtifact schema为3，旧1/2严格拒绝，不与FrozenInput版本迁移混同。
 
 已删除绕过冻结校验并生成 schema 1 的旧 Python sample writer。保留的 `scripts/bidding_source_captions.py` 仅提供标题辅助函数；CI 运行对应 caption 测试。新的本地验收必须调用正常 parse／freeze 管线，不能复用旧 writer 输出。
 

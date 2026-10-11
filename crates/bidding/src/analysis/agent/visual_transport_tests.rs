@@ -58,7 +58,7 @@ impl Model for PixelCheckingModel {
         let calls=packet["reading_packs"].as_array().unwrap().iter().map(|session|{
             let pack=&session["pack"];
             knowledge::models::ChatToolCall{id:format!("scan-{}",pack["id"].as_str().unwrap()),name:"submit_pack".into(),arguments:json!({
-                "wire_scope":serde_json::from_str::<Value>(messages.last().unwrap()["content"].as_str().unwrap()).unwrap()["wire_scope"],"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":false,"requirements":[],"no_requirement_reason":"Visual test fixture reviewed; no bidder response obligation.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()
+                "wire_scope":serde_json::from_str::<Value>(messages.last().unwrap()["content"].as_str().unwrap()).unwrap()["wire_scope"],"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":false,"requirements":[],"issues":[],"no_requirement_reason":"Visual test fixture reviewed; no bidder response obligation.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()
             }).to_string()}
         }).collect();
         Ok(ChatTurn {

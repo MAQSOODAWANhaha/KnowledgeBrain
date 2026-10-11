@@ -91,7 +91,7 @@ impl Model for SimulationModel {
             let id=pack["id"].as_str().unwrap();
             knowledge::models::ChatToolCall {
                 id:format!("simulation-{turn}-{id}"), name:"submit_pack".into(),
-                arguments:json!({"wire_scope":serde_json::from_str::<Value>(messages.last().unwrap()["content"].as_str().unwrap()).unwrap()["wire_scope"],"pack_id":id,"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":false,"requirements":[],"no_requirement_reason":"LOCAL TRANSPORT SIMULATION ONLY. No semantic extraction was performed; this is not a business finding.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()} ).to_string(),
+                arguments:json!({"wire_scope":serde_json::from_str::<Value>(messages.last().unwrap()["content"].as_str().unwrap()).unwrap()["wire_scope"],"pack_id":id,"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":false,"requirements":[],"issues":[],"no_requirement_reason":"LOCAL TRANSPORT SIMULATION ONLY. No semantic extraction was performed; this is not a business finding.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()} ).to_string(),
             }
         }).collect::<Vec<_>>();
         let simulated_reply_tokens = config.limits.tokenizer.count_text_tokens(

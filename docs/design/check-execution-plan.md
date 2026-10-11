@@ -1,6 +1,6 @@
 # Check 执行闭环改造方案
 
-状态：第0、1阶段已完成；第2阶段实现了 通用类型化来源清单（已验证 PDF＋Excel 样例）、跨文档分包及关联原文读取的本地纵向链路。Word/图片关联扩展、局部 repair 和后续性能工作仍是计划。检查点契约为24，Frozen schema 为3，解析合同仍为 source-v2；旧版本明确拒绝，不增加兼容分支。本地合成测试不能替代真实模型验收。
+状态：通用多文档、Word/图片混合及独立原图交付已有本地模拟闭环。当前并行整改来源遗漏修复、跨文件依赖失效、来源副本语义、真实视觉范围与大附件预算分页。下文“目标合同”在对应生产代码及验收通过前均不算已实现；完成状态以集成测试记录为准。FrozenInput schema为3，OutlineArtifact schema为3（旧1/2严格拒绝，无兼容），解析合同为source-v2；检查点契约为26，不迁移旧阅读信用。本地模拟不能替代真实模型验收。
 
 ## 1. 目标与审查结论
 
@@ -39,10 +39,10 @@
 | `outline/read_receipts.rs::queue, seal, confirm` | exact-wire交付、发现版本与Check epoch隔离 | 读过不能证明语义正确或复核完成 |
 | `outline/tools.rs::Draft, CheckReads`、`claim_review.rs::build, validate` | 要求比较、来源观察、目标与复核结果 | 从源范围独立挑战遗漏；模板目标必须覆盖具体义务 |
 | `outline/agent.rs::host_packet, submit_review` | 当前工作投影、pack-only来源复核及要求复核 | 扩展现有提交协议表达源处置和模板覆盖，不按任务种类增加工具 |
-| `outline/agent.rs::reopen_discovery_pack` | 受控重开、repair签名、fresh Check | 当前整Draft清空；未来固定文件集内保守识别受影响领域结果 |
+| `outline/agent.rs::reopen_discovery_pack` | 受控重开、repair签名、fresh Check | 局部repair已在开发；需验证跨依赖闭包与fresh Check，不以保存草稿等同保存信用 |
 | `analysis/agent/discover_coordinator.rs::Pending`及journal | Prepared/Sending/Received/Committed、重放、取消、未知发送记账 | Check接入并发前先证明串行收敛；不另建租约和传输状态机 |
 | `outline/frozen.rs::FrozenBuildInput` | document_set_id、documents、document_relations、全输入digest | 类型化现有成员/关系；区分明确引用、推断候选、缺失与冲突 |
-| `outline/discover_planner.rs::plan_packs_with_budget`、`discover.rs::ParsePack` | 章节合拆、完整请求预算；当前包单document_id，同文档合包筛选 | 跨文件关联不能仅新增类型：规划器须实际选择关联atom或依赖读取，并保留逐原子来源 |
+| `outline/discover_planner.rs::plan_packs_with_budget`、`discover.rs::ParsePack` | 章节合拆、完整请求预算；已支持多文档原子与显式关联 | 跨文件关联不能仅新增类型：规划器须实际选择关联atom或依赖读取，并保留逐原子来源 |
 | `analysis/agent.rs::read_projection_in_context` | full_read_projection已在候选fit循环外构建 | profile实际checkpoint clone、host投影、序列化与测量成本，不重复列已完成优化 |
 
 ### 当前解析调用链（已实现）
@@ -174,7 +174,7 @@ repair提交检查当前版本；旧工作者晚到结果不应用。修改后�
 | 条件与关键内容 | 金额/比例/期限/否定/主体、跨页例外/替代关系及各业务类别有独立正反例 |
 | Excel保真 | 数值0.6+百分比格式、公式/引用/可用缓存、缺缓存；展示/单位不丢、未知显式、不自行算出值 |
 | 多文件关系 | 同名表/跨sheet不混账，主文到Excel/Word/图像保留原子来源；推断未确认不自动优先 |
-| 来源缺失 | 必需附件/公告全文缺失明确阻塞完整验收；未来应填写材料是合法空位而非缺失招标来源 |
+| 来源缺失 | 真实缺附件/公告记录带证据的待处理issue及影响范围，阻塞相关模板范围和clean-ready；独立范围继续，剩余明确文档问题保存报告后受控停止，clean-ready仍失败；投标人待填材料不是招标来源缺失 |
 | 文件集变化 | 新digest后旧结果拒绝，全项目fresh Check；解析缓存不转移复核信用 |
 | 固定集repair | 共享条件影响多个目标、无关领域结果保留有证据；全局epoch过期回执不可复用；修复者不自批 |
 | 重载/历史裁剪 | 序列化、重载、清空transcript后next工作和当前结果一致，不从聊天声明恢复 |
@@ -225,5 +225,70 @@ worker 写权限的调用者属于现有可信执行边界；本阶段不增加�
 - 独立本地 mock 通过生产 request/execute_turn/持久化入口运行；mock 只消费传入的
   请求。修复后的 fresh Check 和清空历史重载有独立断言。结果仅说明协议和状态流转，
   不证明语义召回、实际模型表现或私有投标文件验收通过。
-- 后续多文件关系与格式保真、固定来源集合内局部 repair、性能实测及 Check 并发仍待实现。
-  当前修复仍使用现有重新打开流程；部分已处置范围的下一证据提示尚未做精确区间差优化。
+- 多文件保真已有模拟闭环，局部repair和目录分页已编辑但本轮整体回归尚未完成；性能仅有测试计时，Check并发后置。当前修复复用受控重开流程，不能从历史聊天恢复信用。
+
+
+## 当前并行整改目标合同（未通过集成验收前不宣称已落地）
+
+### 模型显式返回原文问题，结果与问题并存
+
+真实文档缺附件、冲突、语义模糊或不可辨认，须记录来源证据、分类、影响范围及待处理问题；已完成独立可执行范围后，以保留问题的受控停止返回报告；当前不新增`completed_with_issues`状态，不表示问题已解决或全部模板可用。相关范围保持blocked，独立范围继续；clean-ready必须失败。系统漏提、错误绑定、丢失状态、未交付证据或解析器失败不能改称文档issue逃避修复。问题记录复用现有领域结果，不创建第二份RequirementRecord或通用工作流平台。优先扩展现有`submit_review.issues`结构化响应，让模型在正常`source_dispositions`/`template_reviews`旁返回原文问题；宿主验证来源和影响范围并持久化，由问题报告投影呈现；阻塞情形不发布模板artifact。当前已编辑schema保留`id/code/description/requirement_ids/evidence`，`requested_information`必填，`evidence`至少一项；用于表达待补充或确认事项，尚待集成测试。document_missing/conflict/ambiguous/unreadable与system类问题分开，缺附件必须引用实际提及处，不能伪造缺失正文证据。当前不新增完成状态机或`completed_with_issues`枚举。
+
+### 三类 finding 的出口与失效
+
+| finding | 修复出口 | 失效与验收 |
+| --- | --- | --- |
+| 独立来源观察发现漏提，包括零要求范围 | 受控重开准确发现范围，修改唯一RequirementRecord；不是只能对已有claim比较 | 按来源/要求/条件支持/响应目标/章节依赖闭包撤销结果；fresh读取、重新提取及Check后关闭finding |
+| 已有要求的误提、条件或跨文件支持错误 | 允许修改、删除、重提取及重新判定支持；不得永久锁住旧关联 | 删除或修订传播到消费者、目标及章节；保留独立草稿，旧Check信用不得保留；重载清历史仍正确 |
+| 目标、source-copy或模板覆盖错误 | Organize局部修正绑定、槽位和规定文字 | 撤销受影响比较/模板复核，重新读取来源与目标后Check；修复者不能自批 |
+
+真实文档问题走上述独立issue结果；系统finding未修复仍阻止执行成功，不通过更换标签关闭。来源集合变化必须重新解析冻结并全新Check，不跨集合迁移回执。
+
+### 来源副本与响应角色
+
+招标人的instruction是解释义务的来源，不自动复制成投标人承诺；明确要求原文填报的mandated response才形成固定source-copy；投标人事实进入editable blank并保持空白。同一段包含指令和规定响应时按有证据的范围分别处理，不能整段复制或凭标题猜角色。B已修改`SourceCopyPurpose={instruction, mandated_response}`作为source-copy必填目的；`editable_blank`沿用独立槽位类型，不再添加第三种copy目的。该代码尚待统一编译及验收，不能据编辑完成宣称测试通过。
+
+### 视觉范围、身份和读取进展
+
+普通文字/表格PDF不要求全页提前渲染或逐页视觉复核。扫描页、真实图像及实际不可辨认的证据保留原图需求和准确source/region身份；OCR文字、缓存文件存在、别的来源同像素均不授予读取信用。新读取进展是当前来源身份下已确认交付区间的union增加，重叠/重复/过期/pending不推进。视觉分类必须来自解析合同及明确证据，不用格式名推定所有PDF为图像。
+
+### 大附件读取与配置边界
+
+目录用于定位，正文/网格/图像按完整实际请求预算分页，游标绑定输入、来源和当前修订；不能把目录视为正文已读。附件格式、数量、主附件角色独立，目标endpoint按已配置支持能力选择，禁止静默换供应商。source-set、支持关系或来源内容变化后清除过期工作和游标；显式缺失形成文档issue，传输/解析失败保持系统失败。复用现有manifest、关系和阅读工具，不新建泛化平台。
+
+以上整改需包含正反例：零要求漏提重开；支持删除传播；instruction不冒充响应；新读区间union；普通PDF无全页图前置；大附件预算分页；真实文档issue允许执行完成但clean-ready失败；系统缺陷不能被issue状态吞掉。最终统一本地回归和CI，真实验收等单runner窗口，不提前调用provider。
+
+
+当前B编辑将图像缓存键改为完整`view.id`身份，像素确认检查准确`view.message`，worker delivered-related-evidence的原生区间按实际原文carrier身份合并union，不按support origin分割同一原文范围。当前schema已编辑`read_evidence`的`dependency_id`/`dependency_cursor`四择一选择及`read_outline`的`manual_task`（requirement_id/task_id）；尚待集成测试。检查点常量已更新为26。
+
+Discover `submit_pack`与独立Check `submit_review`均支持下述问题合同；新增Discover入口尚待最新编译验证。阻塞问题已有下述代码出口，四类问题的定向runtime测试已通过，整体集成回归仍待完成；不得提前宣称`completed_with_issues`或完整产品UI已实现。
+
+
+### 当前问题报告出口（定向测试通过，整体回归待完成）
+
+`Checkpoint::review_report(input)`纯投影`results`与`issues`：results包含requirements、chapters、bindings、slots、fulfillments、已复核requirement/pack IDs、template_reviews和source_dispositions；issues包含问题正文、按same-carrier原文区间实际overlap计算的`affected_pack_ids`及`resolved:false`。报告附输入摘要、discovery revision、review epoch、`template_ready`与`document_issues_reported`，不新增结果或问题store。数据库checkpoint仍保存权威状态。`progress.outline_review_report`仅保留元数据与issues，移除results，避免每tick复制完整结果；完整API accessor及私有报告包含results与issues。
+
+独立scope完成且仅明确文档问题剩余时，`prepare_request`先保存checkpoint/progress，再返回`DOCUMENT_ISSUES_REPORTED`受控停止；这一出口不调用provider、不占新reserve，不publish、不置done，也不把问题改称clean pass。私有真实runner必须在run返回Err时仍读取已保存state，调用`review_report(input)`输出私有报告，不能丢掉问题。现有Web旧progress路由尚未接成新的报告文件下载；不承诺完整UI闭环。
+
+### 附件目录的实际边界（定向验证通过，最终集成待完成）
+
+目录每页一个relation及小段首原文preview；`dependency_id`/`dependency_cursor`与`refs`/`cursor`互斥。目录frame的exact-wire确认只推进目录读取，不产生来源正文信用。手工任务读取键绑定input/epoch/revision/requirement/fulfillment，实际信用仍须exact-wire交付。重开清除旧支持。`condition_support_options`首页仅一个身份及原生ref预览，`next_support_cursor`通过同一`read_evidence dependency_cursor`遍历持久grant；正文可用`dependency_id`选择`cs_` support_key完整范围，再用既有cursor分页。`ReviewedRequirement`不再内嵌excerpts。这些新改动尚待最新编译测试；单个不可分身份、locator或图像超过完整请求预算仍明确阻断，不能承诺任意输入无界运行。
+
+
+最新定向验证：outline 150 passed、Discover 25 passed、手工任务分页1 passed、文档问题报告1 passed（一个runtime测试循环四种code）。问题报告验证无provider/reserve、保存报告且不批准模板；只有完成全部独立scope后才报告明确文档问题。Check复核与新增Discover问题提交分别遵循下述信用边界。`synchronize_discovery`在prepare前、Discover结束后和read_projection前重建唯一canonical投影。以上是本地定向结果，不代表最终全回归、CI或真实服务验收通过。
+
+完整synthetic mixed测试已通过，包含results+issues报告断言、独立scope继续及reload。该结果只验证本地合成合同；当前整改完整回归尚待完成，无新增真实服务调用。
+
+公开提交`4b3b9410d8efc7caff5c1792f643cb8f9efbb7ff`的CI run `38094511856`已completed/success：Python、Rust、Web、schema-contract、content-e2e、Postgres acceptance、DocReader replay及queue-faults通过，images跳过。它取代旧`ceef0d6`的Python失败/待重跑状态，但只覆盖该公开提交，不代表当前尚未推送的整改代码已通过CI。
+
+
+### Discover同次返回要求与问题（新增代码待最新编译验证）
+
+`submit_pack.issues`必填，复用`ReviewIssue`；证据ev_key必须属于当前包owned范围，仅接受四种document code（missing/conflict/ambiguous/unreadable），`requested_information`非空，Discover阶段`requirement_ids`为空数组。允许正常要求与问题同次返回，也允许空要求加合法问题；后者必须完整inspected且`no_requirement_reason=null`，不能把未读或系统漏提伪装成文档问题。
+
+canonical问题保存在所属已提交`PackRecord`，身份为`discover:pack:revision:modelid`，经现有draft投影展示，不新增问题store。独立范围继续处理，reopen使旧revision问题失效。Check可用同id在fresh读取后补充requirement_ids并持久化重载；Discover问题本身不授予Check阅读或复核信用。该新增合同尚待重新编译和定向验证，之前测试结果不覆盖它。
+
+
+### 最新本地验证状态（真实运行前冻结）
+
+新增Discover问题合同重新编译后，15项discovery定向测试、正常/空要求问题跨Organize与Check重载测试、Organize保留问题但撤销旧信用测试、failed worker修订重开/unknown-send保护测试均通过。它们取代上文相应“待编译”描述。全workspace/all-targets/all-features Clippy（-D warnings）及最终fmt检查通过。全workspace测试两次在链接无关测试目标时耗尽磁盘，未完成，不能记为通过；后置全量测试，真实runner先执行已验证的相关合同。公开CI结论仍只覆盖上述公开提交。真实PDF语义结论另以实际调用和独立原文核对报告为准。

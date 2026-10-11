@@ -335,6 +335,48 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
+    /// User-facing report projected from the authoritative saved draft. This is
+    /// available even when a template cannot be published; an issue is not a
+    /// successful review and does not change the execution error classification.
+    pub fn review_report(&self, input: &FrozenInput) -> Value {
+        let draft = &self.outline_run.tool_draft;
+        let issues = draft
+            .review_issues
+            .iter()
+            .map(|issue| {
+                let affected_pack_ids = draft
+                    .source_scopes
+                    .iter()
+                    .filter(|(_, scope)| {
+                        issue.evidence.iter().any(|reference| {
+                            scope.evidence.iter().any(|source| {
+                                source.same_carrier(reference)
+                                    && match (source.range(), reference.range()) {
+                                        (Some((start, end)), Some((other_start, other_end))) => {
+                                            start < other_end && other_start < end
+                                        }
+                                        (None, None) => true,
+                                        _ => false,
+                                    }
+                            })
+                        })
+                    })
+                    .map(|(id, _)| id)
+                    .collect::<Vec<_>>();
+                json!({"issue":issue,"affected_pack_ids":affected_pack_ids,"resolved":false})
+            })
+            .collect::<Vec<_>>();
+        json!({"frozen_input_sha256":self.input_sha256,"discovery_revision":draft.discovery_revision,
+            "review_epoch":draft.read_epoch,"template_ready":crate::outline::tools::template_ready(input,draft).is_ok(),
+            "document_issues_reported":crate::outline::source_review::document_issue_report_ready(input,draft),
+            "results":{"requirements":draft.requirements,"chapters":draft.chapters,
+                "bindings":draft.bindings,"slots":draft.slots,"fulfillments":draft.fulfillments,
+                "reviewed_requirement_ids":draft.reviewed_requirement_ids,
+                "reviewed_pack_ids":draft.reviewed_pack_ids,"template_reviews":draft.template_reviews,
+                "source_dispositions":draft.source_dispositions},
+            "issues":issues})
+    }
+
     // A prior draft is repair feedback, never a completed review. In normal
     // repair cycles the finalized report remains the authoritative feedback.
     pub(super) fn work(&self) -> Option<&WorkState> {
@@ -394,6 +436,15 @@ impl Checkpoint {
             progress["outline_pack_running"] = json!(counts.running);
             progress["outline_pack_failed"] = json!(counts.failed);
             progress["outline_pack_committed"] = json!(counts.committed);
+        }
+        if !self.outline_run.tool_draft.review_issues.is_empty() {
+            let mut report = self.review_report(input);
+            // Progress carries the problem summary; full canonical results are
+            // available from review_report without duplicating them every tick.
+            report.as_object_mut().unwrap().remove("results");
+            progress["outline_review_report"] = report;
+            progress["outline_open_issues"] =
+                json!(self.outline_run.tool_draft.review_issues.len());
         }
         progress
     }
@@ -544,6 +595,19 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
     async fn prepare_request(&mut self) -> Result<Vec<u8>, AgentError> {
         #[cfg(test)]
         let _profile = profile::enter("prepare_request");
+        crate::outline::agent::synchronize_discovery(self.input, self.state).map_err(invalid)?;
+        if crate::outline::source_review::document_issue_report_ready(
+            self.input,
+            &self.state.outline_run.tool_draft,
+        ) {
+            self.journal
+                .save(self.state, &self.state.progress(self.input))
+                .await?;
+            return Err(error(
+                "DOCUMENT_ISSUES_REPORTED",
+                "Independent review reported source-document issues requiring clarification; the saved review report is available, and the template is not approved.",
+            ));
+        }
         if crate::outline::agent::current(self.input, self.state)
             == crate::outline::agent::Duty::Discover
         {
@@ -556,6 +620,8 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 self.cancel,
             )
             .await?;
+            crate::outline::agent::synchronize_discovery(self.input, self.state)
+                .map_err(invalid)?;
         }
         let started = Instant::now();
         let body = request(self.input, self.config, self.state).await?;
@@ -1341,6 +1407,7 @@ async fn read_projection_in_context(
 ) -> Result<Value, String> {
     #[cfg(test)]
     let _profile = profile::enter("read_projection_in_context");
+    crate::outline::agent::synchronize_discovery(input, state)?;
     let tool = &remaining[0].name;
     let projection_started = std::time::Instant::now();
     if let Some(error) = crate::outline::agent::deny(duty, tool, false) {

@@ -16,6 +16,7 @@ pub struct Frame {
     pub structures: Vec<String>,
     pub empty_packs: Vec<String>,
     pub slots: Vec<(String, usize, usize)>,
+    pub manual_tasks: Vec<String>,
     pub metadata: Vec<(String, Vec<super::metadata_fragments::Field>)>,
     pub sealed_sha256: Option<String>,
 }
@@ -102,6 +103,13 @@ pub(crate) fn queue(state: &mut Checkpoint, before: &Draft, call_id: &str, check
     .into_iter()
     .map(|(_, id)| id)
     .collect::<Vec<_>>();
+    let manual_tasks = delta(
+        &draft.check_reads.pending_manual_tasks,
+        &before.check_reads.pending_manual_tasks,
+    )
+    .into_iter()
+    .map(|(_, version)| version)
+    .collect::<Vec<_>>();
     let metadata = delta(
         &draft.pending_metadata_parts,
         &before.pending_metadata_parts,
@@ -114,6 +122,7 @@ pub(crate) fn queue(state: &mut Checkpoint, before: &Draft, call_id: &str, check
         && slots.is_empty()
         && empty_packs.is_empty()
         && metadata.is_empty()
+        && manual_tasks.is_empty()
     {
         return;
     }
@@ -131,6 +140,7 @@ pub(crate) fn queue(state: &mut Checkpoint, before: &Draft, call_id: &str, check
         structures,
         empty_packs,
         slots,
+        manual_tasks,
         metadata,
         sealed_sha256: None,
     });
@@ -185,6 +195,10 @@ pub(crate) fn confirm(state: &mut Checkpoint, body: &Value) -> Result<(), String
                 .ok_or("delivered metadata record missing")?;
             if record.receive(parts)? && frame.check {
                 let restored = record.restored()?;
+                if let Some(version) = super::agent::complete_manual_task_version(draft, &restored)
+                {
+                    draft.check_reads.manual_tasks.insert(version);
+                }
                 if let Some(structure) = restored["structural_receipt_id"].as_str() {
                     draft.check_reads.structure_keys.insert(structure.into());
                 }
@@ -223,6 +237,14 @@ pub(crate) fn confirm(state: &mut Checkpoint, body: &Value) -> Result<(), String
         if frame.check {
             draft
                 .check_reads
+                .manual_tasks
+                .extend(frame.manual_tasks.iter().cloned());
+            draft
+                .check_reads
+                .pending_manual_tasks
+                .retain(|(_, version)| !frame.manual_tasks.contains(version));
+            draft
+                .check_reads
                 .empty_pack_ids
                 .extend(frame.empty_packs.iter().cloned());
             draft
@@ -259,6 +281,74 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn manual_task_receipts_require_exact_wire_and_current_epoch() {
+        let input = super::super::tests::input();
+        let mut state = super::super::acceptance::checkpoint(&input);
+        let before = state.outline_run.tool_draft.clone();
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .pending_manual_tasks
+            .push((state.turn, "task-version".into()));
+        queue(&mut state, &before, "manual-read", true);
+        let body = json!({"messages":[{"role":"tool","tool_call_id":"manual-read","content":"exact task description and source version"}]});
+        confirm(&mut state, &body).unwrap();
+        assert!(
+            state
+                .outline_run
+                .tool_draft
+                .check_reads
+                .manual_tasks
+                .is_empty()
+        );
+        seal(&mut state, &body).unwrap();
+        let sealed = state.clone();
+        let mut tampered = body.clone();
+        tampered["messages"][0]["content"] = json!("changed task");
+        confirm(&mut state, &tampered).unwrap();
+        assert!(
+            state
+                .outline_run
+                .tool_draft
+                .check_reads
+                .manual_tasks
+                .is_empty()
+        );
+        let mut stale = sealed.clone();
+        stale.outline_run.tool_draft.read_epoch += 1;
+        confirm(&mut stale, &body).unwrap();
+        assert!(
+            stale
+                .outline_run
+                .tool_draft
+                .check_reads
+                .manual_tasks
+                .is_empty()
+        );
+        let mut restored: Checkpoint = serde_json::from_value(json!(sealed)).unwrap();
+        confirm(&mut restored, &body).unwrap();
+        assert!(
+            restored
+                .outline_run
+                .tool_draft
+                .check_reads
+                .manual_tasks
+                .contains("task-version")
+        );
+        assert!(
+            restored
+                .outline_run
+                .tool_draft
+                .check_reads
+                .pending_manual_tasks
+                .is_empty()
+        );
+        let once = json!(restored.outline_run.tool_draft);
+        confirm(&mut restored, &body).unwrap();
+        assert_eq!(once, json!(restored.outline_run.tool_draft));
+    }
+    #[test]
     fn handoff_retains_only_current_undelivered_group_and_never_grants_credit() {
         let frame = Frame {
             call_id: "current".into(),
@@ -269,6 +359,7 @@ mod tests {
             structures: vec!["s".into()],
             empty_packs: vec![],
             slots: vec![],
+            manual_tasks: vec![],
             metadata: vec![],
             sealed_sha256: None,
         };

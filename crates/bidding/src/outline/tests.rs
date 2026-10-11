@@ -82,7 +82,7 @@ fn projection_and_response_preserve_host_source_copy() {
     let mut draft = valid_draft();
     let reference = evidence(&input);
     draft.delivered_evidence = vec![reference.clone()];
-    apply(&input,&mut draft,&BTreeSet::new(),"put_slots",&json!({"mode":"upsert","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[reference]}}]})).unwrap();
+    apply(&input,&mut draft,&BTreeSet::new(),"put_slots",&json!({"mode":"upsert","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[reference]}}]})).unwrap();
     apply(
         &input,
         &mut draft,
@@ -109,7 +109,7 @@ fn model_fixed_wording_and_undelivered_sources_are_rejected() {
     let prior = draft.clone();
     assert!(apply(&input,&mut draft,&BTreeSet::new(),"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","kind":"fixed_text","text":"允许转包"}]})).is_err());
     assert_eq!(draft, prior);
-    assert!(apply(&input,&mut draft,&BTreeSet::new(),"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","refs":[evidence(&input)]}}]})).unwrap_err().contains("outside_scope"));
+    assert!(apply(&input,&mut draft,&BTreeSet::new(),"put_slots",&json!({"mode":"replace","slots":[{"slot_id":"fixed","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[evidence(&input)]}}]})).unwrap_err().contains("outside_scope"));
     assert_eq!(draft, prior);
 }
 
@@ -134,6 +134,7 @@ fn final_projection_and_publication_revalidate_tampered_source_and_roles() {
         chapter_id: "response".into(),
         kind: SlotKind::FixedText,
         content: TemplateBody::SourceCopy {
+            purpose: super::SourceCopyPurpose::MandatedResponse,
             refs: vec![reference],
         },
         text: input.source_units[0].text.clone(),
@@ -210,8 +211,10 @@ fn old_artifact_schema_and_missing_content_contract_are_rejected() {
     .unwrap()
     .artifact;
     let mut old = artifact.clone();
-    old.schema_version = 1;
-    assert!(validate_artifact(&old).is_err());
+    for retired in [1, 2] {
+        old.schema_version = retired;
+        assert!(validate_artifact(&old).is_err());
+    }
     let mut value = serde_json::to_value(artifact).unwrap();
     value["templates"][0]
         .as_object_mut()
@@ -264,5 +267,94 @@ fn instruction_only_target_cannot_fulfill_an_actual_requirement() {
         validate_final_outline(&input, &reqs, &draft)
             .unwrap_err()
             .contains("only generated instructions")
+    );
+}
+
+#[test]
+fn remediation_wire_schema_requires_explicit_roles_issues_and_one_read_selector() {
+    let schemas = agent::schemas();
+    let accepts = |name: &str, args: serde_json::Value| {
+        let schema = &schemas
+            .iter()
+            .find(|value| value["function"]["name"] == name)
+            .unwrap()["function"]["parameters"];
+        jsonschema::JSONSchema::compile(schema)
+            .unwrap()
+            .is_valid(&args)
+    };
+    let mut slot = json!({"mode":"replace","slots":[{"slot_id":"s","chapter_id":"c","content":{"type":"source_copy","refs":[{"source_key":format!("src_{}","a".repeat(64))}]}}]});
+    assert!(!accepts("put_slots", slot.clone()));
+    slot["slots"][0]["content"]["purpose"] = json!("instruction");
+    assert!(accepts("put_slots", slot.clone()));
+    slot["slots"][0]["content"]["purpose"] = json!("mandated_response");
+    assert!(accepts("put_slots", slot));
+    let mut review = json!({"requirement_ids":[],"pack_ids":[],"inspected_evidence":[],"issues":[{"id":"missing","code":"document_missing","description":"Referenced annex was not supplied","requirement_ids":[],"evidence":[{"review_evidence_key":format!("rv_{}","b".repeat(24))}]}],"template_reviews":[],"source_dispositions":[]});
+    assert!(!accepts("submit_review", review.clone()));
+    review["issues"][0]["requested_information"] = json!("Supply the referenced annex");
+    assert!(accepts("submit_review", review.clone()));
+    review["issues"][0]["evidence"] = json!([]);
+    assert!(!accepts("submit_review", review));
+    let mut discovery = json!({"pack_id":"pack-0","call_id":format!("op_{}","a".repeat(16)),"claim_token":format!("cl_{}","b".repeat(16)),"pack_revision":1,"requirements":[],"no_requirement_reason":null,"inspected_atom_ids":[],"repair":false});
+    assert!(!accepts("submit_pack", discovery.clone()));
+    discovery["issues"] = json!([{ "id":"missing", "code":"document_missing", "description":"Referenced annex was not supplied", "requirement_ids":[], "evidence":[{"evidence_key":format!("ev_{}","c".repeat(24))}], "requested_information":"Supply the referenced annex" }]);
+    assert!(accepts("submit_pack", discovery.clone()));
+    for (field, value) in [
+        ("code", json!("api_failure")),
+        ("requirement_ids", json!(["invented-id"])),
+        ("requested_information", json!("")),
+        ("evidence", json!([])),
+    ] {
+        let mut invalid = discovery.clone();
+        invalid["issues"][0][field] = value;
+        assert!(!accepts("submit_pack", invalid), "must reject {field}");
+    }
+    for key in ["dependency_id", "dependency_cursor", "cursor"] {
+        assert!(accepts("read_evidence", json!({key:"host-value"})));
+        assert!(!accepts(
+            "read_evidence",
+            json!({key:"host-value","refs":[]})
+        ));
+    }
+    assert!(!accepts("read_outline", json!({"mode":"manual_task"})));
+    assert!(accepts(
+        "read_outline",
+        json!({"mode":"manual_task","requirement_id":"r","task_id":"t"})
+    ));
+}
+
+#[test]
+fn copied_instruction_is_not_a_response_even_when_identical_words_can_be_mandated() {
+    let input = input();
+    let mut draft = valid_draft();
+    draft.required_requirement_ids.insert("r".into());
+    draft.requirements.insert("r".into(), record(&input));
+    draft.chapters[0].requirement_ids = vec!["r".into()];
+    draft.slots.push(TemplateContent {
+        slot_id: "copy".into(),
+        chapter_id: "response".into(),
+        kind: SlotKind::FixedText,
+        content: TemplateBody::SourceCopy {
+            purpose: SourceCopyPurpose::Instruction,
+            refs: vec![evidence(&input)],
+        },
+        text: input.source_units[0].text.clone(),
+        response_required: false,
+        match_query: String::new(),
+    });
+    let args = json!({"fulfillments":[{"requirement_id":"r","primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"copy"}]}]});
+    let required = draft.required_requirement_ids.clone();
+    assert!(
+        apply(&input, &mut draft, &required, "put_fulfillments", &args)
+            .unwrap_err()
+            .contains("only generated instructions")
+    );
+    if let TemplateBody::SourceCopy { purpose, .. } = &mut draft.slots.last_mut().unwrap().content {
+        *purpose = SourceCopyPurpose::MandatedResponse;
+    }
+    apply(&input, &mut draft, &required, "put_fulfillments", &args).unwrap();
+    assert_eq!(
+        draft.slots.last().unwrap().text,
+        input.source_units[0].text,
+        "semantic purpose never changes the frozen wording"
     );
 }

@@ -24,6 +24,38 @@ struct PackHost<'a, J> {
     journal: &'a J,
     cancel: &'a CancellationToken,
 }
+/// Validate immutable request ownership before confirming reads or constructing
+/// any selector page. Selectors without source keys obey the same boundary.
+fn validate_worker_scope(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    request: &Request,
+) -> Result<Value, String> {
+    let digest = crate::outline::evidence::input_digest(input)?;
+    let identity = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .ok_or("reading plan missing")?
+        .pack_wire_identity(&request.scope.pack)?;
+    let worker = state
+        .outline_run
+        .discover_workers
+        .get(&request.scope.pack)
+        .ok_or("worker missing")?;
+    if state.input_sha256 != digest
+        || identity["input"] != digest
+        || identity["run"] != request.scope.run
+        || identity["revision"] != request.scope.revision
+        || worker.generation != request.scope.generation
+        || crate::outline::canonical_sha256(&(&identity, request.scope.generation, &request.body))?
+            != request.scope.request
+    {
+        return Err("stale or foreign worker input, claim, generation or request".into());
+    }
+    Ok(identity)
+}
+
 impl<J: Journal> PackHost<'_, J> {
     async fn save(&self) -> Result<(), AgentError> {
         self.journal
@@ -44,6 +76,65 @@ impl<J: Journal> PackHost<'_, J> {
             .get_mut(id)
             .ok_or_else(|| invalid("worker missing"))
     }
+    async fn directory_page(
+        &mut self,
+        request: &Request,
+        response: &ChatTurn,
+        cursor: &str,
+    ) -> Result<Value, String> {
+        validate_worker_scope(self.input, self.state, request)?;
+        let id = &request.scope.pack;
+        let work = self
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .ok_or("reading plan missing")?;
+        let mut page = work.dependency_directory_page(self.input, id, cursor)?;
+        let page_id = crate::outline::canonical_sha256(&page)?;
+        page["new_coverage"] = json!(
+            !self
+                .worker(id)
+                .map_err(|e| e.message)?
+                .delivered_dependency_pages
+                .contains(&page_id)
+        );
+        let result = json!({"status":"read_pending_delivery","read":page});
+        let call = &response.tool_calls[0];
+        let frame = coordinator::RelatedReadFrame {
+            directory_page: Some(page_id),
+            call_id: call.id.clone(),
+            pack_revision: request.scope.revision,
+            input_digest: crate::outline::evidence::input_digest(self.input)?,
+            options: vec![],
+            sealed_sha256: None,
+        };
+        let mut candidate = self.state.clone();
+        let worker = candidate
+            .outline_run
+            .discover_workers
+            .get_mut(id)
+            .ok_or("worker missing")?;
+        worker.related_read_frames.push(frame.clone());
+        worker.history.push(json!({"role":"assistant","content":response.content,"tool_calls":response.tool_calls.iter().map(|call|json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}})).collect::<Vec<_>>()}));
+        worker.history.push(json!({"role":"tool","tool_call_id":call.id,"content":super::tool_result_envelope(result.clone()).to_string()}));
+        PackHost {
+            input: self.input,
+            config: self.config,
+            state: &mut candidate,
+            journal: self.journal,
+            cancel: self.cancel,
+        }
+        .prepare_inner(id, false)
+        .await
+        .map_err(|e| e.message)?;
+        self.worker_mut(id)
+            .map_err(|e| e.message)?
+            .related_read_frames
+            .push(frame);
+        Ok(result)
+    }
+
     async fn related_page(
         &mut self,
         request: &Request,
@@ -51,6 +142,10 @@ impl<J: Journal> PackHost<'_, J> {
         args: &Value,
     ) -> Result<Value, String> {
         use crate::outline::evidence::{self, EvidenceRef};
+        validate_worker_scope(self.input, self.state, request)?;
+        if let Some(cursor) = args["dependency_cursor"].as_str() {
+            return self.directory_page(request, response, cursor).await;
+        }
         let id = &request.scope.pack;
         let digest = evidence::input_digest(self.input)?;
         let cursor = args["cursor"].as_str();
@@ -69,6 +164,13 @@ impl<J: Journal> PackHost<'_, J> {
                 return Err("worker dependency cursor scope changed".into());
             }
             saved.refs.clone()
+        } else if let Some(dependency_id) = args["dependency_id"].as_str() {
+            self.state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .ok_or("reading plan missing")?
+                .dependency_selection(self.input, id, dependency_id)?
         } else {
             serde_json::from_value(args["refs"].clone()).map_err(|e| e.to_string())?
         };
@@ -101,12 +203,21 @@ impl<J: Journal> PackHost<'_, J> {
                 .as_ref()
                 .ok_or("reading plan missing")?;
             let (mut value, options) = work.related_read(self.input, id, &selected)?;
-            value["new_coverage"] = json!(!work.related_read_already_delivered(id, &options));
+            let delivered = &self
+                .worker(id)
+                .map_err(|e| e.message)?
+                .delivered_related_evidence;
+            value["new_coverage"] = json!(
+                selected
+                    .iter()
+                    .any(|reference| !evidence::covered_by_union(reference, delivered))
+            );
             value["next_cursor"] = json!(next);
             value["selection_complete"] = json!(tail.is_empty());
             let result = json!({"status":"read_pending_delivery","read":value});
             let call = &response.tool_calls[0];
             let frame = coordinator::RelatedReadFrame {
+                directory_page: None,
                 call_id: call.id.clone(),
                 pack_revision: request.scope.revision,
                 input_digest: digest.clone(),
@@ -208,7 +319,7 @@ impl<J: Journal> PackHost<'_, J> {
             super::validate_frozen_view(self.input, self.config, &view).map_err(invalid)?;
             self.state
                 .source_views
-                .insert(view.identity.image_sha256.clone(), view.clone());
+                .insert(view.id().map_err(invalid)?, view.clone());
             views.push(view);
         }
         let worker = self.worker(id)?;
@@ -220,7 +331,7 @@ impl<J: Journal> PackHost<'_, J> {
             json!({"role":"system","content":format!("{}\nThis worker owns exactly one pack. Submit only that pack using submit_pack; all required original images are attached. Do not select another pack.",Duty::Discover.instructions())}),
             json!({"role":"user","content":json!({"reading_packs":[session], "semantic_contract":crate::outline::agent::semantic_guidance(Duty::Discover), "repair_context":self.state.outline_run.repair_events.iter().rev().find(|event|event["pack_id"]==id && event["status"]=="reopened" && event["pack_revision"]==identity["revision"])}).to_string()}),
         ];
-        messages.push(json!({"role":"user","content":json!({"dependency_progress":{"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain in the owned session. Follow pending cursors until selection_complete; reread original source keys when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
+        messages.push(json!({"role":"user","content":json!({"dependency_progress":{"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain accessible through condition_support_options and next_support_cursor (read_evidence dependency_cursor). Directory pages grant no original reading credit. Follow pending body cursors until selection_complete; reread original source keys or a support dependency_id when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
         messages.extend(worker.history.iter().cloned());
         for view in &views {
             messages.push(view.message());
@@ -376,10 +487,34 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 .discover_workers
                 .entry(id.clone())
                 .or_default();
-            if let Some(Pending::Committed { request, .. }) = &worker.pending {
-                if request.scope.revision != identity["revision"].as_u64().unwrap() {
-                    *worker = Worker::default();
-                } else {
+            if let Some(pending) = &worker.pending {
+                let request = match pending {
+                    Pending::Prepared { request }
+                    | Pending::Sending { request }
+                    | Pending::Received { request, .. }
+                    | Pending::Committed { request, .. }
+                    | Pending::Failed { request, .. } => request,
+                };
+                if request.scope.run != identity["run"]
+                    || request.scope.revision != identity["revision"]
+                {
+                    if matches!(pending, Pending::Sending { .. } | Pending::Received { .. }) {
+                        return Err(invalid(
+                            "unresolved worker journal scope changed; settle or replay before resetting",
+                        ));
+                    }
+                    let rejected_turns = if matches!(pending, Pending::Committed { .. }) {
+                        0
+                    } else {
+                        worker.rejected_turns
+                    };
+                    // Source delivery and opaque keys belong to one claim revision.
+                    // A failed repair is not progress and must retain its stop counter.
+                    *worker = Worker {
+                        rejected_turns,
+                        ..Default::default()
+                    };
+                } else if matches!(pending, Pending::Committed { .. }) {
                     continue;
                 }
             }
@@ -449,6 +584,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
             return Err(invalid("worker commit without durable response"));
         }
         let outcome = (|| -> Result<Value, String> {
+            let identity = validate_worker_scope(self.input, self.state, request)?;
             if !crate::agent_runtime::valid_tool_turn(&response)
                 || response.tool_calls.len() != 1
                 || !matches!(
@@ -468,18 +604,6 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 .decode(args, false)?;
             if call.name == "submit_pack" && args["pack_id"] != *id {
                 return Err("cross-pack worker submission".into());
-            }
-            let identity = self
-                .state
-                .outline_run
-                .reading_packs
-                .as_ref()
-                .unwrap()
-                .pack_wire_identity(id)?;
-            if identity["run"] != request.scope.run
-                || identity["revision"] != request.scope.revision
-            {
-                return Err("stale worker revision".into());
             }
             confirm_worker_related_reads(self.input, self.state, request)?;
             if call.name == "read_evidence" {
@@ -663,6 +787,9 @@ fn confirm_worker_related_reads(
     state: &mut Checkpoint,
     request: &Request,
 ) -> Result<(), String> {
+    if crate::outline::evidence::input_digest(input)? != state.input_sha256 {
+        return Err("related read checkpoint input changed".into());
+    }
     let worker = state
         .outline_run
         .discover_workers
@@ -685,6 +812,8 @@ fn confirm_worker_related_reads(
     }
     let mut pending = Vec::new();
     let mut delivered_calls = BTreeSet::new();
+    let mut directory_pages = BTreeSet::new();
+    let mut delivered_evidence = worker.delivered_related_evidence.clone();
     for frame in &worker.related_read_frames {
         if frame.pack_revision != request.scope.revision || frame.input_digest != state.input_sha256
         {
@@ -693,7 +822,19 @@ fn confirm_worker_related_reads(
         if frame.sealed_sha256.is_some()
             && related_read_wire_hash(input, state, frame, &body)? == frame.sealed_sha256
         {
-            work.confirm_related_read(input, &request.scope.pack, &frame.options)?;
+            if let Some(page) = &frame.directory_page {
+                if !frame.options.is_empty() {
+                    return Err("directory receipt cannot grant source credit".into());
+                }
+                directory_pages.insert(page.clone());
+            } else {
+                work.confirm_related_read(input, &request.scope.pack, &frame.options)?;
+                for reference in frame.options.iter().flat_map(|option| &option.evidence) {
+                    if !crate::outline::evidence::covered_by_union(reference, &delivered_evidence) {
+                        delivered_evidence.push(reference.clone());
+                    }
+                }
+            }
             delivered_calls.insert(frame.call_id.clone());
         } else {
             pending.push(frame.clone());
@@ -706,6 +847,8 @@ fn confirm_worker_related_reads(
         .get_mut(&request.scope.pack)
         .unwrap();
     worker.related_read_frames = pending;
+    worker.delivered_dependency_pages.extend(directory_pages);
+    worker.delivered_related_evidence = delivered_evidence;
     worker.history = retire_delivered_related_history(&worker.history, &delivered_calls);
     Ok(())
 }
@@ -747,7 +890,11 @@ fn confirm_worker_images(
             .find(|v| v.identity.source_id == *image && v.identity.image_sha256 == *hash)
             .ok_or("worker image cache mismatch")?;
         super::validate_frozen_view(input, config, view)?;
-        if !urls.contains(format!("data:image/jpeg;base64,{}", view.jpeg_base64).as_str()) {
+        if !urls.contains(format!("data:image/jpeg;base64,{}", view.jpeg_base64).as_str())
+            || !body["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.contains(&view.message()))
+        {
             return Err("worker original image absent from exact reserved request".into());
         }
         candidate.confirm_pack_image(input, &request.scope.pack, image, hash)?;

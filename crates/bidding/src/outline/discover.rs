@@ -111,6 +111,7 @@ struct PackRecord {
     attempt: u64,
     feedback: Option<PackFeedback>,
     no_requirement_reason: Option<String>,
+    issues: Vec<super::ReviewIssue>,
     inspected_atom_ids: Vec<String>,
     visual_receipts: BTreeMap<String, String>,
 }
@@ -228,11 +229,12 @@ pub struct PackSubmit {
     pub claim_token: String,
     pub pack_revision: u64,
     pub requirements: Vec<PackRequirement>,
+    pub issues: Vec<super::ReviewIssue>,
     pub no_requirement_reason: Option<String>,
     pub inspected_atom_ids: Vec<String>,
 }
 
-const SUBMISSION_INSTRUCTION: &str = "Copy the current short claim_token and submission_operation_id exactly. They are opaque host-issued handles. A rejected submission is not committed. Read all owned atoms and extract actual response obligations. Only genuinely no obligations permits an empty requirements array, with a specific reason and every owned atom_key inspected; never invent a reason or inspection.";
+const SUBMISSION_INSTRUCTION: &str = "Copy the current short claim_token and submission_operation_id exactly. They are opaque host-issued handles. A rejected submission is not committed. Read all owned atoms and extract actual response obligations. Submit supported requirements alongside source-anchored document issues. An empty requirements array still requires inspection of every owned atom_key: use a specific no_requirement_reason only for a genuinely negative result, or issues with null reason for unresolved document problems. Issues use current owned evidence_key, four document issue codes, requested_information and empty requirement_ids; never invent a reason or inspection.";
 
 impl DiscoverWork {
     pub fn plan_with_budget(input: &FrozenInput, fits: &SessionFits<'_>) -> Self {
@@ -257,6 +259,7 @@ impl DiscoverWork {
                             attempt: 0,
                             feedback: None,
                             no_requirement_reason: None,
+                            issues: vec![],
                             inspected_atom_ids: vec![],
                             visual_receipts: BTreeMap::new(),
                         },
@@ -279,7 +282,7 @@ impl DiscoverWork {
     pub(crate) fn pack_wire_identity(&self, id: &str) -> Result<Value, String> {
         let record = self.packs.get(id).ok_or("unknown pack")?;
         Ok(
-            json!({"run":self.run_scope,"pack":id,"revision":record.pack.pack_revision,"generation":record.attempt,"claim":record.pack.claim_token}),
+            json!({"input":self.input_digest,"run":self.run_scope,"pack":id,"revision":record.pack.pack_revision,"generation":record.attempt,"claim":record.pack.claim_token}),
         )
     }
     pub(crate) fn confirm_pack_image(
@@ -513,8 +516,12 @@ impl DiscoverWork {
         claim_record(record, true);
         record.feedback = None;
         record.no_requirement_reason = None;
+        record.issues.clear();
         record.visual_receipts.clear();
         record.inspected_atom_ids.clear();
+        // A reopened domain scope must explicitly bind current reviewed support.
+        // Reused requirement IDs never preserve a prior review authorization.
+        record.pack.condition_support_options.clear();
         let pack = record.pack.clone();
         next.revision = next.revision.saturating_add(1);
         next.reopen_receipts.insert(
@@ -720,6 +727,18 @@ impl DiscoverWork {
             record.status = PackStatus::Committed;
             record.feedback = None;
             record.no_requirement_reason = submit.no_requirement_reason.clone();
+            record.issues = submit
+                .issues
+                .iter()
+                .cloned()
+                .map(|mut issue| {
+                    issue.id = format!(
+                        "discover:{}:{}:{}",
+                        pack_id, record.pack.pack_revision, issue.id
+                    );
+                    issue
+                })
+                .collect();
             record.inspected_atom_ids = submit.inspected_atom_ids.clone();
             next.revision = next.revision.saturating_add(1);
             Ok(())
@@ -878,11 +897,44 @@ impl DiscoverWork {
                 ));
             }
         }
+        let owned_scope = pack_scope(pack, false)
+            .into_iter()
+            .filter(|reference| match reference {
+                EvidenceRef::ImageRegion { image_id, .. } => receipts.contains_key(image_id),
+                _ => true,
+            })
+            .collect::<Vec<_>>();
+        let mut issue_ids = BTreeSet::new();
+        for (index, issue) in submit.issues.iter().enumerate() {
+            if issue.id.trim().is_empty()
+                || !issue_ids.insert(&issue.id)
+                || !super::source_review::is_document_issue(issue)
+                || issue.description.trim().is_empty()
+                || issue.requested_information.trim().is_empty()
+                || !issue.requirement_ids.is_empty()
+                || issue.evidence.is_empty()
+            {
+                errors.push(field(&format!("/issues/{index}"), "invalid_document_issue", "Discovery issues require a unique id, document problem code, description, requested information and owned evidence; requirement_ids stays empty until Check can explicitly associate current requirements"));
+            }
+            if let Err(error) =
+                super::evidence::validate_evidence(&issue.evidence, input, &owned_scope)
+            {
+                errors.push(field(
+                    &format!("/issues/{index}/evidence"),
+                    "outside_scope",
+                    &error,
+                ));
+            }
+        }
+        if !submit.issues.is_empty() && submit.no_requirement_reason.is_some() {
+            errors.push(field("/no_requirement_reason","contradictory_result","document uncertainty is not a conclusion that there are no obligations; use null with issues"));
+        }
         if submit.requirements.is_empty() {
-            if submit
-                .no_requirement_reason
-                .as_deref()
-                .is_none_or(|r| r.trim().is_empty())
+            if submit.issues.is_empty()
+                && submit
+                    .no_requirement_reason
+                    .as_deref()
+                    .is_none_or(|r| r.trim().is_empty())
             {
                 errors.push(field(
                     "/no_requirement_reason",
@@ -931,7 +983,7 @@ impl DiscoverWork {
             }
         }
         Ok(
-            json!({"duty":"discover","pack":pack,"status":record.status,"feedback":record.feedback,"no_requirement_reason":record.no_requirement_reason}),
+            json!({"duty":"discover","pack":pack,"status":record.status,"feedback":record.feedback,"no_requirement_reason":record.no_requirement_reason,"issues":record.issues}),
         )
     }
     pub(crate) fn bind_condition_support(
@@ -966,7 +1018,27 @@ impl DiscoverWork {
         let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
         let excerpts = resolve_evidence(input, refs)?;
         let mut grouped = BTreeMap::<String, Vec<EvidenceRef>>::new();
+        let mut reviewed = Vec::<ConditionSupport>::new();
         for reference in refs {
+            if let Some(option) = pack.condition_support_options.iter().find(|option| {
+                matches!(
+                    option.origin,
+                    ConditionSupportOrigin::ReviewedRequirement { .. }
+                ) && super::evidence::covered_by_union(reference, &option.evidence)
+            }) {
+                if let Some(group) = reviewed.iter_mut().find(|group| {
+                    group.origin == option.origin && group.review_version == option.review_version
+                }) {
+                    group.evidence.push(reference.clone());
+                } else {
+                    reviewed.push(ConditionSupport {
+                        origin: option.origin.clone(),
+                        review_version: option.review_version.clone(),
+                        evidence: vec![reference.clone()],
+                    });
+                }
+                continue;
+            }
             let unit_id = match reference {
                 EvidenceRef::Text { unit_id, .. } => unit_id.as_str(),
                 EvidenceRef::GridCell { table_id, .. } => input
@@ -1012,7 +1084,7 @@ impl DiscoverWork {
                 .or_default()
                 .push(reference.clone());
         }
-        let options = grouped
+        let mut options = grouped
             .into_iter()
             .map(|(relation_id, evidence)| {
                 Ok(ConditionSupport {
@@ -1029,6 +1101,7 @@ impl DiscoverWork {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        options.extend(reviewed);
         let handles = options
             .iter()
             .map(|option| {
@@ -1041,6 +1114,58 @@ impl DiscoverWork {
         ))
     }
 
+    pub(crate) fn dependency_directory_page(
+        &self,
+        input: &FrozenInput,
+        pack_id: &str,
+        cursor: &str,
+    ) -> Result<Value, String> {
+        if input_digest(input)? != self.input_digest {
+            return Err("dependency input changed".into());
+        }
+        let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
+        if cursor.starts_with("support_") {
+            support_directory(pack, Some(cursor))
+        } else {
+            dependency_directory(input, pack, Some(cursor))
+        }
+    }
+    pub(crate) fn dependency_selection(
+        &self,
+        input: &FrozenInput,
+        pack_id: &str,
+        dependency_id: &str,
+    ) -> Result<Vec<EvidenceRef>, String> {
+        if input_digest(input)? != self.input_digest {
+            return Err("dependency input changed".into());
+        }
+        let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
+        if let Some(option) = pack
+            .condition_support_options
+            .iter()
+            .find(|option| support_key(pack, option).as_deref() == Ok(dependency_id))
+        {
+            resolve_evidence(input, &option.evidence)?;
+            return Ok(option.evidence.clone());
+        }
+        let relation = dependency_relations(input, pack)
+            .into_iter()
+            .find(|r| r.id == dependency_id)
+            .ok_or("dependency is outside this pack")?;
+        if relation.kind
+            != crate::analysis::source_manifest::DocumentRelationKind::ExplicitReference
+            || relation.status
+                != crate::analysis::source_manifest::DocumentRelationStatus::Confirmed
+        {
+            return Err("dependency is not explicitly confirmed".into());
+        }
+        dependency_originals(input, pack, relation, None)?
+            .into_iter()
+            .map(|row| serde_json::from_value(row["evidence"].clone()).map_err(|e| e.to_string()))
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn related_read_already_delivered(
         &self,
         pack_id: &str,
@@ -1048,9 +1173,19 @@ impl DiscoverWork {
     ) -> bool {
         self.packs.get(pack_id).is_some_and(|record| {
             !options.is_empty()
-                && options
-                    .iter()
-                    .all(|option| record.pack.condition_support_options.contains(option))
+                && options.iter().all(|option| {
+                    let delivered = record
+                        .pack
+                        .condition_support_options
+                        .iter()
+                        .filter(|old| old.origin == option.origin)
+                        .flat_map(|old| old.evidence.iter().cloned())
+                        .collect::<Vec<_>>();
+                    option
+                        .evidence
+                        .iter()
+                        .all(|reference| super::evidence::covered_by_union(reference, &delivered))
+                })
         })
     }
 
@@ -1096,7 +1231,7 @@ impl DiscoverWork {
                     json!(record.visual_receipts.contains_key(&image_id));
             }
         }
-        let mut session = json!({"duty":"discover","pack":pack,"status":record.status,"feedback":record.feedback,"no_requirement_reason":record.no_requirement_reason});
+        let mut session = json!({"duty":"discover","pack":pack,"status":record.status,"feedback":record.feedback,"no_requirement_reason":record.no_requirement_reason,"issues":record.issues});
         add_submission_identity(&mut session, &record.pack, record.feedback.as_ref())?;
         let (claim, operation) = self.model_handles(pack_id)?;
         session["pack"]["claim_token"] = json!(claim);
@@ -1174,6 +1309,15 @@ impl DiscoverWork {
     }
     pub fn requirement_records(&self) -> &BTreeMap<String, RequirementRecord> {
         &self.requirements
+    }
+    /// Canonical discovery problems belong to their committed pack result.
+    /// Draft and report surfaces only project this same ReviewIssue type.
+    pub fn review_issues(&self) -> Vec<super::ReviewIssue> {
+        self.packs
+            .values()
+            .filter(|record| record.status == PackStatus::Committed)
+            .flat_map(|record| record.issues.iter().cloned())
+            .collect()
     }
     pub fn pack_counts(&self) -> PackCounts {
         let mut c = PackCounts {
@@ -1393,6 +1537,33 @@ fn evidence_key(
         ))?[..24]
     ))
 }
+fn resolve_evidence_keys(
+    value: &mut Value,
+    keys: &BTreeMap<String, EvidenceRef>,
+    path: &str,
+) -> Result<(), String> {
+    for (index, reference) in value
+        .as_array_mut()
+        .ok_or("evidence missing")?
+        .iter_mut()
+        .enumerate()
+    {
+        if reference.as_object().is_none_or(|fields| fields.len() != 1) {
+            return Err(format!(
+                "{path}[{index}]: evidence_key must be the only field"
+            ));
+        }
+        let key = reference["evidence_key"]
+            .as_str()
+            .ok_or("evidence_key required; raw references are not model inputs")?;
+        let selected = keys.get(key).ok_or_else(|| {
+            format!("{path}[{index}]: invalid or stale current-pack evidence_key")
+        })?;
+        *reference = serde_json::to_value(selected).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> Result<(), String> {
     let mut keys = BTreeMap::new();
     let mut atoms = BTreeMap::new();
@@ -1461,26 +1632,23 @@ fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> Result<(), 
                 ))?
                 .section_id
         );
-        for (reference_index, reference) in requirement["evidence"]
-            .as_array_mut()
-            .ok_or("evidence missing")?
-            .iter_mut()
-            .enumerate()
-        {
-            if let Some(key) = reference.get("evidence_key") {
-                let path = format!("requirements[{requirement_index}].evidence[{reference_index}]");
-                if reference.as_object().is_none_or(|fields| fields.len() != 1) {
-                    return Err(format!("{path}: evidence_key must be the only field"));
-                }
-                let selected = key
-                    .as_str()
-                    .and_then(|key| keys.get(key))
-                    .ok_or_else(|| format!("{path}: invalid or stale current-pack evidence_key"))?;
-                *reference = serde_json::to_value(selected).map_err(|e| e.to_string())?;
-            } else {
-                return Err("evidence_key required; raw references are not model inputs".into());
-            }
-        }
+        resolve_evidence_keys(
+            &mut requirement["evidence"],
+            &keys,
+            &format!("requirements[{requirement_index}].evidence"),
+        )?;
+    }
+    for (index, issue) in body["issues"]
+        .as_array_mut()
+        .ok_or("issues missing")?
+        .iter_mut()
+        .enumerate()
+    {
+        resolve_evidence_keys(
+            &mut issue["evidence"],
+            &keys,
+            &format!("issues[{index}].evidence"),
+        )?;
     }
     Ok(())
 }
@@ -1509,6 +1677,7 @@ pub fn apply_pack_tool(
         "claim_token",
         "pack_revision",
         "requirements",
+        "issues",
         "no_requirement_reason",
         "inspected_atom_ids",
     ]
@@ -1535,12 +1704,18 @@ pub fn apply_pack_tool(
         let reason = body["no_requirement_reason"]
             .as_str()
             .is_some_and(|s| !s.trim().is_empty());
-        if !reason || actual != expected || inspected.is_none_or(|v| v.len() != actual.len()) {
+        let has_issues = body["issues"]
+            .as_array()
+            .is_some_and(|issues| !issues.is_empty());
+        if (!reason && !has_issues)
+            || actual != expected
+            || inspected.is_none_or(|v| v.len() != actual.len())
+        {
             return Ok(json!({"ok":false,"state_changed":false,"feedback":{
-                "pack_id":id,"code":"INVALID_NEGATIVE_SUBMISSION","reason_required":!reason,
+                "pack_id":id,"code":"INVALID_NEGATIVE_SUBMISSION","reason_required":!reason && !has_issues,
                 "inspection_complete":actual==expected && inspected.is_some_and(|v| v.len()==actual.len()),
                 "owned_atom_count":expected.len(),"inspected_atom_count":actual.len(),
-                "next_action":"Read the current owned text and tables and extract their actual response obligations with evidence. Empty requirements are allowed only after genuinely finding none, with a specific reason and every owned atom_key inspected. Do not invent a reason or inspection; copy both current host-issued short handles exactly."}}));
+                "next_action":"Read the current owned text and tables and extract their actual response obligations with evidence. Empty requirements need every owned atom inspected and either a genuine negative reason or valid document issues with null reason. Do not invent a reason or inspection; copy both current host-issued short handles exactly."}}));
         }
     }
     let pack = work.resolve_model_envelope(id, &mut body, false)?;
@@ -1582,10 +1757,136 @@ fn feedback(id: &str, submit: &PackSubmit, errors: Vec<FieldError>) -> PackFeedb
     }
 }
 
+fn dependency_relations<'a>(
+    input: &'a FrozenInput,
+    pack: &ParsePack,
+) -> Vec<&'a crate::analysis::DocumentRelation> {
+    input
+        .document_relations
+        .iter()
+        .filter(|relation| {
+            pack.atoms.iter().any(|atom| {
+                atom.document_id == relation.from.document_id
+                    && relation.from.unit_id.as_ref().is_none_or(|key| {
+                        input.source_units.iter().any(|source| {
+                            source.source_unit_revision_id == atom.source_unit_revision_id
+                                && source.locator["unit_id"] == *key
+                        })
+                    })
+            })
+        })
+        .collect()
+}
+fn dependency_cursor(pack: &ParsePack, index: usize) -> Result<String, String> {
+    Ok(format!(
+        "dependency_{index}_{}",
+        super::canonical_sha256(&(
+            &pack.input_digest,
+            &pack.id,
+            pack.pack_revision,
+            &pack.claim_token,
+            index
+        ))?
+    ))
+}
+fn support_cursor(pack: &ParsePack, index: usize) -> Result<String, String> {
+    let option = pack
+        .condition_support_options
+        .get(index)
+        .ok_or("support directory position missing")?;
+    Ok(format!(
+        "support_{index}_{}",
+        super::canonical_sha256(&(
+            &pack.input_digest,
+            &pack.id,
+            pack.pack_revision,
+            &pack.claim_token,
+            index,
+            support_key(pack, option)?
+        ))?
+    ))
+}
+/// Immutable grants remain available through this directory; only one identity
+/// and native reference preview travels in a page, never the original body.
+fn support_directory(pack: &ParsePack, cursor: Option<&str>) -> Result<Value, String> {
+    let index = if let Some(cursor) = cursor {
+        let index = cursor
+            .strip_prefix("support_")
+            .and_then(|s| s.split('_').next())
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or("invalid support directory cursor")?;
+        if support_cursor(pack, index)? != cursor {
+            return Err("stale support directory cursor".into());
+        }
+        index
+    } else {
+        0
+    };
+    let mut rows = Vec::new();
+    if let Some(option) = pack.condition_support_options.get(index) {
+        let key = support_key(pack, option)?;
+        rows.push(json!({"support_key":key,"type":"external_condition_support","origin":option.origin,"review_version":option.review_version,"evidence_preview":option.evidence.first(),"evidence_count":option.evidence.len(),"read":{"tool":"read_evidence","args":{"dependency_id":key}},"reading_status":"Grant directory only, not fresh source reading or Check credit. Read dependency_id for the complete native selection and follow its continuation."}));
+    }
+    Ok(
+        json!({"condition_support_options":rows,"next_support_cursor":if index+1<pack.condition_support_options.len(){Some(support_cursor(pack,index+1)?)}else{None},"support_directory_complete":index+1>=pack.condition_support_options.len()}),
+    )
+}
+
+/// A small directory page is separate from the selected native source body.
+/// Source and tool bytes remain subject to the caller's complete request fit.
+fn dependency_directory(
+    input: &FrozenInput,
+    pack: &ParsePack,
+    cursor: Option<&str>,
+) -> Result<Value, String> {
+    let relations = dependency_relations(input, pack);
+    let index = if let Some(cursor) = cursor {
+        let index = cursor
+            .strip_prefix("dependency_")
+            .and_then(|s| s.split('_').next())
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or("invalid dependency directory cursor")?;
+        if index >= relations.len() || dependency_cursor(pack, index)? != cursor {
+            return Err("stale dependency directory cursor".into());
+        }
+        index
+    } else {
+        0
+    };
+    let mut rows = Vec::new();
+    if let Some(relation) = relations.get(index) {
+        let originals = if relation.kind
+            == crate::analysis::source_manifest::DocumentRelationKind::ExplicitReference
+            && relation.status
+                == crate::analysis::source_manifest::DocumentRelationStatus::Confirmed
+        {
+            dependency_originals(input, pack, relation, Some(1))?
+        } else {
+            vec![]
+        };
+        let target_in_pack = relation.to.as_ref().is_some_and(|target| {
+            pack.atoms.iter().any(|atom| {
+                atom.document_id == target.document_id
+                    && target.unit_id.as_ref().is_none_or(|key| {
+                        input.source_units.iter().any(|source| {
+                            source.source_unit_revision_id == atom.source_unit_revision_id
+                                && source.locator["unit_id"] == *key
+                        })
+                    })
+            })
+        });
+        rows.push(json!({"relation":{"id":relation.id,"from":relation.from,"to":relation.to,"kind":relation.kind,"status":relation.status,"required":relation.required},"target_in_pack":target_in_pack,"available_originals":originals,"originals_preview_only":true,"read":{"tool":"read_evidence","args":{"dependency_id":relation.id}},"read_policy":"Preview is not full source coverage. Read dependency_id for all native ranges using continuation pages; metadata grants no source or review credit."}));
+    }
+    Ok(
+        json!({"read_dependencies":rows,"next_dependency_cursor":if index + 1 < relations.len() { Some(dependency_cursor(pack,index+1)?) } else { None },"directory_complete":index + 1 >= relations.len()}),
+    )
+}
+
 fn dependency_originals(
     input: &FrozenInput,
     pack: &ParsePack,
     relation: &crate::analysis::DocumentRelation,
+    limit: Option<usize>,
 ) -> Result<Vec<Value>, String> {
     let mut originals = Vec::new();
     for source in input.source_units.iter().filter(|source| {
@@ -1629,11 +1930,17 @@ fn dependency_originals(
                     originals.push(json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
                         "anchor_row":row,"anchor_column":column,
                         "evidence":EvidenceRef::GridCell { input_digest:pack.input_digest.clone(),table_id:table.into(),anchor_row:row,anchor_column:column,start_byte:0,end_byte:text.len() }}));
+                    if limit.is_some_and(|limit| originals.len() >= limit) {
+                        return Ok(originals);
+                    }
                 }
             }
         } else if !source.text.is_empty() {
             originals.push(json!({"document_id":source.document_id,"unit_id":source.source_unit_revision_id,
                 "evidence":EvidenceRef::Text { input_digest:pack.input_digest.clone(),unit_id:source.source_unit_revision_id.clone(),start_byte:0,end_byte:source.text.len() }}));
+        }
+        if limit.is_some_and(|limit| originals.len() >= limit) {
+            return Ok(originals);
         }
     }
     Ok(originals)
@@ -1797,29 +2104,12 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
         }
         atoms.push(rendered);
     }
-    let supports = pack.condition_support_options.iter().map(|option| {
-        let mut value = json!({"support_key":support_key(pack,option)?,"type":"external_condition_support","origin":option.origin,"review_version":option.review_version});
-        match option.origin {
-            ConditionSupportOrigin::ReviewedRequirement { .. } => value["excerpts"] = json!(resolve_evidence(input,&option.evidence)?),
-            ConditionSupportOrigin::ConfirmedRelation { .. } => {
-                value["delivered_evidence"] = json!(option.evidence);
-                value["reading_status"] = json!("Original ranges were delivered to this worker; use read_evidence to reread as needed. These are not fresh Check receipts.");
-            }
-        }
-        Ok(value)
-    }).collect::<Result<Vec<_>,String>>()?;
-    let read_dependencies = input.document_relations.iter()
-        .filter(|relation| pack.document_ids.contains(&relation.from.document_id))
-        .map(|relation| Ok(json!({"relation":relation,
-            "target_in_pack":relation.to.as_ref().is_some_and(|target| pack.document_ids.contains(&target.document_id)),
-            "available_originals": if relation.kind == crate::analysis::source_manifest::DocumentRelationKind::ExplicitReference
-                && relation.status == crate::analysis::source_manifest::DocumentRelationStatus::Confirmed {
-                dependency_originals(input, pack, relation)?
-            } else { vec![] },
-            "read_policy":"Read original target atoms in their own planned packs when not present here. Relation metadata grants no source-reading or semantic-review credit."})))
-        .collect::<Result<Vec<_>, String>>()?;
+    let support_page = support_directory(pack, None)?;
+    let supports = support_page["condition_support_options"].clone();
+    let directory = dependency_directory(input, pack, None)?;
+    let read_dependencies = directory["read_dependencies"].clone();
     Ok(
-        json!({"read_dependencies":read_dependencies,"condition_support_options":supports,"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
+        json!({"read_dependencies":read_dependencies,"next_dependency_cursor":directory["next_dependency_cursor"],"condition_support_options":supports,"next_support_cursor":support_page["next_support_cursor"],"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
     )
 }
 
@@ -1856,6 +2146,24 @@ pub(crate) fn fixture_key_submission(
                 .iter()
                 .find(|a| atom_scope(a, &pack.input_digest, true).contains(&reference))
                 .ok_or("fixture reference outside pack")?;
+            *value = json!({"evidence_key":evidence_key(pack,atom,&reference)?});
+        }
+    }
+    for issue in args["issues"]
+        .as_array_mut()
+        .ok_or("fixture issues missing")?
+    {
+        for value in issue["evidence"]
+            .as_array_mut()
+            .ok_or("fixture issue evidence missing")?
+        {
+            let reference: EvidenceRef =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            let atom = pack
+                .atoms
+                .iter()
+                .find(|atom| atom_scope(atom, &pack.input_digest, false).contains(&reference))
+                .ok_or("fixture issue outside owned pack")?;
             *value = json!({"evidence_key":evidence_key(pack,atom,&reference)?});
         }
     }
@@ -1896,7 +2204,7 @@ mod tests {
         let args = json!({"pack_id":pack.id,"call_id":op,"claim_token":claim,"pack_revision":pack.pack_revision,
             "requirements":[{"description":"Submit a signed declaration.","kind":"material","obligation_strength":"mandatory","extraction_quality":"explicit",
             "source_section_id":{"atom_key":atom_key(&pack,&pack.atoms[0]).unwrap()},"evidence":[{"evidence_key":evidence_key(&pack,&pack.atoms[0],&reference).unwrap()}]}],
-            "no_requirement_reason":null,"inspected_atom_ids":[]});
+            "issues":[],"no_requirement_reason":null,"inspected_atom_ids":[]});
         let before = slot.clone();
         let mut empty = args.clone();
         empty["requirements"] = json!([]);
@@ -2003,6 +2311,7 @@ mod tests {
     fn submission(pack: &ParsePack, call: &str, requirements: Vec<PackRequirement>) -> PackSubmit {
         let negative = requirements.is_empty();
         PackSubmit {
+            issues: vec![],
             call_id: call.into(),
             claim_token: pack.claim_token.clone(),
             pack_revision: pack.pack_revision,
@@ -2524,7 +2833,7 @@ mod tests {
     fn unknown_valid_submission_does_not_create_an_unclaimed_plan() {
         let input = input(vec![source("a", 0, "A", "一")], vec![]);
         let mut slot = None;
-        let args = json!({"pack_id":"unknown","call_id":"operation","claim_token":"forged","pack_revision":1,"requirements":[],"no_requirement_reason":"none","inspected_atom_ids":[]});
+        let args = json!({"pack_id":"unknown","call_id":"operation","claim_token":"forged","pack_revision":1,"requirements":[],"issues":[],"no_requirement_reason":"none","inspected_atom_ids":[]});
         assert!(apply_pack_tool(&mut slot, &input, "submit_pack_scan", &args).is_err());
         assert!(slot.is_none());
     }
@@ -2631,5 +2940,129 @@ mod tests {
         recovered.submit(&input, &pack.id, operation).unwrap();
         assert_eq!(recovered, work);
         assert_eq!(recovered.requirement_count(), 1);
+    }
+    #[test]
+    fn discovery_document_issues_use_owned_evidence_and_survive_committed_reload() {
+        let input = input(
+            vec![
+                source("a", 0, "See missing annex. Submit a declaration.", "one"),
+                source("b", 1, "Independent scope.", "two"),
+            ],
+            vec![],
+        );
+        let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|session| session["pack"]["atoms"].as_array().unwrap().len() == 1))
+        });
+        let pack = work.claim(2).remove(0);
+        let session = work.session(&input, &pack.id).unwrap();
+        let reference = atom_scope(&pack.atoms[0], &pack.input_digest, false).remove(0);
+        let issue = json!({"id":"missing-annex","code":"document_missing","description":"Referenced annex was not supplied","requested_information":"Supply the referenced annex","requirement_ids":[],"evidence":[{"evidence_key":evidence_key(&pack,&pack.atoms[0],&reference).unwrap()}]});
+        let args = json!({"pack_id":pack.id,"call_id":session["submission_operation_id"],"claim_token":session["pack"]["claim_token"],"pack_revision":pack.pack_revision,"requirements":[],"issues":[issue],"no_requirement_reason":null,"inspected_atom_ids":[{"atom_key":atom_key(&pack,&pack.atoms[0]).unwrap()}]});
+        for mode in [
+            "missing_field",
+            "system_code",
+            "empty_request",
+            "empty_evidence",
+            "forged_evidence",
+            "raw_reference",
+            "requirement_ids",
+            "negative_reason",
+            "uninspected",
+            "duplicate",
+        ] {
+            let mut bad = args.clone();
+            match mode {
+                "missing_field" => {
+                    bad.as_object_mut().unwrap().remove("issues");
+                }
+                "system_code" => bad["issues"][0]["code"] = json!("AGENT_TURN_BUDGET_EXCEEDED"),
+                "empty_request" => bad["issues"][0]["requested_information"] = json!(" "),
+                "empty_evidence" => bad["issues"][0]["evidence"] = json!([]),
+                "forged_evidence" => {
+                    bad["issues"][0]["evidence"][0] = json!({"evidence_key":"ev_forged"})
+                }
+                "raw_reference" => bad["issues"][0]["evidence"][0] = json!(reference),
+                "requirement_ids" => {
+                    bad["issues"][0]["requirement_ids"] = json!(["guessed-requirement"])
+                }
+                "negative_reason" => bad["no_requirement_reason"] = json!("No obligations"),
+                "uninspected" => bad["inspected_atom_ids"] = json!([]),
+                "duplicate" => bad["issues"] = json!([issue, issue]),
+                _ => unreachable!(),
+            }
+            let mut candidate = Some(work.clone());
+            let result = apply_pack_tool(&mut candidate, &input, "submit_pack_scan", &bad);
+            assert!(result.is_err() || result.unwrap()["ok"] == false, "{mode}");
+            assert!(
+                candidate.as_ref().unwrap().review_issues().is_empty(),
+                "{mode}"
+            );
+            assert_eq!(candidate.as_ref().unwrap().requirement_count(), 0, "{mode}");
+        }
+        for positive in [false, true] {
+            let mut candidate = Some(work.clone());
+            let mut payload = args.clone();
+            if positive {
+                payload["requirements"] = json!([{"description":"Submit a declaration.","kind":"material","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":atom_key(&pack,&pack.atoms[0]).unwrap()},"evidence":[{"evidence_key":evidence_key(&pack,&pack.atoms[0],&reference).unwrap()}]}]);
+            }
+            assert_eq!(
+                apply_pack_tool(&mut candidate, &input, "submit_pack_scan", &payload).unwrap()["ok"],
+                true
+            );
+            let saved = candidate.unwrap();
+            assert_eq!(saved.requirement_count(), usize::from(positive));
+            let issues = saved.review_issues();
+            assert_eq!(issues.len(), 1);
+            assert_eq!(
+                issues[0].id,
+                format!("discover:{}:{}:missing-annex", pack.id, pack.pack_revision)
+            );
+            assert_eq!(issues[0].evidence, vec![reference.clone()]);
+            let mut reloaded: DiscoverWork = serde_json::from_value(json!(saved)).unwrap();
+            assert_eq!(reloaded.review_issues(), issues);
+            reloaded
+                .reopen_committed(
+                    &input,
+                    &pack.id,
+                    pack.pack_revision,
+                    "review-discovery-issue",
+                )
+                .unwrap();
+            assert!(
+                reloaded.review_issues().is_empty(),
+                "old revision problem is no longer current"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_image_document_issue_cannot_replace_actual_pixel_delivery() {
+        let mut image = source("i", 0, "", "one");
+        image.locator["locator_kind"] = json!("image");
+        image.locator["image_available"] = json!(true);
+        let input = input(vec![image], vec![]);
+        let mut work = DiscoverWork::plan(&input, 8192);
+        let pack = work.claim(1).remove(0);
+        let reference = atom_scope(&pack.atoms[0], &pack.input_digest, false).remove(0);
+        let mut submit = submission(&pack, "image-problem", vec![]);
+        submit.no_requirement_reason = None;
+        submit.issues = vec![super::super::ReviewIssue {
+            id: "unreadable-mark".into(),
+            code: "document_unreadable".into(),
+            description: "Original image text cannot be resolved".into(),
+            requested_information: "Supply a readable original".into(),
+            requirement_ids: vec![],
+            evidence: vec![reference],
+        }];
+        let errors = work.submit(&input, &pack.id, submit).unwrap_err();
+        assert!(
+            errors
+                .errors
+                .iter()
+                .any(|error| error.code == "original_image_not_delivered")
+        );
+        assert!(work.review_issues().is_empty());
     }
 }

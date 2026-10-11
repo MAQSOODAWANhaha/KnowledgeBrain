@@ -44,7 +44,7 @@ pub use template::{COVER_CHAPTER_ID, ProjectedOutline, project_draft, validate_p
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,11 +95,20 @@ pub struct TemplateContent {
     pub match_query: String,
 }
 
+/// Copy purpose is an explicit semantic judgment, never inferred from keywords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCopyPurpose {
+    Instruction,
+    MandatedResponse,
+}
+
 /// The model chooses a source or editable position; the host owns fixed text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TemplateBody {
     SourceCopy {
+        purpose: SourceCopyPurpose,
         refs: Vec<evidence::EvidenceRef>,
     },
     EditableBlank,
@@ -139,6 +148,7 @@ pub struct ReviewIssue {
     pub description: String,
     pub requirement_ids: Vec<String>,
     pub evidence: Vec<evidence::EvidenceRef>,
+    pub requested_information: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +240,7 @@ pub(crate) fn validate_artifact(artifact: &OutlineArtifact) -> Result<(), String
         match (&slot.content, slot.kind) {
             (TemplateBody::EditableBlank, SlotKind::BidderBlank | SlotKind::Signature) => {}
             (
-                TemplateBody::SourceCopy { refs },
+                TemplateBody::SourceCopy { refs, .. },
                 SlotKind::FixedText | SlotKind::TenderValue | SlotKind::Preserved,
             ) if !refs.is_empty() => {}
             (TemplateBody::GeneratedExplanation { .. }, SlotKind::Instruction) => {}

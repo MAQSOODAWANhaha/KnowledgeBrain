@@ -37,13 +37,13 @@ impl Duty {
     pub fn instructions(self) -> &'static str {
         match self {
             Self::Discover => {
-                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。只阅读已领取的阅读包，每一段都要读完再 submit_pack。整包读完仍没有应答义务时，requirements 用空数组。仅当阅读会话 status=failed 时 repair=true；status=running 时 repair=false。schema 校验失败不会改变包状态。证据必须直接复制当前阅读包原文旁的 evidence_key，提交 {evidence_key:原值}；key只对当前包、版本和领取会话有效。如有 condition_support_options，可将所需 support_key 单独填入 condition_support；它是外部条件依据，不是当前包主证据，不能替代 evidence 或改变 source_section_id。不要从 Check 的 q 句柄推算其他来源引用，不计算字节偏移，不拼写来源ID；空格没有可选证据。source_section_id 必须用 {atom_key:原值} 选择该原子的所属章节；inspected_atom_ids 必须用 {atom_key:原值}，必须逐个实际读取后选择且不重复。不要写章节，不要写模板，不要匹配知识库。"
+                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。只阅读已领取的阅读包，每一段都要读完再 submit_pack。正常 requirements 与 issues 可以同次 submit_pack 返回，独立包继续处理。明确没有应答义务且没有问题时，requirements 和 issues 都用空数组，并说明 no_requirement_reason。资料缺失、冲突、含糊或不可辨认时不要编造确定要求；用 issues 的 document_missing、document_conflict、document_ambiguous 或 document_unreadable，填写 id、description、requested_information，requirement_ids 必须为空数组，evidence 只用本包已实际读取的 owned 原文 evidence_key。缺失资料引用真实提及该资料的位置，不虚构缺失正文。requirements 为空但有合法 issues 时，no_requirement_reason 必须为 null，inspected_atom_ids 仍须覆盖全部已读 owned 原子。API、解析器或执行失败不能冒充文档问题。仅当阅读会话 status=failed 时 repair=true；status=running 时 repair=false。schema 校验失败不会改变包状态。证据必须直接复制当前阅读包原文旁的 evidence_key，提交 {evidence_key:原值}；key只对当前包、版本和领取会话有效。如有 condition_support_options，可将所需 support_key 单独填入 condition_support；它是外部条件依据，不是当前包主证据，不能替代 evidence 或改变 source_section_id。不要从 Check 的 q 句柄推算其他来源引用，不计算字节偏移，不拼写来源ID；空格没有可选证据。source_section_id 必须用 {atom_key:原值} 选择该原子的所属章节；inspected_atom_ids 必须用 {atom_key:原值}，必须逐个实际读取后选择且不重复。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
                 "本轮按 read_requirements、read_outline 的分页索引写章节、附件绑定和规定模板槽。已有本批要求时先完成对应写入，不重复读取已完整返回的摘要。mode=packs 的全来源索引用于独立 Check，本轮按已有要求的证据读取所需原文，不重新扫描全部来源。固定条文先 read_evidence，再写 content.source_copy 引用，由主机复制；不得提供自由 fixed_text。用 put_fulfillments 把每条要求指向已存在且属于同一应答叶子的实际槽、表格或可见人工任务；该工具不传mode，target_refs必须非空，generated_explanation不能单独履行要求。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组（可多个，即森林）、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。editable_blank 须提供 blank_kind 与非空 match_query，不传 text；source_copy 只传一个已读取来源引用，不传 text、match_query、blank_kind；generated_explanation 须提供 text 与已读取 supporting_refs，不传 match_query、blank_kind。不要用空字符串代替省略字段。分组章节不能带模板槽。put_chapters(mode=upsert)按原章节id更新并保留未提交章节，不是重命名或清空；同一parent下order必须唯一，根章节也一样。需要整体替换时用mode=replace提交完整章节树并保留已有目标引用有效。bind_forms 与 put_slots 的 upsert 按已有id原位更新，未提交项保留，新项追加，不删除或重排。映射内容错误可用upsert修正整条续表链；顺序错误必须先读取完整当前bindings，再用replace提交全部有效绑定并按来源续表顺序排列。槽位重排同样先读取完整slots再replace，不能仅把upsert参数改顺序。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
             }
             Self::Check => {
-                "本轮独立复核来源与响应。readiness 只证明结构，不能证明语义召回。用 read_requirements 分页读取要求和 mode=packs 的源证据索引，用 read_evidence 读取精确原文。逐批核对未提取义务、否定/条件/数值和响应充分性，用 submit_review 提交证据与问题，inspected_evidence 和 issues.evidence 必须直接复制已读取原文旁的 {review_evidence_key:原值}，不要手抄摘要和字节范围。要求的全部原始证据格（含标签和条款号）都必须覆盖；结构回执仍由分页读取记录。空提取包、表格、OCR partial、跨片条件优先。Check 的来源读取必须在进入本职责后重新执行；Organize 的读取回执不能代替独立复核。用 read_outline(mode=slot_body) 按 UTF-8 字节分页读取实际槽正文及空位说明，读完整个目标正文后才能提交要求复核。所有要求与包复核完成后 finish_outline；存在问题保留 needs_review。不要改章节或固定原文。"
+                "本轮独立复核来源与响应。readiness 只证明结构，不能证明语义召回。用 read_requirements 分页读取要求和 mode=packs 的源证据索引，用 read_evidence 读取精确原文。逐批核对未提取义务、否定/条件/数值和响应充分性，用 submit_review 提交证据与问题，inspected_evidence 和 issues.evidence 必须直接复制已读取原文旁的 {review_evidence_key:原值}，不要手抄摘要和字节范围。要求的全部原始证据格（含标签和条款号）都必须覆盖；结构回执仍由分页读取记录。空提取包、表格、OCR partial、跨片条件优先。发现阶段的问题不是 Check 已完成。可沿用已有 issue.id 补充当前 requirement_ids、观察和 requested_information，但必须重新读取并以当前 review_evidence_key 证明范围；不得凭发现问题跳过未覆盖的要求或其他独立范围。Check 的来源读取必须在进入本职责后重新执行；Organize 的读取回执不能代替独立复核。用 read_outline(mode=slot_body) 按 UTF-8 字节分页读取实际槽正文及空位说明，读完整个目标正文后才能提交要求复核。所有要求与包复核完成后 finish_outline；存在问题保留 needs_review。不要改章节或固定原文。"
             }
         }
     }
@@ -318,12 +318,22 @@ pub fn host_packet(
         let draft = &state.outline_run.tool_draft;
         // A submitted judgment is not necessarily resolved. Keep failed or
         // stale judgments actionable after the conversation is discarded.
-        let next = draft.required_requirement_ids.iter().find(|id| {
-            !draft.reviewed_requirement_ids.contains(*id)
-                || draft.template_reviews.get(*id).is_none_or(|review| {
-                    !super::template_review::validate(input, draft, review).unwrap_or(false)
-                })
-        });
+        let active_scope = super::source_review::next_scope(input, draft);
+        let linked =
+            active_scope.map(|pack| super::source_review::linked_requirements(draft, pack));
+        let next = draft
+            .required_requirement_ids
+            .iter()
+            .filter(|id| {
+                linked.as_ref().is_none_or(|ids| ids.contains(*id))
+                    && !super::source_review::has_document_issue(input, draft, id)
+            })
+            .find(|id| {
+                !draft.reviewed_requirement_ids.contains(*id)
+                    || draft.template_reviews.get(*id).is_none_or(|review| {
+                        !super::template_review::validate(input, draft, review).unwrap_or(false)
+                    })
+            });
         let fulfillment =
             next.and_then(|id| draft.fulfillments.iter().find(|f| &f.requirement_id == id));
         let unread_slot = fulfillment
@@ -336,13 +346,17 @@ pub fn host_packet(
                 _ => None,
             })
             .find(|slot| !super::tools::check_read_slot_complete(draft, slot));
+        let unread_manual = fulfillment.into_iter().flat_map(|f| &f.target_refs).find_map(|target| {
+            let super::TargetRef::ManualTask { task_id, .. } = target else { return None };
+            let id = next?;
+            let version = super::template_review::manual_task_version(input,draft,id,task_id).ok()?;
+            (!draft.check_reads.manual_tasks.contains(&version)).then(|| json!({"tool":"read_outline","args":{"mode":"manual_task","requirement_id":id,"task_id":task_id}}))
+        });
         // Derive one bounded source obligation from durable review results.
         // Delivered reads deliberately do not retire this work, and no second
         // task lifecycle is stored beside the canonical pack review receipts.
-        let source_scope = draft
-            .required_pack_ids
-            .difference(&draft.reviewed_pack_ids)
-            .next()
+        let source_scope = active_scope
+            .filter(|id| !super::source_review::execution_complete(input, draft, id).unwrap_or(false))
             .map(|id| {
                 let reviewed = super::source_review::reviewed_evidence(&draft.source_dispositions, id);
                 let blocked = draft.source_dispositions.values().find(|review|
@@ -364,12 +378,18 @@ pub fn host_packet(
                     None => json!({"pack_id":id,"blocked":"discovered source scope missing"}),
                 }
             });
-        packet["check_work"] = json!({"requirement_id":next,"source_scope":source_scope,
+        packet["check_work"] = json!({"scope_pack_id":active_scope,"requirement_id":next,"source_scope":source_scope,
             "remaining_comparisons":draft.required_requirement_ids.iter().filter(|id|!draft.claim_comparisons.contains_key(*id)).count(),
-            "stage":if source_scope.is_some() {"review_sources"} else if next.is_some_and(|id| !draft.claim_comparisons.contains_key(id)) {"compare_claims"} else if unread_slot.is_some() {"read_target_body"} else if next.is_some() {"review_requirement"} else {"review_sources"},
-            "target_refs":fulfillment.map(|f| &f.target_refs),
+            "stage":if source_scope.is_some() {"review_sources"} else if next.is_some_and(|id| !draft.claim_comparisons.contains_key(id)) {"compare_claims"} else if unread_slot.is_some() || unread_manual.is_some() {"read_target_body"} else if next.is_some() {"review_requirement"} else {"review_sources"},
+            "target_refs":fulfillment.map(|f| f.target_refs.iter().map(|target| match target {
+                super::TargetRef::TextSlot { slot_id } => json!({"type":"text_slot","slot_id":slot_id}),
+                super::TargetRef::FormBinding { form_id } => json!({"type":"form_binding","form_id":form_id}),
+                super::TargetRef::ManualTask { task_id, description } => json!({"type":"manual_task","task_id":task_id,"description_bytes":description.len(),
+                    "read":{"tool":"read_outline","args":{"mode":"manual_task","requirement_id":f.requirement_id,"task_id":task_id}}}),
+            }).collect::<Vec<_>>()),
             "blocked_template_review":next.and_then(|id|draft.template_reviews.get(id)),
             "template_review_version":next.and_then(|id| super::template_review::version(input, draft, id).ok()),
+            "next_unread_manual_task":unread_manual,
             "next_unread_slot":unread_slot.map(|slot|json!({"slot_id":slot.slot_id,"chapter_id":slot.chapter_id,"text_bytes":slot.text.len(),"tool":"read_outline","args":{"mode":"slot_body","slot_id":slot.slot_id}})),
             "remaining_unreviewed_packs":draft.required_pack_ids.difference(&draft.reviewed_pack_ids).count(),
             "instruction":"本项来自持久检查进度，不是已完成的语义判断。先对source_scope的未处置范围读取并提交明确来源判断；来源处置完成后read_claim_evidence读取该要求的全部主张证据；已完整读取后提交submit_claim_comparison，再读取实际目标正文并submit_review。next_unread_slot给出具体slot_id；用其args加当前wire_scope读取，续页使用实际返回的next_cursor，直到selection_complete。已读目录不能替代目标字段、格式和空位说明的充分性判断；具体义务绑定的空位允许保持空，不能因未填投标人材料报错。泛化说明或具体目标覆盖不足应如实提交问题。当前要求未复核前不跳到下一条。不要在requirements与packs目录之间反复重启。来源包的未提取义务仍须独立检查，不能以要求比较替代来源覆盖。"});
@@ -447,6 +467,7 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    synchronize_discovery(input, state)?;
     let duty = current(input, state);
     apply_for_duty(input, state, name, args, duty)
 }
@@ -471,25 +492,13 @@ pub fn apply_for_duty(
     Ok(value)
 }
 
-fn apply_for_duty_staged(
+/// Synchronize only from the canonical completed DiscoverWork. Request and read
+/// entry points call this before deriving duty or projecting Check work, including
+/// the repair path that preserves a ready independent response draft.
+pub(crate) fn synchronize_discovery(
     input: &FrozenInput,
     state: &mut Checkpoint,
-    name: &str,
-    args: &Value,
-    duty: Duty,
-) -> Result<Value, String> {
-    if let Some(error) = deny(
-        duty,
-        name,
-        !super::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty(),
-    ) {
-        return Err(error.into());
-    }
-    let handler = registry()
-        .into_iter()
-        .find(|spec| spec.name == name)
-        .ok_or("unknown outline tool")?
-        .handler;
+) -> Result<(), String> {
     if let Some(work) = &state.outline_run.reading_packs
         && work.complete()
     {
@@ -498,6 +507,9 @@ fn apply_for_duty_staged(
             work.revision,
             work.requirement_records(),
         ))?;
+        if state.outline_run.tool_draft.discovery_revision.as_ref() == Some(&revision) {
+            return Ok(());
+        }
         if state
             .outline_run
             .tool_draft
@@ -510,11 +522,23 @@ fn apply_for_duty_staged(
                 .iter()
                 .filter(|(id, record)| work.requirement_records().get(*id) != Some(*record))
                 .map(|(id, _)| id.clone())
+                .chain(
+                    work.requirement_records()
+                        .keys()
+                        .filter(|id| !previous.contains_key(*id))
+                        .cloned(),
+                )
                 .collect();
             let sources = previous
                 .iter()
                 .filter(|(id, record)| work.requirement_records().get(*id) != Some(*record))
                 .flat_map(|(_, record)| record.evidence.iter().cloned())
+                .chain(
+                    work.requirement_records()
+                        .iter()
+                        .filter(|(id, _)| !previous.contains_key(*id))
+                        .flat_map(|(_, record)| record.evidence.iter().cloned()),
+                )
                 .collect::<Vec<_>>();
             super::repair::retain_independent(&mut state.outline_run.tool_draft, changed, &sources);
         }
@@ -536,7 +560,54 @@ fn apply_for_duty_staged(
                 Ok((id, scope))
             })
             .collect::<Result<_, String>>()?;
+        state
+            .outline_run
+            .tool_draft
+            .review_issues
+            .retain(|issue| !issue.id.starts_with("discover:"));
+        state
+            .outline_run
+            .tool_draft
+            .review_issues
+            .extend(work.review_issues());
+    } else if let Some(work) = &state.outline_run.reading_packs {
+        // During Discover, remove reopened/uncommitted findings. Once the
+        // canonical revision is synchronized, Check may enrich the same issue
+        // identity without being overwritten by routine request preparation.
+        state
+            .outline_run
+            .tool_draft
+            .review_issues
+            .retain(|issue| !issue.id.starts_with("discover:"));
+        state
+            .outline_run
+            .tool_draft
+            .review_issues
+            .extend(work.review_issues());
     }
+    Ok(())
+}
+
+fn apply_for_duty_staged(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    name: &str,
+    args: &Value,
+    duty: Duty,
+) -> Result<Value, String> {
+    if let Some(error) = deny(
+        duty,
+        name,
+        !super::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty(),
+    ) {
+        return Err(error.into());
+    }
+    let handler = registry()
+        .into_iter()
+        .find(|spec| spec.name == name)
+        .ok_or("unknown outline tool")?
+        .handler;
+    synchronize_discovery(input, state)?;
     match handler {
         ToolHandler::Requirements | ToolHandler::ClaimRead => {
             return Err("read tools require the asynchronous runtime continuation route".into());
@@ -585,6 +656,8 @@ fn apply_for_duty_staged(
                         .map_err(|e| e.to_string())?,
                     requirement_ids: vec![id.into()],
                     evidence: refs,
+                    requested_information:
+                        "Clarify the source-backed interpretation of unresolved claims".into(),
                 });
             }
             draft.claim_comparisons.insert(id.into(), comparison);
@@ -627,6 +700,11 @@ fn apply_for_duty_staged(
             .as_ref()
             .map(super::discover::DiscoverWork::requirement_ids)
             .unwrap_or_default();
+        if name == "read_outline" && args["mode"] == "manual_task" {
+            let value = manual_task_projection(input, state, args)?;
+            queue_read_projection(state, name, &value, duty);
+            return Ok(value);
+        }
         if name == "read_outline" {
             let mut value = super::tools::apply_canonical(
                 input,
@@ -799,21 +877,57 @@ pub(crate) fn finish_check_repair_batch(
     if current(input, state) != Duty::Check || state.done {
         return Ok(false);
     }
-    let Some((id, comparison)) = state
-        .outline_run
-        .tool_draft
+    let draft = &state.outline_run.tool_draft;
+    let document_blocked = |id: &str| super::source_review::has_document_issue(input, draft, id);
+    let finding = draft
         .claim_comparisons
         .iter()
-        .find(|(_, c)| c.decisions.iter().any(|d| d.verdict != "supports"))
-        .map(|(id, c)| (id.clone(), c.clone()))
-    else {
+        .find(|(id, c)| {
+            !document_blocked(id) && c.decisions.iter().any(|d| d.verdict != "supports")
+        })
+        .map(|(id, c)| (id.clone(), "claim_conflict", json!(c)))
+        .or_else(|| {
+            draft
+                .source_dispositions
+                .values()
+                .find(|review| {
+                    review.verdict == super::source_review::Verdict::Unresolved
+                        && !draft.review_issues.iter().any(|issue| {
+                            super::source_review::is_document_issue(issue)
+                                && review.evidence.iter().all(|reference| {
+                                    super::evidence::covered_by_union(reference, &issue.evidence)
+                                })
+                        })
+                })
+                .map(|review| {
+                    (
+                        format!("{}:source", review.pack_id),
+                        "source_omission",
+                        json!(review),
+                    )
+                })
+        })
+        .or_else(|| {
+            draft
+                .template_reviews
+                .iter()
+                .find(|(id, review)| {
+                    !document_blocked(id)
+                        && super::template_review::validate(input, draft, review)
+                            .is_ok_and(|ready| !ready)
+                })
+                .map(|(id, review)| (id.clone(), "template_insufficiency", json!(review)))
+        });
+    let Some((id, finding_kind, comparison)) = finding else {
         return Ok(false);
     };
     let (pack_id, _) = id
         .rsplit_once(':')
         .ok_or("requirement has no pack identity")?;
+    // At most one automatic attempt per input/scope/finding class. A persistent
+    // failure stays visible for explicit follow-up instead of looping revisions.
     let signature =
-        super::canonical_sha256(&(super::evidence::input_digest(input)?, &id, &comparison))?;
+        super::canonical_sha256(&(super::evidence::input_digest(input)?, &id, finding_kind))?;
     if state
         .outline_run
         .repair_events
@@ -835,7 +949,31 @@ pub(crate) fn finish_check_repair_batch(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let mut event = json!({"signature":signature,"pack_id":pack_id,"comparison":comparison,"issues":issues,"status":"held_for_review"});
+    let mut event = json!({"signature":signature,"pack_id":pack_id,"finding_kind":finding_kind,"comparison":comparison,"issues":issues,"status":"held_for_review"});
+    if finding_kind == "template_insufficiency" {
+        let sources = state
+            .outline_run
+            .tool_draft
+            .requirements
+            .get(&id)
+            .ok_or("template requirement missing")?
+            .evidence
+            .clone();
+        super::repair::retain_independent(
+            &mut state.outline_run.tool_draft,
+            std::collections::BTreeSet::from([id.clone()]),
+            &sources,
+        );
+        event["status"] = json!("reorganize");
+        state.outline_run.repair_events.push(event.clone());
+        state.outline_run.phase = Phase::Outline;
+        state.analysis.outline.phase = Phase::Outline;
+        state.outline_run.finish_rejected = false;
+        state.done = false;
+        state.transcript.clear();
+        state.transcript.push(json!({"role":"user","content":json!({"host_repair_request":event,"instruction":"Repair the affected response targets from current canonical requirements, preserve independent work, then perform fresh Check. Do not change an obligation merely to make an insufficient template pass."}).to_string()}));
+        return Ok(true);
+    }
     let revision = state
         .outline_run
         .reading_packs
@@ -893,6 +1031,20 @@ pub fn reopen_discovery_pack(
     expected_revision: u64,
     operation_id: &str,
 ) -> Result<super::discover::ParsePack, String> {
+    let mut next = state.clone();
+    let result =
+        reopen_discovery_pack_staged(input, &mut next, pack_id, expected_revision, operation_id)?;
+    *state = next;
+    Ok(result)
+}
+
+fn reopen_discovery_pack_staged(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    pack_id: &str,
+    expected_revision: u64,
+    operation_id: &str,
+) -> Result<super::discover::ParsePack, String> {
     // Derive grants only from current, validated Check comparisons, before
     // clearing the review draft. Candidate retrieval alone grants nothing.
     let mut support_options = Vec::new();
@@ -917,12 +1069,37 @@ pub fn reopen_discovery_pack(
             &state.outline_run.tool_draft.check_reads.evidence,
         )?);
     }
-    let affected = work
+    let mut affected: std::collections::BTreeSet<String> = work
         .requirement_ids()
         .into_iter()
         .filter(|id| id.starts_with(&format!("{pack_id}:")))
         .collect();
     let changed_sources = work.pack_evidence(input, pack_id)?;
+    // Re-extract condition dependents before old originating IDs can be deleted
+    // or reused by a replacement submission. This is not Check credit migration.
+    loop {
+        let old_len = affected.len();
+        let carriers = work
+            .requirement_records()
+            .iter()
+            .filter(|(id, _)| affected.contains(*id))
+            .flat_map(|(_, record)| record.evidence.iter())
+            .chain(changed_sources.iter())
+            .collect::<Vec<_>>();
+        let additions = work.requirement_records().iter().filter(|(_,record)| record.condition_support.iter().any(|support|
+            matches!(&support.origin, super::discover::ConditionSupportOrigin::ReviewedRequirement { requirement_id } if affected.contains(requirement_id))
+                || support.evidence.iter().any(|reference| carriers.iter().any(|source| source.same_carrier(reference)))))
+            .map(|(id,_)|id.clone()).collect::<Vec<_>>();
+        affected.extend(additions);
+        if old_len == affected.len() {
+            break;
+        }
+    }
+    let dependent_packs = affected
+        .iter()
+        .filter_map(|id| id.rsplit_once(':').map(|(pack, _)| pack.to_owned()))
+        .filter(|pack| pack != pack_id)
+        .collect::<std::collections::BTreeSet<_>>();
     let outcome = state
         .outline_run
         .reading_packs
@@ -930,6 +1107,18 @@ pub fn reopen_discovery_pack(
         .ok_or("reading packs are not initialized")?
         .reopen_committed(input, pack_id, expected_revision, operation_id)?;
     if !outcome.replayed {
+        for dependent in dependent_packs {
+            let work = state.outline_run.reading_packs.as_mut().unwrap();
+            let revision = work.session(input, &dependent)?["pack"]["pack_revision"]
+                .as_u64()
+                .ok_or("dependent pack revision missing")?;
+            work.reopen_committed(
+                input,
+                &dependent,
+                revision,
+                &format!("{operation_id}:condition:{dependent}"),
+            )?;
+        }
         state
             .outline_run
             .reading_packs
@@ -946,6 +1135,7 @@ pub fn reopen_discovery_pack(
         state.analysis.outline.phase = Phase::Discover;
         state.draft_stage = DraftStage::Outline;
         state.done = false;
+        synchronize_discovery(input, state)?;
     }
     Ok(outcome.pack)
 }
@@ -966,6 +1156,56 @@ fn note_check_phase(input: &FrozenInput, state: &mut Checkpoint) {
     state.outline_run.phase = phase;
 }
 
+fn manual_task_projection(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    args: &Value,
+) -> Result<Value, String> {
+    let requirement_id = args["requirement_id"]
+        .as_str()
+        .ok_or("manual task requirement missing")?;
+    let task_id = args["task_id"]
+        .as_str()
+        .ok_or("manual task identity missing")?;
+    let draft = &state.outline_run.tool_draft;
+    let version =
+        super::template_review::manual_task_version(input, draft, requirement_id, task_id)?;
+    let fulfillment = draft
+        .fulfillments
+        .iter()
+        .find(|row| row.requirement_id == requirement_id)
+        .ok_or("manual task fulfillment missing")?;
+    let target = fulfillment.target_refs.iter().find(|target|matches!(target,super::TargetRef::ManualTask { task_id:id,.. } if id == task_id)).ok_or("manual task missing")?;
+    Ok(
+        json!({"mode":"manual_task","requirement_id":requirement_id,"task_id":task_id,"version":version,"target":target,"selection_complete":true}),
+    )
+}
+
+/// Called only for a complete host-projected row, or an exactly reconstructed
+/// metadata record after all fragments have been delivered. A fragment carrying
+/// only the version is never a read receipt.
+pub(crate) fn complete_manual_task_version(
+    draft: &super::tools::Draft,
+    row: &Value,
+) -> Option<String> {
+    if row["mode"] != "manual_task" || row.get("field_fragments").is_some() {
+        return None;
+    }
+    let requirement_id = row["requirement_id"].as_str()?;
+    let task_id = row["task_id"].as_str()?;
+    let fulfillment = draft
+        .fulfillments
+        .iter()
+        .find(|f| f.requirement_id == requirement_id)?;
+    let target = fulfillment.target_refs.iter().find(
+        |target| matches!(target,super::TargetRef::ManualTask {task_id:id,..} if id == task_id),
+    )?;
+    if row["target"] != serde_json::to_value(target).ok()? {
+        return None;
+    }
+    row["version"].as_str().map(str::to_owned)
+}
+
 pub(crate) fn full_read_projection(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -980,6 +1220,9 @@ pub(crate) fn full_read_projection(
     query.as_object_mut().unwrap().remove("version");
     match name {
         "read_requirements" => requirement_page(input, state, &query),
+        "read_outline" if query["mode"] == "manual_task" => {
+            manual_task_projection(input, state, &query)
+        }
         "read_outline" => {
             let mut value =
                 super::tools::read_outline(input, &state.outline_run.tool_draft, &query)?;
@@ -1016,6 +1259,18 @@ pub(crate) fn queue_read_projection(state: &mut Checkpoint, name: &str, page: &V
     }
     if duty != Duty::Check {
         return;
+    }
+    if name == "read_outline" {
+        let rows = std::iter::once(page).chain(page["items"].as_array().into_iter().flatten());
+        let versions = rows
+            .filter_map(|row| complete_manual_task_version(draft, row))
+            .collect::<Vec<_>>();
+        for version in versions {
+            draft
+                .check_reads
+                .pending_manual_tasks
+                .push((state.turn, version));
+        }
     }
     if name == "read_requirements" {
         for row in page["items"].as_array().into_iter().flatten() {
@@ -1348,7 +1603,7 @@ fn submit_review(
             || record.obligation_strength == "unknown"
             || record.extraction_quality != "explicit"
         {
-            issues.push(super::ReviewIssue{id:format!("extraction-quality:{id}"),code:"uncertain_extraction".into(),description:format!("Requirement {id} retains kind={}, obligation_strength={}, extraction_quality={}; explicit source-backed resolution is required",record.kind,record.obligation_strength,record.extraction_quality),requirement_ids:vec![id.clone()],evidence:record.evidence.clone()});
+            issues.push(super::ReviewIssue{id:format!("extraction-quality:{id}"),code:"uncertain_extraction".into(),description:format!("Requirement {id} retains kind={}, obligation_strength={}, extraction_quality={}; explicit source-backed resolution is required",record.kind,record.obligation_strength,record.extraction_quality),requirement_ids:vec![id.clone()],evidence:record.evidence.clone(),requested_information:"Confirm the source meaning and extraction classification".into()});
         }
         let fulfillment = draft
             .fulfillments
@@ -1396,7 +1651,7 @@ fn submit_review(
             issues.push(super::ReviewIssue {
                 id:format!("source-incomplete:{}",super::canonical_sha256(&excerpt.evidence)?),code:"incomplete_source".into(),
                 description:format!("Source completeness is {}; verify the original carrier before relying on semantic coverage",excerpt.completeness),
-                requirement_ids:requirement_ids.iter().cloned().collect(),evidence:vec![excerpt.evidence],
+                requirement_ids:requirement_ids.iter().cloned().collect(),evidence:vec![excerpt.evidence],requested_information:"Provide a readable complete original carrier".into(),
             });
         }
     }
@@ -1405,6 +1660,8 @@ fn submit_review(
         if issue.id.trim().is_empty()
             || issue.description.trim().is_empty()
             || issue.code.trim().is_empty()
+            || (super::source_review::is_document_issue(issue)
+                && issue.requested_information.trim().is_empty())
             || issue.evidence.is_empty()
             || !ids.insert(&issue.id)
         {

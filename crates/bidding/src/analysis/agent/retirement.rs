@@ -80,6 +80,7 @@ fn committed_packs(input: &FrozenInput) -> DiscoverWork {
                 input,
                 &pack.id,
                 PackSubmit {
+                    issues: vec![],
                     call_id: format!("call:{}", pack.id),
                     claim_token: pack.claim_token.clone(),
                     pack_revision: pack.pack_revision,

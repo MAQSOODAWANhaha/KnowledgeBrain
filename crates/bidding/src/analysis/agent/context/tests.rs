@@ -898,6 +898,7 @@ fn over_budget_eviction_drops_only_committed_pack_turns() {
         &input,
         "pack-0",
         PackSubmit {
+            issues: vec![],
             call_id: "ok".into(),
             claim_token: packs[0].claim_token.clone(),
             pack_revision: packs[0].pack_revision,
@@ -912,6 +913,7 @@ fn over_budget_eviction_drops_only_committed_pack_turns() {
             &input,
             "pack-1",
             PackSubmit {
+                issues: vec![],
                 call_id: "bad".into(),
                 claim_token: packs[1].claim_token.clone(),
                 pack_revision: packs[1].pack_revision,
@@ -1173,6 +1175,7 @@ fn pack_commits_are_discover_progress_and_later_phases_can_block() {
             &input,
             "pack-0",
             PackSubmit {
+                issues: vec![],
                 call_id: "ok".into(),
                 claim_token: packs[0].claim_token.clone(),
                 pack_revision: packs[0].pack_revision,
@@ -1474,7 +1477,7 @@ async fn failed_feedback_repair_scenario(attempts: usize) {
     let session = work.session(&input, "pack-0").unwrap();
     let invalid_identity = json!({"pack_id":"pack-0","call_id":"wrong-identity",
         "claim_token":"wrong-claim","pack_revision":session["pack"]["pack_revision"],"repair":false,
-        "requirements":[],"no_requirement_reason":"No requirements","inspected_atom_ids":[]});
+        "requirements":[],"issues":[],"no_requirement_reason":"No requirements","inspected_atom_ids":[]});
     let unchanged = work.clone();
     let rejection =
         crate::outline::agent::apply(&input, &mut state, "submit_pack", &invalid_identity).unwrap();
@@ -1517,7 +1520,7 @@ async fn failed_feedback_repair_scenario(attempts: usize) {
         let mut args = json!({"pack_id":"pack-0","call_id":session["submission_operation_id"],
             "claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":attempt > 0,
             "requirements":vec![requirement;if attempt == 0 {1} else {24}],
-            "no_requirement_reason":if attempt == 0 { json!("No requirements, but missing inspection IDs") } else { Value::Null },
+            "issues":[],"no_requirement_reason":if attempt == 0 { json!("No requirements, but missing inspection IDs") } else { Value::Null },
             "inspected_atom_ids":[]});
         {
             for requirement in args["requirements"].as_array_mut().unwrap() {
@@ -1626,7 +1629,7 @@ async fn failed_feedback_repair_scenario(attempts: usize) {
     let repaired = crate::outline::agent::apply(&input, &mut state, "submit_pack", &json!({
         "pack_id":"pack-0","call_id":session["submission_operation_id"], "claim_token":pack["claim_token"],
         "pack_revision":pack["pack_revision"],"repair":true,"requirements":[],
-        "no_requirement_reason":"All source atoms inspected; no obligation found in this fixture",
+        "issues":[],"no_requirement_reason":"All source atoms inspected; no obligation found in this fixture",
         "inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()
     })).unwrap();
     assert_eq!(repaired["ok"], true);
@@ -1782,7 +1785,7 @@ async fn malformed_handle_near_output_limit_keeps_schema_feedback_repairable() {
             "pack_revision":pack["pack_revision"],"repair":false,"requirements":[{"description":"A requirement",
             "kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit",
             "source_section_id":{"pack_id":"pack-0","atom_ref":0},"evidence":[{"pack_id":"pack-0","atom_ref":999,"evidence_index":0}]}],
-            "no_requirement_reason":null,"inspected_atom_ids":[{"pack_id":"pack-0","atom_ref":0}]});
+            "issues":[],"no_requirement_reason":null,"inspected_atom_ids":[{"pack_id":"pack-0","atom_ref":0}]});
         if schema_failure {
             args["requirements"][0]["evidence"][0]["evidence_index"] = json!("not-an-integer");
         }
@@ -2268,7 +2271,7 @@ async fn private_runtime_repair_organize_fresh_check_cycle() {
             .map(|s| json!({"support_key":s["support_key"]}))
             .collect::<Vec<_>>();
         assert!(!support.is_empty());
-        let submit = json!({"pack_id":"pack-1","call_id":session["submission_operation_id"],"claim_token":session["pack"]["claim_token"],"pack_revision":session["pack"]["pack_revision"],"repair":false,"requirements":[{"description":"Synthetic fixture requires encrypted upload and excludes the optional paper artifact.","kind":"format","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":original.source_section_id,"evidence":original.evidence,"condition_support":support}],"inspected_atom_ids":[],"no_requirement_reason":null});
+        let submit = json!({"pack_id":"pack-1","call_id":session["submission_operation_id"],"claim_token":session["pack"]["claim_token"],"pack_revision":session["pack"]["pack_revision"],"repair":false,"requirements":[{"description":"Synthetic fixture requires encrypted upload and excludes the optional paper artifact.","kind":"format","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":original.source_section_id,"evidence":original.evidence,"condition_support":support}],"inspected_atom_ids":[],"issues":[],"no_requirement_reason":null});
         step(&input, &config, &mut state, "submit_pack", submit, true).await;
         assert_eq!(outline::current(&input, &state), outline::Duty::Organize);
         let records = state
@@ -2300,7 +2303,7 @@ async fn private_runtime_repair_organize_fresh_check_cycle() {
         step(&input,&config,&mut state,"put_slots",json!({"mode":"replace","slots":[{"slot_id":"response-body","chapter_id":"response","content":{"type":"generated_explanation","supporting_refs":refs},"text":"Synthetic fixture response: use the configured credential for encrypted upload before the fixture deadline; omit the optional paper artifact."}]}),true).await;
         let electronic = original.evidence[0].clone();
         let selected = records["pack-0:0"].evidence[2].clone();
-        step(&input,&config,&mut state,"put_slots",json!({"mode":"upsert","slots":[{"slot_id":"electronic-source","chapter_id":"response","content":{"type":"source_copy","refs":[electronic]}},{"slot_id":"project-selection-source","chapter_id":"response","content":{"type":"source_copy","refs":[selected]}}]}),true).await;
+        step(&input,&config,&mut state,"put_slots",json!({"mode":"upsert","slots":[{"slot_id":"electronic-source","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[electronic]}},{"slot_id":"project-selection-source","chapter_id":"response","content":{"type":"source_copy","purpose":"mandated_response","refs":[selected]}}]}),true).await;
         step(&input,&config,&mut state,"put_fulfillments",json!({"fulfillments":ids.iter().map(|id|json!({"requirement_id":id,"primary_response_chapter_id":"response","target_refs":[{"type":"text_slot","slot_id":"response-body"},{"type":"text_slot","slot_id":"electronic-source"},{"type":"text_slot","slot_id":"project-selection-source"}]})).collect::<Vec<_>>()}),true).await;
         assert_eq!(outline::current(&input, &state), outline::Duty::Check);
         assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
@@ -2693,6 +2696,18 @@ async fn host_navigation_continuation_reaches_real_handler_and_rejects_filter_ta
     raw["outline_run"]["reading_packs"]["requirements"][&id]["description"] =
         json!("合成要求".repeat(10000));
     let mut state: Checkpoint = serde_json::from_value(raw).unwrap();
+    let host = crate::outline::agent::host_packet(&input, &state, 1, json!({}), json!({}), None);
+    assert!(
+        host["review_work"]["target_refs"][0]
+            .get("description")
+            .is_none()
+    );
+    assert!(
+        host["review_work"]["target_refs"][0]["description_bytes"]
+            .as_u64()
+            .unwrap()
+            > 32768
+    );
     let mut config = crate::analysis::tests::config();
     config.limits.max_context_tokens = 32768;
     let navigation = outline::requirements_navigation();
@@ -3416,4 +3431,205 @@ fn serial_check_selects_unreviewed_source_after_reload_without_history() {
         after_review["check_work"]["source_scope"]["next_evidence"]
     );
     assert!(!state.done);
+}
+
+#[tokio::test]
+async fn document_issue_report_stops_before_provider_and_preserves_unapproved_report() {
+    struct ReportJournal(std::sync::Mutex<Option<Value>>);
+    #[async_trait]
+    impl Journal for ReportJournal {
+        async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
+            panic!("not needed")
+        }
+        async fn reserve(&self, _: &Checkpoint, _: &[u8]) -> Result<Option<usize>, AgentError> {
+            panic!("document report must not reserve")
+        }
+        async fn save(&self, state: &Checkpoint, progress: &Value) -> Result<(), AgentError> {
+            assert!(!state.done && !state.outline_run.tool_draft.finished);
+            *self.0.lock().unwrap() = Some(progress["outline_review_report"].clone());
+            Ok(())
+        }
+    }
+    struct NoModel;
+    #[async_trait]
+    impl Model for NoModel {
+        async fn turn(&self, _: &Config, _: &[u8]) -> Result<ChatTurn, AgentError> {
+            panic!("document report must not call a provider")
+        }
+    }
+    for code in [
+        "document_missing",
+        "document_conflict",
+        "document_ambiguous",
+        "document_unreadable",
+    ] {
+        let (input, mut state, pack, refs) = crate::outline::fixture_organized(true);
+        let draft = &mut state.outline_run.tool_draft;
+        draft.check_reads.evidence = refs.clone();
+        draft.check_reads.structure_keys = draft.source_scopes[&pack].structure_keys.clone();
+        let disposition = crate::outline::source_review::Disposition {
+            pack_id: pack.clone(),
+            version: crate::outline::source_review::version(
+                &input,
+                draft,
+                &pack,
+                &draft.source_scopes[&pack],
+            )
+            .unwrap(),
+            evidence: refs.clone(),
+            verdict: crate::outline::source_review::Verdict::Unresolved,
+            requirement_ids: BTreeSet::new(),
+            reason: "Synthetic source problem remains unresolved".into(),
+        };
+        draft.source_dispositions.insert(
+            crate::outline::source_review::key(&disposition).unwrap(),
+            disposition,
+        );
+        draft.review_issues.push(crate::outline::ReviewIssue {
+            id: "source-problem".into(),
+            code: code.into(),
+            description: "Synthetic source needs confirmation".into(),
+            requirement_ids: vec![],
+            evidence: refs,
+            requested_information: "Please supply or clarify the cited source".into(),
+        });
+        let config = crate::analysis::tests::config();
+        let journal = ReportJournal(std::sync::Mutex::new(None));
+        let cancel = CancellationToken::new();
+        let mut driver = crate::analysis::agent::RunDriver {
+            input: &input,
+            config: &config,
+            state: &mut state,
+            journal: &journal,
+            model: &NoModel,
+            cancel: &cancel,
+        };
+        let failure = driver.prepare_request().await.unwrap_err();
+        assert_eq!(failure.code, "DOCUMENT_ISSUES_REPORTED");
+        let saved = journal.0.lock().unwrap().clone().unwrap();
+        assert_eq!(saved["template_ready"], false);
+        assert_eq!(saved["issues"][0]["issue"]["code"], code);
+        assert_eq!(saved["issues"][0]["resolved"], false);
+        assert_eq!(saved["issues"][0]["affected_pack_ids"], json!([pack]));
+        assert_eq!(state.journal.accounting.physical_calls, 0);
+    }
+}
+
+#[tokio::test]
+async fn manual_task_actual_request_paging_requires_complete_exact_delivery() {
+    let (input, mut state, _, _) = crate::outline::fixture_organized(false);
+    let requirement_id = state
+        .outline_run
+        .tool_draft
+        .required_requirement_ids
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    let fulfillment = state
+        .outline_run
+        .tool_draft
+        .fulfillments
+        .iter_mut()
+        .find(|f| f.requirement_id == requirement_id)
+        .unwrap();
+    fulfillment.target_refs = vec![crate::outline::TargetRef::ManualTask {
+        task_id: "verify-attachment".into(),
+        description: "需人工核实证据并补充附件。".repeat(4000),
+    }];
+    let version = crate::outline::template_review::manual_task_version(
+        &input,
+        &state.outline_run.tool_draft,
+        &requirement_id,
+        "verify-attachment",
+    )
+    .unwrap();
+    let mut config = crate::analysis::tests::config();
+    config.limits.max_context_tokens = 32768;
+    state.transcript.clear();
+    let mut args =
+        json!({"mode":"manual_task","requirement_id":requirement_id,"task_id":"verify-attachment"});
+    let mut pages = 0;
+    loop {
+        let call = knowledge::models::ChatToolCall {
+            id: format!("manual-{pages}"),
+            name: "read_outline".into(),
+            arguments: args.to_string(),
+        };
+        state.transcript.push(json!({"role":"assistant","tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]}));
+        let before = state.outline_run.tool_draft.clone();
+        let page = crate::analysis::agent::read_projection_in_context(
+            &input,
+            &config,
+            &mut state,
+            &args,
+            std::slice::from_ref(&call),
+            &[],
+            crate::outline::agent::Duty::Check,
+        )
+        .await
+        .unwrap();
+        state.transcript.push(json!({"role":"tool","tool_call_id":call.id,"content":json!({"ok":true,"result":page}).to_string()}));
+        crate::outline::read_receipts::queue(&mut state, &before, &call.id, true);
+        let body: Value = serde_json::from_slice(
+            &crate::analysis::agent::request(&input, &config, &mut state)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        crate::outline::read_receipts::seal(&mut state, &body).unwrap();
+        assert!(
+            !state
+                .outline_run
+                .tool_draft
+                .check_reads
+                .manual_tasks
+                .contains(&version)
+        );
+        crate::outline::read_receipts::confirm(&mut state, &body).unwrap();
+        pages += 1;
+        if page["selection_complete"] == true {
+            break;
+        }
+        assert!(
+            !state
+                .outline_run
+                .tool_draft
+                .check_reads
+                .manual_tasks
+                .contains(&version)
+        );
+        args = json!({"cursor":page["next_cursor"]});
+        state.transcript.clear();
+        state.turn += 1;
+        assert!(pages < 40, "bounded synthetic pagination must terminate");
+    }
+    assert!(
+        pages > 1,
+        "test must exercise real full-request budget fragmentation"
+    );
+    assert!(
+        state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .manual_tasks
+            .contains(&version)
+    );
+    state.outline_run.tool_draft.read_epoch += 1;
+    let changed = crate::outline::template_review::manual_task_version(
+        &input,
+        &state.outline_run.tool_draft,
+        &requirement_id,
+        "verify-attachment",
+    )
+    .unwrap();
+    assert!(
+        !state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .manual_tasks
+            .contains(&changed)
+    );
 }
