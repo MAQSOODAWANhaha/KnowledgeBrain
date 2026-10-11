@@ -1,4 +1,116 @@
 #[test]
+fn source_identity_dictionary_preserves_native_locations_and_document_separation() {
+    let mut first = source("first", 0, "Original 😀 wording\r\n", "first-section");
+    first.document_id = "one".into();
+    first.locator = json!({"unit_id":"same-native-unit","section_id":"first-section",
+        "heading_path":"Heading","document_revision":"revision-one","parser_version":"parser",
+        "page_ordinal":3,"table_ordinal":2,"left":0.25,"top":0.5,
+        "physical_locator":{"page_ordinal":3,"table_ordinal":2,"left":0.25,"top":0.5},
+        "physical_path":{"sheet":"Sheet A","cell":"B7"},"custom_native_coordinate":{"paragraph":8},
+        "physical_locator_unavailable_reason":"no word-level box","completeness":"complete"});
+    let mut second = first.clone();
+    second.source_unit_revision_id = "second".into();
+    second.document_id = "two".into();
+    second.ordinal = 1;
+    second.locator["document_revision"] = json!("revision-two");
+    second.locator["physical_locator"]["page_ordinal"] = json!(4);
+    let mut third = first.clone();
+    third.source_unit_revision_id = "third".into();
+    third.ordinal = 2;
+    third.locator["parser_version"] = json!("another-parser");
+    let input = input(vec![first, second, third], vec![]);
+    let before = serde_json::to_value(&input).unwrap();
+    let packs = plan_packs(&input, 32768).unwrap();
+    let mut pack = packs[0].clone();
+    pack.atoms = packs.iter().flat_map(|p| p.atoms.clone()).collect();
+    pack.document_ids = vec!["one".into(), "two".into()];
+    let wire = materialize_pack(&input, &pack).unwrap();
+    assert_eq!(wire["source_documents"].as_array().unwrap().len(), 3);
+    for (atom, rendered) in pack.atoms.iter().zip(wire["atoms"].as_array().unwrap()) {
+        let source = input.source_units.iter().find(|s| s.source_unit_revision_id == atom.source_unit_revision_id).unwrap();
+        let document = wire["source_documents"].as_array().unwrap().iter()
+            .find(|d| d["document_key"] == rendered["source_identity"]["document_key"]).unwrap();
+        assert_eq!(document["identity"]["document_id"], source.document_id);
+        assert_eq!(document["identity"]["document_revision"], source.locator["document_revision"]);
+        assert_eq!(document["identity"]["parser_version"], source.locator["parser_version"]);
+        let native = &rendered["source_identity"]["native_locator"];
+        for field in ["unit_id", "page_ordinal", "table_ordinal", "left", "top", "physical_path",
+            "custom_native_coordinate", "physical_locator_unavailable_reason"] {
+            assert_eq!(native[field], source.locator[field]);
+        }
+        assert_eq!(native.get("physical_locator").is_some(), source.document_id == "two");
+        assert_eq!(rendered["excerpts"][0]["quote"], source.text);
+        assert_eq!(rendered["atom_key"], atom_key(&pack, atom).unwrap());
+        let reference = atom_scope(atom, &pack.input_digest, true).remove(0);
+        assert_eq!(rendered["excerpts"][0]["evidence_key"], evidence_key(&pack, atom, &reference).unwrap());
+    }
+    assert_eq!(serde_json::to_value(&input).unwrap(), before);
+    // A derived fragment heading must not erase a different native location.
+    pack.atoms[0].heading_path = "Fragment heading".into();
+    pack.atoms[0].section_id = "Fragment section".into();
+    let fragment = materialize_pack(&input, &pack).unwrap();
+    assert_eq!(fragment["atoms"][0]["source_identity"]["native_locator"]["heading_path"], "Heading");
+    assert_eq!(fragment["atoms"][0]["source_identity"]["native_locator"]["section_id"], "first-section");
+}
+
+#[test]
+fn source_identity_projection_shrinks_repeated_metadata_without_changing_canonical_scope() {
+    let mut sources = Vec::new();
+    for n in 0..12 {
+        let mut unit = source(&format!("source-{n}"), n, "Exact original text", "Section");
+        unit.locator["unit_id"] = json!(format!("native-{n}"));
+        unit.locator["document_revision"] = json!("revision-with-long-immutable-identity".repeat(4));
+        unit.locator["parser_version"] = json!("parser-with-version-and-build-identity".repeat(4));
+        unit.locator["page_ordinal"] = json!(n);
+        sources.push(unit);
+    }
+    let input = input(sources, vec![]);
+    let mut work = DiscoverWork::plan(&input, 32768);
+    let pack = work.claim(1).remove(0);
+    assert_eq!(pack.atoms.len(), 12);
+    let canonical = work.canonical_session(&pack.id).unwrap();
+    let digest = input_digest(&input).unwrap();
+    let wire = materialize_pack(&input, &pack).unwrap();
+    assert_eq!(wire["source_documents"].as_array().unwrap().len(), 1);
+    // Compare the same text, evidence, cells and metadata with the previous
+    // repeated identity representation, without a document-specific byte cap.
+    let mut repeated = wire.clone();
+    repeated.as_object_mut().unwrap().remove("source_documents");
+    for (atom, source) in repeated["atoms"].as_array_mut().unwrap().iter_mut().zip(&input.source_units) {
+        atom["source_identity"] = json!({"document_id":source.document_id,
+            "document_revision":source.locator["document_revision"],"parser_version":source.locator["parser_version"],
+            "source_unit_revision_id":source.source_unit_revision_id,"native_locator":source.locator});
+    }
+    assert!(serde_json::to_vec(&wire).unwrap().len() < serde_json::to_vec(&repeated).unwrap().len());
+    assert_eq!(work.canonical_session(&pack.id).unwrap(), canonical);
+    assert_eq!(input_digest(&input).unwrap(), digest);
+    assert!(work.session_fitting(&input, &pack.id, &|_| Ok(false)).unwrap_err().contains("pack_context_exceeded"),
+        "compacting provenance must not bypass exact request budget admission");
+    let mut next_revision = pack.clone();
+    next_revision.pack_revision += 1;
+    let revised = materialize_pack(&input, &next_revision).unwrap();
+    assert_ne!(wire["source_documents"][0]["document_key"], revised["source_documents"][0]["document_key"]);
+    let mut changed = input.clone();
+    changed.source_units[0].text.push('!');
+    let changed_pack = plan_packs(&changed, 32768).unwrap().remove(0);
+    let changed_wire = materialize_pack(&changed, &changed_pack).unwrap();
+    assert_ne!(wire["source_documents"][0]["document_key"], changed_wire["source_documents"][0]["document_key"]);
+}
+
+#[test]
+fn source_identity_projection_rejects_foreign_owner() {
+    let input = input(vec![source("unit", 0, "Original", "Section")], vec![]);
+    let mut work = DiscoverWork::plan(&input, 8192);
+    let mut pack = work.claim(1).remove(0);
+    assert!(materialize_pack(&input, &pack).is_ok());
+    let original_key = atom_key(&pack, &pack.atoms[0]).unwrap();
+    pack.atoms[0].document_id = "foreign-document".into();
+    assert_eq!(atom_key(&pack, &pack.atoms[0]).unwrap(), original_key,
+        "retaining an issued atom handle cannot authorize a forged document owner");
+    assert!(materialize_pack(&input, &pack).unwrap_err().contains("ownership mismatch"));
+}
+
+#[test]
 fn compact_blank_ranges_preserve_canonical_cells_and_request_dictionary() {
     let cells = (0..7)
         .flat_map(|row| {
@@ -755,7 +867,7 @@ fn opaque_evidence_keys_bind_current_scope_and_select_exact_grid_and_text() {
                 };
                 let key = item["evidence_key"].as_str().unwrap();
                 assert_eq!(key.len(), 27);
-                let make = |key: &str| json!({"requirements":[{"source_section_id":{"atom_key":atom_key(&pack,atom).unwrap()},"evidence":[{"evidence_key":key}]}]});
+                let make = |key: &str| json!({"requirements":[{"source_section_id":{"atom_key":atom_key(&pack,atom).unwrap()},"evidence":[{"evidence_key":key}]}],"issues":[]});
                 let mut body = make(key);
                 resolve_submission_handles(&pack, &mut body).unwrap();
                 assert_eq!(
@@ -811,7 +923,7 @@ fn condition_support_keys_are_separate_from_owned_evidence_and_revision_bound() 
     pack.condition_support_options.push(option.clone());
     let key = support_key(&pack, &option).unwrap();
     let selected_atom = atom_key(&pack, &pack.atoms[0]).unwrap();
-    let make = |key: &str| json!({"requirements":[{"source_section_id":{"atom_key":selected_atom},"evidence":[],"condition_support":[{"support_key":key}]}]});
+    let make = |key: &str| json!({"requirements":[{"source_section_id":{"atom_key":selected_atom},"evidence":[],"condition_support":[{"support_key":key}]}],"issues":[]});
     let mut body = make(&key);
     resolve_submission_handles(&pack, &mut body).unwrap();
     assert_eq!(

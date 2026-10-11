@@ -44,6 +44,7 @@ fn kind(field: &str) -> Option<char> {
         "quote_handle" | "evidence_handles" | "primary_handles" | "support_handles" => 'q',
         "version" | "review_version" | "template_review_version" | "source_review_version" => 'z',
         "source_id" | "image_id" | "source_unit_revision_id" => 'i',
+        "document_key" => 'b',
         _ => return None,
     })
 }
@@ -303,6 +304,56 @@ pub(crate) fn project_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_document_identity_aliases_are_scoped_and_cannot_authorize_evidence() {
+        let input = super::super::tests::input();
+        let mut state = super::super::acceptance::checkpoint(&input);
+        let mut wire = body();
+        let payload = json!({"source_documents":[
+            {"document_key":"doc-one-revision-one","identity":{"document_id":"one"}},
+            {"document_key":"doc-two-revision-one","identity":{"document_id":"two"}}],
+            "atoms":[{"source_identity":{"document_key":"doc-one-revision-one"}},
+                {"source_identity":{"document_key":"doc-two-revision-one"}}]});
+        wire["messages"][0]["content"] = json!(payload.to_string());
+        let original = wire.clone();
+        let registry = project(&state, &mut wire).unwrap();
+        let projected: Value =
+            serde_json::from_str(wire["messages"][0]["content"].as_str().unwrap()).unwrap();
+        let first = &projected["source_documents"][0]["document_key"];
+        let second = &projected["source_documents"][1]["document_key"];
+        assert_ne!(first, second);
+        assert!(first.as_str().unwrap().starts_with('b'));
+        assert_eq!(
+            *first,
+            projected["atoms"][0]["source_identity"]["document_key"]
+        );
+        assert_eq!(
+            *second,
+            projected["atoms"][1]["source_identity"]["document_key"]
+        );
+        assert!(!wire.to_string().contains("doc-one-revision-one"));
+        assert!(
+            registry
+                .decode(
+                    json!({"wire_scope":registry.active,"evidence_key":first}),
+                    false
+                )
+                .is_err()
+        );
+        let encoded = registry
+            .fixture_encode(json!({"document_key":"doc-one-revision-one"}))
+            .unwrap();
+        let restored: Registry = serde_json::from_value(json!(registry)).unwrap();
+        assert_eq!(
+            restored.decode(encoded.clone(), false).unwrap()["document_key"],
+            "doc-one-revision-one"
+        );
+        state.outline_run.tool_draft.model_wire = registry;
+        state.turn += 1;
+        let mut next_wire = original;
+        let next = project(&state, &mut next_wire).unwrap();
+        assert!(next.decode(encoded, false).is_err());
+    }
     fn body() -> Value {
         json!({"messages":[{"role":"user","content":json!({"pack":{"id":"pack-0","pack_revision":1,"atoms":[{"atom_key":"atom-full-hash","evidence_key":"ev-full-hash","source_key":"src-full-hash","support_key":"cs-full-hash"}],"claim_token":"claim-full-hash"},"submission_operation_id":"operation-full-hash","review_evidence_key":"review-full-hash","quote_handle":"q-original","claim_handle":"c-original","table_id":"table-original","next_cursor":"cursor-original"}).to_string()}],"tools":super::super::agent::schemas_for(super::super::agent::Duty::Discover)})
     }

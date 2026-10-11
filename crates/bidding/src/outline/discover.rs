@@ -692,12 +692,34 @@ impl DiscoverWork {
         if !gate.is_empty() {
             return Err(feedback(pack_id, &submit, gate));
         }
-        let errors = self.validation_errors(input, &record.pack, &submit);
+        let mut errors = self.validation_errors(input, &record.pack, &submit);
         // Validate the complete payload before changing either indexes or pack state.
         let mut next = self.clone();
         let record = next.packs.get_mut(pack_id).expect("validated pack");
         if repair {
+            let previous_pack = record.pack.clone();
             claim_record(record, true);
+            // Validation applies to the submitted claim, but corrective hints must
+            // resolve in the next live claim. Keep the original errors and rotate
+            // only their owner handles; never accept an old handle on the wire.
+            let owner_keys = record
+                .pack
+                .atoms
+                .iter()
+                .map(|atom| {
+                    (
+                        atom_key(&previous_pack, atom).expect("serializable atom identity"),
+                        atom_key(&record.pack, atom).expect("serializable atom identity"),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            for error in &mut errors {
+                for owner in &mut error.owner_atom_keys {
+                    if let Some(current) = owner_keys.get(owner) {
+                        *owner = current.clone();
+                    }
+                }
+            }
         }
         let result = if errors.is_empty() {
             let prefix = format!("{pack_id}:");
@@ -2035,6 +2057,7 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
     }
     .into_iter();
     let mut atoms = Vec::new();
+    let mut source_documents = Vec::<Value>::new();
     for atom in &pack.atoms {
         let mut rendered = serde_json::to_value(atom).map_err(|e| e.to_string())?;
         rendered["atom_key"] = json!(atom_key(pack, atom)?);
@@ -2046,22 +2069,67 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
                     && source.document_id == atom.document_id
             })
             .ok_or("pack atom source ownership mismatch")?;
+        // Presentation metadata only: ownership and issued evidence identities
+        // continue to use the complete immutable source and canonical pack.
+        let document = json!({
+            "document_id":source.document_id,
+            "document_revision":source.locator["document_revision"],
+            "parser_version":source.locator["parser_version"]
+        });
+        let document_key = format!(
+            "doc_{}",
+            super::canonical_sha256(&(
+                &pack.input_digest,
+                &pack.id,
+                pack.pack_revision,
+                &document
+            ))?
+        );
+        let document_index = source_documents
+            .iter()
+            .position(|entry| entry["identity"] == document)
+            .unwrap_or_else(|| {
+                let index = source_documents.len();
+                source_documents.push(json!({"document_key":document_key,"identity":document}));
+                index
+            });
         let mut native = source.locator.clone();
         if let Some(object) = native.as_object_mut() {
-            object.remove("cells");
-            object.remove("rendered_spans");
+            for field in ["cells", "rendered_spans"] {
+                object.remove(field);
+            }
+            for field in ["document_revision", "parser_version"] {
+                if object.get(field) == source_documents[document_index]["identity"].get(field) {
+                    object.remove(field);
+                }
+            }
+            for field in ["section_id", "heading_path"] {
+                if object.get(field) == rendered.get(field) {
+                    object.remove(field);
+                }
+            }
             if let Some(physical) = object
                 .get_mut("physical_locator")
                 .and_then(Value::as_object_mut)
             {
                 physical.remove("cells");
             }
+            // Keep format-specific paths, unavailable-location reasons and any
+            // differing nested coordinates. Only exact duplicates are omitted.
+            if object
+                .get("physical_locator")
+                .and_then(Value::as_object)
+                .is_some_and(|physical| {
+                    physical
+                        .iter()
+                        .all(|(key, value)| object.get(key) == Some(value))
+                })
+            {
+                object.remove("physical_locator");
+            }
         }
         rendered["source_identity"] = json!({
-            "document_id":source.document_id,
-            "document_revision":source.locator["document_revision"],
-            "parser_version":source.locator["parser_version"],
-            "source_unit_revision_id":source.source_unit_revision_id,
+            "document_key":source_documents[document_index]["document_key"],
             "native_locator":native
         });
         match &atom.carrier {
@@ -2109,7 +2177,7 @@ fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<Value, Stri
     let directory = dependency_directory(input, pack, None)?;
     let read_dependencies = directory["read_dependencies"].clone();
     Ok(
-        json!({"read_dependencies":read_dependencies,"next_dependency_cursor":directory["next_dependency_cursor"],"condition_support_options":supports,"next_support_cursor":support_page["next_support_cursor"],"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
+        json!({"source_documents":source_documents,"read_dependencies":read_dependencies,"next_dependency_cursor":directory["next_dependency_cursor"],"condition_support_options":supports,"next_support_cursor":support_page["next_support_cursor"],"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
     )
 }
 
@@ -2184,6 +2252,71 @@ pub(crate) fn fixture_key_submission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_repair_feedback_owner_handles_are_current_and_actionable() {
+        let input = input(
+            vec![
+                source("a", 0, "First obligation.", "one"),
+                source("b", 1, "Second obligation.", "two"),
+            ],
+            vec![],
+        );
+        let mut work = DiscoverWork::plan(&input, 8192);
+        let pack = work.claim(1).remove(0);
+        assert_eq!(pack.atoms.len(), 2);
+        let id = pack.id.clone();
+        let mut slot = Some(work);
+        let payload = |work: &DiscoverWork, owner: Option<&str>| {
+            let pack = &work.packs[&id].pack;
+            let (claim, operation) = work.model_handles(&id).unwrap();
+            let reference = atom_scope(&pack.atoms[1], &pack.input_digest, true).remove(0);
+            json!({"pack_id":id,"call_id":operation,"claim_token":claim,
+                "pack_revision":pack.pack_revision,"requirements":[{
+                    "description":"Second obligation.","kind":"material",
+                    "obligation_strength":"mandatory","extraction_quality":"explicit",
+                    "source_section_id":{"atom_key":owner.map(str::to_string)
+                        .unwrap_or_else(|| atom_key(pack,&pack.atoms[0]).unwrap())},
+                    "evidence":[{"evidence_key":evidence_key(pack,&pack.atoms[1],&reference).unwrap()}]
+                }],"issues":[],"no_requirement_reason":null,"inspected_atom_ids":[]})
+        };
+        let initial = payload(slot.as_ref().unwrap(), None);
+        let first = apply_pack_tool(&mut slot, &input, "submit_pack_scan", &initial).unwrap();
+        assert_eq!(first["ok"], false);
+        let old_owner = first["feedback"]["errors"][0]["owner_atom_keys"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let repair = payload(slot.as_ref().unwrap(), None);
+        let rejected = apply_pack_tool(&mut slot, &input, "repair_pack_scan", &repair).unwrap();
+        assert_eq!(rejected["ok"], false);
+        assert_eq!(rejected["feedback"]["errors"][0]["code"], "outside_section");
+        let owner = rejected["feedback"]["errors"][0]["owner_atom_keys"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let current = &slot.as_ref().unwrap().packs[&id].pack;
+        assert_eq!(
+            owner,
+            atom_key(current, &current.atoms[1]).unwrap(),
+            "failed repair must advertise the post-rotation owner handle"
+        );
+        assert_ne!(owner, old_owner);
+        // Persisted feedback must remain usable after host restart.
+        slot = Some(serde_json::from_value(json!(slot.as_ref().unwrap())).unwrap());
+        for invalid in [old_owner.as_str(), "atom_forged"] {
+            let bad = payload(slot.as_ref().unwrap(), Some(invalid));
+            let before = slot.clone();
+            assert!(apply_pack_tool(&mut slot, &input, "repair_pack_scan", &bad).is_err());
+            assert_eq!(slot, before);
+        }
+        let corrected = payload(slot.as_ref().unwrap(), Some(&owner));
+        assert_eq!(
+            apply_pack_tool(&mut slot, &input, "repair_pack_scan", &corrected).unwrap()["ok"],
+            true
+        );
+        assert_eq!(slot.as_ref().unwrap().requirements.len(), 1);
+    }
+
     #[test]
     fn model_claim_and_operation_handles_are_scoped_persistent_and_transactional() {
         let input = input(
