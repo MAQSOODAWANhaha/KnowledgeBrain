@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-- FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 33；Discover 并发 2、每请求 1 包。新检查点包含自动 user 页和保留审计的请求投影，不迁移旧状态。
+- FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 34；Discover 并发 2、每请求 1 包。新检查点包含自动 user 页和保留审计的请求投影，不迁移旧状态。
 - 必需支持由原生合并格、适用表头、既有续表链及精确有向关系选择；同节/祖先正文仍是可选候选，不全部成为提交屏障。主证据严格属于 owned 范围。
 - 宿主自动附入尚未确认的必需支持页。重复失败比较使用归一化动作及错误类，不以固定六次拒绝判定停滞；不同自然语言改写不保证能被识别为同一业务失败。
 
@@ -147,3 +147,7 @@ Discover `submit_pack.issues` 必填，可与正常 requirements 同次提交。
 当前请求的 `outline.chapters` 预览及 `read_outline(mode=chapters)` 提供完整成员列表；省略章节按分页读取，所有 ID 投影为当前 scope。写入回执返回归属新增/移除明细，现有 unassigned_count 和下一请求的未分配要求提供后续导航。历史参数中的旧 scope ID 仍不可复用。
 
 Organize 的新内容版本只计为工作；首次要求归属、表绑定、槽位构建按稳定的实体 ID 与章节 ID 组合各获一次完成进展，首次要求履行按要求 ID 获一次进展。新增槽及迁移至新的目标章可以推进工作；恢复已见组合、改正文或标题不能反复重置 focus。新增结构 ID 可以获得新的构建进展，这不是语义正确性证明，仍需后续 Check 和既有预算约束。完成身份随检查点持久化。checkpoint 33 不自动迁移旧检查点。这些机制不代表语义验收通过。
+
+## 可选纠错请求准入
+
+`max_context_tokens` 继续约束正常分包和普通请求，默认 131072。可选 `max_correction_context_tokens` 只放宽宿主确认的最近一组失败动作之后的纠错请求，最大 262144；未配置时行为不变。旧失败、模型自行标记 repair、成功读取后的普通请求不获得该额度。Discover 还要求当前 worker 为 BUSINESS_REJECTED；主流程规划始终用正常窗口。两类请求均计入完整输入、图片、安全余量及输出预留，并继续受累计预算约束。此项为本地准入策略，不声明供应商支持 256K，不增加 wire 输出硬限制。checkpoint 34 新建运行，不迁移旧状态。

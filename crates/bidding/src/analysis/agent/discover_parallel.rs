@@ -566,7 +566,10 @@ impl<J: Journal> PackHost<'_, J> {
             self.config.limits.token_safety_margin,
             self.config.provider.output_token_reserve as usize,
         )?;
-        let exceeds_budget = count.total_context_tokens > self.config.limits.max_context_tokens;
+        let correction = matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "BUSINESS_REJECTED")
+            && super::correction_retry(&worker.history);
+        let exceeds_budget =
+            count.total_context_tokens > self.config.limits.request_context_limit(correction);
         let mut read_frames = worker.related_read_frames.clone();
         for frame in &mut read_frames {
             frame.sealed_sha256 =

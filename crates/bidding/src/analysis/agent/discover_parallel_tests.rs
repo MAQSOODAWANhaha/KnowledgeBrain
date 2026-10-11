@@ -3538,3 +3538,5 @@ include!("discover_worker_prompt_tests.rs");
 include!("discover_batch_repair_tests.rs");
 
 include!("discover_reference_progress_tests.rs");
+
+include!("discover_correction_window_tests.rs");
