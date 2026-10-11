@@ -3171,6 +3171,9 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             sealed_sha256: None,
         });
     let snapshot = host.state.clone();
+    let retained_audit =
+        settled_submission_audit(&snapshot.outline_run.discover_workers["pack-0"].history);
+    assert!(!retained_audit.is_empty());
     for pending_kind in [
         "failed",
         "prepared",
@@ -3239,7 +3242,13 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             assert!(worker.delivered_related_evidence.is_empty());
             assert!(worker.delivered_dependency_pages.is_empty());
             assert!(worker.related_read_frames.is_empty());
-            assert!(worker.history.is_empty());
+            assert_eq!(worker.history, retained_audit);
+            assert!(
+                !worker
+                    .history
+                    .iter()
+                    .any(|message| message["content"] == "old owned scope")
+            );
             assert!(!worker.source_keys.contains_key("old-source-key"));
             assert_eq!(
                 worker.rejected_turns,
@@ -3270,5 +3279,188 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
     assert_eq!(
         exhausted.outline_run.discover_workers["pack-0"].rejected_turns,
         config.limits.max_no_progress_turns
+    );
+}
+
+#[test]
+fn failed_submission_projection_keeps_unconsumed_read_and_unsettled_groups() {
+    let read = json!({"role":"assistant","tool_calls":[{"id":"read","function":{"name":"read_evidence","arguments":"{}"}}]});
+    let read_result = json!({"role":"tool","tool_call_id":"read","content":"{\"ok\":true,\"result\":{\"status\":\"read_pending_delivery\"}}"});
+    let pending = json!({"role":"assistant","tool_calls":[{"id":"pending","function":{"name":"submit_pack","arguments":"large unacknowledged body"}}]});
+    let success = json!({"role":"assistant","tool_calls":[{"id":"success","function":{"name":"submit_pack","arguments":"successful body"}}]});
+    let success_result = json!({"role":"tool","tool_call_id":"success","content":"{\"ok\":true}"});
+    let mixed = json!({"role":"assistant","tool_calls":[{"id":"mixed-submit","function":{"name":"submit_pack","arguments":"mixed body"}},{"id":"mixed-read","function":{"name":"read_evidence","arguments":"{}"}}]});
+    let mixed_result =
+        json!({"role":"tool","tool_call_id":"mixed-submit","content":"{\"ok\":false}"});
+    let history = vec![
+        read,
+        read_result,
+        pending,
+        success,
+        success_result,
+        mixed,
+        mixed_result,
+    ];
+    assert_eq!(project_settled_submission_history(&history), history);
+}
+
+#[tokio::test]
+async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after_reload() {
+    let (input, mut config, journal) = fixture(1);
+    let mut state = journal.state.lock().unwrap().clone();
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let first = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+    let body: Value = serde_json::from_slice(&first.body).unwrap();
+    let packet = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+        .find(|p| p["reading_packs"].is_array())
+        .unwrap();
+    let atom = &packet["reading_packs"][0]["pack"]["atoms"][0];
+    let mut failed = Delayed::default().turn(&config, &first.body).await.unwrap();
+    let large = "synthetic failed submission audit ".repeat(10000);
+    failed.content = large.clone();
+    let mut args: Value = serde_json::from_str(&failed.tool_calls[0].arguments).unwrap();
+    args["requirements"] = json!([{"description":large,"kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":atom["atom_key"]},"evidence":[{"evidence_key":atom["excerpts"][0]["evidence_key"]}]}]);
+    // The valid positive extraction conflicts with the existing negative reason.
+    failed.tool_calls[0].arguments = args.to_string();
+    host.reserve(&first).await.unwrap();
+    host.received(&first, &failed).await.unwrap();
+    host.commit(&first, failed.clone()).await.unwrap();
+    let audit = host.state.outline_run.discover_workers["pack-0"]
+        .history
+        .clone();
+    assert_eq!(audit[0]["content"], failed.content);
+    assert!(settled_submission_pair(&audit, 0).is_some());
+    let second = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+    assert_eq!(second.scope.revision, first.scope.revision);
+    let second_wire: Value = serde_json::from_slice(&second.body).unwrap();
+    let second_packet = second_wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+        .find(|p| p["reading_packs"].is_array())
+        .unwrap();
+    let second_atom = &second_packet["reading_packs"][0]["pack"]["atoms"][0];
+    let mut second_failure = Delayed::default()
+        .turn(&config, &second.body)
+        .await
+        .unwrap();
+    second_failure.content = failed.content.clone();
+    let mut second_args: Value =
+        serde_json::from_str(&second_failure.tool_calls[0].arguments).unwrap();
+    assert_eq!(second_args["repair"], true);
+    second_args["requirements"] = json!([{"description":failed.content,"kind":"technical","obligation_strength":"mandatory","extraction_quality":"explicit","source_section_id":{"atom_key":second_atom["atom_key"]},"evidence":[{"evidence_key":second_atom["excerpts"][0]["evidence_key"]}]}]);
+    second_failure.tool_calls[0].arguments = second_args.to_string();
+    host.reserve(&second).await.unwrap();
+    host.received(&second, &second_failure).await.unwrap();
+    host.commit(&second, second_failure).await.unwrap();
+    let audit = host.state.outline_run.discover_workers["pack-0"]
+        .history
+        .clone();
+    assert_eq!(audit.len(), 4);
+    assert_eq!(audit[0]["content"], failed.content);
+    assert_eq!(audit[2]["content"], failed.content);
+    let repair = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+    assert!(repair.scope.revision > second.scope.revision);
+    assert_eq!(
+        host.state.outline_run.discover_workers["pack-0"].history,
+        audit
+    );
+    assert!(!String::from_utf8_lossy(&repair.body).contains(&failed.content));
+    assert!(String::from_utf8_lossy(&repair.body).contains("settled_submission_failure"));
+    // Save the common generation/registry starting point for both probes.
+    host.save().await.unwrap();
+    let measured = host.prepare_inner("pack-0", false).await.unwrap();
+    let measured_wire: Value = serde_json::from_slice(&measured.body).unwrap();
+    let count = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
+        &measured_wire,
+        &config.limits.tokenizer,
+        config.limits.image_token_reserve,
+        config.limits.token_safety_margin,
+        config.provider.output_token_reserve as usize,
+    )
+    .unwrap();
+    let first_count = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
+        &body,
+        &config.limits.tokenizer,
+        config.limits.image_token_reserve,
+        config.limits.token_safety_margin,
+        config.provider.output_token_reserve as usize,
+    )
+    .unwrap();
+    assert!(first_count.total_context_tokens <= count.total_context_tokens);
+    assert!(
+        first_count.total_context_tokens * 5 >= count.total_context_tokens * 4,
+        "fixture first wire must already occupy at least 80% of the measured repair window"
+    );
+    drop(host);
+    // The actual compact wire fits at its measured context boundary; no extra
+    // hypothetical future output is reserved. Original audit is far larger.
+    config.limits.max_context_tokens = count.total_context_tokens;
+    let mut restored = journal.load().await.unwrap().unwrap();
+    let mut tight = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut restored,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let fitted = tight.prepare_inner("pack-0", false).await.unwrap();
+    assert_eq!(
+        fitted.body, measured.body,
+        "same checkpoint generation must yield identical measured wire"
+    );
+    assert_eq!(
+        tight.state.outline_run.discover_workers["pack-0"].history,
+        audit
+    );
+    assert!(fitted.body.len() < serde_json::to_vec(&audit).unwrap().len());
+    assert!(
+        !tight
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .complete()
+    );
+    assert!(
+        tight
+            .state
+            .outline_run
+            .tool_draft
+            .check_reads
+            .evidence
+            .is_empty()
+    );
+    drop(tight);
+    config.limits.max_context_tokens = 1;
+    let mut too_small = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut restored,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    assert_eq!(
+        too_small
+            .prepare_inner("pack-0", false)
+            .await
+            .unwrap_err()
+            .code,
+        "AGENT_TURN_BUDGET_EXCEEDED"
     );
 }

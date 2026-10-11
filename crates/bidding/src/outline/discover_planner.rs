@@ -179,8 +179,8 @@ fn pack(digest: &str, order: usize, atoms: Vec<PackAtom>) -> ParsePack {
 fn fits_pack(
     resolver: &super::super::evidence::EvidenceResolver<'_>,
     pack: &ParsePack,
-    fits: &SessionFits<'_>,
-) -> Result<bool, String> {
+    fits: &PlanningFits<'_>,
+) -> Result<PlanningFit, String> {
     #[cfg(test)]
     let _profile = crate::analysis::agent::profile::enter("planner_full_probe");
     #[cfg(test)]
@@ -222,9 +222,10 @@ fn fits_pack(
 pub(super) fn test_pack_fits(input: &FrozenInput, pack: &ParsePack, max_tokens: usize) -> bool {
     let resolver = super::super::evidence::EvidenceResolver::new(input).unwrap();
     fits_pack(&resolver, pack, &|sessions| {
-        test_sessions_fit(sessions, max_tokens)
+        test_sessions_fit(sessions, max_tokens).map(PlanningFit::Unmeasured)
     })
     .unwrap()
+    .fits()
 }
 
 fn midpoint(text: &str, start: usize, end: usize) -> Result<usize, String> {
@@ -393,17 +394,132 @@ fn related_atoms(input: &FrozenInput, owned: &[PackAtom], incoming: &[PackAtom])
     })
 }
 
-/// Propose the whole related range as the final pack. Construct and validate
-/// its complete request once; only a rejected final pack changes the boundary.
-/// Halving is conservative, not a monotonic-fit inference: every smaller final
+// Frozen byte weights are boundary hints, never token counts or admission.
+// Serialize each source/initial carrier once; fragments inherit a range share.
+struct FrozenWeight {
+    bytes: usize,
+    extent: usize,
+}
+fn carrier_weight_key(atom: &PackAtom) -> (String, String) {
+    let kind = match &atom.carrier {
+        PackCarrier::Text { .. } => "text".into(),
+        PackCarrier::Grid { table_id, .. } => format!("grid:{table_id}"),
+        PackCarrier::Image { .. } => "image".into(),
+        PackCarrier::Structure { .. } => "structure".into(),
+    };
+    (atom.source_unit_revision_id.clone(), kind)
+}
+fn carrier_extent(carrier: &PackCarrier) -> usize {
+    match carrier {
+        PackCarrier::Text { evidence } => evidence
+            .range()
+            .map(|(start, end)| end - start)
+            .unwrap_or(0),
+        PackCarrier::Grid {
+            cells,
+            header_context,
+            ..
+        } => cells.iter().chain(header_context).fold(0usize, |sum, c| {
+            sum.saturating_add(c.end_byte - c.start_byte)
+                .saturating_add(1)
+        }),
+        _ => 1,
+    }
+    .max(1)
+}
+fn frozen_weights(
+    input: &FrozenInput,
+    units: &[Unit],
+) -> Result<BTreeMap<(String, String), FrozenWeight>, String> {
+    #[cfg(test)]
+    let _profile = crate::analysis::agent::profile::enter("planner_source_weights");
+    let mut weights = BTreeMap::new();
+    let mut table_sizes = BTreeMap::new();
+    for unit in units {
+        #[cfg(test)]
+        crate::analysis::agent::profile::observe("source_units_weighted", 1);
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| source.source_unit_revision_id == unit.source_id)
+            .ok_or("weight source missing")?;
+        let structure = serde_json::to_vec(&source.locator)
+            .map_err(|e| e.to_string())?
+            .len();
+        for atom in &unit.atoms {
+            #[cfg(test)]
+            crate::analysis::agent::profile::observe("initial_atoms_weighted", 1);
+            let extent = carrier_extent(&atom.carrier);
+            let content = match &atom.carrier {
+                PackCarrier::Grid { table_id, .. } => {
+                    if let Some(&size) = table_sizes.get(table_id) {
+                        size
+                    } else {
+                        #[cfg(test)]
+                        crate::analysis::agent::profile::observe("table_definitions_weighted", 1);
+                        let definition = super::super::evidence::table_definition(input, table_id)?;
+                        let size = serde_json::to_vec(definition)
+                            .map_err(|e| e.to_string())?
+                            .len();
+                        table_sizes.insert(table_id.clone(), size);
+                        size
+                    }
+                }
+                _ => extent,
+            };
+            let bytes = structure
+                .saturating_add(
+                    serde_json::to_vec(&atom.carrier)
+                        .map_err(|e| e.to_string())?
+                        .len(),
+                )
+                .saturating_add(content);
+            weights.insert(carrier_weight_key(atom), FrozenWeight { bytes, extent });
+        }
+    }
+    Ok(weights)
+}
+fn atom_weight(weights: &BTreeMap<(String, String), FrozenWeight>, atom: &PackAtom) -> usize {
+    let base = &weights[&carrier_weight_key(atom)];
+    ((base.bytes as u128)
+        .saturating_mul(carrier_extent(&atom.carrier) as u128)
+        .div_ceil(base.extent as u128)
+        .min(usize::MAX as u128) as usize)
+        .max(1)
+}
+fn shrink_prefix(prefix: &[usize], count: usize, fit: &PlanningFit) -> usize {
+    let base = prefix[0];
+    let target = fit.shrink_weight(prefix[count].saturating_sub(base));
+    prefix[1..count]
+        .partition_point(|&weight| weight.saturating_sub(base) <= target)
+        .max(1)
+}
+fn hinted_prefix(prefix: &[usize], capacity: usize) -> usize {
+    let base = prefix[0];
+    prefix[1..]
+        .partition_point(|&weight| weight.saturating_sub(base) <= capacity)
+        .max(1)
+}
+
+enum PrefixOutcome {
+    Admitted(usize, ParsePack),
+    Oversize(PlanningFit),
+}
+
+/// Select a final pack using a plan-local measured weight hint, or the whole
+/// related range before the first measurement. Only a rejected full request
+/// adjusts the current boundary; successful requests only guide later packs.
+/// Weight-guided shrinking is not a monotonic-fit inference: every smaller final
 /// proposal is checked too. Return immediately on success, without fill probes.
 fn fitted_chapter_prefix(
     input: &FrozenInput,
     digest: &str,
     order: usize,
     chapters: &[Vec<PackAtom>],
-    fits: &impl Fn(&ParsePack) -> Result<bool, String>,
-) -> Result<Option<(usize, ParsePack)>, String> {
+    chapter_prefix: &[usize],
+    capacity_hint: &std::cell::Cell<Option<usize>>,
+    fits: &impl Fn(&ParsePack) -> Result<PlanningFit, String>,
+) -> Result<PrefixOutcome, String> {
     let mut atoms = Vec::new();
     let mut ends = Vec::new();
     for chapter in chapters {
@@ -414,19 +530,24 @@ fn fitted_chapter_prefix(
         ends.push(atoms.len());
     }
     if ends.is_empty() {
-        return Ok(None);
+        return Err("empty chapter proposal".into());
     }
     let candidate = |count: usize| pack(digest, order, atoms[..ends[count - 1]].to_vec());
-    let mut count = ends.len();
+    let prefix = &chapter_prefix[..=ends.len()];
+    let mut count = capacity_hint
+        .get()
+        .map(|capacity| hinted_prefix(prefix, capacity))
+        .unwrap_or(ends.len());
     loop {
         let proposal = candidate(count);
-        if fits(&proposal)? {
-            return Ok(Some((count, proposal)));
+        let fit = fits(&proposal)?;
+        if fit.fits() {
+            return Ok(PrefixOutcome::Admitted(count, proposal));
         }
         if count == 1 {
-            return Ok(None);
+            return Ok(PrefixOutcome::Oversize(fit));
         }
-        count = count.div_ceil(2);
+        count = shrink_prefix(prefix, count, &fit);
     }
 }
 
@@ -436,16 +557,33 @@ pub fn plan_packs_with_budget(
     input: &FrozenInput,
     fits: &SessionFits<'_>,
 ) -> Result<Vec<ParsePack>, String> {
+    plan_packs_with_measured_budget(input, &|sessions| {
+        fits(sessions).map(PlanningFit::Unmeasured)
+    })
+}
+pub fn plan_packs_with_measured_budget(
+    input: &FrozenInput,
+    fits: &PlanningFits<'_>,
+) -> Result<Vec<ParsePack>, String> {
     #[cfg(test)]
     let _profile = crate::analysis::agent::profile::enter("planner_total");
     input.validate_document_relations()?;
     let resolver = super::super::evidence::EvidenceResolver::new(input)?;
     let digest = resolver.digest().to_owned();
     let mut units = source_units(input, &digest)?;
-    let fits_candidate = |candidate: &ParsePack| -> Result<bool, String> {
+    let weights = frozen_weights(input, &units)?;
+    let capacity_hint = std::cell::Cell::new(None);
+    let fits_candidate = |candidate: &ParsePack| -> Result<PlanningFit, String> {
         #[cfg(test)]
         let _profile = crate::analysis::agent::profile::enter("planner_logical_probe");
-        fits_pack(&resolver, candidate, fits)
+        let fit = fits_pack(&resolver, candidate, fits)?;
+        if matches!(&fit, PlanningFit::Measured { estimated_input, .. } if *estimated_input > 0) {
+            let weight = candidate.atoms.iter().fold(0usize, |sum, atom| {
+                sum.saturating_add(atom_weight(&weights, atom))
+            });
+            capacity_hint.set(Some(fit.shrink_weight(weight).max(1)));
+        }
+        Ok(fit)
     };
     'replan: loop {
         assign_links(&mut units);
@@ -477,46 +615,75 @@ pub fn plan_packs_with_budget(
                     .collect()
             })
             .collect();
+        // One cumulative chapter index per replan; later packs reuse slices
+        // including their base. Relation scanning remains independent of it.
+        let mut chapter_prefix = vec![0usize];
+        for atoms in &chapter_atoms {
+            let weight = atoms.iter().fold(0usize, |sum, atom| {
+                sum.saturating_add(atom_weight(&weights, atom))
+            });
+            chapter_prefix.push(chapter_prefix.last().unwrap().saturating_add(weight));
+        }
         let mut out = Vec::new();
         let mut chapter_index = 0;
         while chapter_index < chapters.len() {
-            if let Some((consumed, admitted)) = fitted_chapter_prefix(
+            let rejected = match fitted_chapter_prefix(
                 input,
                 &digest,
                 out.len(),
                 &chapter_atoms[chapter_index..],
+                &chapter_prefix[chapter_index..],
+                &capacity_hint,
                 &fits_candidate,
             )? {
-                out.push(admitted);
-                chapter_index += consumed;
-                continue;
-            }
+                PrefixOutcome::Admitted(consumed, admitted) => {
+                    out.push(admitted);
+                    chapter_index += consumed;
+                    continue;
+                }
+                PrefixOutcome::Oversize(fit) => fit,
+            };
             // The first whole chapter was actually rejected. Preserve the
             // existing ordered atom/UTF-8/grid fallback and replan split links.
             #[cfg(test)]
             crate::analysis::agent::profile::observe("standalone_chapter_fallbacks", 1);
             let chapter = &chapter_atoms[chapter_index];
+            let mut atom_prefix = vec![0usize];
+            for atom in chapter {
+                atom_prefix.push(
+                    atom_prefix
+                        .last()
+                        .unwrap()
+                        .saturating_add(atom_weight(&weights, atom)),
+                );
+            }
             let mut offset = 0;
             while offset < chapter.len() {
-                // The initial whole chapter has already failed above. Start
-                // its adjustment at half; later residual ranges are first
-                // proposed whole. No successful pack triggers a growth probe.
-                let mut count = if offset == 0 {
-                    chapter.len().div_ceil(2)
+                let prefix = &atom_prefix[offset..];
+                let mut count = if offset == 0 && chapter.len() > 1 {
+                    shrink_prefix(prefix, chapter.len(), &rejected)
                 } else {
-                    chapter.len() - offset
+                    capacity_hint
+                        .get()
+                        .map(|capacity| hinted_prefix(prefix, capacity))
+                        .unwrap_or(chapter.len() - offset)
                 };
                 loop {
                     let candidate =
                         pack(&digest, out.len(), chapter[offset..offset + count].to_vec());
                     let already_rejected = offset == 0 && count == chapter.len();
-                    if !already_rejected && fits_candidate(&candidate)? {
+                    let fit = if already_rejected {
+                        None
+                    } else {
+                        Some(fits_candidate(&candidate)?)
+                    };
+                    if fit.as_ref().is_some_and(PlanningFit::fits) {
                         out.push(candidate);
                         offset += count;
                         break;
                     }
                     if count > 1 {
-                        count = count.div_ceil(2);
+                        count = shrink_prefix(prefix, count, fit.as_ref().unwrap_or(&rejected));
                         continue;
                     }
                     let (unit_index, atom_index) = chapters[chapter_index][offset];
@@ -592,6 +759,122 @@ mod endpoint_tests {
             plan_packs_with_budget(&input, &|_| Err("probe failed".into())),
             Err("probe failed".into())
         );
+    }
+    #[test]
+    fn measured_weight_ratio_selects_boundary_then_validates_full_request() {
+        let input = synthetic_input(8, false);
+        let probes = std::cell::RefCell::new(Vec::new());
+        let packs = plan_packs_with_measured_budget(&input, &|sessions| {
+            let count = sessions[0]["pack"]["atoms"].as_array().unwrap().len();
+            probes.borrow_mut().push(count);
+            Ok(PlanningFit::Measured {
+                estimated_input: count * 100,
+                available_input: 500,
+            })
+        })
+        .unwrap();
+        assert_eq!(*probes.borrow(), vec![8, 5, 3]);
+        assert_eq!(
+            packs
+                .iter()
+                .map(|pack| pack.atoms.len())
+                .collect::<Vec<_>>(),
+            vec![5, 3]
+        );
+        assert_eq!(
+            packs
+                .iter()
+                .flat_map(|pack| pack.atoms.iter().map(|atom| atom.unit_ordinal))
+                .collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn later_packs_use_measured_weight_capacity_without_full_remaining_probe() {
+        let input = synthetic_input(9, false);
+        let probes = std::cell::RefCell::new(Vec::new());
+        let packs = plan_packs_with_measured_budget(&input, &|sessions| {
+            let count = sessions[0]["pack"]["atoms"].as_array().unwrap().len();
+            probes.borrow_mut().push(count);
+            Ok(PlanningFit::Measured {
+                estimated_input: count * 100,
+                available_input: 300,
+            })
+        })
+        .unwrap();
+        assert_eq!(*probes.borrow(), vec![9, 3, 3, 3]);
+        assert_eq!(
+            packs
+                .iter()
+                .map(|pack| pack.atoms.len())
+                .collect::<Vec<_>>(),
+            vec![3, 3, 3]
+        );
+    }
+    #[test]
+    fn unequal_frozen_weights_avoid_count_half_overflow() {
+        let mut input = synthetic_input(8, false);
+        for (index, source) in input.source_units.iter_mut().enumerate() {
+            source.text = if index < 2 {
+                "x".repeat(5000)
+            } else {
+                "z".into()
+            };
+        }
+        let probes = std::cell::RefCell::new(Vec::new());
+        let packs = plan_packs_with_measured_budget(&input, &|sessions| {
+            let atoms = sessions[0]["pack"]["atoms"].as_array().unwrap();
+            let bytes: usize = atoms
+                .iter()
+                .flat_map(|atom| atom["excerpts"].as_array().unwrap())
+                .map(|excerpt| excerpt["quote"].as_str().unwrap().len())
+                .sum();
+            probes.borrow_mut().push((atoms.len(), bytes));
+            Ok(PlanningFit::Measured {
+                estimated_input: bytes,
+                available_input: 6000,
+            })
+        })
+        .unwrap();
+        assert_eq!(&probes.borrow()[..2], &[(8, 10006), (1, 5000)]);
+        assert_eq!(packs.iter().map(|pack| pack.atoms.len()).sum::<usize>(), 8);
+        for pack in &packs {
+            let text_bytes: usize = pack
+                .atoms
+                .iter()
+                .map(|atom| input.source_units[atom.unit_ordinal].text.len())
+                .sum();
+            assert!(text_bytes <= 6000);
+        }
+        assert!(
+            input.source_units[..4]
+                .iter()
+                .map(|s| s.text.len())
+                .sum::<usize>()
+                > 6000,
+            "count halving would still exceed this synthetic full-request predicate"
+        );
+    }
+    #[test]
+    fn measured_nonmonotone_rejection_always_shrinks_and_checks_again() {
+        let input = synthetic_input(8, false);
+        let admitted = std::cell::RefCell::new(Vec::new());
+        let packs = plan_packs_with_measured_budget(&input, &|sessions| {
+            let count = sessions[0]["pack"]["atoms"].as_array().unwrap().len();
+            let fits = matches!(count, 1 | 3 | 7);
+            if fits {
+                admitted.borrow_mut().push(count);
+            }
+            Ok(PlanningFit::Measured {
+                estimated_input: if fits { 50 } else { 101 },
+                available_input: 100,
+            })
+        })
+        .unwrap();
+        assert_eq!(packs.iter().map(|pack| pack.atoms.len()).sum::<usize>(), 8);
+        for pack in packs {
+            assert!(admitted.borrow().contains(&pack.atoms.len()));
+        }
     }
     #[test]
     fn bounded_prefix_reduces_full_probes_without_a_candidate_cache() {

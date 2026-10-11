@@ -1997,10 +1997,6 @@ fn shrink_discovery_feedback(sessions: &mut [Value]) -> bool {
     true
 }
 
-// Bounded non-durable schema/handle feedback plus its serialized tool framing.
-// This is repair headroom in context tokens, never a source byte/pack limit.
-pub(super) const DISCOVERY_FEEDBACK_RESERVE_TOKENS: usize = 1024;
-
 async fn prepare_fitted_request(
     input: &FrozenInput,
     config: &Config,
@@ -2077,7 +2073,9 @@ async fn prepare_fitted_request(
             json!({"role":"user","content":brief.to_string()}),
         ];
         let mut visible_views = std::collections::BTreeSet::new();
-        for message in &state.transcript {
+        let projected_history =
+            discover_parallel::project_settled_submission_history(&state.transcript);
+        for message in &projected_history {
             if let Some(refs) = message["source_view_refs"].as_array() {
                 for id in refs {
                     visible_views.insert(
@@ -2182,47 +2180,51 @@ async fn prepare_fitted_request(
             let planning_started = std::time::Instant::now();
             let candidate_fits = std::cell::Cell::new(0usize);
             let cache_before = crate::agent_runtime::chat::cache_counts();
-            let fits = |sessions: &[Value]| -> Result<bool, String> {
-                candidate_fits.set(candidate_fits.get() + 1);
-                #[cfg(test)]
-                let candidate_profile = profile::enter("planner_candidate_envelope");
-                let mut candidate = canonical_body.clone();
-                let mut candidate_brief = brief.clone();
-                candidate_brief["reading_packs"] = json!(sessions);
-                candidate["messages"][1]["content"] = json!(candidate_brief.to_string());
-                candidate["messages"]
-                    .as_array_mut()
-                    .ok_or("request messages missing")?
-                    .last_mut()
-                    .ok_or("request host packet missing")?["content"] =
-                    json!(planning_host.to_string());
-                reserve_pack_image_messages(input, config, state, sessions, &mut candidate)?;
-                #[cfg(test)]
-                drop(candidate_profile);
-                #[cfg(test)]
-                let compact_profile = profile::enter("planner_candidate_compact");
-                crate::outline::discover::compact_request(&mut candidate)?;
-                #[cfg(test)]
-                drop(compact_profile);
-                #[cfg(test)]
-                let source_profile = profile::enter("planner_candidate_source_wire");
-                crate::outline::source_wire::request(state, &mut candidate)?;
-                #[cfg(test)]
-                drop(source_profile);
-                #[cfg(test)]
-                let model_profile = profile::enter("planner_candidate_model_wire");
-                crate::outline::model_wire::project(state, &mut candidate)?;
-                #[cfg(test)]
-                drop(model_profile);
-                let tokens = context::estimate_input_tokens(&candidate, &config.limits)
-                    .map_err(|error| error.to_string())?;
-                Ok(tokens
-                    .saturating_add(config.provider.output_token_reserve as usize)
-                    .saturating_add(config.provider.output_token_reserve as usize)
-                    .saturating_add(DISCOVERY_FEEDBACK_RESERVE_TOKENS)
-                    <= config.limits.max_context_tokens)
-            };
-            let mut work = crate::outline::discover::DiscoverWork::plan_with_budget(input, &fits);
+            let fits =
+                |sessions: &[Value]| -> Result<crate::outline::discover::PlanningFit, String> {
+                    candidate_fits.set(candidate_fits.get() + 1);
+                    #[cfg(test)]
+                    let candidate_profile = profile::enter("planner_candidate_envelope");
+                    let mut candidate = canonical_body.clone();
+                    let mut candidate_brief = brief.clone();
+                    candidate_brief["reading_packs"] = json!(sessions);
+                    candidate["messages"][1]["content"] = json!(candidate_brief.to_string());
+                    candidate["messages"]
+                        .as_array_mut()
+                        .ok_or("request messages missing")?
+                        .last_mut()
+                        .ok_or("request host packet missing")?["content"] =
+                        json!(planning_host.to_string());
+                    reserve_pack_image_messages(input, config, state, sessions, &mut candidate)?;
+                    #[cfg(test)]
+                    drop(candidate_profile);
+                    #[cfg(test)]
+                    let compact_profile = profile::enter("planner_candidate_compact");
+                    crate::outline::discover::compact_request(&mut candidate)?;
+                    #[cfg(test)]
+                    drop(compact_profile);
+                    #[cfg(test)]
+                    let source_profile = profile::enter("planner_candidate_source_wire");
+                    crate::outline::source_wire::request(state, &mut candidate)?;
+                    #[cfg(test)]
+                    drop(source_profile);
+                    #[cfg(test)]
+                    let model_profile = profile::enter("planner_candidate_model_wire");
+                    crate::outline::model_wire::project(state, &mut candidate)?;
+                    #[cfg(test)]
+                    drop(model_profile);
+                    let tokens = context::estimate_input_tokens(&candidate, &config.limits)
+                        .map_err(|error| error.to_string())?;
+                    Ok(crate::outline::discover::PlanningFit::Measured {
+                        estimated_input: tokens,
+                        available_input: config
+                            .limits
+                            .max_context_tokens
+                            .saturating_sub(config.provider.output_token_reserve as usize),
+                    })
+                };
+            let mut work =
+                crate::outline::discover::DiscoverWork::plan_with_measured_budget(input, &fits);
             let cache_after = crate::agent_runtime::chat::cache_counts();
             tracing::info!(
                 event = "analysis_pack_planned",
@@ -2239,38 +2241,12 @@ async fn prepare_fitted_request(
             state.outline_run.reading_packs = Some(work);
             continue;
         }
-        // A running pack has one prior-response allowance inside the same
-        // context budget. An existing latest tool group already consumes that
-        // allowance (including identity errors without a durable pack receipt).
-        // Failed packs use it for their projected repair feedback instead.
+        // The input estimate already includes actual history, feedback, images,
+        // protocol framing and the configured safety margin. Reserve only this
+        // request's output; hypothetical later repair turns are counted later.
         let input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
-        let discovery_lifecycle_tokens = if reading_sessions
-            .iter()
-            .any(|session| session["status"] == "running")
-        {
-            let mut priorless = body.clone();
-            let messages = priorless["messages"]
-                .as_array_mut()
-                .ok_or_else(|| invalid("SDK messages missing"))?;
-            let consumed = if let Some(start) = messages
-                .iter()
-                .rposition(|message| message["role"] == "assistant")
-            {
-                messages.drain(start..messages.len() - 1);
-                input_tokens
-                    .saturating_sub(context::estimate_input_tokens(&priorless, &config.limits)?)
-            } else {
-                0
-            };
-            (config.provider.output_token_reserve as usize)
-                .saturating_add(DISCOVERY_FEEDBACK_RESERVE_TOKENS)
-                .saturating_sub(consumed)
-        } else {
-            0
-        };
         let context_excess = input_tokens
             .saturating_add(config.provider.output_token_reserve as usize)
-            .saturating_add(discovery_lifecycle_tokens)
             .saturating_sub(config.limits.max_context_tokens);
         #[cfg(test)]
         if let Ok(root) = std::env::var("KB_PRIVATE_BUDGET_DIAGNOSTIC_DIR") {
@@ -2284,7 +2260,7 @@ async fn prepare_fitted_request(
             }
             let mut without_tools = body.clone();
             without_tools.as_object_mut().unwrap().remove("tools");
-            let entry = json!({"input_tokens":input_tokens,"serialized_bytes":bytes.len(),"output_reserve":config.provider.output_token_reserve,"lifecycle_reserve":discovery_lifecycle_tokens,"feedback_reserve":DISCOVERY_FEEDBACK_RESERVE_TOKENS,"context_limit":config.limits.max_context_tokens,"excess":context_excess,"tools_marginal_tokens":input_tokens.saturating_sub(context::estimate_input_tokens(&without_tools,&config.limits)?),"messages":parts});
+            let entry = json!({"input_tokens":input_tokens,"serialized_bytes":bytes.len(),"output_reserve":config.provider.output_token_reserve,"context_limit":config.limits.max_context_tokens,"excess":context_excess,"tools_marginal_tokens":input_tokens.saturating_sub(context::estimate_input_tokens(&without_tools,&config.limits)?),"messages":parts});
             use std::io::Write;
             let path = std::path::Path::new(&root).join("budget-preparation-iterations.jsonl");
             writeln!(

@@ -1404,8 +1404,9 @@ async fn discovery_planning_includes_post_plan_progress_at_the_token_boundary() 
     let pre_plan_tokens = crate::analysis::tests::request_tokens(&body, &config);
     assert!(pre_plan_tokens < actual_tokens);
 
-    // Omitting the submission instruction and post-plan progress admits a pack
-    // whose complete request exceeds this boundary. The real planner must split.
+    // Tighten the window using the stripped comparison body. The resulting
+    // complete request must fit and retain all source, irrespective of how many
+    // packs its current envelope/identities require (no hypothetical reserve).
     let mut constrained = config.clone();
     constrained.limits.max_context_tokens =
         pre_plan_tokens + constrained.provider.output_token_reserve as usize;
@@ -1417,17 +1418,42 @@ async fn discovery_planning_includes_post_plan_progress_at_the_token_boundary() 
         crate::analysis::tests::total_request_tokens(&bytes, &constrained)
             <= constrained.limits.max_context_tokens
     );
-    assert!(
-        state
-            .outline_run
-            .reading_packs
-            .as_ref()
-            .unwrap()
-            .pack_counts()
-            .total
-            > 1
-    );
+    let work = state.outline_run.reading_packs.as_ref().unwrap();
+    let mut ranges = Vec::new();
+    for id in work.pack_ids() {
+        for reference in work.pack_evidence(&input, &id).unwrap() {
+            let crate::outline::evidence::EvidenceRef::Text {
+                unit_id,
+                start_byte,
+                end_byte,
+                ..
+            } = reference
+            else {
+                panic!("text fixture expected");
+            };
+            assert_eq!(unit_id, input.source_units[0].source_unit_revision_id);
+            ranges.push((start_byte, end_byte));
+        }
+    }
+    ranges.sort_unstable();
+    let mut end = 0;
+    for (start, next) in ranges {
+        assert_eq!(start, end, "source ranges must neither overlap nor skip");
+        assert!(next > start && input.source_units[0].text.get(start..next).is_some());
+        end = next;
+    }
+    assert_eq!(end, input.source_units[0].text.len());
+
     let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let final_brief: Value =
+        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(
+        final_brief["reading_packs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session["submission_instruction"].is_string())
+    );
     let host: Value = serde_json::from_str(
         body["messages"].as_array().unwrap().last().unwrap()["content"]
             .as_str()
@@ -1445,6 +1471,45 @@ async fn discovery_planning_includes_post_plan_progress_at_the_token_boundary() 
             .pack_counts()
             .total
     );
+}
+
+#[tokio::test]
+async fn discover_admits_current_request_without_hypothetical_repair_reserve() {
+    let input = pack_input(1, &"采购技术要求与交付标准。".repeat(3000));
+    let config = crate::analysis::tests::config();
+    let mut wide = outline_checkpoint();
+    let initial = super::super::prepare_request(&input, &config, &mut wide, true)
+        .await
+        .unwrap();
+    let current_total = crate::analysis::tests::total_request_tokens(&initial, &config);
+    let mut constrained = config.clone();
+    // Small room for generated progress/identity differences, not a future response.
+    constrained.limits.max_context_tokens = current_total + 512;
+    assert!(
+        current_total + config.provider.output_token_reserve as usize
+            > constrained.limits.max_context_tokens
+    );
+    let mut state = outline_checkpoint();
+    let request = super::super::prepare_request(&input, &constrained, &mut state, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .pack_counts()
+            .total,
+        1
+    );
+    assert!(
+        crate::analysis::tests::total_request_tokens(&request, &constrained)
+            <= constrained.limits.max_context_tokens
+    );
+    let body: Value = serde_json::from_slice(&request).unwrap();
+    assert!(body.get("max_tokens").is_none());
+    assert!(body.get("max_completion_tokens").is_none());
 }
 
 #[tokio::test]
@@ -1466,8 +1531,7 @@ async fn failed_feedback_repair_scenario(attempts: usize) {
     constrained.limits.max_context_tokens =
         crate::analysis::tests::total_request_tokens(&bytes, &config)
             + constrained.provider.output_token_reserve as usize
-            + super::super::DISCOVERY_FEEDBACK_RESERVE_TOKENS
-            + 512;
+            + 1536; // Fixture room for its actual failure/tool feedback.
     state = outline_checkpoint();
     super::super::prepare_request(&input, &constrained, &mut state, true)
         .await
@@ -1768,7 +1832,7 @@ async fn malformed_handle_near_output_limit_keeps_schema_feedback_repairable() {
             crate::analysis::tests::total_request_tokens(&bytes, &config)
                 + constrained.provider.output_token_reserve as usize;
         // Replan through the real policy under this constrained window. The
-        // response+feedback allowance must be secured before the first send.
+        // explicit fixture window includes the response later added below.
         state = outline_checkpoint();
         super::super::prepare_request(&input, &constrained, &mut state, true)
             .await

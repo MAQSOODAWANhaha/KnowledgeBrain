@@ -332,7 +332,7 @@ impl<J: Journal> PackHost<'_, J> {
             json!({"role":"user","content":json!({"reading_packs":[session], "semantic_contract":crate::outline::agent::semantic_guidance(Duty::Discover), "repair_context":self.state.outline_run.repair_events.iter().rev().find(|event|event["pack_id"]==id && event["status"]=="reopened" && event["pack_revision"]==identity["revision"])}).to_string()}),
         ];
         messages.push(json!({"role":"user","content":json!({"dependency_progress":{"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain accessible through condition_support_options and next_support_cursor (read_evidence dependency_cursor). Directory pages grant no original reading credit. Follow pending body cursors until selection_complete; reread original source keys or a support dependency_id when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
-        messages.extend(worker.history.iter().cloned());
+        messages.extend(project_settled_submission_history(&worker.history));
         for view in &views {
             messages.push(view.message());
         }
@@ -527,8 +527,10 @@ impl<J: Journal> Host for PackHost<'_, J> {
                     };
                     // Source delivery and opaque keys belong to one claim revision.
                     // A failed repair is not progress and must retain its stop counter.
+                    let history = settled_submission_audit(&worker.history);
                     *worker = Worker {
                         rejected_turns,
+                        history,
                         ..Default::default()
                     };
                 } else if matches!(pending, Pending::Committed { .. }) {
@@ -719,6 +721,50 @@ impl<J: Journal> Host for PackHost<'_, J> {
             .is_some_and(crate::outline::discover::DiscoverWork::complete)
     }
 }
+// Only complete single-submit failures appended by commit are replaceable.
+// History remains the audit; this is a request projection, never read credit.
+fn settled_submission_pair(history: &[Value], index: usize) -> Option<&Value> {
+    let message = history.get(index)?;
+    if message["role"] != "assistant" {
+        return None;
+    }
+    let calls = message["tool_calls"].as_array()?;
+    if calls.len() != 1 || calls[0]["function"]["name"] != "submit_pack" {
+        return None;
+    }
+    let call_id = calls[0]["id"].as_str()?;
+    let receipt = history.get(index + 1)?;
+    if receipt["role"] != "tool" || receipt["tool_call_id"] != call_id {
+        return None;
+    }
+    let value: Value = serde_json::from_str(receipt["content"].as_str()?).ok()?;
+    (value["ok"] == false).then_some(receipt)
+}
+fn settled_submission_audit(history: &[Value]) -> Vec<Value> {
+    let mut result = Vec::new();
+    for index in 0..history.len() {
+        if let Some(receipt) = settled_submission_pair(history, index) {
+            result.push(history[index].clone());
+            result.push(receipt.clone());
+        }
+    }
+    result
+}
+pub(super) fn project_settled_submission_history(history: &[Value]) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < history.len() {
+        if let Some(receipt) = settled_submission_pair(history, index) {
+            result.push(json!({"role":"user","content":json!({"settled_submission_failure":serde_json::from_str::<Value>(receipt["content"].as_str().unwrap()).unwrap(),"instruction":"The prior submission failed. Correct it using the current pack claim and source keys; the omitted duplicate submission body remains in the host audit. This grants no completion or evidence credit."}).to_string()}));
+            index += 2;
+        } else {
+            result.push(history[index].clone());
+            index += 1;
+        }
+    }
+    result
+}
+
 fn retire_delivered_related_history(history: &[Value], delivered: &BTreeSet<String>) -> Vec<Value> {
     history
         .iter()

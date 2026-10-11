@@ -14,6 +14,39 @@ pub(crate) use projection::compact_request;
 
 pub type SessionFits<'a> = dyn Fn(&[Value]) -> Result<bool, String> + 'a;
 
+/// A complete-request measurement guides boundary selection, never admission
+/// by additive source weights. Boolean callers have no measured size hint.
+pub enum PlanningFit {
+    Measured {
+        estimated_input: usize,
+        available_input: usize,
+    },
+    Unmeasured(bool),
+}
+impl PlanningFit {
+    pub fn fits(&self) -> bool {
+        match *self {
+            Self::Measured {
+                estimated_input,
+                available_input,
+            } => estimated_input <= available_input,
+            Self::Unmeasured(fits) => fits,
+        }
+    }
+    fn shrink_weight(&self, weight: usize) -> usize {
+        match *self {
+            Self::Measured {
+                estimated_input,
+                available_input,
+            } if estimated_input > 0 => ((weight as u128 * available_input as u128)
+                / estimated_input as u128)
+                .min(usize::MAX as u128) as usize,
+            _ => weight.div_ceil(2),
+        }
+    }
+}
+pub type PlanningFits<'a> = dyn Fn(&[Value]) -> Result<PlanningFit, String> + 'a;
+
 pub const DEFAULT_PACK_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,7 +271,12 @@ const SUBMISSION_INSTRUCTION: &str = "Copy the current short claim_token and sub
 
 impl DiscoverWork {
     pub fn plan_with_budget(input: &FrozenInput, fits: &SessionFits<'_>) -> Self {
-        let result = plan_packs_with_budget(input, fits);
+        Self::plan_with_measured_budget(input, &|sessions| {
+            fits(sessions).map(PlanningFit::Unmeasured)
+        })
+    }
+    pub fn plan_with_measured_budget(input: &FrozenInput, fits: &PlanningFits<'_>) -> Self {
+        let result = planner::plan_packs_with_measured_budget(input, fits);
         let planning_error = result.as_ref().err().cloned();
         let packs = result.unwrap_or_default();
         let plan_sha256 = super::canonical_sha256(&packs).expect("serializable pack plan");
