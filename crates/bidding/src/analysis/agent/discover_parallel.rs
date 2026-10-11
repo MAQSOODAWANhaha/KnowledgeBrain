@@ -339,7 +339,7 @@ impl<J: Journal> PackHost<'_, J> {
             .as_ref()
             .ok_or_else(|| invalid("reading plan missing"))?;
         let identity = work.pack_wire_identity(id).map_err(invalid)?;
-        let session = work.session(self.input, id).map_err(invalid)?;
+        let mut session = work.session(self.input, id).map_err(invalid)?;
         let owned_image_ids = session["pack"]["atoms"]
             .as_array()
             .into_iter()
@@ -395,11 +395,33 @@ impl<J: Journal> PackHost<'_, J> {
             .generation
             .checked_add(1)
             .ok_or_else(|| invalid("worker generation overflow"))?;
+        let queued = worker
+            .related_read_frames
+            .iter()
+            .filter(|frame| {
+                frame.input_digest == self.state.input_sha256
+                    && frame.pack_revision == identity["revision"]
+            })
+            .flat_map(|frame| frame.options.iter())
+            .flat_map(|option| option.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let next_context = work
+            .next_required_context_read(self.input, id, &queued)
+            .map_err(invalid)?;
+        let next_required_read = worker
+            .related_continuations
+            .keys()
+            .next()
+            .map(|cursor| json!({"tool":"read_evidence","args":{"cursor":cursor}}))
+            .unwrap_or(next_context);
+        session["pack"]["next_required_read"] = next_required_read.clone();
+        session["pack"]["next_required_read_basis"] =
+            json!("after_consuming_current_request_original_pages; navigation_only");
         let mut messages = vec![
             json!({"role":"system","content":format!("{}\nThis worker owns exactly one pack. Submit only that pack using submit_pack; all required original images are attached. Do not select another pack.",Duty::Discover.instructions())}),
             json!({"role":"user","content":json!({"reading_packs":[session], "semantic_contract":crate::outline::agent::semantic_guidance(Duty::Discover), "repair_context":self.state.outline_run.repair_events.iter().rev().find(|event|event["pack_id"]==id && event["status"]=="reopened" && event["pack_revision"]==identity["revision"])}).to_string()}),
         ];
-        messages.push(json!({"role":"user","content":json!({"dependency_progress":{"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain accessible through condition_support_options and next_support_cursor (read_evidence dependency_cursor). Directory pages grant no original reading credit. Follow pending body cursors until selection_complete; reread original source keys or a support dependency_id when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
+        messages.push(json!({"role":"user","content":json!({"dependency_progress":{"next_required_read":next_required_read,"pending_cursors":worker.related_continuations.keys().collect::<Vec<_>>(),"policy":"After consuming all original pages attached to this request, follow next_required_read before submitting. The action anticipates these attached pages only for navigation and grants no delivery credit. original_read_complete marks only confirmed current-claim coverage; do not repeatedly read that completed entry or its support alias while another required original remains. This is navigation, not semantic applicability approval. Only completed exact original reads become durable coverage. Delivered tool payloads may be retired; preserve task-relevant observations in assistant content. Granted support handles remain accessible through condition_support_options and next_support_cursor (read_evidence dependency_cursor). Directory pages grant no original reading credit. Follow pending body cursors until selection_complete; reread original source keys or a support dependency_id when needed. No dependency grants ownership or completion of another pack."}}).to_string()}));
         messages.extend(project_worker_history(&worker.history));
         for view in &views {
             messages.push(view.message());

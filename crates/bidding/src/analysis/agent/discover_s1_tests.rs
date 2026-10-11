@@ -1206,3 +1206,281 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
     );
     assert!(!restored.done);
 }
+
+#[tokio::test]
+async fn s1_two_contexts_wire_navigation_repairs_without_repeating_confirmed_first_entry() {
+    let input = FrozenInput {
+        schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
+        project_id: "s1-navigation-project".into(),
+        document_set_id: "s1-navigation-set".into(),
+        documents: vec![],
+        document_relations: vec![],
+        source_units: [
+            "Only if optional service is selected, the following response conditions apply.",
+            "For that optional service, the response must cover the selected service period.",
+            "Provide the optional service response when the preceding conditions apply.",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, text)| crate::analysis::Source {
+            source_unit_revision_id: format!("s1-navigation-source-{ordinal}"),
+            document_id: "s1-navigation-document".into(),
+            text: text.into(),
+            locator: json!({"section_id":"s1-section","heading_path":"Optional service"}),
+            ordinal,
+        })
+        .collect(),
+        structured_forms: vec![],
+        decisions: vec![],
+    };
+    let work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+        Ok(sessions
+            .iter()
+            .all(|session| session["pack"]["atoms"].as_array().unwrap().len() == 1))
+    });
+    assert!(
+        work.planning_error().is_none(),
+        "{:?}",
+        work.planning_error()
+    );
+    let ids = work.pack_ids();
+    assert_eq!(ids.len(), 3);
+    let target = ids.iter().nth(2).unwrap().clone();
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.outline_run.reading_packs = Some(work);
+    let config = crate::analysis::tests::config();
+    state.config_sha256 = digest(&config).unwrap();
+    let journal = S1Journal(std::sync::Mutex::new(state.clone()));
+    let cancel = CancellationToken::new();
+    let mut target_step = 0;
+    let mut first_action = Value::Null;
+    let mut second_action = Value::Null;
+    let mut calls = 0;
+    for step in 0..12 {
+        let mut host = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut state,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        let request = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let payloads = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .collect::<Vec<_>>();
+        let session = &payloads
+            .iter()
+            .find(|p| p["reading_packs"].is_array())
+            .unwrap()["reading_packs"][0];
+        let pack = &session["pack"];
+        let progress = &payloads
+            .iter()
+            .find(|p| p["dependency_progress"].is_object())
+            .unwrap()["dependency_progress"];
+        let next = pack["next_required_read"].clone();
+        assert_eq!(next, progress["next_required_read"]);
+        let is_target = request.scope.pack == target;
+        let canonical = host
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .canonical_pack(&request.scope.pack)
+            .unwrap();
+        let supports_before = json!(canonical.condition_support_options);
+        if is_target {
+            assert_eq!(pack["read_dependencies"].as_array().unwrap().len(), 1);
+            match target_step {
+                0 => {
+                    assert_eq!(
+                        pack["read_dependencies"][0]["original_read_complete"],
+                        false
+                    );
+                    assert_eq!(next, pack["read_dependencies"][0]["read"]);
+                    assert_eq!(supports_before, json!([]));
+                    first_action = next.clone();
+                }
+                1 => {
+                    assert_eq!(
+                        pack["read_dependencies"][0]["original_read_complete"],
+                        false
+                    );
+                    assert_eq!(
+                        supports_before,
+                        json!([]),
+                        "attached original is not confirmed credit"
+                    );
+                    assert!(
+                        !host.state.outline_run.discover_workers[&target]
+                            .related_read_frames
+                            .is_empty()
+                    );
+                    assert!(!next.is_null());
+                    assert_ne!(
+                        next, first_action,
+                        "after consuming this request, navigate to the second original"
+                    );
+                    second_action = next.clone();
+                }
+                2 => {
+                    assert_eq!(pack["read_dependencies"][0]["original_read_complete"], true);
+                    assert_eq!(
+                        next, second_action,
+                        "confirmed first directory entry must not hide the next page's unread source"
+                    );
+                    assert_eq!(canonical.condition_support_options.len(), 1);
+                }
+                3 => {
+                    assert_eq!(pack["read_dependencies"][0]["original_read_complete"], true);
+                    assert!(
+                        next.is_null(),
+                        "navigation anticipates the second attached original"
+                    );
+                    assert_eq!(
+                        canonical.condition_support_options.len(),
+                        1,
+                        "navigation must not grant the second original before consumption"
+                    );
+                    assert!(
+                        !host.state.outline_run.discover_workers[&target]
+                            .related_read_frames
+                            .is_empty()
+                    );
+                }
+                _ => panic!("target must commit after the corrected submission"),
+            }
+        }
+        // Only the target's second turn intentionally ignores the next action:
+        // its submission must confirm the first original and reject the missing second.
+        let submit = next.is_null() || (is_target && target_step == 1);
+        let (name, args) = if submit {
+            let scope = payloads
+                .iter()
+                .find_map(|p| p["wire_scope"].as_str())
+                .unwrap();
+            (
+                "submit_pack",
+                json!({"wire_scope":scope,"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":session["status"]=="failed","requirements":[],"issues":[],"no_requirement_reason":"Synthetic navigation protocol only, not a semantic extraction assertion.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|atom|atom["context_only"]!=true).map(|atom|json!({"atom_key":atom["atom_key"]})).collect::<Vec<_>>()}),
+            )
+        } else {
+            assert_eq!(next["tool"], "read_evidence");
+            let mut args = next["args"].clone();
+            args["wire_scope"] = json!(
+                payloads
+                    .iter()
+                    .find_map(|p| p["wire_scope"].as_str())
+                    .unwrap()
+            );
+            ("read_evidence", args)
+        };
+        let response = ChatTurn {
+            content: "Synthetic offline navigation response.".into(),
+            finish_reason: "tool_calls".into(),
+            usage: Some(knowledge::models::ChatUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(2),
+                total_tokens: Some(12),
+                ..Default::default()
+            }),
+            tool_calls: vec![knowledge::models::ChatToolCall {
+                id: format!("s1-navigation-{step}"),
+                name: name.into(),
+                arguments: args.to_string(),
+            }],
+        };
+        host.reserve(&request).await.unwrap();
+        host.received(&request, &response).await.unwrap();
+        assert_eq!(
+            json!(
+                host.state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .canonical_pack(&request.scope.pack)
+                    .unwrap()
+                    .condition_support_options
+            ),
+            supports_before,
+            "even durable receipt does not grant source credit before production commit confirms the exact request"
+        );
+        host.commit(&request, response).await.unwrap();
+        calls += 1;
+        let worker = &host.state.outline_run.discover_workers[&request.scope.pack];
+        let receipt: Value =
+            serde_json::from_str(worker.history.last().unwrap()["content"].as_str().unwrap())
+                .unwrap();
+        if is_target && target_step == 1 {
+            assert_eq!(receipt["ok"], false);
+            assert!(
+                receipt
+                    .to_string()
+                    .contains("structural_context_not_delivered")
+            );
+            assert!(
+                matches!(&worker.pending, Some(Pending::Failed { code, .. }) if code == "BUSINESS_REJECTED")
+            );
+            assert_eq!(
+                host.state
+                    .outline_run
+                    .reading_packs
+                    .as_ref()
+                    .unwrap()
+                    .canonical_pack(&target)
+                    .unwrap()
+                    .condition_support_options
+                    .len(),
+                1
+            );
+        } else {
+            assert_eq!(receipt["ok"], true, "step {step}: {receipt}");
+            if !submit {
+                assert_eq!(receipt["result"]["read"]["new_coverage"], true);
+            }
+        }
+        if is_target {
+            target_step += 1;
+        }
+        let saved = journal.load().await.unwrap().unwrap();
+        assert_eq!(json!(saved), json!(host.state));
+        state = saved;
+        if is_target && submit && target_step == 4 {
+            break;
+        }
+    }
+    assert_eq!(target_step, 4);
+    let work = state.outline_run.reading_packs.as_ref().unwrap();
+    assert!(
+        work.complete(),
+        "every pack used the actual host lifecycle, without seeding successful unrelated scopes"
+    );
+    assert_eq!(work.status(&target), Some(PackStatus::Committed));
+    assert!(
+        work.canonical_pack(&target)
+            .unwrap()
+            .condition_support_options
+            .is_empty(),
+        "successful repair rotates the claim; original delivery does not grant fresh-claim support or Check credit"
+    );
+    assert!(work.pack_evidence(&input, &target).unwrap().iter().all(|reference| matches!(reference, EvidenceRef::Text { unit_id, .. } if unit_id == "s1-navigation-source-2")));
+    assert!(state.outline_run.tool_draft.check_reads.evidence.is_empty());
+    assert_eq!(state.journal.accounting.physical_calls, calls);
+    let accounting = json!(state.journal.accounting);
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    host.replay_received().await.unwrap();
+    assert!(host.next(&BTreeSet::new()).await.unwrap().is_none());
+    assert_eq!(json!(host.state.journal.accounting), accounting);
+}

@@ -950,21 +950,7 @@ impl DiscoverWork {
         // conclusion or primary ownership. Only this claim's delivered ranges
         // count; separate continuation pages may jointly cover the original.
         for source in pack_section_context(input, pack) {
-            let current = section_context_key(pack, source);
-            let delivered = pack
-                .condition_support_options
-                .iter()
-                .filter(|option| {
-                    matches!(&option.origin, ConditionSupportOrigin::StructuralContext {
-                        source_unit_revision_id
-                    } if source_unit_revision_id == &source.source_unit_revision_id)
-                        && current
-                            .as_ref()
-                            .is_ok_and(|key| key == &option.review_version)
-                })
-                .flat_map(|option| option.evidence.iter().cloned())
-                .collect::<Vec<_>>();
-            if !super::evidence::covered_by_union(&section_context_ref(pack, source), &delivered) {
+            if !section_context_delivered(pack, source) {
                 errors.push(field(
                     "/pack_id",
                     "structural_context_not_delivered",
@@ -1322,6 +1308,30 @@ impl DiscoverWork {
             json!({"excerpts":excerpts,"condition_support_options":handles,"delivery_policy":"These options become usable only after this exact read output is delivered in a completed request for the same worker."}),
             options,
         ))
+    }
+
+    /// Navigation only: queued originals may be delivered in the next request;
+    /// they never become submission credit through this projection.
+    pub(crate) fn next_required_context_read(
+        &self,
+        input: &FrozenInput,
+        pack_id: &str,
+        queued: &[EvidenceRef],
+    ) -> Result<Value, String> {
+        let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
+        if super::evidence::input_digest(input)? != pack.input_digest {
+            return Err("dependency input changed".into());
+        }
+        for source in pack_section_context(input, pack) {
+            let mut coverage = section_context_delivered_evidence(pack, source);
+            coverage.extend_from_slice(queued);
+            if !super::evidence::covered_by_union(&section_context_ref(pack, source), &coverage) {
+                return Ok(
+                    json!({"tool":"read_evidence","args":{"dependency_id":section_context_key(pack, source)?}}),
+                );
+            }
+        }
+        Ok(Value::Null)
     }
 
     pub(crate) fn dependency_directory_page(
@@ -2055,6 +2065,23 @@ fn support_directory(pack: &ParsePack, cursor: Option<&str>) -> Result<Value, St
     )
 }
 
+// Navigation and submission use the same current-claim receipt union. A
+// directory preview or pending delivery never marks an original as read.
+fn section_context_delivered_evidence(pack: &ParsePack, source: &Source) -> Vec<EvidenceRef> {
+    let current = section_context_key(pack, source);
+    pack.condition_support_options.iter().filter(|option| {
+        matches!(&option.origin, ConditionSupportOrigin::StructuralContext { source_unit_revision_id }
+            if source_unit_revision_id == &source.source_unit_revision_id)
+            && current.as_ref().is_ok_and(|key| key == &option.review_version)
+    }).flat_map(|option| option.evidence.iter().cloned()).collect()
+}
+fn section_context_delivered(pack: &ParsePack, source: &Source) -> bool {
+    super::evidence::covered_by_union(
+        &section_context_ref(pack, source),
+        &section_context_delivered_evidence(pack, source),
+    )
+}
+
 /// A small directory page is separate from the selected native source body.
 /// Source and tool bytes remain subject to the caller's complete request fit.
 fn dependency_directory(
@@ -2107,12 +2134,21 @@ fn dependency_directory(
     {
         rows.push(json!({"type":"structural_context_candidate",
             "heading_path":source.locator["heading_path"],
+            "original_read_complete":section_context_delivered(pack, source),
             "evidence_preview":section_context_ref(pack, source),
             "read":{"tool":"read_evidence","args":{"dependency_id":section_context_key(pack, source)?}},
             "read_policy":"Earlier prose in the same native section or an ancestor section may qualify these rows. Read all structural context originals completely in completed worker requests before submitting any result; decide applicability separately. This directory grants no reading credit, no primary evidence ownership, and no completion of another pack."}));
     }
+    let next_required_read = context
+        .iter()
+        .find(|source| !section_context_delivered(pack, source))
+        .map(|source| {
+            section_context_key(pack, source)
+                .map(|key| json!({"tool":"read_evidence","args":{"dependency_id":key}}))
+        })
+        .transpose()?;
     Ok(
-        json!({"read_dependencies":rows,"next_dependency_cursor":if index + 1 < total { Some(dependency_cursor(pack,index+1)?) } else { None },"directory_complete":index + 1 >= total}),
+        json!({"read_dependencies":rows,"next_required_read":next_required_read,"next_dependency_cursor":if index + 1 < total { Some(dependency_cursor(pack,index+1)?) } else { None },"directory_complete":index + 1 >= total}),
     )
 }
 
@@ -2411,7 +2447,7 @@ fn materialize_pack_with_resolver(
     let _profile = crate::analysis::agent::profile::enter("materialize_final_json");
 
     Ok(
-        json!({"source_documents":source_documents,"read_dependencies":read_dependencies,"next_dependency_cursor":directory["next_dependency_cursor"],"condition_support_options":supports,"next_support_cursor":support_page["next_support_cursor"],"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
+        json!({"source_documents":source_documents,"read_dependencies":read_dependencies,"next_required_read":directory["next_required_read"],"next_dependency_cursor":directory["next_dependency_cursor"],"condition_support_options":supports,"next_support_cursor":support_page["next_support_cursor"],"id":pack.id,"document_ids":pack.document_ids,"input_digest":pack.input_digest,"order":pack.order,"pack_revision":pack.pack_revision,"claim_token":pack.claim_token,"atoms":atoms}),
     )
 }
 
