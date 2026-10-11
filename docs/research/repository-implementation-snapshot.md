@@ -22,7 +22,7 @@
 | `worker` | `crates/worker` | 无 | 知识处理 Runtime；招投标当前注册见部署/队列合同 |
 | `docreader` | `services/docreader` | gRPC `:50051` | 文件/URL → Markdown + 图片字节 |
 
-投标与知识库复用平台数据面；该历史快照不含当前 ONLYOFFICE 接入，不能将旧进程拓扑当作新部署已完成。对象身份由平台 ObjectRegistry/namespace 合同定义。
+投标与知识库复用平台数据面；该历史快照不含当前 ONLYOFFICE 接入，不能将旧进程拓扑当作新部署已完成。对象身份由平台 ObjectRegistry 合同定义。
 
 数据面：Postgres（领域 + chunks + 向量 + wiki + 图 + spans + 死信）、Redis（oxana + 分布式锁）、对象存储（S3/MinIO/local，桶 `KNOWLEDGEBRAIN_S3_BUCKET`，键 `objects/{sha256}`）。可选 Neo4j（`KNOWLEDGEBRAIN_NEO4J_HTTP_URL`）：图谱双写投影，**不**门闩 extract。
 

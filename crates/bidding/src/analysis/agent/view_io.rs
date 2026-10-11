@@ -13,7 +13,7 @@ pub(super) async fn read_source_view<J: Journal>(
     if !config.limits.vision_enabled {
         return Err(error(
             "AGENT_VISION_NOT_CONFIGURED",
-            "original-image review requires vision_enabled=true and an image-capable configured authoring model; no alternative provider was selected",
+            "original-image review requires an image-capable Chat model; confirm KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES=true for an unlisted model; no alternative provider was selected",
         ));
     }
     let source_id = args["source_id"]

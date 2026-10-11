@@ -930,7 +930,14 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
     }
     register_rerank_revision(&pool).await;
 
-    for role in ["kb_runtime_api", "kb_runtime_worker"] {
+    let app_role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for (role, expected) in [
+        (app_role.as_str(), (true, true, true, true)),
+        ("public", (false, false, false, false)),
+    ] {
         for table in [
             "embedding_revisions_v2",
             "knowledge_retrieval_policies_v2",
@@ -947,43 +954,43 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert_eq!(privileges, (true, false, false, false));
+            assert_eq!(privileges, expected);
         }
     }
     for table in ["chunk_keyword_indexes_v2", "chunk_vector_indexes_v2"] {
         let api_privileges: (bool, bool, bool, bool) = sqlx::query_as(
-            "SELECT has_table_privilege('kb_runtime_api',$1,'SELECT'),
-                    has_table_privilege('kb_runtime_api',$1,'INSERT'),
-                    has_table_privilege('kb_runtime_api',$1,'UPDATE'),
-                    has_table_privilege('kb_runtime_api',$1,'DELETE')",
+            "SELECT has_table_privilege(current_user,$1,'SELECT'),
+                    has_table_privilege(current_user,$1,'INSERT'),
+                    has_table_privilege(current_user,$1,'UPDATE'),
+                    has_table_privilege(current_user,$1,'DELETE')",
         )
         .bind(table)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(api_privileges, (true, false, false, false));
-        let worker_privileges: (bool, bool, bool, bool) = sqlx::query_as(
-            "SELECT has_table_privilege('kb_runtime_worker',$1,'SELECT'),
-                    has_table_privilege('kb_runtime_worker',$1,'INSERT'),
-                    has_table_privilege('kb_runtime_worker',$1,'UPDATE'),
-                    has_table_privilege('kb_runtime_worker',$1,'DELETE')",
+        assert_eq!(api_privileges, (true, true, true, true));
+        let public_privileges: (bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT has_table_privilege('public',$1,'SELECT'),
+                    has_table_privilege('public',$1,'INSERT'),
+                    has_table_privilege('public',$1,'UPDATE'),
+                    has_table_privilege('public',$1,'DELETE')",
         )
         .bind(table)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(worker_privileges, (true, false, false, false));
+        assert_eq!(public_privileges, (false, false, false, false));
     }
-    let worker_vector_reconcile: bool = sqlx::query_scalar(
+    let public_vector_reconcile: bool = sqlx::query_scalar(
         "SELECT has_function_privilege(
-            'kb_runtime_worker',
+            'public',
             'kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb)',
             'EXECUTE')",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(worker_vector_reconcile);
+    assert!(!public_vector_reconcile);
 
     let sidecar_counts: Vec<i64> = sqlx::query_scalar(
         "SELECT count(*) FROM chunk_keyword_indexes_v2

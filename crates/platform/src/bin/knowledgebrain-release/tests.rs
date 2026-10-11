@@ -17,11 +17,7 @@ impl Fixture {
         )
         .unwrap();
         std::fs::write(path.join("compose.yml"), "services: {}\n").unwrap();
-        std::fs::write(
-            path.join("release.env"),
-            "KB_DEPLOYMENT_NAMESPACE_ID=123e4567-e89b-12d3-a456-426614174000\nTOKEN=test-secret\n",
-        )
-        .unwrap();
+        std::fs::write(path.join("release.env"), "TOKEN=test-secret\n").unwrap();
         Self(path)
     }
     fn args(&self) -> Vec<String> {
@@ -76,7 +72,7 @@ fn container_value(input: &Input, service: &str, expected: &Value) -> Value {
     json!([{"Id":service,"Name":format!("/{}-{service}",input.project),"Image":format!("sha256:{}","f".repeat(64)),
         "Config":{"Image":expected["image"],"Labels":{"com.docker.compose.project":input.project,"com.docker.compose.service":service},
             "Env":env,"Cmd":null,"Entrypoint":["/image-entrypoint"],"Healthcheck":{"Test":expected["healthcheck"]["test"]}},
-        "Mounts":[{"Destination":MOUNT,"Source":input.descriptor_path,"Type":"bind","RW":false}],
+        "Mounts":[],
         "State":{"Status":if service=="migrate" {"exited"} else {"running"},"Running":service!="migrate","ExitCode":0,"Health":{"Status":"healthy"}}}])
 }
 
@@ -362,7 +358,6 @@ async fn stale_component_or_faked_probe_rejects_replay_without_mutations() {
         ("/0/Config/Healthcheck/Test", json!(["CMD", "true"])),
         ("/0/Config/Cmd", json!(["true"])),
         ("/0/Config/Env", json!(["BIN=worker"])),
-        ("/0/Mounts/0/RW", json!(true)),
     ] {
         let f = Fixture::new();
         let input = f.input();
@@ -419,13 +414,7 @@ fn typed_descriptor_validator_matches_checked_schema_for_release_inputs() {
         .compile(&schema)
         .unwrap();
     let mut values = vec![valid.clone()];
-    for field in [
-        "release_revision",
-        "platform_schema_revision",
-        "git_sha",
-        "schema_version",
-        "images",
-    ] {
+    for field in ["release_revision", "git_sha", "schema_version", "images"] {
         for value in [
             Value::Null,
             json!(true),
@@ -484,7 +473,7 @@ fn cleanup_failure_cannot_be_reported_as_success() {
 }
 
 #[test]
-fn role_identity_mount_health_and_endpoint_mismatches_are_rejected() {
+fn image_process_health_and_endpoint_mismatches_are_rejected() {
     let f = Fixture::new();
     let input = f.input();
     let extra = Override::create(&input, "attempt", &[]).unwrap();
@@ -507,9 +496,6 @@ fn role_identity_mount_health_and_endpoint_mismatches_are_rejected() {
             json!("worker"),
         ),
         ("/0/Name", json!("/foreign-api")),
-        ("/0/Mounts/0/RW", json!(true)),
-        ("/0/Mounts/0/Source", json!("/other/descriptor")),
-        ("/0/Mounts", json!([])),
         ("/0/Config/Healthcheck/Test", json!(["CMD", "true"])),
         ("/0/State/Health/Status", json!("unhealthy")),
         ("/0/State/Running", json!(false)),
@@ -521,14 +507,8 @@ fn role_identity_mount_health_and_endpoint_mismatches_are_rejected() {
             "{pointer}"
         );
     }
-    for key in [
-        "BIN",
-        platform::COMPONENT_KIND_ENV,
-        platform::COMPONENT_IMAGE_DIGEST_ENV,
-        platform::RELEASE_DESCRIPTOR_SHA256_ENV,
-        platform::DEPLOYMENT_NAMESPACE_ID_ENV,
-        platform::RELEASE_DESCRIPTOR_PATH_ENV,
-    ] {
+    {
+        let key = "BIN";
         let mut changed = valid.clone();
         let env = changed[0]["Config"]["Env"].as_array_mut().unwrap();
         let value = env
@@ -552,12 +532,8 @@ fn role_identity_mount_health_and_endpoint_mismatches_are_rejected() {
 
 #[test]
 fn invalid_inputs_and_schema_drift_fail_without_engine_access() {
-    for invalid in [
-        "",
-        "KB_DEPLOYMENT_NAMESPACE_ID=INVALID\n",
-        "KB_DEPLOYMENT_NAMESPACE_ID=123E4567-E89B-12D3-A456-426614174000\n",
-        "TOKEN=a\nTOKEN=b\n",
-    ] {
+    {
+        let invalid = "TOKEN=a\nTOKEN=b\n";
         let f = Fixture::new();
         std::fs::write(f.0.join("release.env"), invalid).unwrap();
         assert!(Input::load(f.args().into_iter()).is_err());

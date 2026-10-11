@@ -22,7 +22,7 @@ fn bootstrap_diagnostic(error: &platform::SchemaError) -> String {
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
-    let pool = platform::connect_unverified()
+    let pool = platform::connect()
         .await
         .unwrap_or_else(|error| panic!("postgres bootstrap connection failed: {error}"));
     platform::apply_fresh_baseline(&pool)
@@ -41,6 +41,6 @@ mod tests {
         let error =
             platform::SchemaError::Sql(sqlx::Error::Protocol("private driver payload".into()));
         assert_eq!(super::bootstrap_diagnostic(&error), "");
-        assert_eq!(error.to_string(), "postgres schema verification failed");
+        assert_eq!(error.to_string(), "postgres operation failed");
     }
 }

@@ -1,6 +1,6 @@
 //! Host release entry point. Docker output can contain credentials; never echo it.
 use async_trait::async_trait;
-use platform::{ReleaseDescriptorV1, SchemaRuntimeIdentity};
+use platform::ReleaseDescriptorV1;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -10,7 +10,6 @@ use std::{
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, String>;
-const MOUNT: &str = "/run/knowledgebrain/release-descriptor.json";
 const ATTEMPT_LABEL: &str = "io.knowledgebrain.release-attempt";
 
 struct Input {
@@ -24,7 +23,6 @@ struct Input {
     schema_bytes: Vec<u8>,
     descriptor: ReleaseDescriptorV1,
     sha: String,
-    namespace: String,
     project: String,
     env: BTreeMap<String, String>,
     timeout: u64,
@@ -120,31 +118,6 @@ impl Input {
                 return Err("duplicate release env key".into());
             }
         }
-        let namespace = env
-            .get(platform::DEPLOYMENT_NAMESPACE_ID_ENV)
-            .ok_or("env file must explicitly set KB_DEPLOYMENT_NAMESPACE_ID")?
-            .clone();
-        let identity = SchemaRuntimeIdentity::from_descriptor(
-            descriptor_path.clone(),
-            descriptor.clone(),
-            &sha,
-            "migrator",
-            descriptor
-                .component_digest(platform::SchemaComponentKind::Migrator)
-                .map_err(|e| e.to_string())?,
-            &namespace,
-        )
-        .map_err(|e| e.to_string())?;
-        if identity.deployment_namespace_id.to_string() != namespace {
-            return Err("noncanonical namespace".into());
-        }
-        env.insert(
-            "KB_RELEASE_DESCRIPTOR_FILE".into(),
-            descriptor_path
-                .to_str()
-                .ok_or("non-UTF8 descriptor path")?
-                .into(),
-        );
         Ok(Self {
             compose_bytes: read(&compose_path)?,
             schema_path,
@@ -156,7 +129,6 @@ impl Input {
             env_bytes,
             descriptor,
             sha,
-            namespace,
             project,
             env,
             timeout,
@@ -344,36 +316,10 @@ fn verify_container(
                 }
             }
         }
-        if matches!(kind, "migrator" | "api" | "worker" | "retention") {
-            for (key, value) in [
-                ("BIN", kind),
-                (platform::RELEASE_DESCRIPTOR_PATH_ENV, MOUNT),
-                (platform::RELEASE_DESCRIPTOR_SHA256_ENV, &input.sha),
-                (platform::DEPLOYMENT_NAMESPACE_ID_ENV, &input.namespace),
-                (platform::COMPONENT_KIND_ENV, kind),
-                (
-                    platform::COMPONENT_IMAGE_DIGEST_ENV,
-                    image.split_once('@').ok_or("image digest missing")?.1,
-                ),
-            ] {
-                if env.get(key) != Some(&value) {
-                    return Err("container release environment mismatch".into());
-                }
-            }
-            let mounts = container["Mounts"]
-                .as_array()
-                .ok_or("container mounts missing")?;
-            let selected: Vec<_> = mounts
-                .iter()
-                .filter(|m| m["Destination"] == MOUNT)
-                .collect();
-            if selected.len() != 1
-                || selected[0]["Type"] != "bind"
-                || selected[0]["RW"] != false
-                || selected[0]["Source"].as_str() != input.descriptor_path.to_str()
-            {
-                return Err("descriptor mount must be exact and read-only".into());
-            }
+        if matches!(kind, "migrator" | "api" | "worker" | "retention")
+            && env.get("BIN") != Some(&kind)
+        {
+            return Err("container executable selection mismatch".into());
         }
     }
     Ok(())
@@ -421,10 +367,7 @@ impl Override {
             let mut entry = json!({"image":image,"pull_policy":"never", "labels":{ATTEMPT_LABEL:attempt},
                 "container_name":format!("{}-{service}", input.project)});
             if kind != "docreader" {
-                entry["environment"] = json!({"BIN":kind,"KB_RELEASE_DESCRIPTOR_PATH":MOUNT,"KB_RELEASE_DESCRIPTOR_SHA256":input.sha,
-                    "KB_DEPLOYMENT_NAMESPACE_ID":input.namespace,"KB_COMPONENT_KIND":kind,
-                    "KB_COMPONENT_IMAGE_DIGEST":image.split_once('@').ok_or("image digest missing")?.1});
-                entry["volumes"] = json!([{"type":"bind","source":input.descriptor_path,"target":MOUNT,"read_only":true}]);
+                entry["environment"] = json!({"BIN":kind});
             }
             services.insert(service.into(), entry);
         }

@@ -1,6 +1,5 @@
 //! Optional S3/MinIO projection. Local disk remains the write-through cache.
 
-use crate::DeploymentNamespaceV1;
 use aws_sdk_s3::{
     Client,
     config::{BehaviorVersion, Credentials, Region, retry::RetryConfig, timeout::TimeoutConfig},
@@ -22,20 +21,25 @@ pub fn endpoint() -> String {
     std::env::var("KNOWLEDGEBRAIN_S3_ENDPOINT").unwrap_or_default()
 }
 
-fn access_key() -> Result<String, String> {
-    std::env::var("KNOWLEDGEBRAIN_S3_ACCESS_KEY")
-        .or_else(|_| std::env::var("MINIO_ROOT_USER"))
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "S3 access key is required".into())
+fn credentials(get: &impl Fn(&str) -> Option<String>) -> Result<(String, String), String> {
+    let read = |name| get(name).filter(|value| !value.trim().is_empty());
+    let key = read("KNOWLEDGEBRAIN_S3_ACCESS_KEY");
+    let secret = read("KNOWLEDGEBRAIN_S3_SECRET_KEY");
+    match (key, secret) {
+        (Some(key), Some(secret)) => Ok((key, secret)),
+        (None, None) if read("KNOWLEDGEBRAIN_S3_ENDPOINT").is_some_and(|endpoint|
+            endpoint.trim().trim_end_matches('/') == "http://minio:9000") => {
+            Ok((read("MINIO_ROOT_USER").ok_or("MINIO_ROOT_USER is required for built-in storage")?,
+                read("MINIO_ROOT_PASSWORD").ok_or("MINIO_ROOT_PASSWORD is required for built-in storage")?))
+        }
+        _ => Err("KNOWLEDGEBRAIN_S3_ACCESS_KEY and KNOWLEDGEBRAIN_S3_SECRET_KEY must be provided together for external storage".into()),
+    }
 }
-
+fn access_key() -> Result<String, String> {
+    credentials(&|key| std::env::var(key).ok()).map(|pair| pair.0)
+}
 fn secret_key() -> Result<String, String> {
-    std::env::var("KNOWLEDGEBRAIN_S3_SECRET_KEY")
-        .or_else(|_| std::env::var("MINIO_ROOT_PASSWORD"))
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "S3 secret key is required".into())
+    credentials(&|key| std::env::var(key).ok()).map(|pair| pair.1)
 }
 
 fn region() -> String {
@@ -69,85 +73,11 @@ impl ConnectionConfig {
     }
 }
 
-pub(crate) fn reset_preflight(
-    namespace: DeploymentNamespaceV1,
-    timeout: Duration,
-) -> Result<Option<crate::NamespaceResetMinioPreflight>, String> {
-    let endpoint = endpoint();
-    let bucket = bucket();
-    if endpoint.is_empty() && bucket.is_empty() {
-        return Ok(None);
-    }
-    reset_preflight_with_config(
-        ConnectionConfig::from_environment_at(endpoint, bucket)?,
-        namespace,
-        timeout,
-    )
-    .map(Some)
-}
-
-fn reset_preflight_with_config(
-    mut config: ConnectionConfig,
-    namespace: DeploymentNamespaceV1,
-    timeout: Duration,
-) -> Result<crate::NamespaceResetMinioPreflight, String> {
-    validate_bucket(&config.bucket)?;
-    let parsed =
-        reqwest::Url::parse(&config.endpoint).map_err(|_| "invalid MinIO reset endpoint")?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.path() != "/"
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || config.region.trim().is_empty()
-        || timeout.is_zero()
-    {
-        return Err("invalid MinIO reset connection mapping or timeout".into());
-    }
-    config.endpoint = parsed.as_str().trim_end_matches('/').to_owned();
-    let observation = crate::NamespaceResetMinioPreflight {
-        namespace,
-        endpoint: config.endpoint.clone(),
-        bucket: config.bucket.clone(),
-        signing_region: config.region.clone(),
-        prefix: format!("{}/", namespace.storage_label()),
-    };
-    // HeadBucket authenticates only this bucket. Missing/forbidden is a failure;
-    // preflight never lists or creates buckets and never mutates objects.
-    with_client(config, timeout, |client, bucket| async move {
-        client
-            .head_bucket()
-            .bucket(bucket)
-            .send()
-            .await
-            .map_err(|error| sdk_error("HEAD bucket", error))?;
-        Ok(())
-    })?;
-    Ok(observation)
-}
-
 pub fn put_object(key: &str, bytes: &[u8]) -> Result<(), String> {
     if !configured() {
         return Ok(());
     }
-    put_object_in_namespace(
-        DeploymentNamespaceV1::from_environment().map_err(|e| e.to_string())?,
-        key,
-        bytes,
-    )
-}
-
-pub(crate) fn put_object_in_namespace(
-    namespace: DeploymentNamespaceV1,
-    key: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
-    if !configured() {
-        return Ok(());
-    }
-    let key = object_key(namespace, key)?;
+    let key = object_key(key)?;
     let bytes = bytes.to_vec();
     with_client(
         ConnectionConfig::from_environment()?,
@@ -168,20 +98,10 @@ pub(crate) fn put_object_in_namespace(
 }
 
 pub fn get_object(key: &str) -> Result<Vec<u8>, String> {
-    get_object_in_namespace(
-        DeploymentNamespaceV1::from_environment().map_err(|e| e.to_string())?,
-        key,
-    )
-}
-
-pub(crate) fn get_object_in_namespace(
-    namespace: DeploymentNamespaceV1,
-    key: &str,
-) -> Result<Vec<u8>, String> {
     if !configured() {
         return Err("s3 not configured".into());
     }
-    let key = object_key(namespace, key)?;
+    let key = object_key(key)?;
     with_client(
         ConnectionConfig::from_environment()?,
         Duration::from_secs(30),
@@ -203,14 +123,11 @@ pub(crate) fn get_object_in_namespace(
     )
 }
 
-pub(crate) fn delete_object_in_namespace(
-    namespace: DeploymentNamespaceV1,
-    key: &str,
-) -> Result<(), String> {
+pub(crate) fn delete_object(key: &str) -> Result<(), String> {
     if !configured() {
         return Ok(());
     }
-    let key = object_key(namespace, key)?;
+    let key = object_key(key)?;
     with_client(
         ConnectionConfig::from_environment()?,
         Duration::from_secs(30),
@@ -227,12 +144,12 @@ pub(crate) fn delete_object_in_namespace(
     )
 }
 
-fn object_key(namespace: DeploymentNamespaceV1, key: &str) -> Result<String, String> {
+fn object_key(key: &str) -> Result<String, String> {
     let name = key
         .strip_prefix("objects/")
         .ok_or("logical object reference must start with objects/")?;
     crate::object_store::object_name(name).map_err(|e| e.to_string())?;
-    Ok(format!("{}/objects/{}", namespace.storage_label(), name))
+    Ok(format!("objects/{name}"))
 }
 
 fn validate_bucket(bucket: &str) -> Result<(), String> {
@@ -348,6 +265,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn storage_credentials_never_cross_external_endpoints() {
+        let mut values = std::collections::HashMap::from([
+            ("KNOWLEDGEBRAIN_S3_ENDPOINT", "http://minio:9000"),
+            ("MINIO_ROOT_USER", "internal-user"),
+            ("MINIO_ROOT_PASSWORD", " exact-secret "),
+        ]);
+        assert_eq!(
+            credentials(&|key| values.get(key).map(|v| v.to_string()))
+                .unwrap()
+                .1,
+            " exact-secret "
+        );
+        values.insert("KNOWLEDGEBRAIN_S3_ENDPOINT", "https://external.invalid");
+        assert!(credentials(&|key| values.get(key).map(|v| v.to_string())).is_err());
+        values.insert("KNOWLEDGEBRAIN_S3_ACCESS_KEY", "external-user");
+        assert!(credentials(&|key| values.get(key).map(|v| v.to_string())).is_err());
+        values.insert("KNOWLEDGEBRAIN_S3_SECRET_KEY", "external-secret");
+        assert_eq!(
+            credentials(&|key| values.get(key).map(|v| v.to_string()))
+                .unwrap()
+                .1,
+            "external-secret"
+        );
+    }
+
+    #[test]
     fn failed_bucket_probe_does_not_create_or_follow_redirects() {
         use std::io::{Read, Write};
         for status in [403, 500, 307] {
@@ -406,186 +349,24 @@ mod tests {
         }
     }
 
-    // Only fixtures bypass the namespace prefix, to prove legacy isolation.
-    fn legacy_object(method: &str, key: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
-        with_client(
-            ConnectionConfig::from_environment()?,
-            Duration::from_secs(5),
-            |client, bucket| async move {
-                match method {
-                    "PUT" => {
-                        client
-                            .put_object()
-                            .bucket(bucket)
-                            .key(key)
-                            .body(ByteStream::from(bytes.to_vec()))
-                            .send()
-                            .await
-                            .map_err(|e| sdk_error("fixture PUT", e))?;
-                        Ok(Vec::new())
-                    }
-                    "GET" => {
-                        let output = client
-                            .get_object()
-                            .bucket(bucket)
-                            .key(key)
-                            .send()
-                            .await
-                            .map_err(|e| sdk_error("fixture GET", e))?;
-                        Ok(output
-                            .body
-                            .collect()
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .into_bytes()
-                            .to_vec())
-                    }
-                    "DELETE" => {
-                        client
-                            .delete_object()
-                            .bucket(bucket)
-                            .key(key)
-                            .send()
-                            .await
-                            .map_err(|e| sdk_error("fixture DELETE", e))?;
-                        Ok(Vec::new())
-                    }
-                    _ => unreachable!("invalid fixture operation"),
-                }
-            },
-        )
-    }
-
     #[test]
-    fn reset_mapping_rejects_unsafe_locations_before_connecting() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let config = ConnectionConfig {
-            endpoint: endpoint.clone(),
-            bucket: "preflight-test".into(),
-            access_key: "test-access".into(),
-            secret_key: "test-secret".into(),
-            region: "test-region".into(),
-        };
-        let namespace = uuid::Uuid::new_v4().to_string().parse().unwrap();
-        let mut cases = Vec::new();
-        for location in [
-            String::new(),
-            format!("{endpoint}/prefix"),
-            format!("{endpoint}?parameter=value"),
-            format!("{endpoint}#fragment"),
-            endpoint.replace("http://", "http://user:password@"),
+    fn object_keys_use_objects_prefix_and_reject_unsafe_names() {
+        assert_eq!(
+            object_key("objects/example.md").unwrap(),
+            "objects/example.md"
+        );
+        for invalid in [
+            "",
+            "../escape",
+            "/objects/escape",
+            "objects/../escape",
+            "objects/%2e%2e",
+            "objects/a?x",
+            "objects/a#x",
+            "foreign/object",
         ] {
-            let mut case = config.clone();
-            case.endpoint = location;
-            cases.push(case);
+            assert!(object_key(invalid).is_err());
         }
-        for bucket in ["", ".", "..", "../other", "bucket/other", "bucket?query"] {
-            let mut case = config.clone();
-            case.bucket = bucket.into();
-            cases.push(case);
-        }
-        let mut blank_region = config.clone();
-        blank_region.region = " ".into();
-        cases.push(blank_region);
-        for case in cases {
-            assert!(reset_preflight_with_config(case, namespace, Duration::from_secs(1)).is_err());
-        }
-        assert!(reset_preflight_with_config(config, namespace, Duration::ZERO).is_err());
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-    }
-
-    #[test]
-    #[ignore = "requires owned MinIO service and KNOWLEDGEBRAIN_REQUIRE_S3_TESTS=1"]
-    fn live_reset_preflight_reads_bucket_without_creating_or_deleting() {
-        assert_eq!(
-            std::env::var("KNOWLEDGEBRAIN_REQUIRE_S3_TESTS").as_deref(),
-            Ok("1")
-        );
-        let config = ConnectionConfig::from_environment().unwrap();
-        assert_eq!(
-            reqwest::Url::parse(&config.endpoint).unwrap().host_str(),
-            Some("127.0.0.1")
-        );
-        let target: DeploymentNamespaceV1 = uuid::Uuid::new_v4().to_string().parse().unwrap();
-        let foreign = uuid::Uuid::new_v4().to_string().parse().unwrap();
-        let key = format!("objects/{}", uuid::Uuid::new_v4());
-        put_object_in_namespace(target, &key, b"target-sentinel").unwrap();
-        put_object_in_namespace(foreign, &key, b"foreign-sentinel").unwrap();
-        let legacy = key.clone();
-        legacy_object("PUT", &legacy, b"legacy-sentinel").unwrap();
-        let revision = "minio-preflight-test";
-        let request = crate::NamespaceResetRequest::new(
-            &target.storage_label(),
-            revision,
-            &crate::namespace_reset_confirmation(target, revision).unwrap(),
-        )
-        .unwrap();
-        let observed = crate::verify_namespace_reset_minio(&request, Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
-        assert_eq!(observed.namespace, target);
-        assert_eq!(observed.endpoint, config.endpoint);
-        assert_eq!(observed.bucket, config.bucket);
-        assert_eq!(observed.signing_region, config.region);
-        assert_eq!(observed.prefix, format!("{}/", target.storage_label()));
-        assert_eq!(
-            reset_preflight_with_config(config.clone(), target, Duration::from_secs(5)).unwrap(),
-            observed
-        );
-        let other =
-            reset_preflight_with_config(config.clone(), foreign, Duration::from_secs(5)).unwrap();
-        assert_eq!(observed.bucket, other.bucket);
-        assert_ne!(observed.prefix, other.prefix);
-        let serialized = serde_json::to_string(&observed).unwrap();
-        assert!(
-            !serialized.contains(&config.access_key) && !serialized.contains(&config.secret_key)
-        );
-
-        let mut denied = config.clone();
-        denied.secret_key = uuid::Uuid::new_v4().to_string();
-        assert!(reset_preflight_with_config(denied, target, Duration::from_secs(5)).is_err());
-        let mut missing = config.clone();
-        missing.bucket = format!("missing-{}", uuid::Uuid::new_v4().simple());
-        assert!(
-            reset_preflight_with_config(missing.clone(), target, Duration::from_secs(5)).is_err()
-        );
-        assert!(
-            with_client(
-                missing,
-                Duration::from_secs(5),
-                |client, bucket| async move {
-                    client
-                        .head_bucket()
-                        .bucket(bucket)
-                        .send()
-                        .await
-                        .map_err(|error| sdk_error("HEAD bucket", error))?;
-                    Ok(())
-                }
-            )
-            .is_err()
-        );
-
-        assert_eq!(
-            get_object_in_namespace(target, &key).unwrap(),
-            b"target-sentinel"
-        );
-        assert_eq!(
-            get_object_in_namespace(foreign, &key).unwrap(),
-            b"foreign-sentinel"
-        );
-        assert_eq!(
-            legacy_object("GET", &legacy, &[]).unwrap(),
-            b"legacy-sentinel"
-        );
-        delete_object_in_namespace(target, &key).unwrap();
-        delete_object_in_namespace(foreign, &key).unwrap();
-        legacy_object("DELETE", &legacy, &[]).unwrap();
     }
 
     #[test]
@@ -609,50 +390,6 @@ mod tests {
         put_object(&key, b"knowledgebrain-s3").expect("s3 put");
         let got = get_object(&key).expect("s3 get");
         assert_eq!(got, b"knowledgebrain-s3");
-        delete_object_in_namespace(DeploymentNamespaceV1::from_environment().unwrap(), &key)
-            .expect("delete test object");
-    }
-
-    #[test]
-    #[ignore = "requires owned MinIO service and KNOWLEDGEBRAIN_REQUIRE_S3_TESTS=1"]
-    fn live_namespaces_keep_same_key_isolated_and_never_adopt_legacy_objects() {
-        assert_eq!(
-            std::env::var("KNOWLEDGEBRAIN_REQUIRE_S3_TESTS").as_deref(),
-            Ok("1")
-        );
-        assert!(
-            configured(),
-            "required namespace test needs configured owned MinIO"
-        );
-        let first = uuid::Uuid::new_v4().to_string().parse().unwrap();
-        let second = uuid::Uuid::new_v4().to_string().parse().unwrap();
-        let key = format!("objects/{}", uuid::Uuid::new_v4());
-        put_object_in_namespace(first, &key, b"first").unwrap();
-        assert!(get_object_in_namespace(second, &key).is_err());
-        put_object_in_namespace(second, &key, b"second").unwrap();
-        assert_eq!(get_object_in_namespace(first, &key).unwrap(), b"first");
-        assert_eq!(get_object_in_namespace(second, &key).unwrap(), b"second");
-        // Deliberately create a legacy object only inside this owned fixture.
-        let legacy = key.clone();
-        legacy_object("PUT", &legacy, b"legacy").unwrap();
-        for invalid in [
-            "../escape",
-            "/objects/escape",
-            "objects/../escape",
-            "objects/%2e%2e",
-            "objects/a?x",
-            "objects/a#x",
-            "foreign/object",
-        ] {
-            assert!(put_object_in_namespace(first, invalid, b"invalid").is_err());
-            assert!(get_object_in_namespace(first, invalid).is_err());
-            assert!(delete_object_in_namespace(first, invalid).is_err());
-        }
-        delete_object_in_namespace(first, &key).unwrap();
-        assert!(get_object_in_namespace(first, &key).is_err());
-        assert_eq!(get_object_in_namespace(second, &key).unwrap(), b"second");
-        assert_eq!(legacy_object("GET", &legacy, &[]).unwrap(), b"legacy");
-        delete_object_in_namespace(second, &key).unwrap();
-        legacy_object("DELETE", &legacy, &[]).unwrap();
+        delete_object(&key).expect("delete test object");
     }
 }

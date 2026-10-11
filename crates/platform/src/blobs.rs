@@ -13,8 +13,7 @@ pub fn object_ref(hash: &str) -> String {
 pub fn write_blob(hash: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     let store = LocalObjectStore::from_environment()?;
     let path = store.write(hash, bytes)?;
-    crate::s3::put_object_in_namespace(store.namespace, &object_ref(hash), bytes)
-        .map_err(io::Error::other)?;
+    crate::s3::put_object(&object_ref(hash), bytes).map_err(io::Error::other)?;
     Ok(path)
 }
 
@@ -40,8 +39,7 @@ pub fn read_blob(hash: &str) -> io::Result<Vec<u8>> {
     match store.read(hash) {
         Ok(bytes) => Ok(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let bytes = crate::s3::get_object_in_namespace(store.namespace, &object_ref(hash))
-                .map_err(|_| error)?;
+            let bytes = crate::s3::get_object(&object_ref(hash)).map_err(|_| error)?;
             store.write(hash, &bytes)?;
             Ok(bytes)
         }
@@ -65,7 +63,7 @@ pub async fn delete_retained_blob(digest: &str) -> Result<(), String> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
         }
-        crate::s3::delete_object_in_namespace(store.namespace, &object_ref(&digest))
+        crate::s3::delete_object(&object_ref(&digest))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -77,7 +75,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires owned MinIO, OBJECT_DIR and KNOWLEDGEBRAIN_REQUIRE_S3_TESTS=1"]
-    fn live_cache_fallback_and_retention_stay_in_namespace() {
+    fn live_cache_fallback_and_retention_preserve_object_safety() {
         assert_eq!(
             std::env::var("KNOWLEDGEBRAIN_REQUIRE_S3_TESTS").as_deref(),
             Ok("1")
@@ -85,7 +83,7 @@ mod tests {
         assert!(crate::s3_configured());
         let store = LocalObjectStore::from_environment().unwrap();
         let name = uuid::Uuid::new_v4().simple().to_string();
-        let bytes = b"namespace cache roundtrip";
+        let bytes = b"object cache roundtrip";
         let path = write_blob(&name, bytes).unwrap();
         assert_eq!(crate::get_object(&object_ref(&name)).unwrap(), bytes);
         store.remove(&name).unwrap();

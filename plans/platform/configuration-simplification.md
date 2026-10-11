@@ -2,20 +2,20 @@
 
 ## 状态、范围与目标
 
-本页是用户确认方向后的待实施方案，不代表代码已完成。核对基线为 PR #22 的 `3a8bafae77048d3e94f9ddd1c0aef26ce7a1424d`（2026-10-11）。本 PR 只提交方案和导航，不修改运行代码、不部署、不清库。
+本页方案已进入本地实施与验证，基线为 PR #22 的 `3a8bafae77048d3e94f9ddd1c0aef26ce7a1424d`（2026-10-11）。代码、部署与验收脚本已同步；尚未部署或操作已有数据库。验证结果见文末。
 
 用户只需明确提供：**账号密码、JWT_SECRET、模型服务配置、最大上下文**。其余参数使用程序默认值或由标准部署派生，允许外部基础设施的显式覆盖。当前业务范围为招标解析、OCR、Discover → Organize → Check；知识检索与匹配填充不在本阶段。
 
 **仅支持全新数据库部署，不设计旧库、旧角色、旧配置或旧检查点迁移。** 不编写 ALTER/backfill、角色转移或兼容迁移工具，不自动删除已有数据库或资料。遇到已有不匹配数据库，明确拒绝并要求提供新空库。
 
-本方案取代 `runtime-foundation.md` 中独立 migrator/API/worker/retention 数据库账号、专用 owner 与角色 ACL 边界的目标；schema 正确性、业务校验、幂等、审计、对象引用保护仍保留。数据库权限收敛不等于合并 API/Worker/DocReader 进程或删除 retention 业务职责。
+本方案取代 `runtime-foundation.md` 中独立 migrator/API/worker/retention 数据库账号、专用 owner 与角色 ACL 边界的目标；真实 DDL 与数据约束、业务校验、幂等、审计、对象引用保护仍保留。数据库权限收敛不等于合并 API/Worker/DocReader 进程或删除 retention 业务职责。
 
 ## 1. 当前问题与实施差距
 
 | 问题 | 当前依据 | 目标 |
 | --- | --- | --- |
 | 用户要配置四套运行角色密码 | `deploy/postgres-init/010-runtime-identities.sh`、`deploy/docker-compose.yml` | 一套应用数据库账号，各组件使用相同连接 |
-| SQL 与 catalog 仍硬编码多角色 | `migrations/*baseline.sql`、`crates/platform/src/catalog.rs`、`db.rs` | fresh baseline 与校验共同改为单账号，不只删 env |
+| SQL 仍硬编码多角色 | `migrations/*baseline.sql`、`crates/platform/src/db.rs` | fresh baseline 与权限验收共同改为单账号，不只删 env |
 | 上下文固定且另有 JSON 覆盖 | `crates/bidding/src/analysis/agent.rs` | 一个必填标量入口，131072 是当前选择而非永久上限 |
 | 未知模型要求用户提供 tokenizer 校准 | `agent_runtime/chat/tokenization.rs` | 程序内部保守计数、自动分包；不要求用户理解编码或倍率 |
 | 无 LDAP 的登录不校验密码 | `crates/platform/src/auth.rs`、`crates/api/src/routes.rs` | 默认本地账号密码登录，LDAP 为可选替代 |
@@ -23,11 +23,11 @@
 | 不用知识库仍被 Embedding 就绪门阻塞 | `crates/platform/src/probe.rs` | readiness 只检查当前启用能力 |
 | Compose、宿主脚本、代码默认不一致 | `deploy/.env.example`、Compose、runtime helper | 同一解析规则与默认值，环境只决定网络拓扑 |
 
-此前本地已验证的 `KB_TENDER_AGENT_LIMITS` 删除改动不属于本 PR；实施时复用其删除方向，不能把其中固定 131072 的临时行为当最终接口。原工作区修改保持原样，不借本 PR 提交。
+`KB_TENDER_AGENT_LIMITS` 的删除已整合进本工作树；上下文改用必填标量，未保留固定 131072 的临时接口。原工作区未提交修改仍保留。
 
 ## 2. 唯一用户配置入口
 
-以下是**目标接口**；新增变量必须在后续实现、测试和 Compose 透传后才能使用。
+以下接口已在运行代码和 Compose 中实现。
 
 | 变量或组 | 必填条件 | 规则 |
 | --- | --- | --- |
@@ -41,7 +41,7 @@
 | `KNOWLEDGEBRAIN_VLM_BASE_URL/API_KEY/MODEL` | 使用独立 OCR 服务时条件必填 | 详见视觉继承规则；不支持鉴权的本地服务需要显式能力约定，不能任意猜造 Key |
 | `KNOWLEDGEBRAIN_EMBEDDING_*` | 本阶段不要求 | 后续开启知识能力时要求；当前 readiness 必须先修改，不能用假端点填空 |
 
-生产可通过 Secret 注入上述值，无需明文 `.env`。密码校验只报键名及要求，不输出值。新管理员使用成熟、带盐的密码 KDF 存储；初始化幂等，不因重启重新设置密码；不开放公共注册。默认登录必须校验密码，删除未配 LDAP 时开放登录的回退。LDAP 的 URL、DN 模板为高级可选覆盖；若选择 LDAP，账号密码来自身份系统，不再要求本地管理员引导，不能把 `ldaps://` 简单降为明文 TCP。
+生产可通过 Secret 注入上述值，无需明文 `.env`。密码校验只报键名及要求，不输出值。新管理员使用成熟、带盐的密码 KDF 存储；初始化幂等，不因重启重新设置密码；不开放公共注册。默认登录必须校验密码，删除未配 LDAP 时开放登录的回退。本地登录名不能通过个人资料接口修改，避免与启动配置失配。LDAP 的 URL、DN 模板为高级可选覆盖；若选择 LDAP，账号密码来自身份系统，不再要求本地管理员引导，不能把 `ldaps://` 简单降为明文 TCP。
 
 数据库管理账号、对象存储账号、用户登录账号是不同身份，不复用密码；“一套数据库账号”仅指应用各进程访问同一数据库。
 
@@ -54,15 +54,15 @@
 3. PostgreSQL 服务初始化所需的引擎管理身份由容器内部管理，不作为第二套应用账号暴露。不能直接把应用 `POSTGRES_USER` 交给官方镜像初始化后让 API 继承 superuser。实现部署初始化适配：本地受控初始化准备必要扩展和应用库，创建用户提供的应用账号为 NOSUPERUSER/NOCREATEROLE/NOREPLICATION/NOBYPASSRLS；应用阶段只使用该账号。
 4. 外部 PostgreSQL 由其管理员预备数据库和扩展，用户提供一套应用凭据；应用不得尝试夺取集群管理权限。地址、端口、库名可覆盖，不能把外部凭据硬编码。
 5. 三份 fresh baseline 仍按现有领域顺序、锁和事务执行；移除 `SET LOCAL ROLE kb_app_owner`、多角色 GRANT/REVOKE/角色断言，改为当前应用 owner。保留与匿名 PUBLIC 访问、函数执行及跨库边界相关的合理限制。
-6. API/Worker 仍只执行只读 schema readiness，不自行创建或修补 schema。baseline 初始化是独立启动步骤，即使凭据相同也不能在普通请求路径执行 DDL。
+6. API/Worker 只检查运行依赖就绪，不自行创建或修补 schema。baseline 初始化是独立启动步骤，即使凭据相同也不能在普通请求路径执行 DDL。
 
 ### 必须同步调整的安全合同
 
 共享账号后，数据库不再隔离 API/Worker/retention 的 DDL 或删除权限，这是明确接受的取舍，不能继续宣称角色级最小权限。业务授权、事务、lease/token fence、幂等和删除引用保护必须继续在实际调用路径验证。单账号拥有对象意味着有权绕过部分 DB 保护，应如实记录其防护边界。
 
-`catalog.rs` 的 owner 过滤、角色白名单、ACL canonicalization；`db.rs` 的 owner inventory、baseline 执行、receipt 校验；相关 SQL 函数、RLS/SECURITY DEFINER、测试及 fresh-schema 验收必须一起修改。定义应用 schema/object 边界，排除系统与扩展对象，不能以“所有当前用户对象”无界收集。可配置用户名必须按 PostgreSQL identifier 规则安全引用，不拼接密码或未转义标识符。
+保留 SQL 函数、业务权限与 fresh DDL 验收。可配置用户名必须按 PostgreSQL identifier 规则安全引用，不拼接密码或未转义标识符。删除 catalog manifest、schema snapshot/receipt 和结构 hash 启动门禁。
 
-catalog/receipt 合同版本、baseline hash 与 release descriptor 同步重新生成；不能关闭校验绕过差异。发布身份由构建与部署生成并验证，生产不能沿用虚构的开发镜像摘要。部署命名空间首次创建后持久保存，重启不重新随机生成。
+发布镜像身份由宿主发布工具验证，生产不能沿用虚构的开发镜像摘要；该身份不再绑定数据库结构版本。删除部署 UUID 及跨后端 reset 设计，各安装通过独立数据库、Redis 数据库、bucket、对象目录和图数据库隔离，不提供旧布局迁移或兼容。
 
 ## 4. 上下文与内部预算
 
@@ -80,9 +80,9 @@ catalog/receipt 合同版本、baseline hash 与 release descriptor 同步重新
 
 招标原图复核始终使用配置的 Chat 模型，完整流程要求该模型有图像与工具能力；去掉用户 `vision_enabled` JSON 开关。能力由供应商资料/已维护配置确认，未知时明确指出待确认，不以模型名字猜测，不自动发送付费探测请求。
 
-VLM 未配置时，仅当 Chat 已确认支持图像，才整组继承 Chat 地址、密钥、模型。显式 VLM 模型可在同一已确认端点复用其凭据；只要显式换端点，就要求独立凭据策略，绝不向新地址自动发送 Chat Key。独立 OCR 不能使不支持图像的 Chat 自动获得原图复核能力；能力不足返回清楚错误。
+VLM 未配置时，仅当 Chat 已确认支持图像，才整组继承 Chat 地址、密钥、模型。显式 VLM 模型可在同一已确认端点复用其凭据；只要显式换端点，就要求独立凭据策略，绝不向新地址自动发送 Chat Key。独立 OCR 不能使不支持图像的 Chat 自动获得原图复核能力；能力不足返回清楚错误。 同一最终请求端点和模型必须继承 Chat 上下文及图片能力，显式重复模型名或使用完整 `/chat/completions` 地址不能绕过。图片沿用每图 16384 的保守估算，4096/8192 窗口的原图请求会明确拒绝。
 
-当前阶段标准部署固定为招标能力集合，无需用户额外填写能力 JSON。API/Worker readiness 检查 DB、schema/发布身份及其承担功能需要的 Redis、存储、DocReader配置/就绪；移除招标模式下无条件 Embedding 门槛。不得用空模型、stub 或不可用占位端点制造“已就绪”；readiness 不发付费模型请求。Neo4j、知识索引及 Embedding 仅在后续知识业务启用时加入检查，不删除其现存领域代码。
+当前阶段标准部署固定为招标能力集合，无需用户额外填写能力 JSON。API/Worker readiness 检查 DB 及其承担功能需要的 Redis、存储、DocReader配置/就绪；移除招标模式下无条件 Embedding 门槛。不得用空模型、stub 或不可用占位端点制造“已就绪”；readiness 不发付费模型请求。Neo4j、知识索引及 Embedding 仅在后续知识业务启用时加入检查，不删除其现存领域代码。
 
 ## 6. 其他参数默认与部署派生
 
@@ -97,14 +97,14 @@ VLM 未配置时，仅当 Chat 已确认支持图像，才整组继承 Chat 地�
 | Worker probe | 当前默认 loopback:8081，容器按实际探测拓扑派生 | 可选 |
 | 超时 | authoring 180000 ms | `KB_AUTHORING_TIMEOUT_MS` 可选 |
 | 解析并发/招标队列并发 | 4/4 | 可选正整数及资源上限 |
-| OCR 输出/区域深度/区域调用 | 8192/2/8 | 可选，保留完整性拒绝 |
+| OCR 输出/区域深度/区域调用 | 独立模型 8192；继承 Chat 时输出受 C/4 限制；区域 2/8 | 完整请求须容纳文本、图片、输出和安全余量，超限发送前拒绝 |
 | Core/Postprocess/Enrichment/Maintenance/Wiki/Multimodal 并发 | 8/2/12/4/8/12；只启动本阶段需要的队列 | 可选，不引入额外用户配额 JSON |
 | DocReader worker/文件上限 | 4/50 MiB | 可选 |
 | PDF 渲染并行/DPI/JPEG/长边 | CPU 派生 1–4/200/85/2000 | 可选 |
 | PDF/XLSX 保护、临时目录、日志 | 保留已有解析安全默认；临时目录 `/tmp/docreader` | 高级可选 |
 | ODL/外部解析/代理/SSRF 白名单 | 关闭/空 | 仅显式启用；不自动发外部请求或放宽白名单 |
 | gRPC TLS/认证 | 私有单机网络由标准拓扑限定；跨网络按部署策略提供证书与内部随机 token | 不能开启 TLS 后因缺证书静默降级；不新增普通用户必填调参 |
-| release descriptor/hash、component identity、namespace、queue registry | 构建/部署派生并挂载验证 | 非普通手填；外部发布来源须可信 |
+| release descriptor/hash、component identity、queue registry | 构建/部署派生并挂载验证 | 非普通手填；外部发布来源须可信 |
 
 固定密码、JWT、外部模型端点均不属于允许的默认。标准部署应只发布必要应用入口，数据库与存储管理端口默认内部可见。OnlyOffice 等不属于当前招标读取/大纲路径的服务使用独立功能配置，不列为本阶段必填；不能以清理 env 为由删除其业务代码。
 
@@ -160,7 +160,7 @@ DOCREADER_ADDR=<该进程可访问的DocReader地址>
 | 步骤 | 修改范围 | 必须通过的验收 |
 | --- | --- | --- |
 | 1. 收敛配置解析 | bidding runtime/agent、platform 配置、Compose/env 文档 | 删除 limits 入口；单一上下文冻结；未知模型不要求用户校准；空值/冲突/非法值单测 |
-| 2. Fresh 单账号 | postgres-init、三 baseline、catalog/db、fresh 验收脚本 | 新空库初始化；只有一套应用登录身份；非 superuser；各组件使用同一 DSN；catalog/receipt 仍检查真实 schema 漂移 |
+| 2. Fresh 单账号 | postgres-init、三 baseline、db、fresh 验收脚本 | 新空库初始化；只有一套应用登录身份；非 superuser；各组件使用同一 DSN；应用不要求结构版本/hash 启动校验 |
 | 3. 默认登录与秘密 | API/platform auth、账号初始化、Secret 注入 | 正确密码登录、错误密码拒绝；重启不重置密码；JWT 缺失拒绝；不再有无密码开发回退 |
 | 4. 模型能力与运行默认 | 原图/OCR、tokenization/planner、readiness、DocReader 注入 | 无 Embedding 的招标部署就绪；OCR 按能力整组继承；跨端点不泄露密钥；无付费健康探测 |
 | 5. 全新部署集成 | 部署生成、示例与文档、CI | 只填最小配置可启动；容器/宿主地址各自可达；真实解析链集成使用受控 fixture；未授权不调用付费模型 |
@@ -170,3 +170,23 @@ DOCREADER_ADDR=<该进程可访问的DocReader地址>
 本 PR 的完成条件是设计可审阅、导航唯一、示例不含真实秘密；后续分别记录代码实现、聚焦测试、新空库集成、部署、真实业务验收。已存在的本地旧分支测试不能作为新配置设计的通过证据。
 
 不提供存量升级/回滚脚本。不兼容部署只能选择独立新空库，停止失败的新实例不会触碰旧实例数据。任何清库或删除卷都不属于本方案授权。
+
+
+## 本轮实施与验证记录（2026-10-11）
+
+本轮验证基线为本地 PR #23 计划提交 `5d2f52f4d0ba1d551a7af6a6ca34094577b5e83b` 上的未提交实现，代码原始基线为 `3a8bafae77048d3e94f9ddd1c0aef26ce7a1424d`。下列结果记录发布前的本地验证，不代表已整合后续上游提交。
+
+- 删除部署 UUID、生成脚本、跨部署对象/队列/图前缀、reset 工具及数据库关联字段。不同安装使用各自的基础设施资源。
+- 删除 catalog、schema 版本/结构 hash/receipt 启动校验及专属 schema-verifier、配置、测试和旧手工升级脚本。保留三份 fresh DDL、事务初始化、业务约束和非超级用户权限检查。宿主发布工具的镜像 digest 与输入完整性检查独立保留。
+- 修复本地账号改名导致重启失败、OCR 继承上下文遗漏、拆包残留旧需求、claim 修复丢失缩小预算。两项预算回归先复现失败，再修复通过。
+- 复审补齐等价 OCR 端点和显式同模型的能力校验，阻止配置写法绕过。队列破坏性测试只允许显式开关加专用环回端口，无 Redis 的计数器测试使用隔离子进程。
+
+聚焦验证通过：5 项预算回归、6 项 OCR 请求预算测试、8 项模型配置测试、3 项 Compose 配置测试、16 项配置/样例 Python 测试。独立 PostgreSQL/Redis 验证通过：fresh 初始化 1 项、账号初始化 1 项、招标数据库 9 项、内容 SQL 1 项、对象清理与失败重试 3 项、队列/计数器 2 项、原生队列故障 4 项、队列库测试 14 项、计数器库测试 2 项。实际 API 两次启动验证正确/错误密码、改名拒绝、身份保持及不重置密码。所有服务与输入为本任务创建的临时资源，没有使用现有业务数据库或真实模型密钥。
+
+全目标/all-features 严格 Clippy、格式与差异空白检查通过。完整 Rust 工作区 all-features 回归 957 项通过、0 失败、55 项 ignored。最后新增的 Redis 测试隔离 guard 及计数器子进程用例另经上述定向验证，最终 Clippy 覆盖全部当前代码。不将 opt-in/ignored 或未运行的真实模型调用视为已验证。
+
+### 上游待集成边界
+
+只读比较发现 PR #22 已前进至 `977fd91755ca04fc19951c694b76b49cc894a43b`，17 个文件变化中有 5 个与本地重叠；`agent.rs`、`discover_parallel.rs`、`discover_parallel_tests.rs` 存在文本冲突，`outline/discover.rs` 与运行契约文档还需要语义合并。上游的可选纠错扩窗与本地单一上下文/已缩小上限不能机械叠加；引用 registry 与 checkpoint 34 变更需要结合恢复测试重新核对。本轮没有 rebase、覆盖或集成该提交，测试结论不覆盖两者组合。
+
+完整 Compose 镜像构建、生产发布和真实模型语义验收未执行。已初始化库不再进行结构兼容性验证；普通 SQL 错误正常暴露。现有资料不迁移、不清库。

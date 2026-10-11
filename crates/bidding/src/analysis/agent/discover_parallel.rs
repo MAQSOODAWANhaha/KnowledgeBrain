@@ -330,6 +330,47 @@ impl<J: Journal> PackHost<'_, J> {
         }
     }
 
+    fn split_for_capacity(&mut self, id: &str, limit: usize) -> Result<(), AgentError> {
+        // Work on a clone: an indivisible source or invalid budget leaves every
+        // old claim, completed read, and reservation untouched.
+        if limit
+            <= self.config.provider.output_token_reserve as usize
+                + self.config.limits.token_safety_margin
+        {
+            return Err(error(
+                "DISCOVER_READ_CAPACITY_EXCEEDED",
+                "Reduced context cannot contain request reserves; no retry.",
+            ));
+        }
+        let mut candidate = self.state.clone();
+        let children = candidate
+            .outline_run
+            .reading_packs
+            .as_mut()
+            .ok_or_else(|| invalid("reading plan missing"))?
+            .split_rejected_pack(self.input, id)
+            .map_err(|_| {
+                error(
+                    "DISCOVER_READ_CAPACITY_EXCEEDED",
+                    "Rejected pack cannot be split without losing original evidence; no retry.",
+                )
+            })?;
+        for child in children {
+            candidate.outline_run.discover_workers.insert(
+                child,
+                Worker {
+                    reduced_context_tokens: Some(limit),
+                    ..Worker::default()
+                },
+            );
+        }
+        // Parent workers retain all delivered evidence, history and rejected
+        // physical requests. Children claim no inherited credit and reread their
+        // exact originals; successful unrelated packs are never replanned.
+        *self.state = candidate;
+        Ok(())
+    }
+
     async fn prepare(&mut self, id: &str) -> Result<Request, AgentError> {
         self.prepare_inner(id, true).await
     }
@@ -565,7 +606,10 @@ impl<J: Journal> PackHost<'_, J> {
             self.config.limits.token_safety_margin,
             self.config.provider.output_token_reserve as usize,
         )?;
-        let exceeds_budget = count.total_context_tokens > self.config.limits.max_context_tokens;
+        let context_limit = worker
+            .reduced_context_tokens
+            .unwrap_or(self.config.limits.max_context_tokens);
+        let exceeds_budget = count.total_context_tokens > context_limit;
         let mut read_frames = worker.related_read_frames.clone();
         for frame in &mut read_frames {
             frame.sealed_sha256 =
@@ -749,6 +793,11 @@ impl<J: Journal> Host for PackHost<'_, J> {
                         let history = worker.history.clone();
                         let history_revision_start = history.len();
                         let retired_read_calls = worker.retired_read_calls.clone();
+                        // Repair/reopen rotates evidence claims, not the
+                        // provider capacity already learned within this run.
+                        let reduced_context_tokens = (request.scope.run == identity["run"])
+                            .then_some(worker.reduced_context_tokens)
+                            .flatten();
                         *worker = Worker {
                             rejected_turns,
                             failure_signatures,
@@ -756,6 +805,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
                             history,
                             history_revision_start,
                             retired_read_calls,
+                            reduced_context_tokens,
                             ..Default::default()
                         };
                     } else if matches!(pending, Pending::Committed { .. }) {
@@ -778,6 +828,11 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 match self.prepare(&id).await {
                     Ok(request) => return Ok(Some(request)),
                     Err(error) if error.code == "DISCOVER_READ_CAPACITY_EXCEEDED" => {
+                        if let Some(limit) = self.worker(&id)?.reduced_context_tokens
+                            && self.split_for_capacity(&id, limit).is_ok()
+                        {
+                            self.save().await?;
+                        }
                         local_capacity_failure = true;
                         continue;
                     }
@@ -1029,10 +1084,46 @@ impl<J: Journal> Host for PackHost<'_, J> {
         self.save().await
     }
     async fn failed(&mut self, request: &Request, error: &AgentError) -> Result<(), AgentError> {
+        if !matches!(&self.worker(&request.scope.pack)?.pending, Some(Pending::Sending { request: saved }) if saved == request)
+        {
+            return Err(invalid(
+                "failure does not match the reserved physical request",
+            ));
+        }
         self.worker_mut(&request.scope.pack)?.pending = Some(Pending::Failed {
             request: request.clone(),
             code: error.code.clone(),
         });
+        if error.code == "AGENT_PROVIDER_CONTEXT_EXCEEDED" {
+            let replans = self
+                .state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .ok_or_else(|| invalid("reading plan missing"))?
+                .context_replans;
+            if replans < 3 {
+                let current = self
+                    .worker(&request.scope.pack)?
+                    .reduced_context_tokens
+                    .unwrap_or(self.config.limits.max_context_tokens);
+                // Measured rejected size can be lower than the configured
+                // window. Always shrink below both, never resend the same wire.
+                let measured = request
+                    .input_reserve
+                    .saturating_add(request.output_reserve)
+                    .min(usize::MAX as u64) as usize;
+                let limit = current.min(measured).saturating_mul(3) / 4;
+                if self.split_for_capacity(&request.scope.pack, limit).is_ok() {
+                    self.state
+                        .outline_run
+                        .reading_packs
+                        .as_mut()
+                        .unwrap()
+                        .context_replans += 1;
+                }
+            }
+        }
         self.save().await
     }
     async fn cancelled(&mut self, _: &BTreeSet<String>) -> Result<(), AgentError> {

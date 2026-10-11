@@ -228,6 +228,58 @@ pub(super) fn test_pack_fits(input: &FrozenInput, pack: &ParsePack, max_tokens: 
     .fits()
 }
 
+/// Split exactly one uncommitted pack. Existing atoms retain their identity;
+/// subdivided carriers retain outer links and receive deterministic child IDs.
+/// The archived parent supplies the lineage when a neighbouring pack is already
+/// in flight and its immutable wire must not be rewritten.
+pub(super) fn bisect_pack(
+    input: &FrozenInput,
+    source: &ParsePack,
+) -> Result<Vec<ParsePack>, String> {
+    let atoms = if source.atoms.len() > 1 {
+        let middle = source.atoms.len() / 2;
+        vec![
+            source.atoms[..middle].to_vec(),
+            source.atoms[middle..].to_vec(),
+        ]
+    } else {
+        let atom = source.atoms.first().ok_or("empty pack cannot be split")?;
+        let carriers = split_carrier(input, &atom.carrier)?;
+        let ids = (0..carriers.len())
+            .map(|index| format!("{}:split:{index}", atom.id))
+            .collect::<Vec<_>>();
+        carriers
+            .into_iter()
+            .enumerate()
+            .map(|(index, carrier)| {
+                vec![PackAtom {
+                    id: ids[index].clone(),
+                    previous_fragment_id: index
+                        .checked_sub(1)
+                        .map(|prior| ids[prior].clone())
+                        .or_else(|| atom.previous_fragment_id.clone()),
+                    next_fragment_id: ids
+                        .get(index + 1)
+                        .cloned()
+                        .or_else(|| atom.next_fragment_id.clone()),
+                    carrier,
+                    ..atom.clone()
+                }]
+            })
+            .collect()
+    };
+    Ok(atoms
+        .into_iter()
+        .enumerate()
+        .map(|(index, atoms)| {
+            let mut child = pack(&source.input_digest, source.order, atoms);
+            child.id = format!("{}:split:{index}", source.id);
+            child.condition_support_options = source.condition_support_options.clone();
+            child
+        })
+        .collect())
+}
+
 fn midpoint(text: &str, start: usize, end: usize) -> Result<usize, String> {
     let raw = text.get(start..end).ok_or("invalid UTF-8 evidence range")?;
     let middle = start + (end - start) / 2;

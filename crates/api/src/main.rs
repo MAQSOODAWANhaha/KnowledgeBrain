@@ -14,16 +14,28 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    platform::require_openai_chat();
-    platform::connect_runtime_verified(platform::SchemaComponentKind::Api)
+    platform::knowledge_enabled().map_err(anyhow::Error::msg)?;
+    let app = router().map_err(anyhow::Error::msg)?;
+    let local_admin = platform::LocalAdminConfig::from_env().map_err(anyhow::Error::msg)?;
+    bidding::analysis::agent::Config::from_environment()
+        .context("invalid bidding model configuration")?;
+    let pool = platform::connect()
         .await
-        .context("postgres schema readiness failed")?;
+        .context("postgres connection failed")?;
+    platform::verify_application_role(&pool)
+        .await
+        .context("invalid application database role")?;
+    if let Some(config) = local_admin {
+        platform::initialize_local_admin(&pool, &config)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     tracing::info!(addr = %addr, "api ready");
-    axum::serve(listener, router())
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("api serve failed")?;

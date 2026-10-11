@@ -16,7 +16,7 @@
 - 通用 actor identity、幂等结果、append-only audit 基础设施；
 - `ObjectRegistry`、不可变 deletion identity、Oxana typed retention job 与 owner-fenced 完成 tombstone；
 - 维护门、健康检查、日志、tracing、metrics 与部署验收基础；
-- PostgreSQL/Redis/对象存储的启动、权限与运行安全基线；三 baseline release receipt、catalog manifest readiness 与 deployment namespace reset。
+- PostgreSQL/Redis/对象存储的启动、权限与运行安全基线；三 baseline fresh 初始化与依赖就绪检查。
 
 ## 共享平台不拥有
 

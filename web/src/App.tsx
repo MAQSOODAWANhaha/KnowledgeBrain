@@ -43,7 +43,7 @@ function Login() {
           setErr("");
           setBusy(true);
           try {
-            const r = await api.login(email.trim() || "dev@local", password);
+            const r = await api.login(email.trim(), password);
             setToken(r.token);
             go("/");
           } catch (ex) {
@@ -70,6 +70,8 @@ function Login() {
         <Input
           id="login-email"
           data-testid="login-email"
+          required
+          autoComplete="username"
           placeholder="账号"
           value={email}
           onChange={(e) => setEmail(e.currentTarget.value)}
@@ -79,6 +81,8 @@ function Login() {
           <Input
             id="login-password"
             data-testid="login-password"
+            required
+            autoComplete="current-password"
             type="password"
             placeholder="密码"
             value={password}
@@ -86,7 +90,7 @@ function Login() {
           />
         </div>
         {err ? <p className="mt-3 text-sm text-stop">{err}</p> : null}
-        <Button type="submit" className="mt-6 w-full" size="lg" disabled={busy} data-testid="login-submit">
+        <Button type="submit" className="mt-6 w-full" size="lg" disabled={busy || !email.trim() || !password.trim()} data-testid="login-submit">
           {busy ? "进入中…" : "进入"}
         </Button>
       </form>

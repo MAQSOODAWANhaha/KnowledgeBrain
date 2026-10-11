@@ -152,6 +152,19 @@ fn response_type(headers: &reqwest::header::HeaderMap) -> &'static str {
     }
 }
 
+fn confirmed_context_rejection(status: u16, body: &[u8]) -> bool {
+    if !matches!(status, 400 | 413 | 422) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    matches!(
+        value["error"]["code"].as_str(),
+        Some("context_length_exceeded" | "context_window_exceeded")
+    )
+}
+
 fn client() -> Result<reqwest::Client, AgentError> {
     static CLIENT: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
     CLIENT
@@ -300,13 +313,35 @@ async fn read_provider_events(
         elapsed_ms = started.elapsed().as_millis() as u64
     );
     if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let request_ids = safe_request_ids(response.headers());
+        // Only explicit, complete provider codes establish a rejected context.
+        // Never infer this from arbitrary messages, HTTP 413, or transport errors.
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        let body = tokio::time::timeout(Duration::from_millis(250), async {
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.ok()?;
+                if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
+                    return None;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Some(bytes)
+        })
+        .await
+        .ok()
+        .flatten();
+        let rejected_context = body
+            .as_deref()
+            .is_some_and(|bytes| confirmed_context_rejection(status, bytes));
         return Err(AgentError::new(
-            "AGENT_PROVIDER_UNAVAILABLE",
-            format!(
-                "configured provider returned HTTP {}; request_ids={:?}",
-                response.status().as_u16(),
-                safe_request_ids(response.headers())
-            ),
+            if rejected_context {
+                "AGENT_PROVIDER_CONTEXT_EXCEEDED"
+            } else {
+                "AGENT_PROVIDER_UNAVAILABLE"
+            },
+            format!("configured provider returned HTTP {status}; request_ids={request_ids:?}"),
         ));
     }
     let stream = response.bytes_stream().map(move |chunk| {
@@ -434,6 +469,24 @@ fn apply_event(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_rejection_requires_explicit_code_and_rejected_status() {
+        let body = br#"{"error":{"code":"context_length_exceeded","message":"private text"}}"#;
+        for status in [400, 413, 422] {
+            assert!(super::confirmed_context_rejection(status, body));
+        }
+        for status in [200, 401, 403, 429, 500, 503] {
+            assert!(!super::confirmed_context_rejection(status, body));
+        }
+        for body in [
+            br#"{"error":{"code":"insufficient_quota"}}"#.as_slice(),
+            br#"{"error":{"message":"context length exceeded"}}"#,
+            br#"{"error":{"code":"context_length_exceeded"}"#,
+        ] {
+            assert!(!super::confirmed_context_rejection(400, body));
+        }
+    }
+
     use super::*;
     use serde_json::{Value, json};
     use tokio::{
@@ -711,6 +764,18 @@ mod tests {
         }
         let (result, _, _) = exchange(200, tool, true).await;
         assert_eq!(result.unwrap_err().code, "AGENT_TURN_TIMEOUT");
+    }
+
+    #[tokio::test]
+    async fn complete_http_context_rejection_is_classified_without_disclosing_body() {
+        let body = serde_json::json!({"error":{"code":"context_length_exceeded","message":"synthetic private input"}}).to_string();
+        let (result, requests, _) = exchange(400, body.clone(), false).await;
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "AGENT_PROVIDER_CONTEXT_EXCEEDED");
+        assert!(!error.message.contains("synthetic private input"));
+        assert_eq!(requests.len(), 1);
+        let (result, _, _) = exchange(429, body, false).await;
+        assert_eq!(result.unwrap_err().code, "AGENT_PROVIDER_UNAVAILABLE");
     }
 
     #[tokio::test]

@@ -1,6 +1,5 @@
 //! Local object I/O anchored to directory descriptors. Path checks alone are
 //! insufficient: an intermediate symlink must never redirect a later open.
-use crate::DeploymentNamespaceV1;
 use std::{
     ffi::{CStr, CString},
     fs::File,
@@ -81,11 +80,10 @@ fn regular_file(parent: &File, name: &CStr) -> io::Result<File> {
 
 pub(crate) struct LocalObjectStore {
     root: PathBuf,
-    pub(crate) namespace: DeploymentNamespaceV1,
 }
 
 impl LocalObjectStore {
-    pub(crate) fn new(root: PathBuf, namespace: DeploymentNamespaceV1) -> io::Result<Self> {
+    pub(crate) fn new(root: PathBuf) -> io::Result<Self> {
         if root.as_os_str().is_empty()
             || root.components().any(|p| {
                 matches!(
@@ -99,23 +97,18 @@ impl LocalObjectStore {
                 "object root contains an invalid component",
             ));
         }
-        Ok(Self { root, namespace })
+        Ok(Self { root })
     }
 
     pub(crate) fn from_environment() -> io::Result<Self> {
         let root = std::env::var_os("OBJECT_DIR")
             .filter(|s| !s.is_empty())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "OBJECT_DIR is required"))?;
-        let namespace = DeploymentNamespaceV1::from_environment().map_err(io::Error::other)?;
-        Self::new(root.into(), namespace)
+        Self::new(root.into())
     }
 
     pub(crate) fn path(&self, name: &str) -> io::Result<PathBuf> {
-        Ok(self
-            .root
-            .join(self.namespace.storage_label())
-            .join("objects")
-            .join(object_name(name)?))
+        Ok(self.root.join("objects").join(object_name(name)?))
     }
 
     fn root_directory(&self, create: bool) -> io::Result<File> {
@@ -133,35 +126,8 @@ impl LocalObjectStore {
     }
 
     fn directory(&self, create: bool) -> io::Result<File> {
-        let mut parent = self.root_directory(create)?;
-        parent = directory_at(
-            &parent,
-            &CString::new(self.namespace.storage_label()).unwrap(),
-            create,
-        )?;
+        let parent = self.root_directory(create)?;
         directory_at(&parent, c"objects", create)
-    }
-
-    /// Observe existing directories using the same no-follow descriptor walk as
-    /// object I/O. A missing configured root is an error; a missing namespace or
-    /// objects child is an explicit observation, never a reason to create it.
-    pub(crate) fn reset_directories(&self) -> io::Result<(File, Option<File>, Option<File>)> {
-        let root = self.root_directory(false)?;
-        let namespace = match directory_at(
-            &root,
-            &CString::new(self.namespace.storage_label()).unwrap(),
-            false,
-        ) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((root, None, None)),
-            Err(error) => return Err(error),
-        };
-        let objects = match directory_at(&namespace, c"objects", false) {
-            Ok(directory) => Some(directory),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        Ok((root, Some(namespace), objects))
     }
 
     pub(crate) fn read(&self, name: &str) -> io::Result<Vec<u8>> {
@@ -231,7 +197,7 @@ impl LocalObjectStore {
         let name = CString::new(object_name(name)?).unwrap();
         let directory = self.directory(false)?;
         regular_file(&directory, &name)?;
-        // SAFETY: unlink is relative to the opened namespace directory and
+        // SAFETY: unlink is relative to the opened objects directory and
         // does not follow the final component if it is concurrently replaced.
         if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } < 0 {
             return Err(io::Error::last_os_error());
@@ -254,11 +220,7 @@ mod tests {
             Self(root)
         }
         fn store(&self) -> LocalObjectStore {
-            LocalObjectStore::new(
-                self.0.join("root"),
-                uuid::Uuid::new_v4().to_string().parse().unwrap(),
-            )
-            .unwrap()
+            LocalObjectStore::new(self.0.join("root")).unwrap()
         }
     }
     impl Drop for Fixture {
@@ -268,20 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn namespaces_isolate_source_and_derived_object_reads_writes_and_removal() {
+    fn configured_roots_isolate_objects_without_extra_configuration() {
         let fixture = Fixture::new();
         let first = fixture.store();
-        let second = fixture.store();
+        let second = LocalObjectStore::new(fixture.0.join("other-root")).unwrap();
         for name in ["shared", "shared.md"] {
-            let path = first.write(name, b"first").unwrap();
-            assert!(
-                path.starts_with(
-                    fixture
-                        .0
-                        .join("root")
-                        .join(first.namespace.storage_label())
-                        .join("objects")
-                )
+            assert_eq!(
+                first.write(name, b"first").unwrap(),
+                fixture.0.join("root/objects").join(name)
             );
             assert_eq!(
                 second.read(name).unwrap_err().kind(),
@@ -293,7 +249,6 @@ mod tests {
             assert_eq!(second.read(name).unwrap(), b"second");
             first.remove(name).unwrap();
             assert!(!first.exists(name).unwrap());
-            assert!(second.exists(name).unwrap());
             assert_eq!(second.read(name).unwrap(), b"second");
         }
         assert_eq!(
@@ -332,12 +287,12 @@ mod tests {
             io::ErrorKind::NotFound
         );
         assert!(!fixture.0.join("root").exists());
-        assert!(LocalObjectStore::new(fixture.0.join("../outside"), store.namespace).is_err());
+        assert!(LocalObjectStore::new(fixture.0.join("../outside")).is_err());
     }
 
     #[test]
     fn symlinks_at_every_level_and_hard_linked_objects_cannot_escape_scope() {
-        for level in 0..4 {
+        for level in 0..3 {
             let fixture = Fixture::new();
             let store = fixture.store();
             let object = store.write("object", b"inside").unwrap();
@@ -346,11 +301,10 @@ mod tests {
             fs::write(outside.join("object"), b"outside").unwrap();
             let attacked = match level {
                 0 => fixture.0.join("root"),
-                1 => fixture.0.join("root").join(store.namespace.storage_label()),
-                2 => object.parent().unwrap().to_path_buf(),
+                1 => object.parent().unwrap().to_path_buf(),
                 _ => object,
             };
-            if level == 3 {
+            if level == 2 {
                 fs::remove_file(&attacked).unwrap();
                 symlink(outside.join("object"), &attacked).unwrap();
             } else {

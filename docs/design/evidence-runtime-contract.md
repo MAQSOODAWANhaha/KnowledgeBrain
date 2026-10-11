@@ -25,7 +25,7 @@
 
 ## 容量、续页与真实交付
 
-`prepare_request` / `fit_batch` 对完整下一请求计量，包括系统提示、工具、历史、来源、图像与输出预留。自定义 tokenizer 需有可核实来源或实测校准；经验估算不代表长上下文能力证明。模型上下文与操作员调用/费用/时间限制独立。
+`prepare_request` / `fit_batch` 对完整下一请求计量，包括系统提示、工具、历史、来源、图像与输出预留。未知模型由程序使用显式标记的 UTF-8 字节保守估算，不要求用户提供 tokenizer 校准；该估算不是供应商精确 token 数或长上下文能力证明。模型上下文与操作员调用/费用/时间限制独立。
 
 `read_evidence`、`read_claim_evidence`、`read_requirements`、`read_outline` 由正式异步 runtime 决定容纳量和续页。完整段、原生行优先；单个载体过大时，宿主生成连续 UTF-8 子范围。超大元数据以稳定 record identity、命名字段和字段范围传递，宿主核对完整字段后恢复记录；模型不拼接 JSON 字节。缺页不能授予完整回执。
 
@@ -67,7 +67,7 @@ Check 重新读取完整原段、原生行、跨行合并格与适用表头；�
 
 ## 运行参数默认值与边界
 
-应用层 crates/bidding/config/request-defaults.json 提供请求输出预算 16384 token、单请求传输超时 180000 ms；环境变量仅作显式覆盖，非法正数仍拒绝。此默认值是保守请求预算，不冒称未知供应商的原生最大输出能力。完整请求继续计入输出预留并受上下文预算约束。隔离启动器无需复制这两个非秘密参数才能启动。环境覆盖名为 `KB_AUTHORING_OUTPUT_TOKEN_RESERVE`，它只参与本地上下文核算，不增加 provider 的 max_tokens/max_completion_tokens。Compose、示例与隔离脚本使用当前名称，空值统一回落共享默认。此前旧名 `KB_AUTHORING_MAX_OUTPUT_TOKENS` 的 8192 配置实际被运行时忽略，并非有效覆盖；该旧说明已纠正，不提供旧名兼容别名。
+应用层 crates/bidding/config/request-defaults.json 提供请求输出预算上界 16384 token、单请求传输超时 180000 ms；环境变量仅作显式覆盖，非法正数仍拒绝。输出预留默认取 min(16384, C/4)，至少 1；安全余量默认取 min(4096, C/16)，至少 1，C 为用户明确配置的上下文。显式覆盖不自动夹紧，预留与余量之和必须小于 C。此默认值是保守请求预算，不冒称未知供应商的原生最大输出能力。完整请求继续计入输出预留并受上下文预算约束。隔离启动器无需复制这两个非秘密参数才能启动。环境覆盖名为 `KB_AUTHORING_OUTPUT_TOKEN_RESERVE`，它只参与本地上下文核算，不增加 provider 的 max_tokens/max_completion_tokens。Compose、示例与隔离脚本使用当前名称，空值统一回落共享默认。此前旧名 `KB_AUTHORING_MAX_OUTPUT_TOKENS` 的 8192 配置实际被运行时忽略，并非有效覆盖；该旧说明已纠正，不提供旧名兼容别名。
 
 旧 source-review、finding repair、Reviewer/Fill 协议及其操作限额已经删除；实际生产只使用 Discover/Organize/Check，内容生成经 published outline → match_queries → retrieval → response::respond。旧检查点不兼容。分包根据包含提示、工具、历史、图片和输出预留的完整请求 token 判断。
 
@@ -77,11 +77,11 @@ Rust/API/worker 与 Python 验收入口共享 `crates/bidding/config/request-def
 
 ## 环境默认配置
 
-生产从所选 provider 解析模型身份。已核实的 tokenizer 映射不需要额外 Limits JSON；未知模型必须提供 `KB_AUTHORING_TOKENIZER_PROFILE` 的实测 encoding/calibration，不接受重复的 model_id。有效配置自动绑定 provider.model_id。`KB_TENDER_AGENT_LIMITS` 可省略，也可仅声明 `vision_enabled` 等单项覆盖；已删除的操作配额和工具字节上限字段会被拒绝。
+生产从所选 provider 解析模型身份。已核实模型使用内建 tokenizer 映射；未知模型冻结内部 `utf8_bytes` 保守估算，不要求 `KB_AUTHORING_TOKENIZER_PROFILE`。唯一上下文入口是必填正整数 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS`，有效值写入 `limits.max_context_tokens` 并随运行冻结，恢复不从环境替换。内部预算与原图尺寸使用默认值，不再提供环境变量 JSON 覆盖入口。招标原图复核使用同一 authoring provider；图像能力来自维护的准确名单或模型配置的显式声明，未知模型默认不宣称支持图像；实际要求原图时能力不足明确拒绝，不会自动切换模型或供应商。
 
-默认 `max_context_tokens=131072` 是应用层单请求预算，包含提示、历史、工具、图片估算和输出预留，不代表自动探测到供应商上下文能力。图片能力必须由同一模型的实测或资料确认。宿主预览明确给出省略数和正式分页入口，不构成读取回执；所有 canonical 要求保持不变，正式工具使用完整请求 token 适配和 opaque cursor 续读。
+当前用户选择的 `max_context_tokens=131072` 是应用层单请求预算，包含提示、历史、工具、图片估算和输出预留，不代表自动探测到供应商上下文能力。图片能力必须由同一模型的实测或资料确认。宿主预览明确给出省略数和正式分页入口，不构成读取回执；所有 canonical 要求保持不变，正式工具使用完整请求 token 适配和 opaque cursor 续读。
 
-当前profile的131072为硬上界，局部覆盖只能降低预算；更大窗口必须引入经过验证的新profile契约。分页续页仅传`{cursor}`，首次筛选保存在宿主cursor中，不再重复mode或筛选字段。
+131072 不再是模型上界；实现接受最多 4194304 token 的数值资源边界，并将传输分配限制在 256 MiB，避免异常配置导致无界内存分配。此资源边界不声称模型支持该窗口。分页续页仅传`{cursor}`，首次筛选保存在宿主cursor中，不再重复mode或筛选字段。
 
 ## 未发布阶段的变更原则
 

@@ -26,7 +26,7 @@ async fn live() -> Json<platform::LiveBody> {
 }
 
 async fn ready() -> (StatusCode, Json<platform::ReadyBody>) {
-    let check = platform::check_readiness(platform::SchemaComponentKind::Worker).await;
+    let check = platform::check_readiness(platform::ReleaseComponentKind::Worker).await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {

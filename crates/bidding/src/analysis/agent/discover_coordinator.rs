@@ -67,6 +67,8 @@ pub(crate) struct Worker {
     pub retired_read_calls: BTreeSet<String>,
     pub pending: Option<Pending>,
     pub generation: u64,
+    #[serde(default)]
+    pub reduced_context_tokens: Option<usize>,
     pub registry: crate::outline::model_wire::Registry,
     pub rejected_turns: usize,
     pub failure_signatures: BTreeSet<String>,

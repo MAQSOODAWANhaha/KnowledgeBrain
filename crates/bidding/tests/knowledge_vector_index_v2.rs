@@ -357,25 +357,16 @@ async fn bound_version_hard_delete_cascades_only_from_the_parent() {
         "a live parent's immutable binding cannot be deleted directly"
     );
 
-    let mut unauthorized = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL ROLE kb_runtime_retention")
-        .execute(&mut *unauthorized)
-        .await
-        .unwrap();
-    let unauthorized_delete = sqlx::query("DELETE FROM product_versions WHERE id=$1")
-        .bind(fixture.version_id)
-        .execute(&mut *unauthorized)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        unauthorized_delete
-            .as_database_error()
-            .and_then(|error| error.code())
-            .as_deref(),
-        Some("42501"),
-        "an unauthorized parent delete must fail before any cascade"
+    let public_delete: bool =
+        sqlx::query_scalar("SELECT has_table_privilege('public','product_versions','DELETE')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !public_delete,
+        "anonymous PUBLIC cannot delete a parent or cascade bindings"
     );
-    unauthorized.rollback().await.unwrap();
+
     let binding_after_unauthorized: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM product_version_embedding_bindings_v2 WHERE product_version_id=$1",
     )
@@ -770,7 +761,14 @@ async fn complete_vector_generation_is_atomic_fail_closed_and_acl_guarded() {
     ));
     assert_eq!(marker(&pool, fixture.version_id).await, before_revoke);
 
-    for role in ["kb_runtime_api", "kb_runtime_worker"] {
+    let app_role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for (role, expected) in [
+        (app_role.as_str(), (true, true, true, true)),
+        ("public", (false, false, false, false)),
+    ] {
         for table in [
             "chunk_vector_indexes_v2",
             "product_version_vector_index_generations_v2",
@@ -783,16 +781,16 @@ async fn complete_vector_generation_is_atomic_fail_closed_and_acl_guarded() {
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert_eq!(acl, (true, false, false, false), "ACL for {role} {table}");
+            assert_eq!(acl, expected, "ACL for {role} {table}");
         }
     }
-    let function_acl: (bool, bool, bool) = sqlx::query_as(
-        "SELECT has_function_privilege('kb_runtime_api','kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb)','EXECUTE'),has_function_privilege('kb_runtime_worker','kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb)','EXECUTE'),has_function_privilege('public','kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb)','EXECUTE')",
+    let function_acl: (bool, bool) = sqlx::query_as(
+        "SELECT has_function_privilege(current_user,'kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb)','EXECUTE'),has_function_privilege('public','kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb)','EXECUTE')",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(function_acl, (false, true, false));
+    assert_eq!(function_acl, (true, false));
 
     cleanup(&pool, &different_fixture).await;
     cleanup(&pool, &fixture).await;

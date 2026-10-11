@@ -503,59 +503,34 @@ pub async fn describe_image_bytes_once_async(
             "image media type is outside the closed VLM allowlist".into(),
         ));
     }
-    let base = vlm_base_url();
-    let model = platform::vlm_model();
-    if base.is_empty() || model.is_empty() || model == "stub-vlm" {
-        return Err(ChatTransportError::Response(
-            "VLM endpoint/model is not configured".into(),
-        ));
-    }
+    let config = platform::vlm_config().map_err(ChatTransportError::Response)?;
     let image_url = format!(
         "data:{media_type};base64,{}",
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_bytes)
     );
     async fn complete(
-        url: &str,
-        key: &str,
-        model: &str,
+        config: &platform::VisionModelConfig,
         image_url: &str,
-        prompt: String,
+        prompt: &str,
     ) -> Result<crate::models::ChatTurn, ChatTransportError> {
+        let body = vlm_request_body(config, prompt, image_url, ocr_output_token_budget())
+            .map_err(ChatTransportError::Response)?;
         crate::models::chat_sse_turn_once_async(
-            url,
-            key,
-            serde_json::json!({
-                "model": model,
-                "max_tokens": ocr_output_token_budget(),
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    ]
-                }]
-            }),
+            &chat::completions_url_for_vlm(&config.base_url),
+            &config.api_key,
+            body,
             std::time::Duration::from_secs(180),
         )
         .await
     }
-    let url = chat::completions_url_for_vlm(&base);
-    let key = platform::vlm_api_key();
-    let ocr = complete(
-        &url,
-        &key,
-        &model,
-        &image_url,
-        ocr_prompt(image_source_type).to_string(),
-    )
-    .await?;
+    let ocr = complete(&config, &image_url, ocr_prompt(image_source_type)).await?;
     if ocr.finish_reason != "stop" {
         return Err(ChatTransportError::Response(format!(
             "incomplete OCR: finish_reason={}",
             ocr.finish_reason
         )));
     }
-    let caption = complete(&url, &key, &model, &image_url, caption_prompt(language)).await?;
+    let caption = complete(&config, &image_url, &caption_prompt(language)).await?;
     if caption.finish_reason != "stop" {
         return Err(ChatTransportError::Response(format!(
             "incomplete caption: finish_reason={}",
@@ -653,28 +628,17 @@ fn vlm_complete(base: &str, prompt: &str, image_key: &str) -> Result<String, Str
 }
 
 fn vlm_complete_inner(base: &str, prompt: &str, image_key: &str) -> Result<String, String> {
-    let key = platform::vlm_api_key();
-    let model = {
-        let m = platform::vlm_model();
-        if m.is_empty() || m == "stub-vlm" {
-            return Err("vlm model not configured".into());
-        }
-        m
-    };
-    let url = chat::completions_url_for_vlm(base);
+    let config = platform::vlm_config()?;
+    if base.trim_end_matches('/') != config.base_url.trim_end_matches('/') {
+        return Err("VLM endpoint changed before OCR request".into());
+    }
     let image_url = image_data_url(image_key)?;
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": ocr_output_token_budget(),
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}}
-            ]
-        }]
-    });
-    crate::models::chat_sse(&url, &key, body)
+    let body = vlm_request_body(&config, prompt, &image_url, ocr_output_token_budget())?;
+    crate::models::chat_sse(
+        &chat::completions_url_for_vlm(&config.base_url),
+        &config.api_key,
+        body,
+    )
 }
 
 pub fn markdown_image_keys(md: &str) -> Vec<String> {
@@ -703,6 +667,49 @@ fn ocr_output_token_budget() -> u32 {
         .unwrap_or(8192)
 }
 
+// Match the tender runtime's conservative per-image reserve. This is an
+// admission estimate, not a promise about an unknown provider's image tokenizer.
+const OCR_IMAGE_TOKEN_RESERVE: usize = 16_384;
+
+fn vlm_request_body(
+    config: &platform::VisionModelConfig,
+    prompt: &str,
+    image_url: &str,
+    requested_output: u32,
+) -> Result<serde_json::Value, String> {
+    let output = config
+        .chat_context_tokens
+        .map_or(requested_output as usize, |context| {
+            (requested_output as usize).min((context / 4).max(1))
+        });
+    let mut body = serde_json::json!({
+        "model": config.model, "stream": true, "max_tokens": output,
+        "messages": [{"role":"user", "content":[
+            {"type":"text", "text":prompt},
+            {"type":"image_url", "image_url":{"url":""}}
+        ]}]
+    });
+    if let Some(context) = config.chat_context_tokens {
+        // UTF-8 bytes conservatively account for the complete serialized text
+        // envelope; image bytes are charged separately, never as base64 text.
+        let text = serde_json::to_vec(&body).map_err(|e| e.to_string())?.len();
+        let safety = (context / 16).clamp(1, 4096);
+        let required = text
+            .checked_add(40)
+            .and_then(|n| n.checked_add(OCR_IMAGE_TOKEN_RESERVE))
+            .and_then(|n| n.checked_add(output))
+            .and_then(|n| n.checked_add(safety))
+            .ok_or("OCR request budget overflow")?;
+        if required > context {
+            return Err(format!(
+                "OCR request exceeds Chat context budget: conservative input/image/output/safety estimate {required} > {context}; use a larger Chat context supported by the provider or an independent OCR model"
+            ));
+        }
+    }
+    body["messages"][0]["content"][1]["image_url"]["url"] = image_url.into();
+    Ok(body)
+}
+
 /// One physical, cancellation-safe literal OCR call. Empty text is valid only
 /// after a complete `stop` response and a complete SSE terminal event.
 pub async fn literal_ocr_bytes_once_async(
@@ -721,22 +728,35 @@ pub async fn literal_ocr_bytes_once_async(
             "invalid OCR image media".into(),
         ));
     }
-    let base = vlm_base_url();
-    let model = platform::vlm_model();
-    if base.is_empty() || model.is_empty() || model == "stub-vlm" {
-        return Err(ChatTransportError::Response(
-            "VLM endpoint/model is not configured".into(),
-        ));
-    }
+    let config = platform::vlm_config().map_err(ChatTransportError::Response)?;
     let image_url = format!(
         "data:{media_type};base64,{}",
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_bytes)
     );
-    crate::models::chat_complete_text_once_async(&chat::completions_url_for_vlm(&base),&platform::vlm_api_key(),serde_json::json!({
-        "model":model,"max_tokens":ocr_output_token_budget(),"messages":[{"role":"user","content":[
-            {"type":"text","text":ocr_prompt(image_source_type)}, {"type":"image_url","image_url":{"url":image_url}}
-        ]}]
-    }),std::time::Duration::from_secs(180)).await
+    literal_ocr_with_config(
+        &config,
+        ocr_prompt(image_source_type),
+        &image_url,
+        ocr_output_token_budget(),
+    )
+    .await
+}
+
+async fn literal_ocr_with_config(
+    config: &platform::VisionModelConfig,
+    prompt: &str,
+    image_url: &str,
+    requested_output: u32,
+) -> Result<crate::models::ChatTurn, crate::models::ChatTransportError> {
+    let body = vlm_request_body(config, prompt, image_url, requested_output)
+        .map_err(crate::models::ChatTransportError::Response)?;
+    crate::models::chat_complete_text_once_async(
+        &chat::completions_url_for_vlm(&config.base_url),
+        &config.api_key,
+        body,
+        std::time::Duration::from_secs(180),
+    )
+    .await
 }
 
 fn recognize_image_regions(image_key: &str, prompt: &str) -> Result<regions::Recognition, String> {
@@ -757,21 +777,16 @@ fn recognize_image_regions(image_key: &str, prompt: &str) -> Result<regions::Rec
         .clamp(1, 64);
     tokio::task::block_in_place(|| {
         Ok(regions::recognize(&image, depth, calls, |bytes| {
-            let model = platform::vlm_model();
-            let base = vlm_base_url();
-            if model.is_empty() || model == "stub-vlm" || base.is_empty() {
-                return Err("VLM endpoint/model is not configured".into());
-            }
+            let config = platform::vlm_config()?;
             let url = format!(
                 "data:image/png;base64,{}",
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
             );
+            let body = vlm_request_body(&config, prompt, &url, ocr_output_token_budget())?;
             let turn = crate::models::chat_complete_text_once(
-                &chat::completions_url_for_vlm(&base),
-                &platform::vlm_api_key(),
-                serde_json::json!({
-                    "model":model,"max_tokens":ocr_output_token_budget(),"messages":[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":url}}]}]
-                }),
+                &chat::completions_url_for_vlm(&config.base_url),
+                &config.api_key,
+                body,
                 std::time::Duration::from_secs(180),
             )?;
             if turn.finish_reason != "stop" || !turn.tool_calls.is_empty() {
@@ -828,6 +843,155 @@ mod tests {
     use super::*;
     use crate::{Chunk, DocJob, Document, ProductVersion, SummaryStatus};
     use uuid::Uuid;
+
+    fn chat_ocr_config(context: Option<usize>) -> platform::VisionModelConfig {
+        platform::VisionModelConfig {
+            base_url: "http://unused.invalid/v1".into(),
+            api_key: "synthetic-test-key".into(),
+            model: "synthetic-vision-model".into(),
+            chat_context_tokens: context,
+        }
+    }
+
+    #[tokio::test]
+    async fn inherited_ocr_http_admission_and_wire_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = chat_ocr_config(Some(8192));
+        config.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        for context in [4096, 8192] {
+            config.chat_context_tokens = Some(context);
+            let error =
+                literal_ocr_with_config(&config, "OCR", "data:image/png;base64,fixture", 8192)
+                    .await
+                    .unwrap_err();
+            assert!(error.to_string().contains("exceeds Chat context budget"));
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut wire = Vec::new();
+            let body;
+            loop {
+                let mut bytes = [0; 4096];
+                let n = socket.read(&mut bytes).await.unwrap();
+                assert!(n > 0);
+                wire.extend_from_slice(&bytes[..n]);
+                if let Some(end) = wire.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&wire[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if wire.len() >= end + 4 + length {
+                        body = serde_json::from_slice::<serde_json::Value>(
+                            &wire[end + 4..end + 4 + length],
+                        )
+                        .unwrap();
+                        break;
+                    }
+                }
+            }
+            let response = "data: {\"choices\":[{\"delta\":{\"content\":\"text\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(response.as_bytes()).await.unwrap();
+            body
+        });
+        config.chat_context_tokens = Some(24_576);
+        let turn = literal_ocr_with_config(&config, "OCR", "data:image/png;base64,fixture", 8192)
+            .await
+            .unwrap();
+        assert_eq!(turn.content, "text");
+        let body = server.await.unwrap();
+        assert_eq!(body["max_tokens"], 6144);
+        assert_eq!(body["stream"], true);
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,fixture"
+        );
+    }
+
+    #[test]
+    fn inherited_ocr_rejects_small_context_before_transport() {
+        for context in [4096, 8192] {
+            let error = vlm_request_body(
+                &chat_ocr_config(Some(context)),
+                "OCR",
+                "data:image/png;base64,fixture",
+                8192,
+            )
+            .unwrap_err();
+            assert!(error.contains("exceeds Chat context budget"));
+            assert!(!error.contains("fixture"));
+            assert!(!error.contains("synthetic-test-key"));
+        }
+    }
+
+    #[test]
+    fn inherited_ocr_accounts_for_complete_envelope_image_output_and_safety() {
+        let config = chat_ocr_config(Some(24_576));
+        let body = vlm_request_body(&config, "OCR", "data:image/png;base64,fixture", 8192).unwrap();
+        assert_eq!(body["max_tokens"], 6144);
+        assert_eq!(body["stream"], true);
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,fixture"
+        );
+        // Same context and image: increasing only prompt text must fail admission.
+        assert!(
+            vlm_request_body(
+                &config,
+                &"x".repeat(4096),
+                "data:image/png;base64,fixture",
+                8192
+            )
+            .is_err()
+        );
+        // The complete model/envelope bytes are charged too.
+        let mut long_model = config.clone();
+        long_model.model = "x".repeat(4096);
+        assert!(
+            vlm_request_body(&long_model, "OCR", "data:image/png;base64,fixture", 8192).is_err()
+        );
+    }
+
+    #[test]
+    fn ocr_image_accounting_does_not_count_base64_as_text() {
+        let config = chat_ocr_config(Some(24_576));
+        let small = vlm_request_body(&config, "OCR", "data:image/png;base64,small", 8192).unwrap();
+        let large = vlm_request_body(
+            &config,
+            "OCR",
+            &format!("data:image/png;base64,{}", "x".repeat(100_000)),
+            8192,
+        )
+        .unwrap();
+        assert_eq!(small["max_tokens"], large["max_tokens"]);
+    }
+
+    #[test]
+    fn independent_ocr_keeps_its_own_output_budget() {
+        let body = vlm_request_body(
+            &chat_ocr_config(None),
+            "OCR",
+            "data:image/png;base64,fixture",
+            8192,
+        )
+        .unwrap();
+        assert_eq!(body["max_tokens"], 8192);
+    }
 
     #[test]
     fn image_source_type_only_for_image_dominated_pdf() {

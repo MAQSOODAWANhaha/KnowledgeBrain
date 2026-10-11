@@ -2939,61 +2939,9 @@ CREATE TRIGGER documents_object_reference_delete_guard
 BEFORE DELETE ON documents
 FOR EACH ROW EXECUTE FUNCTION kb_guard_knowledge_document_delete();
 
-GRANT EXECUTE ON FUNCTION kb_register_knowledge_document_object(uuid, text, kb_actor_identity, text, uuid),
-    kb_release_knowledge_document_object(uuid, kb_actor_identity, text, uuid)
-TO kb_runtime_api, kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_register_knowledge_image_object(uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity)
-TO kb_runtime_worker;
-
--- Knowledge-base runtime DML remains domain-owned. Platform-owned object,
--- idempotency, audit, and retention tables were created by the preceding Shared
--- slice and are exposed here only through the checked integration functions.
+-- Shared application ownership replaces database role isolation. Runtime paths
+-- retain checked integration functions and business authorization.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON
-    workspaces, users, workspace_members, products, product_versions, documents,
-    tags, document_tags, document_processing_spans,
-    models, api_keys, chunks, chunk_embeddings, graph_nodes, graph_relations,
-    wiki_pages, wiki_folders, wiki_log_entries
-TO kb_runtime_api, kb_runtime_worker;
-GRANT SELECT ON
-    embedding_revisions_v2, rerank_revisions_v2, knowledge_retrieval_policies_v2,
-    product_version_embedding_bindings_v2, knowledge_image_artifact_revisions,
-    knowledge_image_ocr_chunk_artifact_mappings
-TO kb_runtime_api, kb_runtime_worker;
-GRANT INSERT ON knowledge_image_artifact_revisions,knowledge_image_ocr_chunk_artifact_mappings
-TO kb_runtime_worker;
-GRANT SELECT ON chunk_keyword_indexes_v2, chunk_vector_indexes_v2,
-    product_version_vector_index_generations_v2,
-    product_version_keyword_index_generations_v2,
-    knowledge_semantic_index_intents_v2 TO kb_runtime_api;
-GRANT SELECT ON chunk_keyword_indexes_v2, chunk_vector_indexes_v2,
-    product_version_vector_index_generations_v2,
-    product_version_keyword_index_generations_v2,
-    knowledge_semantic_index_intents_v2 TO kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION vector_in(cstring,oid,integer),
-    cosine_distance(vector,vector)
-TO kb_runtime_api, kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_knowledge_rebuild_keyword_indexes_v2(uuid),
-    kb_knowledge_has_pending_derived_v2(uuid),
-    kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb),
-    kb_knowledge_prepare_semantic_index_intent_v2(uuid),
-    kb_knowledge_preflight_semantic_index_intent_v2(uuid,bigint),
-    kb_knowledge_rebuild_semantic_keyword_indexes_v2(uuid,text,text),
-    kb_knowledge_complete_semantic_index_intent_v2(uuid,bigint),
-    kb_knowledge_record_semantic_index_intent_v2(uuid,bigint,text,text,text)
-TO kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_knowledge_keyword_token_stream_v2(text),
-    kb_knowledge_lock_semantic_policy_v2(text),
-    kb_knowledge_lock_rerank_revision_v2(text),
-    kb_knowledge_freeze_retrieval_identity_v1()
-TO kb_runtime_api, kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_knowledge_attest_matching_scope_v2(jsonb),
-    kb_knowledge_verify_matching_scope_v2(uuid,text,jsonb),
-    kb_knowledge_require_matching_attestation_v2(uuid,text),
-    kb_knowledge_load_matching_attestation_v2(uuid,text),
-    kb_knowledge_verify_attested_text_hit_v2(uuid,text,uuid,jsonb),
-    kb_knowledge_verify_attested_image_hit_v3(uuid,text,uuid,jsonb)
-TO kb_runtime_worker;
 
 -- Document attempts are isolated index generations. Readers select only the
 -- published generation; workers publish with an expected-attempt row lock.
@@ -3050,8 +2998,6 @@ BEGIN
 END $$;
 CREATE TRIGGER documents_source_changed AFTER UPDATE ON documents
 FOR EACH ROW EXECUTE FUNCTION kb_document_source_changed();
-GRANT SELECT,INSERT,UPDATE,DELETE ON knowledge_job_outbox,knowledge_job_receipts
-TO kb_runtime_api,kb_runtime_worker;
 
 -- Initial ingestion and every new attempt also retain their enqueue obligation.
 CREATE FUNCTION kb_document_convert_obligation() RETURNS trigger

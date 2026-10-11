@@ -435,14 +435,7 @@ pub(crate) fn completions_url_for_vlm(base: &str) -> String {
 }
 
 fn completions_url(base: &str) -> String {
-    let b = base.trim_end_matches('/');
-    if b.ends_with("/v1") {
-        format!("{b}/chat/completions")
-    } else if b.ends_with("/chat/completions") {
-        b.to_string()
-    } else {
-        format!("{b}/v1/chat/completions")
-    }
+    platform::model_chat_completions_url(base)
 }
 
 fn stub_complete(user: &str) -> String {

@@ -71,19 +71,12 @@ impl Drop for RetentionConsumer {
 async fn start_retention_consumer() -> RetentionConsumer {
     platform::init_tracing();
     let url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").unwrap();
-    let options = url
-        .parse::<sqlx::postgres::PgConnectOptions>()
-        .unwrap()
-        .username("kb_runtime_retention")
-        .password(
-            &std::env::var("KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD")
-                .expect("cleanup contract requires retention role password"),
-        );
+    let options = url.parse::<sqlx::postgres::PgConnectOptions>().unwrap();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect_with(options)
         .await
-        .expect("real retention role login");
+        .expect("shared application identity login");
     let storage = platform::oxana_connect().expect("explicit Oxana configuration");
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let runtime = storage
@@ -733,7 +726,6 @@ async fn cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker() {
             "KNOWLEDGEBRAIN_TEST_DATABASE_URL",
             "KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS",
             "OBJECT_DIR",
-            "KB_DEPLOYMENT_NAMESPACE_ID",
         ] {
             child.env(
                 key,

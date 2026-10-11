@@ -31,36 +31,12 @@ END
 $$;
 REVOKE ALL ON FUNCTION kb_reject_append_only() FROM PUBLIC;
 
-CREATE TABLE platform_schema_snapshot (
-    singleton boolean PRIMARY KEY CHECK (singleton),
-    schema_revision text NOT NULL,
-    shared_baseline_sha256 char(64) NOT NULL,
-    knowledge_baseline_sha256 char(64) NOT NULL,
-    bidding_baseline_sha256 char(64) NOT NULL,
-    manifest_contract_version integer NOT NULL,
-    catalog_manifest_sha256 char(64) NOT NULL,
-    postgres_server_version_num integer NOT NULL,
-    extensions jsonb NOT NULL,
-    release_descriptor_sha256 char(64) NOT NULL,
-    deployment_namespace_id uuid NOT NULL,
-    created_at timestamptz NOT NULL
-);
-
--- Runtime identities must not be able to shadow hardened helper dependencies
--- through attacker-controlled temporary relations.
-DO $$
-BEGIN
-EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
-IF has_database_privilege('kb_runtime_api',current_database(),'TEMPORARY')
-   OR has_database_privilege('kb_runtime_worker',current_database(),'TEMPORARY')
-   OR has_database_privilege('kb_runtime_retention',current_database(),'TEMPORARY') THEN
-  RAISE EXCEPTION 'runtime database roles must not have TEMPORARY privilege'
-    USING ERRCODE='42501';
-END IF;
-END
-$$;
-GRANT USAGE ON SCHEMA public TO
-    kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
+-- A single non-superuser owns application objects. Initialization revokes
+-- PUBLIC access; application functions retain business fences and audit checks.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES REVOKE USAGE ON TYPES FROM PUBLIC;
 
 CREATE TABLE idempotency_requests (
     actor_identity kb_actor_identity NOT NULL,
@@ -437,7 +413,7 @@ $$;
 
 -- Internal transfer seam. Domain SECURITY DEFINER mutations call this in the
 -- same transaction as their business row, audit, pointer, and receipt writes.
--- It is deliberately not granted to runtime roles.
+-- Application callers must use the domain mutation boundary, not call this alone.
 CREATE FUNCTION kb_object_upload_commit(
     p_staging_id uuid,
     p_object_ref kb_object_ref,
@@ -761,25 +737,20 @@ CREATE VIEW available_object_registry AS
 SELECT object_ref, digest, media_type, byte_length, registered_at
   FROM object_registry WHERE state = 'available';
 
--- Runtime roles get no direct platform table writes. Domain-owned object
--- mutations are checked SECURITY DEFINER functions in their owning slices.
--- Retention has the only database capability which can complete deletion state.
+-- PUBLIC cannot access application data. The shared owner can perform DDL;
+-- application paths still enforce business authorization and deletion fences.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
-GRANT SELECT ON platform_schema_snapshot,
-    application_maintenance_gate, queue_contract_artifacts, queue_contract_current
-TO kb_migrator, kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
-GRANT SELECT ON available_object_registry
-TO kb_runtime_api, kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_actor_identity_valid(text)
-TO kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
-GRANT EXECUTE ON FUNCTION kb_object_upload_stage(uuid, kb_object_ref, kb_sha256, text, bigint, kb_actor_identity),
-    kb_object_upload_abandon(uuid, kb_actor_identity),
-    kb_object_upload_request_expiry(uuid, kb_actor_identity)
-TO kb_runtime_api, kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_object_upload_expiry_candidates()
-TO kb_runtime_retention;
-GRANT EXECUTE ON FUNCTION kb_object_upload_expire_one(uuid),
-    kb_retention_preflight(uuid, kb_object_ref, kb_sha256, bigint),
-    kb_retention_complete(uuid, kb_object_ref, kb_sha256)
-TO kb_runtime_retention;
+DO $public_function_acl$
+DECLARE application_function regprocedure;
+BEGIN
+  FOR application_function IN
+    SELECT p.oid::regprocedure FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.proowner=current_user::regrole
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+        WHERE d.classid='pg_catalog.pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', application_function);
+  END LOOP;
+END
+$public_function_acl$;

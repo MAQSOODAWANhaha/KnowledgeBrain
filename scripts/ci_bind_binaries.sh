@@ -15,7 +15,6 @@ fi
   exit 1
 }
 : "${CI_MIGRATOR_BIN:?}"
-: "${CI_SCHEMA_VERIFIER_BIN:?}"
 : "${CI_API_BIN:?}"
 : "${CI_WORKER_BIN:?}"
 : "${CI_TENDER_PREPARE_BIN:?}"
@@ -23,7 +22,6 @@ fi
 {
   printf 'CI_BIN_ROOT=%s\n' "$base"
   printf 'KB_MIGRATOR_BIN=%s\n' "$base/bins/$CI_MIGRATOR_BIN"
-  printf 'KB_SCHEMA_VERIFIER_BIN=%s\n' "$base/bins/$CI_SCHEMA_VERIFIER_BIN"
   printf 'KB_API_BIN=%s\n' "$base/bins/$CI_API_BIN"
   printf 'KB_WORKER_BIN=%s\n' "$base/bins/$CI_WORKER_BIN"
   printf 'KB_TENDER_PREPARE_BIN=%s\n' "$base/bins/$CI_TENDER_PREPARE_BIN"

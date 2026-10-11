@@ -342,7 +342,7 @@ crates/bidding/src/
 
 **风险：** 今日 `decr_pending` 在 Redis 错误时返回「做完」，fanout 与 `run_image` 都会提前进 postprocess。改成 `Result::Err` 会影响 image 路径，这是同一漏洞的修复，不是无关重构。
 
-**做法：** S3 与 ingest 同提交改 `pending.rs`；`run_image` 对 Err 当瞬时失败（Oxana retry），不把 Err 当成 last-decr。`redis_namespace.rs` 补 Redis 失败用例。
+**做法：** S3 与 ingest 同提交改 `pending.rs`；`run_image` 对 Err 当瞬时失败（Oxana retry），不把 Err 当成 last-decr。Redis 计数器补失败用例。
 
 **闸门：** 无 Redis 或 DECR 失败时不出现 `parse_status=completed` / 不 `enqueue_post_process`。有 Redis 时原 last-decr 仍触发 postprocess。
 

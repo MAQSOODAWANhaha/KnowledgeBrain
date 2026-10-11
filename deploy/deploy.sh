@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Retired keys never affect runtime; reject stale deployment files without
+# printing their values. Fresh deployment has no old configuration adapter.
+if [[ -f deploy/.env ]] && grep -Eq '^[[:space:]]*(KB_TENDER_AGENT_LIMITS|KB_AUTHORING_TOKENIZER_PROFILE|KNOWLEDGEBRAIN_(MIGRATOR|API_DB|WORKER_DB|RETENTION_DB)_PASSWORD)=' deploy/.env; then
+  echo 'Remove retired limits/tokenizer JSON or per-component database password keys from deploy/.env.' >&2
+  exit 64
+fi
+
 COMPOSE=(
   docker compose
   -f deploy/docker-compose.yml

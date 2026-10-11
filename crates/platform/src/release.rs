@@ -1,21 +1,15 @@
-use crate::jcs_canonical_bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::str::FromStr;
 use thiserror::Error;
-use uuid::Uuid;
 
 pub const RELEASE_DESCRIPTOR_SCHEMA: &str =
     include_str!("../../../deploy/release-descriptor-v1.schema.json");
 pub const RELEASE_DESCRIPTOR_HASH_DOMAIN: &[u8] = b"KB:ReleaseDescriptor:v1\0";
-pub const RELEASE_DESCRIPTOR_PATH_ENV: &str = "KB_RELEASE_DESCRIPTOR_PATH";
-pub const RELEASE_DESCRIPTOR_SHA256_ENV: &str = "KB_RELEASE_DESCRIPTOR_SHA256";
-pub const COMPONENT_KIND_ENV: &str = "KB_COMPONENT_KIND";
-pub const COMPONENT_IMAGE_DIGEST_ENV: &str = "KB_COMPONENT_IMAGE_DIGEST";
-pub const DEPLOYMENT_NAMESPACE_ID_ENV: &str = "KB_DEPLOYMENT_NAMESPACE_ID";
+/// RFC 8785 canonical bytes shared by release and content hashing.
+pub fn jcs_canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json_canonicalizer::to_vec(value)
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -23,7 +17,6 @@ pub struct ReleaseDescriptorV1 {
     pub schema_version: u32,
     pub release_revision: String,
     pub git_sha: String,
-    pub platform_schema_revision: String,
     pub images: ReleaseImagesV1,
 }
 
@@ -38,14 +31,14 @@ pub struct ReleaseImagesV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SchemaComponentKind {
+pub enum ReleaseComponentKind {
     Migrator,
     Api,
     Worker,
     Retention,
 }
 
-impl SchemaComponentKind {
+impl ReleaseComponentKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Migrator => "migrator",
@@ -56,7 +49,7 @@ impl SchemaComponentKind {
     }
 }
 
-impl FromStr for SchemaComponentKind {
+impl FromStr for ReleaseComponentKind {
     type Err = ReleaseIdentityError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -70,100 +63,12 @@ impl FromStr for SchemaComponentKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SchemaRuntimeIdentity {
-    pub descriptor_path: PathBuf,
-    pub descriptor: ReleaseDescriptorV1,
-    pub release_descriptor_sha256: String,
-    pub component_kind: SchemaComponentKind,
-    pub component_image_digest: String,
-    pub deployment_namespace_id: Uuid,
-}
-
-impl SchemaRuntimeIdentity {
-    pub fn load_from_env() -> Result<Self, ReleaseIdentityError> {
-        let descriptor_path = required_env(RELEASE_DESCRIPTOR_PATH_ENV)?;
-        let descriptor_sha256 = required_env(RELEASE_DESCRIPTOR_SHA256_ENV)?;
-        let component_kind = required_env(COMPONENT_KIND_ENV)?;
-        let component_image_digest = required_env(COMPONENT_IMAGE_DIGEST_ENV)?;
-        let deployment_namespace_id = required_env(DEPLOYMENT_NAMESPACE_ID_ENV)?;
-        Self::load_verified(
-            Path::new(&descriptor_path),
-            &descriptor_sha256,
-            &component_kind,
-            &component_image_digest,
-            &deployment_namespace_id,
-        )
-    }
-
-    pub fn load_verified(
-        descriptor_path: &Path,
-        expected_descriptor_sha256: &str,
-        component_kind: &str,
-        expected_component_digest: &str,
-        deployment_namespace_id: &str,
-    ) -> Result<Self, ReleaseIdentityError> {
-        let bytes = std::fs::read(descriptor_path)
-            .map_err(|_| ReleaseIdentityError::DescriptorUnreadable)?;
-        let descriptor: ReleaseDescriptorV1 =
-            serde_json::from_slice(&bytes).map_err(|_| ReleaseIdentityError::DescriptorInvalid)?;
-        Self::from_descriptor(
-            descriptor_path.to_path_buf(),
-            descriptor,
-            expected_descriptor_sha256,
-            component_kind,
-            expected_component_digest,
-            deployment_namespace_id,
-        )
-    }
-
-    pub fn from_descriptor(
-        descriptor_path: PathBuf,
-        descriptor: ReleaseDescriptorV1,
-        expected_descriptor_sha256: &str,
-        component_kind: &str,
-        expected_component_digest: &str,
-        deployment_namespace_id: &str,
-    ) -> Result<Self, ReleaseIdentityError> {
-        descriptor.validate()?;
-        require_lower_hex(expected_descriptor_sha256, 64)
-            .map_err(|_| ReleaseIdentityError::DescriptorHashInvalid)?;
-        let calculated = descriptor.sha256()?;
-        if calculated != expected_descriptor_sha256 {
-            return Err(ReleaseIdentityError::DescriptorHashMismatch);
-        }
-        let component_kind = SchemaComponentKind::from_str(component_kind)?;
-        require_digest_suffix(expected_component_digest)?;
-        let selected_digest = descriptor.component_digest(component_kind)?.to_owned();
-        if selected_digest != expected_component_digest {
-            return Err(ReleaseIdentityError::ComponentDigestMismatch);
-        }
-        let deployment_namespace_id = deployment_namespace_id
-            .parse::<crate::DeploymentNamespaceV1>()
-            .map_err(|_| ReleaseIdentityError::DeploymentNamespaceInvalid)?
-            .id();
-        Ok(Self {
-            descriptor_path,
-            descriptor,
-            release_descriptor_sha256: calculated,
-            component_kind,
-            component_image_digest: selected_digest,
-            deployment_namespace_id,
-        })
-    }
-
-    pub fn schema_revision(&self) -> &str {
-        &self.descriptor.platform_schema_revision
-    }
-}
-
 impl ReleaseDescriptorV1 {
     pub fn validate(&self) -> Result<(), ReleaseIdentityError> {
         if self.schema_version != 1 {
             return Err(ReleaseIdentityError::DescriptorVersionMismatch);
         }
         require_revision(&self.release_revision)?;
-        require_revision(&self.platform_schema_revision)?;
         require_lower_hex(&self.git_sha, 40).map_err(|_| ReleaseIdentityError::GitShaInvalid)?;
         for image in [
             &self.images.migrator,
@@ -187,18 +92,18 @@ impl ReleaseDescriptorV1 {
         Ok(hex::encode(digest.finalize()))
     }
 
-    pub fn component_image(&self, component: SchemaComponentKind) -> &str {
+    pub fn component_image(&self, component: ReleaseComponentKind) -> &str {
         match component {
-            SchemaComponentKind::Migrator => &self.images.migrator,
-            SchemaComponentKind::Api => &self.images.api,
-            SchemaComponentKind::Worker => &self.images.worker,
-            SchemaComponentKind::Retention => &self.images.retention,
+            ReleaseComponentKind::Migrator => &self.images.migrator,
+            ReleaseComponentKind::Api => &self.images.api,
+            ReleaseComponentKind::Worker => &self.images.worker,
+            ReleaseComponentKind::Retention => &self.images.retention,
         }
     }
 
     pub fn component_digest(
         &self,
-        component: SchemaComponentKind,
+        component: ReleaseComponentKind,
     ) -> Result<&str, ReleaseIdentityError> {
         let image = self.component_image(component);
         validate_digest_only_image(image)?;
@@ -211,10 +116,6 @@ impl ReleaseDescriptorV1 {
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum ReleaseIdentityError {
-    #[error("RELEASE_IDENTITY_INVALID: required environment is missing")]
-    MissingEnvironment,
-    #[error("RELEASE_IDENTITY_INVALID: release descriptor is unreadable")]
-    DescriptorUnreadable,
     #[error("RELEASE_IDENTITY_INVALID: release descriptor is invalid")]
     DescriptorInvalid,
     #[error("RELEASE_IDENTITY_INVALID: descriptor schema version mismatch")]
@@ -225,25 +126,10 @@ pub enum ReleaseIdentityError {
     GitShaInvalid,
     #[error("RELEASE_IDENTITY_INVALID: image reference is not digest-only")]
     ImageReferenceInvalid,
-    #[error("RELEASE_IDENTITY_INVALID: descriptor hash is invalid")]
-    DescriptorHashInvalid,
-    #[error("RELEASE_IDENTITY_INVALID: descriptor hash mismatch")]
-    DescriptorHashMismatch,
     #[error("RELEASE_IDENTITY_INVALID: component kind is invalid")]
     InvalidComponentKind,
     #[error("RELEASE_IDENTITY_INVALID: component digest is invalid")]
     ComponentDigestInvalid,
-    #[error("RELEASE_IDENTITY_INVALID: component digest mismatch")]
-    ComponentDigestMismatch,
-    #[error("RELEASE_IDENTITY_INVALID: deployment namespace is invalid")]
-    DeploymentNamespaceInvalid,
-}
-
-fn required_env(name: &str) -> Result<String, ReleaseIdentityError> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or(ReleaseIdentityError::MissingEnvironment)
 }
 
 pub(crate) fn require_revision(value: &str) -> Result<(), ReleaseIdentityError> {
@@ -321,7 +207,6 @@ mod tests {
             schema_version: 1,
             release_revision: "development-1".into(),
             git_sha: "0123456789abcdef0123456789abcdef01234567".into(),
-            platform_schema_revision: "platform-v1".into(),
             images: ReleaseImagesV1 {
                 migrator: format!("registry.example/kb/migrator@sha256:{}", "1".repeat(64)),
                 api: format!("registry.example/kb/api@sha256:{}", "2".repeat(64)),
@@ -350,7 +235,7 @@ mod tests {
         let mut tagged = value.clone();
         tagged["images"]["api"] = json!("registry.example/kb/api:latest");
         let mut bad_revision = value.clone();
-        bad_revision["platform_schema_revision"] = json!("bad revision");
+        bad_revision["release_revision"] = json!("bad revision");
         let mut bad_git = value.clone();
         bad_git["git_sha"] = json!("A".repeat(40));
         for invalid in [unknown_root, unknown_image, tagged, bad_revision, bad_git] {
@@ -359,7 +244,7 @@ mod tests {
         assert!(
             serde_json::from_value::<ReleaseDescriptorV1>(json!({
                 "schema_version":1,"release_revision":"x","git_sha":"0".repeat(40),
-                "platform_schema_revision":"x","images":value["images"],"extra":true
+                "images":value["images"],"extra":true
             }))
             .is_err()
         );
@@ -392,114 +277,31 @@ mod tests {
         let mut replay = Sha256::new();
         replay.update(b"KB:ReleaseDescriptor:v1\0");
         replay.update(canonical);
-        assert_eq!(
-            descriptor.sha256().unwrap(),
-            "0dd4a7f43c41ea62ee0c20dc3afc9077d10d323b9d740717e0a5ec08e4505a6d"
-        );
         assert_eq!(descriptor.sha256().unwrap(), hex::encode(replay.finalize()));
         let mut changed = descriptor.clone();
         changed.release_revision.push('x');
         assert_ne!(changed.sha256().unwrap(), descriptor.sha256().unwrap());
         assert_eq!(
             descriptor
-                .component_digest(SchemaComponentKind::Api)
+                .component_digest(ReleaseComponentKind::Api)
                 .unwrap(),
             format!("sha256:{}", "2".repeat(64))
         );
     }
-
     #[test]
-    fn checked_in_development_descriptor_hash_is_frozen_but_not_runtime_proof() {
-        let descriptor: ReleaseDescriptorV1 = serde_json::from_str(include_str!(
-            "../../../deploy/release-descriptor-v1.development.json"
-        ))
-        .unwrap();
+    fn utf16_key_order_is_rfc8785_order_not_unicode_scalar_order() {
+        let value = json!({"\u{e000}": 1, "\u{10000}": 2, "a": 3});
         assert_eq!(
-            descriptor.sha256().unwrap(),
-            "770ce81ba32a38ff76cdee4e26abe276e3645a07dd6a6bf9d14ebf2bee76d84c"
+            String::from_utf8(jcs_canonical_bytes(&value).unwrap()).unwrap(),
+            "{\"a\":3,\"𐀀\":2,\"\":1}"
         );
-    }
-
-    #[test]
-    fn executables_and_compose_use_the_shared_identity_gate() {
-        let api = include_str!("../../api/src/main.rs");
-        let worker = include_str!("../../worker/src/main.rs");
-        let retention = include_str!("../../retention/src/main.rs");
-        let migrator = include_str!("bin/migrator.rs");
-        assert!(api.contains("connect_runtime_verified(platform::SchemaComponentKind::Api)"));
-        assert!(worker.contains("connect_runtime_verified(platform::SchemaComponentKind::Worker)"));
-        assert!(
-            retention
-                .contains("connect_runtime_verified(platform::SchemaComponentKind::Retention)")
+        assert_eq!(
+            String::from_utf8(
+                jcs_canonical_bytes(&json!({"fraction": 1.5, "large": 1e30, "small": 1e-7}))
+                    .unwrap()
+            )
+            .unwrap(),
+            "{\"fraction\":1.5,\"large\":1e+30,\"small\":1e-7}"
         );
-        assert!(migrator.contains("connect_unverified()"));
-        assert!(migrator.contains("apply_fresh_baseline(&pool)"));
-
-        let compose = include_str!("../../../deploy/docker-compose.yml");
-        assert!(
-            compose
-                .matches("/run/knowledgebrain/release-descriptor.json:ro")
-                .count()
-                >= 4
-        );
-        for kind in ["migrator", "api", "worker", "retention"] {
-            assert!(compose.contains(&format!("KB_COMPONENT_KIND: {kind}")));
-        }
-        assert!(!compose.contains("KB_COMPONENT_IMAGE_DIGEST: latest"));
-    }
-
-    #[test]
-    fn runtime_identity_binds_descriptor_kind_digest_and_namespace() {
-        let descriptor = descriptor();
-        let hash = descriptor.sha256().unwrap();
-        let digest = format!("sha256:{}", "2".repeat(64));
-        let identity = SchemaRuntimeIdentity::from_descriptor(
-            "/mounted/descriptor.json".into(),
-            descriptor.clone(),
-            &hash,
-            "api",
-            &digest,
-            "123e4567-e89b-12d3-a456-426614174000",
-        )
-        .unwrap();
-        assert_eq!(identity.schema_revision(), "platform-v1");
-        for (wrong_hash, kind, wrong_digest, namespace) in [
-            (
-                "0".repeat(64),
-                "api",
-                digest.clone(),
-                "123e4567-e89b-12d3-a456-426614174000".to_string(),
-            ),
-            (
-                hash.clone(),
-                "docreader",
-                digest.clone(),
-                "123e4567-e89b-12d3-a456-426614174000".to_string(),
-            ),
-            (
-                hash.clone(),
-                "api",
-                format!("sha256:{}", "3".repeat(64)),
-                "123e4567-e89b-12d3-a456-426614174000".to_string(),
-            ),
-            (
-                hash.clone(),
-                "api",
-                digest.clone(),
-                "123E4567-E89B-12D3-A456-426614174000".to_string(),
-            ),
-        ] {
-            assert!(
-                SchemaRuntimeIdentity::from_descriptor(
-                    "/mounted/descriptor.json".into(),
-                    descriptor.clone(),
-                    &wrong_hash,
-                    kind,
-                    &wrong_digest,
-                    &namespace,
-                )
-                .is_err()
-            );
-        }
     }
 }

@@ -21,13 +21,18 @@ fn destructive_postgres_tests_require_an_isolated_non_live_database() {
         ("knowledge clone", KNOWLEDGE_CLONE),
         ("knowledge search", KNOWLEDGE_SEARCH),
     ] {
-        assert!(source.contains("DROP SCHEMA public CASCADE"), "{name}");
+        assert!(source.contains("reset_isolated_schema(pool)"), "{name}");
         assert!(
             source.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"),
             "{name}"
         );
         assert!(source.contains(":15432/"), "{name}");
     }
+    let reset_helper = include_str!("../../../test-support/postgres.rs");
+    assert!(reset_helper.contains("KNOWLEDGEBRAIN_TEST_ADMIN_DATABASE_URL"));
+    assert!(reset_helper.contains("options.get_port() != 25433"));
+    assert!(reset_helper.contains("knowledgebrain_test_"));
+    assert!(reset_helper.contains("DROP SCHEMA public CASCADE"));
     assert!(FRESH_SCHEMA_ACCEPTANCE.contains("urlparse"));
     assert!(FRESH_SCHEMA_ACCEPTANCE.contains("url.port != 25433"));
     assert!(FRESH_SCHEMA_ACCEPTANCE.contains("knowledgebrain_test_"));
@@ -39,7 +44,7 @@ fn destructive_postgres_tests_require_an_isolated_non_live_database() {
 
 #[test]
 fn platform_order_and_knowledge_object_ownership_are_frozen() {
-    let owner = PLATFORM_DB.find("SET LOCAL ROLE kb_app_owner").unwrap();
+    assert!(!PLATFORM_DB.contains("SET LOCAL ROLE"));
     let shared = PLATFORM_DB
         .find("sqlx::raw_sql(SHARED_PLATFORM_BASELINE)")
         .unwrap();
@@ -47,7 +52,7 @@ fn platform_order_and_knowledge_object_ownership_are_frozen() {
         .find("sqlx::raw_sql(KNOWLEDGE_BASE_BASELINE)")
         .unwrap();
     let bidding = PLATFORM_DB.find("sqlx::raw_sql(BIDDING_BASELINE)").unwrap();
-    assert!(owner < shared && shared < knowledge && knowledge < bidding);
+    assert!(shared < knowledge && knowledge < bidding);
     for symbol in [
         "kb_register_knowledge_image_object",
         "kb_register_knowledge_document_object",

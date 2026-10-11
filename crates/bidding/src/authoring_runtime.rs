@@ -17,6 +17,21 @@ pub fn request_defaults() -> &'static RequestDefaults {
     })
 }
 
+/// Resource bound, not a provider model limit. Keeps wire allocations bounded.
+pub const MAX_CONTEXT_TOKENS: usize = 4_194_304;
+
+pub(crate) fn context_tokens_with(read: &impl Fn(&str) -> Option<String>) -> Result<usize, String> {
+    const KEY: &str = "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS";
+    read(KEY)
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| (1..=MAX_CONTEXT_TOKENS).contains(value))
+        .ok_or_else(|| format!("{KEY} must be an integer between 1 and {MAX_CONTEXT_TOKENS}"))
+}
+
+pub(crate) fn context_tokens_from_environment() -> Result<usize, String> {
+    context_tokens_with(&nonempty_env)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthoringRuntimeContractV1 {
@@ -46,6 +61,18 @@ impl AuthoringRuntimeContractV1 {
     }
 
     fn resolve_with(read: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let read = |key: &str| {
+            read(key).and_then(|value| {
+                if value.trim().is_empty() {
+                    return None;
+                }
+                Some(if key.ends_with("API_KEY") {
+                    value
+                } else {
+                    value.trim().to_owned()
+                })
+            })
+        };
         let base =
             alias(&read, "KNOWLEDGEBRAIN_CHAT_BASE_URL", "LLM_BASE_URL")?.ok_or_else(|| {
                 "AGENT_PROVIDER_UNAVAILABLE: chat base URL is not configured".to_string()
@@ -91,6 +118,19 @@ impl AuthoringRuntimeContractV1 {
         } else {
             format!("{base_url}/v1/chat/completions")
         };
+        let context = context_tokens_with(&read)?;
+        let reasoning_effort = match (
+            model_id.as_str(),
+            read("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT"),
+        ) {
+            ("gpt-6-luna", None) => Some("none".to_owned()),
+            ("gpt-6-luna", Some(value)) if value != "none" => {
+                return Err(
+                    "gpt-6-luna Chat Completions tool calls require reasoning_effort=none".into(),
+                );
+            }
+            (_, value) => value,
+        };
         let runtime = Self {
             schema_version: 1,
             base_url,
@@ -102,7 +142,9 @@ impl AuthoringRuntimeContractV1 {
             output_token_reserve: positive_setting(
                 &read,
                 "KB_AUTHORING_OUTPUT_TOKEN_RESERVE",
-                request_defaults().output_token_reserve,
+                request_defaults()
+                    .output_token_reserve
+                    .min((context / 4).max(1) as u32),
             )?,
             timeout_ms: positive_setting(
                 &read,
@@ -112,8 +154,14 @@ impl AuthoringRuntimeContractV1 {
             response_mode: "strict_json_schema".into(),
             transport_retries: 0,
             temperature: None,
-            reasoning_effort: read("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT"),
+            reasoning_effort,
         };
+        if (runtime.output_token_reserve as usize)
+            .checked_add((context / 16).clamp(1, 4096))
+            .is_none_or(|reserved| reserved >= context)
+        {
+            return Err("KB_AUTHORING_OUTPUT_TOKEN_RESERVE plus safety reserve must fit KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS".into());
+        }
         runtime.validate()?;
         Ok(runtime)
     }
@@ -174,7 +222,16 @@ impl AuthoringRuntimeContractV1 {
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
+    std::env::var(name).ok().and_then(|value| {
+        if value.trim().is_empty() {
+            return None;
+        }
+        Some(if name.ends_with("API_KEY") {
+            value
+        } else {
+            value.trim().to_owned()
+        })
+    })
 }
 
 fn alias(
@@ -259,6 +316,7 @@ mod tests {
         [
             ("LLM_BASE_URL", "https://llm.example/v1"),
             ("LLM_MODEL", "configured-model"),
+            ("KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS", "131072"),
             ("LLM_API_KEY", "test-key"),
             ("KB_AUTHORING_OUTPUT_TOKEN_RESERVE", "4096"),
             ("KB_AUTHORING_TIMEOUT_MS", "90000"),
@@ -266,6 +324,17 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
         .collect()
+    }
+
+    #[test]
+    fn luna_tool_calls_use_supported_reasoning_effort() {
+        let mut env = environment();
+        env.insert("LLM_MODEL".into(), "gpt-6-luna".into());
+        let runtime =
+            AuthoringRuntimeContractV1::resolve_with(|key| env.get(key).cloned()).unwrap();
+        assert_eq!(runtime.reasoning_effort.as_deref(), Some("none"));
+        env.insert("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT".into(), "high".into());
+        assert!(AuthoringRuntimeContractV1::resolve_with(|key| env.get(key).cloned()).is_err());
     }
 
     #[test]
@@ -309,6 +378,73 @@ mod tests {
                 assert!(err.contains(key));
             }
         }
+    }
+
+    #[test]
+    fn context_is_required_bounded_and_derives_reserves() {
+        let mut env = environment();
+        env.remove("KB_AUTHORING_OUTPUT_TOKEN_RESERVE");
+        for context in [64, 8192, 131072, 262144, MAX_CONTEXT_TOKENS] {
+            env.insert(
+                "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS".into(),
+                context.to_string(),
+            );
+            let runtime =
+                AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).unwrap();
+            assert_eq!(
+                runtime.output_token_reserve as usize,
+                (context / 4).clamp(1, 16384)
+            );
+        }
+        for raw in [
+            "",
+            "  ",
+            "0",
+            "-1",
+            "1.5",
+            "18446744073709551616",
+            "4194305",
+            "1",
+            "2",
+        ] {
+            env.insert("KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS".into(), raw.into());
+            assert!(AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).is_err());
+        }
+        env.remove("KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS");
+        assert!(
+            AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned())
+                .unwrap_err()
+                .contains("KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS")
+        );
+        env.insert(
+            "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS".into(),
+            "8192".into(),
+        );
+        for reserve in [7680, 8192, u32::MAX] {
+            env.insert(
+                "KB_AUTHORING_OUTPUT_TOKEN_RESERVE".into(),
+                reserve.to_string(),
+            );
+            assert!(AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).is_err());
+        }
+    }
+
+    #[test]
+    fn strings_trim_but_secret_bytes_are_preserved() {
+        let mut env = environment();
+        env.insert("LLM_MODEL".into(), "  configured-model  ".into());
+        env.insert("LLM_API_KEY".into(), "  secret-key  ".into());
+        env.insert(
+            "KNOWLEDGEBRAIN_CHAT_API_KEY".into(),
+            "  secret-key  ".into(),
+        );
+        let runtime = AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).unwrap();
+        assert_eq!(runtime.model_id, "configured-model");
+        env.insert("KNOWLEDGEBRAIN_CHAT_API_KEY".into(), "secret-key".into());
+        assert!(AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).is_err());
+        env.insert("LLM_API_KEY".into(), "   ".into());
+        env.remove("KNOWLEDGEBRAIN_CHAT_API_KEY");
+        assert!(AuthoringRuntimeContractV1::resolve_with(|k| env.get(k).cloned()).is_err());
     }
 
     #[test]

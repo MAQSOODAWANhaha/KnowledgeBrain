@@ -4,8 +4,8 @@
 //! Text token counts are exact for the selected encoding, not provider billing
 //! counts: server-side chat/tool framing and vision preprocessing are not public
 //! wire JSON. We count the entire canonical request (without image URLs) and add
-//! explicit framing, image and safety reserves. Unsupported models require a
-//! named, model-bound calibration rather than a silently guessed tokenizer.
+//! explicit framing, image and safety reserves. Unknown models use a conservative
+//! UTF-8 byte estimate, explicitly labelled as an estimate, never a claimed tokenizer.
 use crate::agent_error::AgentError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +16,8 @@ use tiktoken_rs::CoreBPE;
 pub enum TokenEncoding {
     O200kBase,
     Cl100kBase,
+    /// Internal conservative estimate for unverified model tokenizers.
+    Utf8Bytes,
 }
 
 impl TokenEncoding {
@@ -23,6 +25,7 @@ impl TokenEncoding {
         match self {
             Self::O200kBase => tiktoken_rs::o200k_base_singleton(),
             Self::Cl100kBase => tiktoken_rs::cl100k_base_singleton(),
+            Self::Utf8Bytes => unreachable!("byte estimates do not use a BPE"),
         }
     }
 }
@@ -38,6 +41,9 @@ pub(crate) fn cache_counts() -> (u64, u64) {
     CACHE_COUNTS.with(std::cell::Cell::get)
 }
 fn count_canonical_text(encoding: TokenEncoding, serialized: &str) -> usize {
+    if encoding == TokenEncoding::Utf8Bytes {
+        return serialized.len();
+    }
     if let Some(count) = LAST_TEXT_COUNT.with(|cache| {
         cache.borrow().as_ref().and_then(|(prior, text, count)| {
             (*prior == encoding && text == serialized).then_some(*count)
@@ -85,8 +91,8 @@ pub struct TokenizerCalibration {
 pub struct TokenizerProfile {
     pub model_id: String,
     pub encoding: TokenEncoding,
-    /// None is valid only for the explicitly supported model/encoding pairs.
-    /// There is deliberately no Default or automatic unknown-model fallback.
+    /// Internal measured overrides may be frozen by maintainers; ordinary
+    /// configuration never requires a calibration.
     pub calibration: Option<TokenizerCalibration>,
 }
 
@@ -101,7 +107,7 @@ fn overflow() -> AgentError {
 /// Explicit allowlist, not the library's permissive prefix heuristic (which
 /// would also accept invented names such as gpt-5-unknown-vendor). Encoding
 /// mappings follow OpenAI tiktoken/model.py and tiktoken-rs 0.12.1. New IDs must
-/// be verified here or configured with explicit calibration.
+/// be verified here; other models use the explicitly labelled byte estimate.
 fn supported_encoding(model_id: &str) -> Option<TokenEncoding> {
     match model_id {
         "gpt-5"
@@ -150,9 +156,8 @@ fn supported_encoding(model_id: &str) -> Option<TokenEncoding> {
 }
 
 impl TokenizerProfile {
-    pub fn published_for_model(model_id: &str) -> Result<Self, AgentError> {
-        let encoding = supported_encoding(model_id).ok_or_else(|| invalid(
-            "custom model requires a measured KB_AUTHORING_TOKENIZER_PROFILE; no tokenizer is inferred"))?;
+    pub fn for_model(model_id: &str) -> Result<Self, AgentError> {
+        let encoding = supported_encoding(model_id).unwrap_or(TokenEncoding::Utf8Bytes);
         Ok(Self {
             model_id: model_id.into(),
             encoding,
@@ -182,9 +187,11 @@ impl TokenizerProfile {
                     "tokenizer calibration requires multiplier_bps >= 10000 and provenance",
                 ))
             }
-            None if supported.is_none() => Err(invalid(
-                "unsupported model requires an explicit tokenizer encoding and calibration provenance",
-            )),
+            None if supported.is_none() && self.encoding != TokenEncoding::Utf8Bytes => {
+                Err(invalid(
+                    "unsupported model requires an explicit tokenizer encoding and calibration provenance",
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -193,7 +200,11 @@ impl TokenizerProfile {
     /// With calibration configured this returns a rounded-up budget estimate.
     pub fn count_text_tokens(&self, text: &str) -> Result<usize, AgentError> {
         self.validate_for_model(&self.model_id)?;
-        self.calibrate(self.encoding.bpe().count_ordinary(text))
+        self.calibrate(if self.encoding == TokenEncoding::Utf8Bytes {
+            text.len()
+        } else {
+            self.encoding.bpe().count_ordinary(text)
+        })
     }
 
     fn calibrate(&self, tokens: usize) -> Result<usize, AgentError> {
@@ -209,7 +220,11 @@ impl TokenizerProfile {
     /// policy. Both pinned vocabularies have a maximum ordinary piece of 128
     /// bytes, checked exhaustively against the embedded library data in tests.
     pub fn max_piece_bytes(&self) -> usize {
-        128
+        if self.encoding == TokenEncoding::Utf8Bytes {
+            1
+        } else {
+            128
+        }
     }
 }
 
@@ -324,7 +339,7 @@ pub(crate) fn estimate_request_tokens_with_reserve(
     Ok(RequestTokenEstimate {
         encoding: profile.encoding,
         calibrated: profile.calibration.is_some(),
-        provenance: profile.calibration.as_ref().map(|c| c.provenance.clone()).unwrap_or_else(|| "tiktoken-rs 0.12.1 embedded encoding; verified OpenAI model mapping; canonical JSON plus reserved framing, not provider usage".into()),
+        provenance: profile.calibration.as_ref().map(|c| c.provenance.clone()).unwrap_or_else(|| if profile.encoding == TokenEncoding::Utf8Bytes { "conservative UTF-8 byte estimate for an unverified tokenizer; not exact provider usage".into() } else { "tiktoken-rs 0.12.1 embedded encoding; verified OpenAI model mapping; canonical JSON plus reserved framing, not provider usage".into() }),
         text_tokens,
         calibrated_text_tokens,
         framing_tokens,

@@ -2,7 +2,6 @@
   "schema_version": 1,
   "release_revision": "development-only",
   "git_sha": "0000000000000000000000000000000000000000",
-  "platform_schema_revision": "development-platform-v1",
   "images": {
     "migrator": "development.local/knowledgebrain/migrator@sha256:1111111111111111111111111111111111111111111111111111111111111111",
     "api": "development.local/knowledgebrain/api@sha256:2222222222222222222222222222222222222222222222222222222222222222",

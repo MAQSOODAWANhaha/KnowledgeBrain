@@ -285,11 +285,9 @@ pub(crate) async fn run_transport_group(
     ctx: AppCtx,
     core_storage: oxana::Storage,
 ) -> Result<(), oxana::OxanaError> {
-    let post_storage = platform::oxana_connect()?;
-    let enrich_storage = platform::oxana_connect()?;
+    let knowledge_enabled =
+        platform::knowledge_enabled().map_err(oxana::OxanaError::GenericError)?;
     let maintenance_storage = platform::oxana_connect()?;
-    let wiki_storage = platform::oxana_connect()?;
-    let multimodal_storage = platform::oxana_connect()?;
     let bid_storage = platform::oxana_connect()?;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let shut = |stop: tokio::sync::watch::Receiver<bool>| async move {
@@ -297,63 +295,82 @@ pub(crate) async fn run_transport_group(
         Ok::<(), std::io::Error>(())
     };
     let mut tasks = tokio::task::JoinSet::<Result<(), oxana::OxanaError>>::new();
-    let core = core_storage
-        .runtime(ctx.clone())
-        .queue_with_concurrency::<DefaultQueue>(platform::runtime_concurrency("CORE", 8))
-        .worker::<DocumentProcessWorker, DocumentProcessJob>()
-        .worker::<DocumentProcessWorker, ManualProcessJob>()
-        .shutdown_on(shut(stop_rx.clone()))
-        .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
-        .run();
-    tasks.spawn(async move { core.await.map(|_| ()) });
-    let post = post_storage
-        .runtime(ctx.clone())
-        .queue_with_concurrency::<PostprocessQueue>(platform::runtime_concurrency("POSTPROCESS", 2))
-        .worker::<PostProcessWorker, PostProcessJob>()
-        .worker::<KnowledgeSemanticIndexV2Worker, KnowledgeSemanticIndexV2Job>()
-        .shutdown_on(shut(stop_rx.clone()))
-        .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
-        .run();
-    tasks.spawn(async move { post.await.map(|_| ()) });
-    let enrich = enrich_storage
-        .runtime(ctx.clone())
-        .queue_with_concurrency::<SummaryQueue>(platform::runtime_concurrency("ENRICHMENT", 12))
-        .worker::<SummaryWorker, SummaryJob>()
-        .worker::<DatatableWorker, DatatableJob>()
-        .shutdown_on(shut(stop_rx.clone()))
-        .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
-        .run();
-    tasks.spawn(async move { enrich.await.map(|_| ()) });
+    if knowledge_enabled {
+        let post_storage = platform::oxana_connect()?;
+        let enrich_storage = platform::oxana_connect()?;
+        let wiki_storage = platform::oxana_connect()?;
+        let multimodal_storage = platform::oxana_connect()?;
+        let core = core_storage
+            .runtime(ctx.clone())
+            .queue_with_concurrency::<DefaultQueue>(platform::runtime_concurrency("CORE", 8))
+            .worker::<DocumentProcessWorker, DocumentProcessJob>()
+            .worker::<DocumentProcessWorker, ManualProcessJob>()
+            .shutdown_on(shut(stop_rx.clone()))
+            .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
+            .run();
+        tasks.spawn(async move { core.await.map(|_| ()) });
+        let post = post_storage
+            .runtime(ctx.clone())
+            .queue_with_concurrency::<PostprocessQueue>(platform::runtime_concurrency(
+                "POSTPROCESS",
+                2,
+            ))
+            .worker::<PostProcessWorker, PostProcessJob>()
+            .worker::<KnowledgeSemanticIndexV2Worker, KnowledgeSemanticIndexV2Job>()
+            .shutdown_on(shut(stop_rx.clone()))
+            .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
+            .run();
+        tasks.spawn(async move { post.await.map(|_| ()) });
+        let enrich = enrich_storage
+            .runtime(ctx.clone())
+            .queue_with_concurrency::<SummaryQueue>(platform::runtime_concurrency("ENRICHMENT", 12))
+            .worker::<SummaryWorker, SummaryJob>()
+            .worker::<DatatableWorker, DatatableJob>()
+            .shutdown_on(shut(stop_rx.clone()))
+            .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
+            .run();
+        tasks.spawn(async move { enrich.await.map(|_| ()) });
+        let wiki = wiki_storage
+            .runtime(ctx.clone())
+            .queue_with_concurrency::<WikiQueue>(platform::runtime_concurrency("WIKI", 8))
+            .worker::<WikiIngestWorker, WikiIngestJob>()
+            .worker::<WikiFinalizeWorker, WikiFinalizeJob>()
+            .shutdown_on(shut(stop_rx.clone()))
+            .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
+            .run();
+        tasks.spawn(async move { wiki.await.map(|_| ()) });
+        let multimodal = multimodal_storage
+            .runtime(ctx.clone())
+            .queue_with_concurrency::<MultimodalQueue>(platform::runtime_concurrency(
+                "MULTIMODAL",
+                12,
+            ))
+            .worker::<ImageMultimodalWorker, ImageMultimodalJob>()
+            .shutdown_on(shut(stop_rx.clone()))
+            .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
+            .run();
+        tasks.spawn(async move { multimodal.await.map(|_| ()) });
+    }
     let maintenance = maintenance_storage
         .runtime(ctx.clone())
         .queue_with_concurrency::<LowQueue>(platform::runtime_concurrency("MAINTENANCE", 4))
-        .worker::<VersionCloneWorker, VersionCloneJob>()
         .worker::<ListDeleteWorker, ListDeleteJob>()
         .worker::<KbDeleteWorker, KbDeleteJob>()
-        .worker::<ListReparseWorker, ListReparseJob>()
         .worker::<IndexDeleteWorker, IndexDeleteJob>()
-        .worker::<HousekeepWorker, HousekeepJob>()
+        .worker::<HousekeepWorker, HousekeepJob>();
+    // Clone and reparse enqueue model work, unlike cleanup.
+    let maintenance = if knowledge_enabled {
+        maintenance
+            .worker::<VersionCloneWorker, VersionCloneJob>()
+            .worker::<ListReparseWorker, ListReparseJob>()
+    } else {
+        maintenance
+    };
+    let maintenance = maintenance
         .shutdown_on(shut(stop_rx.clone()))
         .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
         .run();
     tasks.spawn(async move { maintenance.await.map(|_| ()) });
-    let wiki = wiki_storage
-        .runtime(ctx.clone())
-        .queue_with_concurrency::<WikiQueue>(platform::runtime_concurrency("WIKI", 8))
-        .worker::<WikiIngestWorker, WikiIngestJob>()
-        .worker::<WikiFinalizeWorker, WikiFinalizeJob>()
-        .shutdown_on(shut(stop_rx.clone()))
-        .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
-        .run();
-    tasks.spawn(async move { wiki.await.map(|_| ()) });
-    let multimodal = multimodal_storage
-        .runtime(ctx.clone())
-        .queue_with_concurrency::<MultimodalQueue>(platform::runtime_concurrency("MULTIMODAL", 12))
-        .worker::<ImageMultimodalWorker, ImageMultimodalJob>()
-        .shutdown_on(shut(stop_rx.clone()))
-        .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
-        .run();
-    tasks.spawn(async move { multimodal.await.map(|_| ()) });
     let bid = bid_storage
         .runtime(ctx.clone())
         .queue_with_concurrency::<platform::BidAuthoringV2Queue>(platform::runtime_concurrency(
@@ -366,7 +383,14 @@ pub(crate) async fn run_transport_group(
         .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
         .run();
     tasks.spawn(async move { bid.await.map(|_| ()) });
-    debug_assert_eq!(tasks.len(), TRANSPORT_RUNTIME_COUNT);
+    debug_assert_eq!(
+        tasks.len(),
+        if knowledge_enabled {
+            TRANSPORT_RUNTIME_COUNT
+        } else {
+            2
+        }
+    );
     join_transport_group(tasks, &ctx.shutdown, stop_tx).await
 }
 

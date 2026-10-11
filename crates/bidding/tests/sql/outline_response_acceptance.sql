@@ -241,11 +241,11 @@ BEGIN
   EXCEPTION WHEN check_violation THEN NULL;
   END;
   -- This fixture checks database GC authorization, not a fabricated physical delete receipt.
-  IF has_table_privilege('kb_runtime_worker','bid_outline_runs','UPDATE')
-     OR has_table_privilege('kb_runtime_worker','bid_outline_artifacts','INSERT')
-     OR has_table_privilege('kb_runtime_api','bid_documents','INSERT')
-     OR has_function_privilege('kb_runtime_worker','kb_object_reference_remove(kb_object_ref,text,uuid,text,uuid)','EXECUTE') THEN
-    RAISE EXCEPTION 'runtime can bypass publication fence';
+  IF has_table_privilege('public','bid_outline_runs','UPDATE')
+     OR has_table_privilege('public','bid_outline_artifacts','INSERT')
+     OR has_table_privilege('public','bid_documents','INSERT')
+     OR has_function_privilege('public','kb_object_reference_remove(kb_object_ref,text,uuid,text,uuid)','EXECUTE') THEN
+    RAISE EXCEPTION 'PUBLIC can bypass publication fence';
   END IF;
 END
 $acceptance$;

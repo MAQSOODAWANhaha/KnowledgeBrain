@@ -83,5 +83,5 @@ LLM 经常默默选择一种解释然后执行。这个原则强制明确推理�
 
 - Postgres `127.0.0.1:15432`，Redis `127.0.0.1:16379`，对象存储 `127.0.0.1:19000`。`minio/minio` 已从 Docker Hub 下架，对象存储使用 Chainguard MinIO，bucket 为 `knowledgebrain`。
 - API 是 `http://127.0.0.1:8080`（`/ready`）。网页是 `http://127.0.0.1:5174`，并代理到该 API。
-- 未设置 `KNOWLEDGEBRAIN_CHAT_*` 或 `KNOWLEDGEBRAIN_EMBEDDING_*` 时使用本机占位地址，只为让进程和 `/ready` 起来。真实模型调用要换成可用端点。
-- 未配置 LDAP 时本地登录不校验密码。开发账号可用 `dev@local`。
+- Chat 模型与 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS` 必须显式配置；默认招标模式不要求 Embedding，启用知识库后才检查相关模型。
+- 未配置 LDAP 时使用本地密码登录；首次启动必须显式配置 `KB_ADMIN_USERNAME`、`KB_ADMIN_PASSWORD` 和 `JWT_SECRET`。

@@ -516,16 +516,15 @@ async fn assert_seeded_fixture(pool: PgPool, fixture: Fixture) {
         .await
         .unwrap();
 
+    let app_role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     for (role, expected_keyword, expected_vector) in [
         (
-            "kb_runtime_api",
-            (true, false, false, false),
-            (true, false, false, false),
-        ),
-        (
-            "kb_runtime_worker",
-            (true, false, false, false),
-            (true, false, false, false),
+            app_role.as_str(),
+            (true, true, true, true),
+            (true, true, true, true),
         ),
         (
             "public",
@@ -578,7 +577,7 @@ async fn assert_seeded_fixture(pool: PgPool, fixture: Fixture) {
     .unwrap();
     assert!(hardened_helpers);
 
-    for role in ["kb_runtime_api", "kb_runtime_worker"] {
+    for role in [app_role.as_str()] {
         let has_temporary: bool =
             sqlx::query_scalar("SELECT has_database_privilege($1,current_database(),'TEMPORARY')")
                 .bind(role)
@@ -592,8 +591,7 @@ async fn assert_seeded_fixture(pool: PgPool, fixture: Fixture) {
     }
 
     for (role, rebuild, tokenizer, vector_reconcile) in [
-        ("kb_runtime_api", false, true, false),
-        ("kb_runtime_worker", true, true, true),
+        (app_role.as_str(), true, true, true),
         ("public", false, false, false),
     ] {
         let privileges: (bool, bool, bool) = sqlx::query_as(

@@ -1,12 +1,10 @@
 #[allow(dead_code)]
 mod support;
 
-use sqlx::{Executor, PgPool};
+use sqlx::PgPool;
 
 async fn owner(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
-    let mut connection = pool.acquire().await.unwrap();
-    connection.execute("SET ROLE kb_app_owner").await.unwrap();
-    connection
+    pool.acquire().await.unwrap()
 }
 
 #[tokio::test]
