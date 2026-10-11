@@ -1157,9 +1157,46 @@ pub(in crate::analysis) fn observe_progress(
         if state.analysis.outline.phase != super::super::outline_flow::Phase::Discover {
             versions.push(delivered_read_progress_marker(state)?);
         }
-        state
-            .main_progress
-            .observe(versions, Some(marker), &limits.progress());
+        if state.analysis.outline.phase == super::super::outline_flow::Phase::Outline {
+            // A new draft version is work, not a completed obligation. Credit
+            // each accepted entity/owner pair once so construction and migration
+            // can advance, but restoring an old pair or editing its text cannot.
+            // New entity IDs can earn credit; this is not semantic deduplication.
+            let draft = &state.outline_run.tool_draft;
+            let mut completed = BTreeSet::new();
+            for chapter in &draft.chapters {
+                for id in &chapter.requirement_ids {
+                    completed.insert(digest(&json!(["organize_assigned", id, chapter.id]))?);
+                }
+            }
+            for binding in &draft.bindings {
+                completed.insert(digest(&json!([
+                    "organize_bound",
+                    binding.form_id,
+                    binding.chapter_id
+                ]))?);
+            }
+            for slot in &draft.slots {
+                completed.insert(digest(&json!([
+                    "organize_slot",
+                    slot.slot_id,
+                    slot.chapter_id
+                ]))?);
+            }
+            for fulfillment in &draft.fulfillments {
+                completed.insert(digest(&json!([
+                    "organize_fulfilled",
+                    fulfillment.requirement_id
+                ]))?);
+            }
+            state
+                .main_progress
+                .observe_completions(versions, completed, &limits.progress());
+        } else {
+            state
+                .main_progress
+                .observe(versions, Some(marker), &limits.progress());
+        }
         return Ok(());
     }
     if *role == Role::Main

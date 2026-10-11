@@ -243,7 +243,7 @@
     "type": "function",
     "function": {
       "name": "put_chapters",
-      "description": "Write chapters. mode=replace replaces the full chapter collection; mode=upsert updates submitted IDs and preserves other chapters. Preserve existing requirement assignments when updating a chapter. Upsert merges by chapter id and retains omitted chapters; it does not rename or replace an existing tree. Sibling order must be unique per parent, including roots. Reuse existing ids when updating; use replace only for an intentional complete tree replacement.",
+      "description": "Write chapters. mode=replace replaces the full chapter collection; mode=upsert updates submitted IDs and preserves other chapters. Every submitted chapter replaces that entire chapter, including requirement_ids; the list is not appended or unioned. To add a requirement, copy the complete current list from outline.chapters or read_outline(mode=chapters), then add the new ID. Omitted requirement IDs are removed from that chapter. Move a requirement by submitting both source and destination chapters together. Upsert merges by chapter id and retains omitted chapters; it does not rename or replace an existing tree. Sibling order must be unique per parent, including roots. Reuse existing ids when updating; use replace only for an intentional complete tree replacement.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,

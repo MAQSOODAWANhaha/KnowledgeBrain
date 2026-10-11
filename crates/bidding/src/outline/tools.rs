@@ -219,8 +219,31 @@ fn put_chapters(
     validate_targets(input, &probe, known_requirements)?;
     probe.required_requirement_ids = known_requirements.clone();
     invalidate_review(&mut probe);
+    let ownership = |chapters: &[ChapterOutline]| -> BTreeSet<(String, String)> {
+        chapters
+            .iter()
+            .flat_map(|chapter| {
+                chapter
+                    .requirement_ids
+                    .iter()
+                    .map(|id| (chapter.id.clone(), id.clone()))
+            })
+            .collect()
+    };
+    let before = ownership(&draft.chapters);
+    let after = ownership(&probe.chapters);
+    let changes = |rows: Vec<&(String, String)>| -> Value {
+        json!(rows.into_iter().map(|(chapter, requirement)|
+            json!({"chapter_id":chapter,"requirement_id":requirement})).collect::<Vec<_>>())
+    };
     *draft = probe;
-    Ok(view(input, draft))
+    let mut result = view(input, draft);
+    result["assignment_changes"] = json!({
+        "removed":changes(before.difference(&after).collect()),
+        "added":changes(after.difference(&before).collect()),
+        "instruction":"Submitted chapters replace their complete requirement_ids. Use current chapter membership when adding; removals and moves above are effective. Read current chapters before further edits."
+    });
+    Ok(result)
 }
 
 fn binding_sets<'a>(
@@ -1039,7 +1062,7 @@ pub(crate) fn read_outline(
     }
     let chapter_id = args["chapter_id"].as_str();
     let rows: Vec<Value> = match mode {
-        "chapters" => draft.chapters.iter().filter(|c|chapter_id.is_none_or(|id|c.id==id || c.parent_id.as_deref()==Some(id))).map(|c|json!({"id":c.id,"parent_id":c.parent_id,"order":c.order,"title":c.title,"purpose":c.purpose,"requirement_count":c.requirement_ids.len()})).collect(),
+        "chapters" => draft.chapters.iter().filter(|c|chapter_id.is_none_or(|id|c.id==id || c.parent_id.as_deref()==Some(id))).map(|c|json!({"id":c.id,"parent_id":c.parent_id,"order":c.order,"title":c.title,"purpose":c.purpose,"requirement_count":c.requirement_ids.len(),"requirement_ids":c.requirement_ids})).collect(),
         "slots" => draft.slots.iter().filter(|s|chapter_id.is_none_or(|id|s.chapter_id==id)).map(|s|json!({"slot_id":s.slot_id,"chapter_id":s.chapter_id,"kind":s.kind,"content":s.content,"text_bytes":s.text.len(),"body_mode":"slot_body","match_query":s.match_query})).collect(),
         "bindings" => draft.bindings.iter().filter(|s|chapter_id.is_none_or(|id|s.chapter_id==id)).map(|s|json!(s)).collect(),
         "fulfillments" => draft.fulfillments.iter().filter(|s|chapter_id.is_none_or(|id|s.primary_response_chapter_id==id)).map(|s|json!(s)).collect(),
@@ -1595,6 +1618,168 @@ mod tests {
             {"id":"leaf-a","parent_id":"mid","order":0,"title":"甲","purpose":"response","requirement_ids":[]},
             {"id":"leaf-b","parent_id":"mid","order":1,"title":"乙","purpose":"response","requirement_ids":[]}
         ]})
+    }
+
+    #[test]
+    fn chapter_membership_updates_are_complete_atomic_and_reloadable() {
+        let input = input();
+        let mut draft = Draft::default();
+        let known = BTreeSet::from(["r1".into(), "r2".into(), "r3".into()]);
+        let mut initial = three_level_chapters();
+        initial["chapters"][2]["requirement_ids"] = json!(["r1"]);
+        apply_canonical(&input, &mut draft, &known, "put_chapters", &initial).unwrap();
+        let mut a = initial["chapters"][2].clone();
+        let mut b = initial["chapters"][3].clone();
+        // Incremental chapter upserts preserve omitted chapters, not omitted IDs.
+        a["requirement_ids"] = json!(["r1", "r2"]);
+        apply_canonical(
+            &input,
+            &mut draft,
+            &known,
+            "put_chapters",
+            &json!({"mode":"upsert","chapters":[a.clone()]}),
+        )
+        .unwrap();
+        let page = read_outline(
+            &input,
+            &draft,
+            &json!({"mode":"chapters","chapter_id":"leaf-a"}),
+        )
+        .unwrap();
+        assert_eq!(page["items"][0]["requirement_ids"], json!(["r1", "r2"]));
+        draft = serde_json::from_value(serde_json::to_value(draft).unwrap()).unwrap();
+        a["requirement_ids"] = json!(["r1", "r2", "r3"]);
+        apply_canonical(
+            &input,
+            &mut draft,
+            &known,
+            "put_chapters",
+            &json!({"mode":"upsert","chapters":[a.clone()]}),
+        )
+        .unwrap();
+        assert_eq!(draft.chapters.len(), 4);
+        let saved = draft.clone();
+        b["requirement_ids"] = json!(["r1"]);
+        assert!(
+            apply_canonical(
+                &input,
+                &mut draft,
+                &known,
+                "put_chapters",
+                &json!({"mode":"upsert","chapters":[b.clone()]})
+            )
+            .is_err()
+        );
+        assert_eq!(draft, saved, "duplicate ownership is rejected atomically");
+        a["requirement_ids"] = json!(["r2", "r3"]);
+        let moved = apply_canonical(
+            &input,
+            &mut draft,
+            &known,
+            "put_chapters",
+            &json!({"mode":"upsert","chapters":[b.clone(),a.clone()]}),
+        )
+        .unwrap();
+        assert_eq!(moved["unassigned_count"], 0);
+        assert_eq!(
+            moved["assignment_changes"]["removed"],
+            json!([{"chapter_id":"leaf-a","requirement_id":"r1"}])
+        );
+        assert_eq!(
+            moved["assignment_changes"]["added"],
+            json!([{"chapter_id":"leaf-b","requirement_id":"r1"}])
+        );
+        // Intentional removal remains legal and is visible; no blind union.
+        a["requirement_ids"] = json!(["r3"]);
+        let removed = apply_canonical(
+            &input,
+            &mut draft,
+            &known,
+            "put_chapters",
+            &json!({"mode":"upsert","chapters":[a.clone()]}),
+        )
+        .unwrap();
+        assert_eq!(removed["unassigned_count"], 1);
+        assert_eq!(
+            removed["assignment_changes"]["removed"][0]["requirement_id"],
+            "r2"
+        );
+        // Full replacement removes omitted chapters, unlike upsert.
+        initial["chapters"].as_array_mut().unwrap().pop();
+        initial["chapters"][2] = a;
+        let replaced =
+            apply_canonical(&input, &mut draft, &known, "put_chapters", &initial).unwrap();
+        assert_eq!(draft.chapters.len(), 3);
+        assert_eq!(replaced["unassigned_count"], 2);
+        assert_eq!(
+            replaced["assignment_changes"]["removed"][0]["requirement_id"],
+            "r1"
+        );
+    }
+
+    #[test]
+    fn existing_fulfillment_migration_has_no_partial_mutation_escape() {
+        let input = input();
+        let mut draft = Draft::default();
+        let known = BTreeSet::from(["r".into()]);
+        let mut chapters = three_level_chapters();
+        chapters["chapters"][2]["requirement_ids"] = json!(["r"]);
+        apply_canonical(&input, &mut draft, &known, "put_chapters", &chapters).unwrap();
+        let mut fulfillment = json!({"requirement_id":"r","primary_response_chapter_id":"leaf-a", "target_refs":[{"type":"manual_task","task_id":"task","description":"Synthetic required action"}]});
+        apply_canonical(
+            &input,
+            &mut draft,
+            &known,
+            "put_fulfillments",
+            &json!({"fulfillments":[fulfillment.clone()]}),
+        )
+        .unwrap();
+        let saved = draft.clone();
+        // An empty batch is an upsert no-op, not a deletion primitive.
+        apply_canonical(
+            &input,
+            &mut draft,
+            &known,
+            "put_fulfillments",
+            &json!({"fulfillments":[]}),
+        )
+        .unwrap();
+        assert_eq!(draft.fulfillments, saved.fulfillments);
+        let saved = draft.clone(); // A write invalidates review even with no membership change.
+        fulfillment["target_refs"] = json!([]);
+        assert!(
+            apply_canonical(
+                &input,
+                &mut draft,
+                &known,
+                "put_fulfillments",
+                &json!({"fulfillments":[fulfillment.clone()]})
+            )
+            .is_err()
+        );
+        assert_eq!(draft, saved);
+        // Neither possible first step of the cross-collection move is valid.
+        chapters["chapters"][2]["requirement_ids"] = json!([]);
+        chapters["chapters"][3]["requirement_ids"] = json!(["r"]);
+        assert!(apply_canonical(&input, &mut draft, &known, "put_chapters", &chapters).is_err());
+        assert_eq!(draft, saved);
+        fulfillment["primary_response_chapter_id"] = json!("leaf-b");
+        fulfillment["target_refs"] = json!([{"type":"manual_task","task_id":"task","description":"Synthetic required action"}]);
+        assert!(
+            apply_canonical(
+                &input,
+                &mut draft,
+                &known,
+                "put_fulfillments",
+                &json!({"fulfillments":[fulfillment]})
+            )
+            .is_err()
+        );
+        assert_eq!(draft, saved);
+        // Cancellation between rejected steps and reload preserves a valid old state.
+        draft = serde_json::from_value(serde_json::to_value(draft).unwrap()).unwrap();
+        validate_targets(&input, &draft, &known).unwrap();
+        assert_eq!(draft, saved);
     }
 
     #[test]

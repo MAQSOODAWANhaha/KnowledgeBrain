@@ -341,6 +341,14 @@ pub fn host_packet(
             "navigation":"read_requirements(mode=packs)"});
         packet["outline"] = json!({"navigation":"read_outline",
             "unmapped_forms":super::tools::unmapped_forms(input, &state.outline_run.tool_draft).len()});
+        let chapters = &state.outline_run.tool_draft.chapters;
+        packet["outline"]["chapters"] = json!({
+            "items":chapters.iter().take(max_items).collect::<Vec<_>>(),
+            "total":chapters.len(),"preview_only":true,
+            "omitted":chapters.len().saturating_sub(max_items),
+            "navigation":{"tool":"read_outline","args":{"mode":"chapters"}},
+            "instruction":"Each visible chapter has its complete current requirement_ids. Upsert replaces each submitted chapter including that entire list, never appends IDs. Preserve these IDs when adding; read any omitted chapter before editing it. To move assignments, submit both affected chapters together."
+        });
     }
     if duty == Duty::Check {
         let draft = &state.outline_run.tool_draft;

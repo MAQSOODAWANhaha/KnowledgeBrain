@@ -3901,3 +3901,459 @@ fn repeated_requirement_projection_keeps_latest_typed_handles_resolvable() {
         "fixture must exercise changed handle allocation order"
     );
 }
+
+#[test]
+fn organize_assignment_removal_move_and_reload_do_not_repeat_completion_credit() {
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let id = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let limits = crate::analysis::tests::config().limits;
+    let row = |chapter: &str, ids: Vec<String>| crate::outline::ChapterOutline {
+        id: chapter.into(),
+        parent_id: None,
+        order: 0,
+        title: chapter.into(),
+        purpose: crate::outline::ChapterPurpose::Response,
+        requirement_ids: ids,
+    };
+    state.outline_run.tool_draft.chapters = vec![row("a", vec![id.clone()])];
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.focus_turns, 0);
+    let credit = state.main_progress.completions.clone();
+    state.outline_run.tool_draft.chapters = vec![row("a", vec![])];
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.focus_turns, 1);
+    // Reload preserves earned pairs. First migration earns credit, but returning
+    // to the original owner and changing its title cannot earn it again.
+    state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+    state.outline_run.tool_draft.chapters = vec![row("b", vec![id.clone()])];
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.focus_turns, 0);
+    assert_eq!(state.main_progress.completions.len(), credit.len() + 1);
+    let migrated_credit = state.main_progress.completions.clone();
+    state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+    state.outline_run.tool_draft.chapters = vec![row("a", vec![id.clone()])];
+    state.outline_run.tool_draft.chapters[0].title = "Revised title".into();
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.focus_turns, 1);
+    assert_eq!(state.main_progress.completions, migrated_credit);
+    let host = crate::outline::agent::host_packet(&input, &state, 4, json!({}), json!({}), None);
+    assert_eq!(
+        host["outline"]["chapters"]["items"][0]["requirement_ids"],
+        json!([id])
+    );
+    let hidden = crate::outline::agent::host_packet(&input, &state, 0, json!({}), json!({}), None);
+    assert_eq!(hidden["outline"]["chapters"]["omitted"], 1);
+    assert_eq!(
+        hidden["outline"]["chapters"]["navigation"]["args"]["mode"],
+        "chapters"
+    );
+}
+
+#[test]
+fn organize_current_membership_survives_scope_rotation_and_reload() {
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let id = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    state.outline_run.tool_draft.chapters = vec![crate::outline::ChapterOutline {
+        id: "a".into(),
+        parent_id: None,
+        order: 0,
+        title: "Synthetic".into(),
+        purpose: crate::outline::ChapterPurpose::Response,
+        requirement_ids: vec![id.clone()],
+    }];
+    let mut previous = None;
+    for _ in 0..2 {
+        let host =
+            crate::outline::agent::host_packet(&input, &state, 4, json!({}), json!({}), None);
+        let mut body = json!({"messages":[{"role":"user","content":host.to_string()}],"tools":[]});
+        let registry = crate::outline::model_wire::project(&state, &mut body).unwrap();
+        let wire: Value =
+            serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
+        let args = json!({"wire_scope":wire["wire_scope"],"chapters":wire["outline"]["chapters"]["items"]});
+        let decoded = registry.decode(args.clone(), false).unwrap();
+        assert_eq!(decoded["chapters"][0]["requirement_ids"], json!([id]));
+        if let Some(old) = previous {
+            assert_eq!(
+                registry.decode(old, false).unwrap_err(),
+                "stale request scope"
+            );
+        }
+        previous = Some(args);
+        state.outline_run.tool_draft.model_wire = registry;
+        state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+        state.turn += 1;
+    }
+}
+
+fn organize_progress_chapter(id: &str, requirement_ids: Vec<String>) -> Value {
+    json!({"id":id,"parent_id":null,"order":usize::from(id == "b"),
+        "title":id,"purpose":"response","requirement_ids":requirement_ids})
+}
+
+fn organize_progress_blank(id: &str, chapter: &str, query: &str) -> Value {
+    json!({"slot_id":id,"chapter_id":chapter,"blank_kind":"bidder_blank",
+        "content":{"type":"editable_blank"},"match_query":query})
+}
+
+#[test]
+fn organize_more_than_72_legal_new_slots_and_moves_keep_advancing() {
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let limits = crate::analysis::tests::config().limits;
+    let known: BTreeSet<_> = state
+        .outline_run
+        .tool_draft
+        .requirements
+        .keys()
+        .cloned()
+        .collect();
+    crate::outline::tools::apply_canonical(
+        &input,
+        &mut state.outline_run.tool_draft,
+        &known,
+        "put_chapters",
+        &json!({"mode":"replace","chapters":[
+            organize_progress_chapter("a",known.iter().cloned().collect()),
+            organize_progress_chapter("b",vec![])]}),
+    )
+    .unwrap();
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    let initial = state.main_progress.completions.len();
+    // Construct the response template before linking fulfillments. Every row is
+    // accepted by the production writer; no prefilled fulfillment grants credit.
+    for chapter in ["a", "b"] {
+        for index in 0..123 {
+            crate::outline::tools::apply_canonical(&input, &mut state.outline_run.tool_draft, &known,
+                "put_slots", &json!({"mode":"upsert","slots":[
+                    organize_progress_blank(&format!("slot-{index}"),chapter,&format!("Synthetic target {index}"))]})).unwrap();
+            observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+            assert_eq!(
+                state.main_progress.watch.focus_turns, 0,
+                "{chapter}/{index}"
+            );
+            assert!(!super::super::outline_execution_blocked(&state));
+            if index == 80 {
+                state = serde_json::from_value(json!(state)).unwrap();
+            }
+        }
+    }
+    assert_eq!(state.outline_run.tool_draft.slots.len(), 123);
+    assert!(state.outline_run.tool_draft.fulfillments.is_empty());
+    assert_eq!(state.main_progress.completions.len(), initial + 246);
+}
+
+#[test]
+fn organize_more_than_72_existing_requirements_can_move_to_existing_chapter() {
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let limits = crate::analysis::tests::config().limits;
+    // Synthetic domain fixture: preserve valid source records, expand only the
+    // set of requirement identities whose legal ownership moves are exercised.
+    let record = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()
+        .values()
+        .next()
+        .cloned()
+        .expect("discovered fixture has a committed canonical requirement");
+    state.outline_run.tool_draft.requirements = (0..123)
+        .map(|i| (format!("synthetic-requirement-{i:03}"), record.clone()))
+        .collect();
+    let known: BTreeSet<_> = state
+        .outline_run
+        .tool_draft
+        .requirements
+        .keys()
+        .cloned()
+        .collect();
+    let mut remaining: Vec<_> = known.iter().cloned().collect();
+    let mut moved = Vec::new();
+    crate::outline::tools::apply_canonical(&input,&mut state.outline_run.tool_draft,&known,
+        "put_chapters",&json!({"mode":"replace","chapters":[
+            organize_progress_chapter("a",remaining.clone()),organize_progress_chapter("b",vec![])]})).unwrap();
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    let initial = state.main_progress.completions.len();
+    while let Some(id) = remaining.pop() {
+        moved.push(id);
+        crate::outline::tools::apply_canonical(&input,&mut state.outline_run.tool_draft,&known,
+            "put_chapters",&json!({"mode":"upsert","chapters":[
+                organize_progress_chapter("a",remaining.clone()),organize_progress_chapter("b",moved.clone())]})).unwrap();
+        observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+        assert_eq!(state.main_progress.watch.focus_turns, 0);
+        assert!(!super::super::outline_execution_blocked(&state));
+        if moved.len() == 80 {
+            state = serde_json::from_value(json!(state)).unwrap();
+        }
+    }
+    assert_eq!(state.main_progress.completions.len(), initial + 123);
+    let credit = state.main_progress.completions.clone();
+    state = serde_json::from_value(json!(state)).unwrap();
+    crate::outline::tools::apply_canonical(
+        &input,
+        &mut state.outline_run.tool_draft,
+        &known,
+        "put_chapters",
+        &json!({"mode":"replace","chapters":[
+            organize_progress_chapter("a",moved),organize_progress_chapter("b",vec![])]}),
+    )
+    .unwrap();
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.focus_turns, 1);
+    assert_eq!(
+        state.main_progress.completions, credit,
+        "restoring 123 old pairs is not new credit"
+    );
+}
+
+#[test]
+fn organize_slot_removal_restore_text_edit_and_round_trip_do_not_repeat_credit() {
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let limits = crate::analysis::tests::config().limits;
+    let known: BTreeSet<_> = state
+        .outline_run
+        .tool_draft
+        .requirements
+        .keys()
+        .cloned()
+        .collect();
+    crate::outline::tools::apply_canonical(&input,&mut state.outline_run.tool_draft,&known,
+        "put_chapters",&json!({"mode":"replace","chapters":[
+            organize_progress_chapter("a",known.iter().cloned().collect()),organize_progress_chapter("b",vec![])]})).unwrap();
+    for chapter in ["a", "b"] {
+        crate::outline::tools::apply_canonical(
+            &input,
+            &mut state.outline_run.tool_draft,
+            &known,
+            "put_slots",
+            &json!({"mode":"upsert","slots":[organize_progress_blank("s",chapter,"First text")]}),
+        )
+        .unwrap();
+        observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+        assert_eq!(state.main_progress.watch.focus_turns, 0);
+    }
+    let credit = state.main_progress.completions.clone();
+    state = serde_json::from_value(json!(state)).unwrap();
+    for (index, slots) in [
+        json!([]),
+        json!([organize_progress_blank("s", "a", "First text")]),
+        json!([organize_progress_blank("s", "a", "Edited text")]),
+        json!([organize_progress_blank("s", "b", "Edited again")]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        crate::outline::tools::apply_canonical(
+            &input,
+            &mut state.outline_run.tool_draft,
+            &known,
+            "put_slots",
+            &json!({"mode":"replace","slots":slots}),
+        )
+        .unwrap();
+        observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+        assert_eq!(state.main_progress.watch.focus_turns, index + 1);
+        assert_eq!(state.main_progress.completions, credit);
+    }
+    // Explicit boundary: identity aliases are new accepted structure, not
+    // semantically deduplicated. Token limits still bound such construction.
+    crate::outline::tools::apply_canonical(
+        &input,
+        &mut state.outline_run.tool_draft,
+        &known,
+        "put_slots",
+        &json!({"mode":"upsert","slots":[organize_progress_blank("alias","b","Edited again")]}),
+    )
+    .unwrap();
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.focus_turns, 0);
+    assert_eq!(state.main_progress.completions.len(), credit.len() + 1);
+}
+
+#[tokio::test]
+async fn oversized_chapter_membership_fragments_keep_current_typed_handles_in_actual_wire() {
+    use crate::outline::agent as outline;
+    let (input, mut state, _, _) = crate::outline::fixture_discovered(false);
+    let member = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .requirement_records()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    state.outline_run.tool_draft.chapters = vec![crate::outline::ChapterOutline {
+        id: "synthetic-chapter".into(),
+        parent_id: None,
+        order: 0,
+        title: "合成章节😀".repeat(8_000),
+        purpose: crate::outline::ChapterPurpose::Response,
+        requirement_ids: vec![member.clone()],
+    }];
+    let mut config = crate::analysis::tests::config();
+    config.limits.max_context_tokens = 32768;
+    let mut args = json!({"mode":"chapters"});
+    state.transcript.clear();
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(pages <= 8, "bounded traversal to the member field");
+        let call = knowledge::models::ChatToolCall {
+            id: format!("chapter-page-{pages}"),
+            name: "read_outline".into(),
+            arguments: args.to_string(),
+        };
+        state.transcript.push(json!({"role":"assistant","content":"Read complete chapter membership.","tool_calls":[
+            {"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}
+        ]}));
+        let before = state.outline_run.tool_draft.clone();
+        let page = super::super::read_projection_in_context(
+            &input,
+            &config,
+            &mut state,
+            &args,
+            std::slice::from_ref(&call),
+            &[],
+            outline::Duty::Organize,
+        )
+        .await
+        .unwrap();
+        let parts = page["items"][0]["field_fragments"]
+            .as_array()
+            .expect("single oversized chapter must use actual budget fragments");
+        eprintln!("synthetic chapter page {pages}: fields={}, complete={}",json!(parts.iter().map(|part|json!({"ordinal":part["ordinal"],"start":part["start_byte"],"end":part["end_byte"]})).collect::<Vec<_>>()),page["selection_complete"]);
+        let member_part = parts
+            .iter()
+            .find(|part| part["path"] == json!(["requirement_ids", "0"]));
+        if let Some(part) = member_part {
+            assert_eq!(part["value"], member);
+            assert!(part["start_byte"].is_null() && part["end_byte"].is_null());
+        }
+        state.transcript.push(json!({"role":"tool","tool_call_id":call.id,"content":json!({"ok":true,"result":page}).to_string()}));
+        crate::outline::read_receipts::queue(&mut state, &before, &call.id, false);
+        let wire: Value =
+            serde_json::from_slice(&super::request(&input, &config, &mut state).await.unwrap())
+                .unwrap();
+        assert!(
+            super::estimate_input_tokens(&wire, &config.limits).unwrap()
+                + config.provider.output_token_reserve as usize
+                <= config.limits.max_context_tokens
+        );
+        crate::outline::read_receipts::seal(&mut state, &wire).unwrap();
+        crate::outline::read_receipts::confirm(&mut state, &wire).unwrap();
+        let key = page["items"][0]["record_key"].as_str().unwrap();
+        let record = &state.outline_run.tool_draft.metadata_records[key];
+        assert_eq!(record.complete(), page["selection_complete"] == true);
+        if page["selection_complete"] == true {
+            assert!(
+                member_part.is_some(),
+                "final canonical member atom must actually be delivered"
+            );
+            assert_eq!(
+                record.restored().unwrap()["requirement_ids"],
+                json!([member])
+            );
+            break;
+        }
+        let wire_page: Value = serde_json::from_str(
+            wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["tool_call_id"] == call.id)
+                .unwrap()["content"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let host: Value = serde_json::from_str(
+            wire["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        args=state.outline_run.tool_draft.model_wire.decode(json!({"wire_scope":host["wire_scope"],"cursor":wire_page["result"]["next_cursor"]}),false).unwrap();
+        assert_eq!(args, json!({"cursor":page["next_cursor"]}));
+        state.transcript.clear();
+        state.turn += 1;
+    }
+    assert!(
+        pages > 1,
+        "fixture exercises host continuation, not a first-page assumption"
+    );
+    let mut previous = None;
+    for _ in 0..2 {
+        let wire: Value =
+            serde_json::from_slice(&super::request(&input, &config, &mut state).await.unwrap())
+                .unwrap();
+        assert!(
+            super::estimate_input_tokens(&wire, &config.limits).unwrap()
+                + config.provider.output_token_reserve as usize
+                <= config.limits.max_context_tokens
+        );
+        let payloads = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .collect::<Vec<_>>();
+        let projected = payloads
+            .iter()
+            .filter_map(|payload| payload["result"]["items"][0]["field_fragments"].as_array())
+            .flatten();
+        let handle = &projected
+            .into_iter()
+            .find(|part| part["path"] == json!(["requirement_ids", "0"]))
+            .unwrap()["value"];
+        assert_ne!(handle, &json!(member));
+        let scope = &payloads
+            .iter()
+            .find(|payload| payload["wire_scope"].is_string())
+            .unwrap()["wire_scope"];
+        let registry = &state.outline_run.tool_draft.model_wire;
+        let current = json!({"wire_scope":scope,"requirement_ids":[handle]});
+        assert_eq!(
+            registry.decode(current.clone(), false).unwrap()["requirement_ids"],
+            json!([member])
+        );
+        assert!(
+            registry
+                .decode(
+                    json!({"wire_scope":scope,"requirement_ids":[member]}),
+                    false
+                )
+                .is_err()
+        );
+        if let Some(old) = previous {
+            assert_eq!(
+                registry.decode(old, false).unwrap_err(),
+                "stale request scope"
+            );
+        }
+        previous = Some(current);
+        state = serde_json::from_value(json!(state)).unwrap();
+        state.turn += 1;
+    }
+    assert_eq!(state.journal.accounting.physical_calls, 0);
+}

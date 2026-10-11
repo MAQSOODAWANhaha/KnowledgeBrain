@@ -48,6 +48,14 @@ fn kind(field: &str) -> Option<char> {
         _ => return None,
     })
 }
+/// Metadata paths retain their domain field name through array indices.
+pub(super) fn reference_field(path: &[String]) -> Option<&str> {
+    let field = path
+        .iter()
+        .rev()
+        .find(|part| part.parse::<usize>().is_err())?;
+    kind(field).map(|_| field.as_str())
+}
 impl Registry {
     fn issue(
         &mut self,
@@ -104,8 +112,27 @@ impl Registry {
                 }
             }
             Value::Object(fields) => {
+                // A metadata fragment's `value` keeps the type of its canonical
+                // field. Never expose raw IDs or reinterpret them as free text.
+                if fields.contains_key("ordinal")
+                    && fields.contains_key("start_byte")
+                    && fields.contains_key("end_byte")
+                    && let Some(path) = fields
+                        .get("path")
+                        .and_then(|path| serde_json::from_value::<Vec<String>>(path.clone()).ok())
+                    && let Some(reference) = reference_field(&path)
+                    && let Some(value) = fields.get_mut("value")
+                {
+                    self.walk_encode(reference, value, owner)?;
+                    return Ok(());
+                }
                 let local_owner = fields
                     .get("requirement_id")
+                    .or_else(|| {
+                        fields
+                            .get("record_identity")
+                            .and_then(|identity| identity.get("requirement_id"))
+                    })
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 let owner = local_owner.as_deref().or(owner);
@@ -304,6 +331,51 @@ pub(crate) fn project_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_metadata_fragments_reissue_current_handles_and_reject_raw_or_stale_ids() {
+        let input = super::super::tests::input();
+        let mut state = super::super::acceptance::checkpoint(&input);
+        let record = super::super::metadata_fragments::Record::new(json!({
+            "requirement_id":"canonical-owner", "requirement_ids":["canonical-member"],
+            "quote_handle":"canonical-quote", "description":"unchanged prose"
+        }));
+        let original = record.page("record-synthetic", &record.fields);
+        let mut previous = None;
+        for _ in 0..2 {
+            let mut wire =
+                json!({"messages":[{"role":"user","content":original.to_string()}],"tools":[]});
+            let registry = project(&state, &mut wire).unwrap();
+            let page: Value =
+                serde_json::from_str(wire["messages"][0]["content"].as_str().unwrap()).unwrap();
+            let field = |name: &str| {
+                page["field_fragments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|field| field["path"][0] == name)
+                    .unwrap()["value"]
+                    .clone()
+            };
+            assert!(!wire.to_string().contains("canonical-"));
+            assert_eq!(field("description"), "unchanged prose");
+            let args = json!({"wire_scope":page["wire_scope"],"requirement_id":field("requirement_id"),
+                "requirement_ids":[field("requirement_ids")],"quote_handle":field("quote_handle")});
+            let decoded = registry.decode(args.clone(), false).unwrap();
+            assert_eq!(decoded["requirement_ids"], json!(["canonical-member"]));
+            assert_eq!(decoded["quote_handle"], "canonical-quote");
+            assert!(registry.decode(json!({"wire_scope":page["wire_scope"],"requirement_ids":["canonical-member"]}),false).is_err());
+            if let Some(old) = previous {
+                assert_eq!(
+                    registry.decode(old, false).unwrap_err(),
+                    "stale request scope"
+                );
+            }
+            previous = Some(args);
+            state.outline_run.tool_draft.model_wire = registry;
+            state = serde_json::from_value(json!(state)).unwrap();
+            state.turn += 1;
+        }
+    }
     #[test]
     fn shared_document_identity_aliases_are_scoped_and_cannot_authorize_evidence() {
         let input = super::super::tests::input();

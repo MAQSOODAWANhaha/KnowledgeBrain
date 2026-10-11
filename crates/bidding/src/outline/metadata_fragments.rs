@@ -39,7 +39,12 @@ fn flatten(value: &Value, path: &mut Vec<String>, out: &mut Vec<Field>) {
             }
         }
         _ => {
-            let end = value.as_str().map(str::len);
+            // Typed references are opaque atoms, even when their canonical
+            // representation is a string. Only prose has UTF-8 subranges.
+            let end = value
+                .as_str()
+                .filter(|_| super::model_wire::reference_field(path).is_none())
+                .map(str::len);
             out.push(Field {
                 ordinal: out.len(),
                 path: path.clone(),
@@ -70,7 +75,11 @@ impl Record {
             if expected.path != part.path {
                 return Err("metadata field path changed".into());
             }
-            match expected.value.as_str() {
+            match expected
+                .value
+                .as_str()
+                .filter(|_| expected.start_byte.is_some())
+            {
                 Some(text) => {
                     let (a, b) = part
                         .start_byte
@@ -102,7 +111,7 @@ impl Record {
     }
     pub fn complete(&self) -> bool {
         self.fields.iter().all(|field| {
-            if let Some(text) = field.value.as_str() {
+            if let Some(text) = field.value.as_str().filter(|_| field.start_byte.is_some()) {
                 let mut ranges = self
                     .received
                     .get(&field.ordinal)
@@ -149,6 +158,9 @@ impl Record {
     }
 }
 pub fn split(field: &Field) -> Result<(Field, Field), String> {
+    if super::model_wire::reference_field(&field.path).is_some() {
+        return Err("typed metadata reference is indivisible".into());
+    }
     let text = field
         .value
         .as_str()
@@ -174,6 +186,40 @@ pub fn split(field: &Field) -> Result<(Field, Field), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_metadata_references_are_atomic_and_receipts_require_exact_canonical_values() {
+        let original =
+            json!({"id":"chapter","requirement_ids":["canonical-member-😀"],"title":"完整章节😀"});
+        let mut record = Record::new(original.clone());
+        let member = record
+            .fields
+            .iter()
+            .find(|field| field.path == ["requirement_ids", "0"])
+            .unwrap()
+            .clone();
+        assert!(member.start_byte.is_none() && member.end_byte.is_none());
+        assert!(split(&member).is_err());
+        for value in [json!("canonical-member"), json!("r1")] {
+            let mut forged = member.clone();
+            forged.value = value;
+            let before = record.clone();
+            assert!(record.receive(&[forged]).is_err());
+            assert_eq!(record, before);
+        }
+        let mut forged = member.clone();
+        forged.start_byte = Some(0);
+        forged.end_byte = Some(1);
+        assert!(record.receive(&[forged]).is_err());
+        let other = record
+            .fields
+            .iter()
+            .filter(|field| field.ordinal != member.ordinal)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!record.receive(&other).unwrap());
+        assert!(record.receive(&[member]).unwrap());
+        assert_eq!(record.restored().unwrap(), original);
+    }
     #[test]
     fn named_fields_reconstruct_only_after_complete_utf8_delivery() {
         let original = json!({"requirement_id":"r","description":"条款😀".repeat(10000),"condition":{"applies":true,"sources":["source-a","source-b"]},"empty":[]});

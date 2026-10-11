@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-- FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 31；Discover 并发 2、每请求 1 包。新检查点包含自动 user 页和保留审计的请求投影，不迁移旧状态。
+- FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 32；Discover 并发 2、每请求 1 包。新检查点包含自动 user 页和保留审计的请求投影，不迁移旧状态。
 - 必需支持由原生合并格、适用表头、既有续表链及精确有向关系选择；同节/祖先正文仍是可选候选，不全部成为提交屏障。主证据严格属于 owned 范围。
 - 宿主自动附入尚未确认的必需支持页。重复失败比较使用归一化动作及错误类，不以固定六次拒绝判定停滞；不同自然语言改写不保证能被识别为同一业务失败。
 
@@ -137,3 +137,11 @@ FrozenInput 与内部 PackCarrier 保存完整网格及空白锚点。模型请�
 Discover `submit_pack.issues` 必填，可与正常 requirements 同次提交。问题只接受 `document_missing/document_conflict/document_ambiguous/document_unreadable`，引用当前包 owned 的有效证据，`requested_information` 非空，Discover 的 `requirement_ids` 为空。空 requirements 仍须完整 inspected：真正无义务时 issues 为空并给具体 no_requirement_reason；存在有效文档问题时 reason 必须为 null，不能把不确定当无义务。后续 Check 可在 fresh 读取后关联要求；问题不授予阅读或模板完成信用。
 
 问题保存在 canonical 包记录并投影至现有 Draft，不新增第二 store。报告使用 `Checkpoint::review_report` 输出 results 与 issues，按原文实际 overlap 给 affected_pack_ids、待补信息及未解决状态，并附输入摘要、发现版本、review epoch 与 template_ready。只有全部独立范围处理完成、仅明确文档问题剩余时，现有 `DOCUMENT_ISSUES_REPORTED` 出口保存报告并受控停止，不 publish、不置 done。失败 runner 仍须读取持久报告；传输/宿主错误不能被改名为文档问题。
+
+### Organize 章节归属更新
+
+`put_chapters(mode=upsert)` 以章节 ID 为键更新完整章节，未提交章节保留；提交章节的 `requirement_ids` 是完整替换，不做追加或集合并集。补充要求时复制当前完整列表；跨章移动应在同一次调用提交两侧章节。`replace` 替换整棵树。所有写入仍原子校验唯一归属与既有响应目标，不禁止有意移除或重组。例如某章已有 `[A]`，新增 B 应提交 `[A,B]`；提交 `[B]` 会移除 A。尚无履行目标的 A 从甲章移到乙章，须同批提交甲章不含 A 的完整列表及乙章包含 A 的完整列表。已有 fulfillment 的跨集合迁移仍受逐工具一致性约束，尚无独立原子迁移契约，不声称该路径已支持。
+
+当前请求的 `outline.chapters` 预览及 `read_outline(mode=chapters)` 提供完整成员列表；省略章节按分页读取，所有 ID 投影为当前 scope。写入回执返回归属新增/移除明细，现有 unassigned_count 和下一请求的未分配要求提供后续导航。历史参数中的旧 scope ID 仍不可复用。
+
+Organize 的新内容版本只计为工作；首次要求归属、表绑定、槽位构建按稳定的实体 ID 与章节 ID 组合各获一次完成进展，首次要求履行按要求 ID 获一次进展。新增槽及迁移至新的目标章可以推进工作；恢复已见组合、改正文或标题不能反复重置 focus。新增结构 ID 可以获得新的构建进展，这不是语义正确性证明，仍需后续 Check 和既有预算约束。完成身份随检查点持久化。checkpoint 32 不自动迁移旧检查点。这些机制不代表语义验收通过。
