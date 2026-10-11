@@ -1814,7 +1814,12 @@ fn resolve_evidence_keys(
     Ok(())
 }
 
-pub(crate) fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> Result<(), String> {
+struct SubmissionHandleIndex<'a> {
+    keys: BTreeMap<String, EvidenceRef>,
+    atoms: BTreeMap<String, &'a PackAtom>,
+}
+
+fn submission_handle_index(pack: &ParsePack) -> Result<SubmissionHandleIndex<'_>, String> {
     let mut keys = BTreeMap::new();
     let mut atoms = BTreeMap::new();
     for atom in &pack.atoms {
@@ -1830,6 +1835,72 @@ pub(crate) fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> 
             keys.insert(key, reference);
         }
     }
+
+    Ok(SubmissionHandleIndex { keys, atoms })
+}
+
+/// Best-effort normalization only for a non-executable failure fingerprint.
+/// Build the immutable pack index once, independently of candidate count.
+pub(crate) fn normalize_signature_handles(
+    pack: &ParsePack,
+    value: &mut Value,
+) -> Result<(), String> {
+    let index = submission_handle_index(pack)?;
+    let supports = pack
+        .condition_support_options
+        .iter()
+        .map(|option| {
+            Ok((
+                support_key(pack, option)?,
+                serde_json::to_value(option).map_err(|e| e.to_string())?,
+            ))
+        })
+        .collect::<Result<BTreeMap<String, Value>, String>>()?;
+    fn walk(
+        value: &mut Value,
+        index: &SubmissionHandleIndex<'_>,
+        supports: &BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        if value.as_object().is_some_and(|fields| fields.len() == 1) {
+            let resolved = if let Some(key) = value["evidence_key"].as_str() {
+                index
+                    .keys
+                    .get(key)
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+            } else if let Some(key) = value["atom_key"].as_str() {
+                index.atoms.get(key).map(|atom| json!(atom.id))
+            } else if let Some(key) = value["support_key"].as_str() {
+                supports.get(key).cloned()
+            } else {
+                None
+            };
+            if let Some(resolved) = resolved {
+                *value = resolved;
+                return Ok(());
+            }
+        }
+        match value {
+            Value::Object(fields) => {
+                for child in fields.values_mut() {
+                    walk(child, index, supports)?;
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    walk(child, index, supports)?;
+                }
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+    walk(value, &index, &supports)
+}
+
+pub(crate) fn resolve_submission_handles(pack: &ParsePack, body: &mut Value) -> Result<(), String> {
+    let SubmissionHandleIndex { keys, atoms } = submission_handle_index(pack)?;
 
     let atom = |value: &Value| -> Result<&PackAtom, String> {
         if value.as_object().is_none_or(|fields| fields.len() != 1) {

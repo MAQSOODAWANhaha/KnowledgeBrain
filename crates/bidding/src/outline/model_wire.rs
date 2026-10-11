@@ -17,6 +17,14 @@ pub struct Registry {
     nonce: String,
     active: String,
     scopes: BTreeMap<String, BTreeMap<String, Binding>>,
+    naming_scope: String,
+    names: BTreeMap<String, Binding>,
+}
+#[derive(Default)]
+struct ReferenceReport {
+    reproject: bool,
+    errors: Vec<Value>,
+    mappings: Vec<Value>,
 }
 impl Default for Registry {
     fn default() -> Self {
@@ -24,6 +32,8 @@ impl Default for Registry {
             nonce: uuid::Uuid::new_v4().to_string(),
             active: String::new(),
             scopes: BTreeMap::new(),
+            naming_scope: String::new(),
+            names: BTreeMap::new(),
         }
     }
 }
@@ -68,28 +78,24 @@ impl Registry {
         } else {
             None
         };
-        let bindings = self
-            .scopes
+        let binding = Binding {
+            kind,
+            canonical: canonical.into(),
+            owner,
+        };
+        let key = if let Some((key, _)) = self.names.iter().find(|(_, value)| **value == binding) {
+            key.clone()
+        } else {
+            let key = format!("{kind}{}", self.names.len() + 1);
+            self.names.insert(key.clone(), binding.clone());
+            key
+        };
+        // Naming history is not authority. Only values projected into this
+        // request enter its active allowlist.
+        self.scopes
             .get_mut(&self.active)
-            .ok_or("request scope missing")?;
-        if let Some((key, _)) = bindings
-            .iter()
-            .find(|(_, v)| v.kind == kind && v.canonical == canonical && v.owner == owner)
-        {
-            return Ok(key.clone());
-        }
-        let key = format!("{kind}{}", bindings.len() + 1);
-        if bindings.contains_key(&key) {
-            return Err("wire handle collision".into());
-        }
-        bindings.insert(
-            key.clone(),
-            Binding {
-                kind,
-                canonical: canonical.into(),
-                owner,
-            },
-        );
+            .ok_or("request scope missing")?
+            .insert(key.clone(), binding);
         Ok(key)
     }
     fn walk_encode(
@@ -145,6 +151,9 @@ impl Registry {
                         None
                     };
                 for (key, item) in fields {
+                    if key == "rejected_submission_audit" {
+                        continue;
+                    }
                     if key == "id"
                         && let (Some(prefix), Some(text)) = (id_kind, item.as_str())
                     {
@@ -161,66 +170,178 @@ impl Registry {
     fn walk_decode(
         &self,
         scope: &str,
-        field: &str,
+        field_path: (&str, &str),
         value: &mut Value,
-        path: &str,
         owner: Option<&str>,
-    ) -> Result<(), String> {
+        report: &mut ReferenceReport,
+    ) {
+        let (field, path) = field_path;
         match value {
             Value::String(text) => {
                 if let Some(kind) = kind(field)
                     && !text.is_empty()
                 {
-                    let binding = self
-                        .scopes
-                        .get(scope)
-                        .and_then(|bindings| bindings.get(text))
-                        .ok_or_else(|| format!("{path}: unknown current-scope {field}"))?;
-                    if binding.kind != kind
-                        || (matches!(kind, 'q' | 'k') && binding.owner.as_deref() != owner)
-                    {
-                        return Err(format!("{path}: wrong reference namespace"));
+                    let binding = self.scopes.get(scope).and_then(|items| items.get(text));
+                    let resolved = match binding {
+                        None => Err(("unknown_reference", "unknown current-scope reference")),
+                        Some(binding) if binding.kind != kind => {
+                            Err(("wrong_namespace", "wrong reference namespace"))
+                        }
+                        Some(binding)
+                            if matches!(kind, 'q' | 'k') && binding.owner.as_deref() != owner =>
+                        {
+                            Err(("wrong_owner", "wrong reference owner"))
+                        }
+                        Some(binding) if report.reproject => self
+                            .scopes
+                            .get(&self.active)
+                            .and_then(|items| {
+                                items.iter().find(|(_, candidate)| *candidate == binding)
+                            })
+                            .map(|(key, _)| key.clone())
+                            .ok_or((
+                                "not_currently_issued",
+                                "historical reference is not issued in the current request",
+                            )),
+                        Some(binding) => Ok(binding.canonical.clone()),
+                    };
+                    match resolved {
+                        Ok(resolved) => {
+                            if report.reproject {
+                                report.mappings.push(json!({"path":path,"value":text,
+                                    "current_value":resolved,"expected_type":field}));
+                            }
+                            *text = resolved;
+                        }
+                        Err((code, reason)) => report.errors.push(json!({"path":path,"value":text,
+                            "expected_type":field,"expected_prefix":kind.to_string(),"code":code,"reason":reason})),
                     }
-                    *text = binding.canonical.clone();
                 }
             }
             Value::Array(items) => {
                 for (index, item) in items.iter_mut().enumerate() {
-                    self.walk_decode(scope, field, item, &format!("{path}/{index}"), owner)?;
+                    self.walk_decode(
+                        scope,
+                        (field, &format!("{path}/{index}")),
+                        item,
+                        owner,
+                        report,
+                    );
                 }
             }
             Value::Object(fields) => {
+                // Resolve the owner from the original wire value before any
+                // field is decoded, including nested review batches.
+                let local_owner = fields
+                    .get("requirement_id")
+                    .or_else(|| {
+                        fields
+                            .get("record_identity")
+                            .and_then(|id| id.get("requirement_id"))
+                    })
+                    .and_then(Value::as_str)
+                    .and_then(|id| self.scopes.get(scope)?.get(id))
+                    .filter(|binding| binding.kind == 'r')
+                    .map(|binding| binding.canonical.clone());
+                let owner = local_owner.as_deref().or(owner);
                 for (key, item) in fields {
-                    self.walk_decode(scope, key, item, &format!("{path}/{key}"), owner)?;
+                    let pointer_key = key.replace('~', "~0").replace('/', "~1");
+                    self.walk_decode(
+                        scope,
+                        (key, &format!("{path}/{pointer_key}")),
+                        item,
+                        owner,
+                        report,
+                    );
                 }
             }
             _ => (),
         }
-        Ok(())
     }
-    pub fn decode(&self, mut args: Value, historical: bool) -> Result<Value, String> {
+    fn argument_scope(&self, args: &Value, historical: bool) -> Result<String, String> {
         let scope = args
             .get("wire_scope")
             .and_then(Value::as_str)
-            .ok_or("wire_scope required")?
-            .to_owned();
+            .ok_or("wire_scope required")?;
         if !historical && scope != self.active {
             return Err("stale request scope".into());
         }
-        if !self.scopes.contains_key(&scope) {
+        if !self.scopes.contains_key(scope) {
             return Err("unissued request scope".into());
         }
+        Ok(scope.to_owned())
+    }
+    pub fn decode(&self, mut args: Value, historical: bool) -> Result<Value, String> {
+        let scope = self.argument_scope(&args, historical)?;
         args.as_object_mut()
             .ok_or("arguments must be object")?
             .remove("wire_scope");
-        let owner = args
-            .get("requirement_id")
-            .and_then(Value::as_str)
-            .and_then(|id| self.scopes.get(&scope)?.get(id))
-            .filter(|binding| binding.kind == 'r')
-            .map(|binding| binding.canonical.clone());
-        self.walk_decode(&scope, "", &mut args, "", owner.as_deref())?;
+        let mut report = ReferenceReport::default();
+        self.walk_decode(&scope, ("", ""), &mut args, None, &mut report);
+        if !report.errors.is_empty() {
+            return Err(format!(
+                "invalid typed references: {}",
+                json!(report.errors)
+            ));
+        }
         Ok(args)
+    }
+    pub(crate) fn reference_diagnostics(
+        &self,
+        args: &Value,
+        historical: bool,
+    ) -> Result<Vec<Value>, String> {
+        let scope = self.argument_scope(args, historical)?;
+        let mut arguments = args.clone();
+        let mut report = ReferenceReport::default();
+        self.walk_decode(&scope, ("", ""), &mut arguments, None, &mut report);
+        Ok(report.errors)
+    }
+    /// Failure-loop fingerprint only. Successful references retain their
+    /// identity even when another field is invalid; invalid strings cannot
+    /// change the fingerprint by changing their spelling. The caller resolves
+    /// claim-scoped domain handles, removes transport fields and normalizes
+    /// unordered collections. No partially decoded action is returned or
+    /// authorized: execution must still pass `decode` in full.
+    pub(crate) fn canonical_signature(
+        &self,
+        args: &Value,
+        normalize: impl FnOnce(&mut Value),
+    ) -> Result<String, String> {
+        let scope = self.argument_scope(args, false)?;
+        let mut arguments = args.clone();
+        arguments
+            .as_object_mut()
+            .ok_or("arguments must be object")?
+            .remove("wire_scope");
+        let mut report = ReferenceReport::default();
+        self.walk_decode(&scope, ("", ""), &mut arguments, None, &mut report);
+        for error in report.errors {
+            let path = error["path"]
+                .as_str()
+                .ok_or("reference diagnostic path missing")?;
+            let value = arguments
+                .pointer_mut(path)
+                .ok_or("reference diagnostic path invalid")?;
+            *value = json!({"invalid_typed_reference":true});
+        }
+        normalize(&mut arguments);
+        super::canonical_sha256(&arguments)
+    }
+    /// Diagnostic projection only: historical bindings identify what the model
+    /// meant; the current allowlist alone decides whether a mapping is offered.
+    /// Unknown historical values are never interpreted in the current scope.
+    /// This does not issue any handle or return canonical identities.
+    pub(crate) fn reproject_rejected_arguments(&self, args: &Value) -> Result<Value, String> {
+        let scope = self.argument_scope(args, true)?;
+        let mut arguments = args.clone();
+        let mut report = ReferenceReport {
+            reproject: true,
+            ..ReferenceReport::default()
+        };
+        self.walk_decode(&scope, ("", ""), &mut arguments, None, &mut report);
+        Ok(json!({"current_reference_mappings":report.mappings,
+            "invalid_reference_diagnostics":report.errors}))
     }
     #[cfg(test)]
     pub fn fixture_encode(&self, mut args: Value) -> Result<Value, String> {
@@ -280,13 +401,30 @@ pub(crate) fn project_scope(
     identity: &Value,
     body: &mut Value,
 ) -> Result<Registry, String> {
+    project_claim_scope(prior, identity, identity, body)
+}
+
+/// The immutable claim owns names; each concrete request independently owns
+/// authority. Callers without a stable claim keep using `project_scope`.
+pub(crate) fn project_claim_scope(
+    prior: &Registry,
+    claim_identity: &Value,
+    request_identity: &Value,
+    body: &mut Value,
+) -> Result<Registry, String> {
     let mut registry = prior.clone();
+    let naming_scope = super::canonical_sha256(&(&registry.nonce, claim_identity))?;
+    if registry.naming_scope != naming_scope {
+        registry.naming_scope = naming_scope;
+        registry.names.clear();
+    }
     let scope = format!(
         "w{}",
-        &super::canonical_sha256(&(&registry.nonce, identity))?[..16]
+        &super::canonical_sha256(&(&registry.nonce, claim_identity, request_identity))?[..16]
     );
     registry.active = scope.clone();
-    registry.scopes.entry(scope.clone()).or_default();
+    // Even rebuilding a request may not revive a value omitted from its body.
+    registry.scopes.insert(scope.clone(), BTreeMap::new());
     for message in body["messages"].as_array_mut().ok_or("messages missing")? {
         if let Some(text) = message["content"].as_str()
             && let Ok(mut payload) = serde_json::from_str::<Value>(text)
@@ -294,6 +432,44 @@ pub(crate) fn project_scope(
             registry.walk_encode("", &mut payload, None)?;
             message["content"] = json!(payload.to_string());
         }
+    }
+    // Failed candidates are opaque audit text, never another source of
+    // authority. Build repair hints only after all current bindings exist.
+    for message in body["messages"].as_array_mut().ok_or("messages missing")? {
+        if message["role"] != "user" {
+            continue;
+        }
+        let Some(text) = message["content"].as_str() else {
+            continue;
+        };
+        let Ok(mut payload) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        let Some(audit) = payload
+            .get_mut("rejected_submission_audit")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let projection = audit
+            .get("original_arguments_text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "original arguments text missing".to_owned())
+            .and_then(|text| serde_json::from_str::<Value>(text).map_err(|error| error.to_string()))
+            .and_then(|args| registry.reproject_rejected_arguments(&args));
+        let projection = projection.unwrap_or_else(|reason| json!({
+            "current_reference_mappings":[],
+            "invalid_reference_diagnostics":[{"path":"/wire_scope","expected_type":"wire_scope","reason":reason}]
+        }));
+        audit.insert(
+            "current_reference_mappings".into(),
+            projection["current_reference_mappings"].clone(),
+        );
+        audit.insert(
+            "invalid_reference_diagnostics".into(),
+            projection["invalid_reference_diagnostics"].clone(),
+        );
+        message["content"] = json!(payload.to_string());
     }
     for tool in body["tools"].as_array_mut().ok_or("tools missing")? {
         let parameters = &mut tool["function"]["parameters"];
@@ -331,6 +507,330 @@ pub(crate) fn project_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn simple_body(payload: Value) -> Value {
+        json!({"messages":[{"role":"user","content":payload.to_string()}],"tools":[]})
+    }
+
+    #[test]
+    fn failure_signature_preserves_valid_references_and_collapses_invalid_spelling() {
+        let claim = json!("claim");
+        let payload = json!({"items":[{"evidence_key":"first"},{"evidence_key":"second"},
+            {"atom_key":"atom-one"},{"atom_key":"atom-two"},
+            {"call_id":"call-one"},{"call_id":"call-two"},{"source_key":"source"}]});
+        let first = project_claim_scope(
+            &Registry::default(),
+            &claim,
+            &json!(1),
+            &mut simple_body(payload.clone()),
+        )
+        .unwrap();
+        let mut args = first
+            .fixture_encode(json!({"evidence":[{"evidence_key":"first"}],
+            "inspected_atom_ids":[{"atom_key":"atom-one"},{"atom_key":"atom-two"}],
+            "call_id":"call-one"}))
+            .unwrap();
+        args["evidence"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"evidence_key":"e999999"}));
+        let normalize = |args: &mut Value| {
+            args.as_object_mut().unwrap().remove("call_id");
+            for field in ["evidence", "inspected_atom_ids"] {
+                args[field]
+                    .as_array_mut()
+                    .unwrap()
+                    .sort_by_key(Value::to_string);
+            }
+        };
+        let fingerprint = first.canonical_signature(&args, normalize).unwrap();
+        let mut changed_valid = args.clone();
+        changed_valid["evidence"][0]["evidence_key"] = first
+            .fixture_encode(json!({"evidence_key":"second"}))
+            .unwrap()["evidence_key"]
+            .clone();
+        assert_ne!(
+            fingerprint,
+            first
+                .canonical_signature(&changed_valid, normalize)
+                .unwrap()
+        );
+        // Changing garbage, supplying a raw canonical ID, or borrowing a
+        // different namespace cannot masquerade as meaningful source repair.
+        for invalid in [
+            json!("e123456"),
+            json!("second"),
+            first
+                .fixture_encode(json!({"source_key":"source"}))
+                .unwrap()["source_key"]
+                .clone(),
+        ] {
+            let mut changed_invalid = args.clone();
+            changed_invalid["evidence"][1]["evidence_key"] = invalid;
+            assert_eq!(
+                fingerprint,
+                first
+                    .canonical_signature(&changed_invalid, normalize)
+                    .unwrap()
+            );
+            assert!(first.decode(changed_invalid, false).is_err());
+        }
+        let mut reordered = args.clone();
+        reordered["evidence"].as_array_mut().unwrap().reverse();
+        reordered["inspected_atom_ids"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        reordered["call_id"] =
+            first.fixture_encode(json!({"call_id":"call-two"})).unwrap()["call_id"].clone();
+        assert_eq!(
+            fingerprint,
+            first.canonical_signature(&reordered, normalize).unwrap()
+        );
+        assert!(first.decode(args.clone(), false).is_err());
+        assert!(first.decode(changed_valid, false).is_err());
+        let second =
+            project_claim_scope(&first, &claim, &json!(2), &mut simple_body(payload)).unwrap();
+        assert!(second.canonical_signature(&args, normalize).is_err());
+        args["wire_scope"] = json!(second.active);
+        assert_eq!(
+            fingerprint,
+            second.canonical_signature(&args, normalize).unwrap()
+        );
+    }
+
+    #[test]
+    fn signature_diagnostic_paths_escape_keys_before_replacing_invalid_values() {
+        let registry =
+            project_scope(&Registry::default(), &json!(1), &mut simple_body(json!({}))).unwrap();
+        let first = json!({"wire_scope":registry.active,"nested/~key":{"evidence_key":"e123"}});
+        let second =
+            json!({"wire_scope":registry.active,"nested/~key":{"evidence_key":"raw-canonical"}});
+        assert_eq!(
+            registry.reference_diagnostics(&first, false).unwrap()[0]["path"],
+            "/nested~1~0key/evidence_key"
+        );
+        assert_eq!(
+            registry.canonical_signature(&first, |_| {}).unwrap(),
+            registry.canonical_signature(&second, |_| {}).unwrap()
+        );
+    }
+
+    #[test]
+    fn claim_names_stay_stable_but_only_current_projection_authorizes() {
+        let claim = json!({"input":"input-one","pack":"pack-one","revision":1,"claim":"one"});
+        let first = project_claim_scope(
+            &Registry::default(),
+            &claim,
+            &json!(1),
+            &mut simple_body(json!({"items":[{"evidence_key":"first"},{"evidence_key":"shared"}]})),
+        )
+        .unwrap();
+        let first_only = first
+            .fixture_encode(json!({"evidence_key":"first"}))
+            .unwrap();
+        let shared = first
+            .fixture_encode(json!({"evidence_key":"shared"}))
+            .unwrap();
+        let restored: Registry = serde_json::from_value(json!(first)).unwrap();
+        let second = project_claim_scope(
+            &restored,
+            &claim,
+            &json!(2),
+            &mut simple_body(json!({"items":[{"source_key":"new"},{"evidence_key":"shared"}]})),
+        )
+        .unwrap();
+        let current = second
+            .fixture_encode(json!({"evidence_key":"shared"}))
+            .unwrap();
+        assert_eq!(shared["evidence_key"], current["evidence_key"]);
+        assert_ne!(shared["wire_scope"], current["wire_scope"]);
+        assert!(second.decode(shared, false).is_err());
+        assert!(second.decode(first_only.clone(), true).is_ok());
+        let mut retired = first_only;
+        retired["wire_scope"] = json!(second.active);
+        assert!(second.decode(retired, false).is_err());
+        assert!(
+            second
+                .fixture_encode(json!({"evidence_key":"first"}))
+                .is_err()
+        );
+        assert!(
+            second
+                .decode(
+                    json!({"wire_scope":second.active,"evidence_key":"shared"}),
+                    false
+                )
+                .is_err()
+        );
+        assert_eq!(
+            second.decode(current.clone(), false).unwrap()["evidence_key"],
+            "shared"
+        );
+
+        // Rebuilding even the same request identity replaces its allowlist.
+        let rebuilt = project_claim_scope(
+            &second,
+            &claim,
+            &json!(2),
+            &mut simple_body(json!({"source_key":"only-source"})),
+        )
+        .unwrap();
+        assert!(rebuilt.decode(current.clone(), false).is_err());
+        for field in ["input", "pack", "revision", "claim"] {
+            let mut other_claim = claim.clone();
+            other_claim[field] = json!("changed");
+            let other = project_claim_scope(
+                &second,
+                &other_claim,
+                &json!(2),
+                &mut simple_body(json!({"source_key":"only-source"})),
+            )
+            .unwrap();
+            assert_ne!(other.naming_scope, second.naming_scope);
+            assert_ne!(other.active, second.active);
+            assert_eq!(other.names.len(), 1);
+            assert!(other.decode(current.clone(), false).is_err());
+            assert!(
+                other
+                    .fixture_encode(json!({"evidence_key":"shared"}))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn decode_reports_all_invalid_references_without_partial_authorization() {
+        let registry = project_scope(
+            &Registry::default(),
+            &json!("one"),
+            &mut simple_body(json!({"items":[
+                {"requirement_id":"one","quote_handle":"quote"},
+                {"requirement_id":"two","quote_handle":"quote"},
+                {"evidence_key":"canonical-evidence"},{"source_key":"canonical-source"}]})),
+        )
+        .unwrap();
+        let first = registry
+            .fixture_encode(json!({"requirement_id":"one","quote_handle":"quote"}))
+            .unwrap();
+        let second = registry
+            .fixture_encode(json!({"requirement_id":"two","quote_handle":"quote"}))
+            .unwrap();
+        let source = registry
+            .fixture_encode(json!({"source_key":"canonical-source"}))
+            .unwrap();
+        let args = json!({"wire_scope":registry.active,"requirement_id":first["requirement_id"],
+            "quote_handle":second["quote_handle"],"evidence":[
+                {"evidence_key":"e999999"},{"evidence_key":source["source_key"]},
+                {"evidence_key":"canonical-evidence"}]});
+        let structured = registry.reference_diagnostics(&args, false).unwrap();
+        let error = registry.decode(args, false).unwrap_err();
+        let diagnostics: Value =
+            serde_json::from_str(error.strip_prefix("invalid typed references: ").unwrap())
+                .unwrap();
+        let by_path = |items: &[Value]| {
+            items
+                .iter()
+                .map(|item| (item["path"].as_str().unwrap().to_owned(), item.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            by_path(diagnostics.as_array().unwrap()),
+            by_path(&structured)
+        );
+        assert_eq!(diagnostics.as_array().unwrap().len(), 4);
+        for (path, reason) in [
+            ("/quote_handle", "wrong reference owner"),
+            (
+                "/evidence/0/evidence_key",
+                "unknown current-scope reference",
+            ),
+            ("/evidence/1/evidence_key", "wrong reference namespace"),
+            (
+                "/evidence/2/evidence_key",
+                "unknown current-scope reference",
+            ),
+        ] {
+            let item = diagnostics
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["path"] == path)
+                .unwrap();
+            assert_eq!(item["reason"], reason);
+            assert!(item["value"].is_string());
+            assert!(item["expected_type"].is_string());
+            assert!(item["code"].is_string());
+        }
+        assert!(registry.decode(first, false).is_ok());
+    }
+
+    #[test]
+    fn rejected_audit_maps_only_historical_and_current_authorized_references() {
+        let claim = json!("claim-one");
+        let first = project_claim_scope(
+            &Registry::default(),
+            &claim,
+            &json!(1),
+            &mut simple_body(json!({"items":[{"source_key":"source"},
+                {"evidence_key":"kept"},{"evidence_key":"retired"}]})),
+        )
+        .unwrap();
+        let kept = first
+            .fixture_encode(json!({"evidence_key":"kept"}))
+            .unwrap();
+        let retired = first
+            .fixture_encode(json!({"evidence_key":"retired"}))
+            .unwrap();
+        let never_issued = format!("e{}", first.names.len() + 1);
+        let args = json!({"wire_scope":first.active,"requirements":[
+            {"evidence":[{"evidence_key":kept["evidence_key"]}]},
+            {"evidence":[{"evidence_key":retired["evidence_key"]}]},
+            {"evidence":[{"evidence_key":never_issued}]},
+            {"evidence":[{"evidence_key":"raw-secret-canonical"}]}]});
+        let original_text = args.to_string();
+        let mut body = simple_body(
+            json!({"items":[{"evidence_key":"new"},{"evidence_key":"kept"}],
+            "rejected_submission_audit":{"original_arguments_text":original_text,
+                "evidence_key":"audit-must-not-issue"}}),
+        );
+        let second = project_claim_scope(&first, &claim, &json!(2), &mut body).unwrap();
+        assert_eq!(
+            second
+                .fixture_encode(json!({"evidence_key":"new"}))
+                .unwrap()["evidence_key"],
+            never_issued
+        );
+        assert_eq!(second.names.len(), 4);
+        assert_eq!(second.scopes[&second.active].len(), 2);
+        let projected: Value =
+            serde_json::from_str(body["messages"][0]["content"].as_str().unwrap()).unwrap();
+        let audit = &projected["rejected_submission_audit"];
+        assert_eq!(audit["original_arguments_text"], original_text);
+        let mappings = audit["current_reference_mappings"].as_array().unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(
+            mappings[0]["path"],
+            "/requirements/0/evidence/0/evidence_key"
+        );
+        assert_eq!(mappings[0]["current_value"], kept["evidence_key"]);
+        let errors = audit["invalid_reference_diagnostics"].as_array().unwrap();
+        assert_eq!(errors.len(), 3);
+        assert_eq!(
+            errors[0]["reason"],
+            "historical reference is not issued in the current request"
+        );
+        assert_eq!(errors[1]["value"], never_issued);
+        assert_eq!(errors[1]["reason"], "unknown current-scope reference");
+        let mut unknown_scope = args;
+        unknown_scope["wire_scope"] = json!("w0000000000000000");
+        assert!(second.reproject_rejected_arguments(&unknown_scope).is_err());
+        assert!(
+            second
+                .fixture_encode(json!({"evidence_key":"retired"}))
+                .is_err()
+        );
+    }
+
     #[test]
     fn typed_metadata_fragments_reissue_current_handles_and_reject_raw_or_stale_ids() {
         let input = super::super::tests::input();

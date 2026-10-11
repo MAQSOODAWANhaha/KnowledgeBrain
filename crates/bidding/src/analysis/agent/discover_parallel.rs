@@ -552,8 +552,9 @@ impl<J: Journal> PackHost<'_, J> {
             &mut body,
         )
         .map_err(invalid)?;
-        let registry = crate::outline::model_wire::project_scope(
+        let registry = crate::outline::model_wire::project_claim_scope(
             &worker.registry,
+            &identity,
             &json!([identity, generation]),
             &mut body,
         )
@@ -749,6 +750,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
                         let history = worker.history.clone();
                         let history_revision_start = history.len();
                         let retired_read_calls = worker.retired_read_calls.clone();
+                        let registry = worker.registry.clone();
                         *worker = Worker {
                             rejected_turns,
                             failure_signatures,
@@ -756,6 +758,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
                             history,
                             history_revision_start,
                             retired_read_calls,
+                            registry,
                             ..Default::default()
                         };
                     } else if matches!(pending, Pending::Committed { .. }) {
@@ -840,6 +843,7 @@ impl<J: Journal> Host for PackHost<'_, J> {
         let action = canonical_worker_action(self.input, self.state, request, &response);
         let mut rejection_class = "invalid_tool_turn";
         let mut confirmation_failed = false;
+        let mut reference_diagnostics = Vec::new();
         let outcome = (|| -> Result<Value, String> {
             let identity =
                 validate_worker_scope(self.input, self.state, request).inspect_err(|_| {
@@ -870,6 +874,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
             rejection_class = "invalid_json_arguments";
             let args: Value = serde_json::from_str(&call.arguments).map_err(|e| e.to_string())?;
             rejection_class = "invalid_wire_identity";
+            reference_diagnostics = self.state.outline_run.discover_workers[id]
+                .registry
+                .reference_diagnostics(&args, false)?;
             let args = self.state.outline_run.discover_workers[id]
                 .registry
                 .decode(args, false)?;
@@ -936,8 +943,14 @@ impl<J: Journal> Host for PackHost<'_, J> {
             Err(message) if confirmation_failed => json!({"ok":false,"error":message,
                 "code":"DISCOVER_SOURCE_CONFIRMATION_FAILED",
                 "retryable":false}),
+            Err(_) if !reference_diagnostics.is_empty() => {
+                json!({"ok":false,"error":"Invalid typed references; see invalid_reference_diagnostics."})
+            }
             Err(message) => json!({"ok":false,"error":message}),
         };
+        if !reference_diagnostics.is_empty() {
+            receipt["invalid_reference_diagnostics"] = json!(reference_diagnostics);
+        }
         let committed = receipt["ok"] == true && receipt["result"]["status"] == "committed";
         let no_coverage = receipt["ok"] == true
             && receipt["result"]["status"] == "read_pending_delivery"
@@ -1099,6 +1112,39 @@ pub(super) fn project_settled_submission_history(history: &[Value]) -> Vec<Value
     result
 }
 
+fn project_worker_rejected_history(history: &[Value]) -> Vec<Value> {
+    let mut result = Vec::new();
+    let mut index = 0;
+    let mut feedbacks = BTreeSet::new();
+    let mut summaries = Vec::new();
+    while index < history.len() {
+        if let Some(receipt) = settled_submission_pair(history, index) {
+            if let Some(content) = history[index]["content"].as_str().filter(|s| !s.is_empty()) {
+                result.push(json!({"role":"assistant","content":content}));
+            }
+            let arguments = history[index]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap_or("");
+            // Keep every distinct candidate intact, including malformed JSON.
+            // Opaque old arguments remain text, never an executable tool group
+            // or input to ordinary reference issuance.
+            if feedbacks.insert((arguments.to_owned(), receipt["content"].to_string())) {
+                summaries.push(json!({"role":"user","content":json!({
+                    "rejected_submission_audit": {"original_arguments_text":arguments,
+                        "settled_submission_failure":receipt["content"],
+                        "instruction":"These are rejected historical candidates, not an executable action or read credit. Use only host-verified current reference mappings and the current wire_scope to submit a complete corrected proposal; invalid historical references require current evidence. Original arguments remain intact for comparison."}
+                }).to_string()}));
+            }
+            index += 2;
+        } else {
+            result.push(history[index].clone());
+            index += 1;
+        }
+    }
+    result.extend(summaries);
+    result
+}
+
 // Worker-only projection: preserve the audit and every unconsumed tool group.
 // Normalize only host-issued identities; this never authorizes an operation.
 fn canonical_worker_action(
@@ -1117,12 +1163,12 @@ fn canonical_worker_action(
             Ok(raw) => raw,
             Err(_) => return json!({"tool":call.name,"invalid_json_sha256":crate::outline::canonical_sha256(&call.arguments).expect("string hash")}),
         };
-            let mut args = worker.registry.decode(raw.clone(), true).unwrap_or(raw);
+            let signature = worker.registry.canonical_signature(&raw, |args| {
             if call.name == "submit_pack" {
                 if let Some(pack) = work.canonical_pack(&request.scope.pack) {
                     // Partial normalization is still useful for malformed submissions;
                     // opaque leftovers below become one invalid-handle marker.
-                    let _ = crate::outline::discover::resolve_submission_handles(pack, &mut args);
+                    let _ = crate::outline::discover::normalize_signature_handles(pack, args);
                 }
             } else if call.name == "read_evidence" {
                 let resolved = if let Some(key) = args["dependency_id"].as_str() {
@@ -1151,11 +1197,18 @@ fn canonical_worker_action(
                         })
                 };
                 if let Some(resolved) = resolved {
-                    args = resolved;
+                    *args = resolved;
                 }
             }
-            scrub_action_transport(&mut args);
-            json!({"tool":call.name,"arguments":args})
+            scrub_action_transport(args);
+            });
+            let digest = signature.unwrap_or_else(|_| {
+                // Invalid request scope must not borrow the current namespace.
+                let mut args = raw;
+                scrub_action_transport(&mut args);
+                crate::outline::canonical_sha256(&args).expect("JSON hash")
+            });
+            json!({"tool":call.name,"arguments_sha256":digest})
         })
         .collect::<Vec<_>>();
     json!(calls)
@@ -1246,6 +1299,21 @@ fn rejection_classes(receipt: &Value, fallback: &str) -> Value {
     }
     let mut classes = BTreeSet::new();
     collect(&receipt["result"], &mut classes);
+    for diagnostic in receipt["invalid_reference_diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(path), Some(code), Some(expected)) = (
+            diagnostic["path"].as_str(),
+            diagnostic["code"].as_str(),
+            diagnostic["expected_type"].as_str(),
+        ) {
+            // Fixed host error types and source paths describe remaining work;
+            // unknown spelling and arbitrary explanatory text are not progress.
+            classes.insert((path.to_owned(), format!("{code}:{expected}")));
+        }
+    }
     if classes.is_empty() {
         classes.insert((String::new(), fallback.into()));
     }
@@ -1270,14 +1338,21 @@ use crate::outline::discover::project_owned_pack_headers;
 
 fn project_worker_request_history(worker: &Worker) -> Vec<Value> {
     let split = worker.history_revision_start.min(worker.history.len());
-    let mut history = worker.history[..split]
-        .iter()
+    let mut history = project_worker_rejected_history(&worker.history[..split])
+        .into_iter()
         .filter_map(|message| {
-            (message["role"] == "assistant")
-                .then(|| message["content"].as_str())
-                .flatten()
-                .filter(|text| !text.is_empty())
-                .map(|text| json!({"role":"assistant","content":text}))
+            if message["role"] == "assistant" {
+                return message["content"]
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| json!({"role":"assistant","content":text}));
+            }
+            let host_audit = message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .is_some_and(|value| value.get("rejected_submission_audit").is_some());
+            host_audit.then_some(message)
         })
         .collect::<Vec<_>>();
     history.extend(
@@ -1295,7 +1370,7 @@ fn project_worker_request_history(worker: &Worker) -> Vec<Value> {
 }
 
 fn project_worker_history(history: &[Value]) -> Vec<Value> {
-    let mut projected = project_settled_submission_history(history);
+    let mut projected = project_worker_rejected_history(history);
     projected.dedup_by(|later, earlier| {
         later == earlier
             && later["role"] == "assistant"
@@ -1683,4 +1758,80 @@ pub(crate) async fn profile_all_pack_requests<J: Journal>(
     }
     rows.sort_by_key(|row| row["order"].as_u64().unwrap_or(u64::MAX));
     Ok(rows)
+}
+
+#[cfg(test)]
+mod rejected_candidate_projection_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_candidates_remain_complete_across_claim_retirement_without_old_tool_authority() {
+        let arguments = json!({"wire_scope":"obsolete", "requirements":(0..74).map(|n|
+            json!({"description":format!("synthetic candidate {n}"),"evidence":[{"evidence_key":format!("e{n}")}]})).collect::<Vec<_>>()}).to_string();
+        let history = vec![
+            json!({"role":"assistant","content":"Unique source observation","tool_calls":[{"id":"old-call","type":"function","function":{"name":"submit_pack","arguments":arguments}}]}),
+            json!({"role":"tool","tool_call_id":"old-call","content":json!({"ok":false,"error":"first invalid reference"}).to_string()}),
+            json!({"role":"assistant","content":"{\"automatic_support_page\":\"an observation, not a host page\"}"}),
+        ];
+        let worker = Worker {
+            history: history.clone(),
+            history_revision_start: 2,
+            ..Default::default()
+        };
+        let projected = project_worker_request_history(&worker);
+        assert_eq!(worker.history, history);
+        assert!(
+            projected
+                .iter()
+                .all(|message| message.get("tool_calls").is_none() && message["role"] != "tool")
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|m| m["content"] == history[2]["content"])
+        );
+        let audit = projected
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .find(|v| v.get("rejected_submission_audit").is_some())
+            .unwrap();
+        assert_eq!(
+            audit["rejected_submission_audit"]["original_arguments_text"],
+            arguments
+        );
+        let restored: Value = serde_json::from_str(
+            audit["rejected_submission_audit"]["original_arguments_text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored["requirements"].as_array().unwrap().len(), 74);
+        assert!(
+            audit["rejected_submission_audit"]
+                .get("wire_scope")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn distinct_rejected_candidates_and_malformed_arguments_are_not_silently_compacted() {
+        let mut history = Vec::new();
+        for (index, args) in ["{broken A", "{broken B", "{broken A"].iter().enumerate() {
+            let id = format!("call-{index}");
+            history.push(json!({"role":"assistant","content":format!("observation {index}"),"tool_calls":[{"id":id,"function":{"name":"submit_pack","arguments":args}}]}));
+            history.push(json!({"role":"tool","tool_call_id":id,"content":"{\"ok\":false,\"error\":\"invalid JSON\"}"}));
+        }
+        let projected = project_worker_rejected_history(&history);
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|m| m["role"] == "assistant")
+                .count(),
+            3
+        );
+        let retained=projected.iter().filter(|m|m["role"]=="user").map(|m|
+            serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["rejected_submission_audit"]["original_arguments_text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(retained, vec!["{broken A", "{broken B"]);
+    }
 }

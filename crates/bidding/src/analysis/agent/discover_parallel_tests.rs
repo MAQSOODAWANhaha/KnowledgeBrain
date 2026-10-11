@@ -3423,11 +3423,11 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
     .unwrap();
     assert!(first_count.total_context_tokens <= count.total_context_tokens);
     assert!(
-        first_count.total_context_tokens * 5 >= count.total_context_tokens * 4,
-        "fixture first wire must already occupy at least 80% of the measured repair window"
+        count.total_context_tokens > first_count.total_context_tokens,
+        "retained candidates consume real request capacity"
     );
-    // The actual compact wire fits at its measured context boundary; no extra
-    // hypothetical future output is reserved. Original audit is far larger.
+    // Exact full-candidate boundary succeeds. This is a measured request, not
+    // permission to enlarge the original failed window or omit candidate text.
     config.limits.max_context_tokens = count.total_context_tokens;
     let mut restored = journal.load().await.unwrap().unwrap();
     let mut tight = PackHost {
@@ -3446,7 +3446,28 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         tight.state.outline_run.discover_workers["pack-0"].history,
         audit
     );
-    assert!(fitted.body.len() < serde_json::to_vec(&audit).unwrap().len());
+    let fitted_wire: Value = serde_json::from_slice(&fitted.body).unwrap();
+    let candidate_texts = fitted_wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .filter_map(|v| {
+            v["rejected_submission_audit"]["original_arguments_text"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_texts.len(), 2);
+    assert_eq!(
+        candidate_texts[0],
+        audit[0]["tool_calls"][0]["function"]["arguments"]
+    );
+    assert_eq!(
+        candidate_texts[1],
+        audit[2]["tool_calls"][0]["function"]["arguments"]
+    );
     assert!(
         !tight
             .state
@@ -3465,7 +3486,7 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .evidence
             .is_empty()
     );
-    config.limits.max_context_tokens = 1;
+    config.limits.max_context_tokens = first_count.total_context_tokens;
     let mut too_small = PackHost {
         input: &input,
         config: &config,
@@ -3480,6 +3501,19 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .unwrap_err()
             .code,
         "DISCOVER_READ_CAPACITY_EXCEEDED"
+    );
+    assert_eq!(
+        too_small.state.outline_run.discover_workers["pack-0"].history,
+        audit
+    );
+    assert!(
+        !too_small
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .complete()
     );
 }
 
@@ -3498,3 +3532,9 @@ include!("discover_s2_tests.rs");
 include!("discover_s5_tests.rs");
 
 include!("discover_first_support_plan_tests.rs");
+
+include!("discover_worker_prompt_tests.rs");
+
+include!("discover_batch_repair_tests.rs");
+
+include!("discover_reference_progress_tests.rs");
