@@ -3731,3 +3731,166 @@ async fn partial_source_async_claim_read_is_rejected_before_projection_or_credit
         assert_eq!(before, serde_json::to_value(&state).unwrap());
     }
 }
+
+#[test]
+fn repeated_requirement_projection_retains_latest_page_and_protocol() {
+    use crate::outline::agent::Duty;
+    let page = json!({"ok":true,"result":{"selection_complete":true,
+        "requirements":[{"id":"r1","description":"synthetic obligation ".repeat(100)}]}})
+    .to_string();
+    let mut original = Vec::new();
+    for id in ["read-a", "read-b", "read-c"] {
+        original.push(
+            json!({"role":"assistant","tool_calls":[{"id":id,"type":"function",
+            "function":{"name":"read_requirements","arguments":"{}"}}]}),
+        );
+        original.push(json!({"role":"tool","tool_call_id":id,"content":page}));
+    }
+    let mut projected = original.clone();
+    let before = serde_json::to_vec(&original).unwrap().len();
+    assert_eq!(
+        project_repeated_requirement_reads(&mut projected, Duty::Organize),
+        2
+    );
+    assert_eq!(projected.len(), original.len());
+    assert_eq!(projected[5], original[5]);
+    for index in [0, 2, 4] {
+        assert_eq!(projected[index], original[index]);
+    }
+    for index in [1, 3] {
+        assert_eq!(
+            projected[index]["tool_call_id"],
+            original[index]["tool_call_id"]
+        );
+        let marker: Value =
+            serde_json::from_str(projected[index]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            marker["result"]["identical_page_retained_in_tool_call"],
+            "read-c"
+        );
+        assert_eq!(original[index]["content"], page);
+    }
+    assert!(serde_json::to_vec(&projected).unwrap().len() < before / 2);
+    assert_eq!(
+        project_repeated_requirement_reads(&mut projected, Duty::Organize),
+        0
+    );
+    for duty in [Duty::Discover, Duty::Check] {
+        let mut untouched = original.clone();
+        assert_eq!(project_repeated_requirement_reads(&mut untouched, duty), 0);
+        assert_eq!(untouched, original);
+    }
+}
+
+#[test]
+fn repeated_requirement_projection_preserves_changed_partial_failed_and_other_reads() {
+    use crate::outline::agent::Duty;
+    for (name, ok, complete, changed) in [
+        ("read_requirements", true, false, false),
+        ("read_requirements", false, true, false),
+        ("read_evidence", true, true, false),
+        ("read_requirements", true, true, true),
+    ] {
+        let mut transcript = Vec::new();
+        for (n, id) in ["a", "b"].into_iter().enumerate() {
+            let page = json!({"ok":ok,"result":{"selection_complete":complete,
+                "requirements":[{"id":if changed {n} else {0},
+                    "description":"synthetic obligation ".repeat(100)}]}})
+            .to_string();
+            transcript.push(json!({"role":"assistant","tool_calls":[{"id":id,
+                "function":{"name":name,"arguments":"{}"}}]}));
+            transcript.push(json!({"role":"tool","tool_call_id":id,"content":page}));
+        }
+        let original = transcript.clone();
+        assert_eq!(
+            project_repeated_requirement_reads(&mut transcript, Duty::Organize),
+            0
+        );
+        assert_eq!(transcript, original);
+    }
+}
+
+#[test]
+fn repeated_requirement_projection_keeps_latest_typed_handles_resolvable() {
+    use crate::outline::{agent::Duty, model_wire, source_wire};
+    let (input, mut initial, _, refs) = crate::outline::fixture_discovered(false);
+    crate::outline::agent::synchronize_discovery(&input, &mut initial).unwrap();
+    let mut page = crate::outline::agent::full_read_projection(
+        &input,
+        &initial,
+        "read_requirements",
+        &json!({"mode":"requirements"}),
+    )
+    .unwrap();
+    // The async pagination host marks a completely delivered selected page.
+    page["selection_complete"] = json!(true);
+    let canonical_id = page["items"][0]["requirement_id"].clone();
+    let canonical_ref = page["items"][0]["requirement"]["evidence"][0].clone();
+    assert_eq!(canonical_ref, json!(refs[0]));
+    let content = json!({"ok":true,"result":page}).to_string();
+    let mut transcript = vec![
+        json!({"role":"assistant","tool_calls":[{"id":"old-page","type":"function","function":{"name":"read_requirements","arguments":"{}"}}]}),
+        json!({"role":"tool","tool_call_id":"old-page","content":content}),
+        // Distinct identity between copies changes allocation order when the
+        // old page is compacted. Never rely on the old short-handle numbers.
+        json!({"role":"user","content":json!({"requirement_id":"independent-synthetic-requirement"}).to_string()}),
+        json!({"role":"assistant","tool_calls":[{"id":"latest-page","type":"function","function":{"name":"read_requirements","arguments":"{}"}}]}),
+        json!({"role":"tool","tool_call_id":"latest-page","content":content}),
+    ];
+    let original = transcript.clone();
+    assert_eq!(
+        project_repeated_requirement_reads(&mut transcript, Duty::Organize),
+        1
+    );
+    assert_eq!(transcript[4], original[4]);
+    let mut issued_ids = Vec::new();
+    for history in [original, transcript] {
+        let mut state = initial.clone();
+        let mut messages = history;
+        messages.push(json!({"role":"user","content":"{}"}));
+        let mut body =
+            json!({"messages":messages,"tools":crate::outline::agent::schemas_for(Duty::Organize)});
+        state.outline_run.tool_draft.source_keys = source_wire::request(&state, &mut body).unwrap();
+        let registry = model_wire::project(&state, &mut body).unwrap();
+        let latest = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["tool_call_id"] == "latest-page")
+            .unwrap();
+        let latest: Value = serde_json::from_str(latest["content"].as_str().unwrap()).unwrap();
+        let item = &latest["result"]["items"][0];
+        let host: Value = serde_json::from_str(
+            body["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let read_args =
+            json!({"wire_scope":host["wire_scope"],"requirement_id":item["requirement_id"]});
+        let decoded = registry.decode(read_args, false).unwrap();
+        assert_eq!(decoded["requirement_id"], canonical_id);
+        issued_ids.push(item["requirement_id"].clone());
+        let source_ref = item["requirement"]["evidence"][0].clone();
+        assert!(source_ref["source_key"].as_str().unwrap().starts_with('s'));
+        let args = json!({"wire_scope":host["wire_scope"],"mode":"upsert","slots":[{
+            "slot_id":"synthetic-slot","chapter_id":"synthetic-leaf","text":"Synthetic instruction",
+            "content":{"type":"generated_explanation","supporting_refs":[source_ref]}
+        }]});
+        let decoded = registry.decode(args, false).unwrap();
+        let resolved = source_wire::resolve(&state, "put_slots", decoded).unwrap();
+        assert_eq!(
+            resolved["slots"][0]["content"]["supporting_refs"][0],
+            canonical_ref
+        );
+        assert_eq!(
+            state.outline_run.tool_draft.delivered_evidence,
+            initial.outline_run.tool_draft.delivered_evidence,
+            "projecting a repeated page grants no source read credit"
+        );
+    }
+    assert_ne!(
+        issued_ids[0], issued_ids[1],
+        "fixture must exercise changed handle allocation order"
+    );
+}

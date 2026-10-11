@@ -6,6 +6,9 @@ structured Document objects with text content and chunks. It supports multiple
 sheets and handles various Excel formats using pandas.
 """
 import logging
+import base64
+import hashlib
+import warnings
 import os
 import re
 import zipfile
@@ -22,6 +25,7 @@ from openpyxl.utils.cell import range_boundaries
 from docreader.models.document import (
     Chunk,
     Document,
+    ImageLocator,
     PdfTableCell,
     SpreadsheetCell,
     SpreadsheetLocator,
@@ -153,8 +157,9 @@ class ExcelParser(BaseParser):
         # pandas first can expand a single XFD1048576 cell into a huge rectangle.
         fmt = detect_excel_format(content)
         structured_units: List[StructuredSourceUnit] = []
+        images: dict[str, str] = {}
         if fmt == "xlsx":
-            structured_units = _extract_xlsx_structured_units(content)
+            structured_units = _extract_xlsx_structured_units(content, images)
             for unit in structured_units:
                 if unit.kind is not StructuredSourceUnitKind.TABLE_ROW or not unit.text:
                     continue
@@ -169,11 +174,12 @@ class ExcelParser(BaseParser):
                 content="".join(text),
                 chunks=chunks,
                 structured_source_units=structured_units,
+                images=images,
             )
         if fmt == "xls":
             converted = convert_excel_to_xlsx_bytes(content, suffix=".xls")
             if converted and detect_excel_format(converted) == "xlsx":
-                structured_units = _extract_xlsx_structured_units(converted)
+                structured_units = _extract_xlsx_structured_units(converted, images)
 
         excel_file = _open_excel_file(content, file_type=self.file_type)
         for excel_sheet_name in excel_file.sheet_names:
@@ -198,6 +204,7 @@ class ExcelParser(BaseParser):
             content="".join(text),
             chunks=chunks,
             structured_source_units=structured_units,
+            images=images,
         )
 
 
@@ -322,7 +329,7 @@ def _preflight_xlsx_structure(content: bytes) -> None:
         tables = 0
         cells = 0
         merges = 0
-        cells_per_row: dict[int, int] = defaultdict(int)
+        cells_per_row: dict[tuple[str, int], int] = defaultdict(int)
         cell_references: set[tuple[str, str]] = set()
         archive_names: set[str] = set()
         for info in infos:
@@ -392,10 +399,10 @@ def _preflight_xlsx_structure(content: bytes) -> None:
                                 cells,
                                 XLSX_MAX_MATERIALIZED_CELLS,
                             )
-                            cells_per_row[row] += 1
+                            cells_per_row[(name, row)] += 1
                             _limit(
                                 "cells_per_row",
-                                cells_per_row[row],
+                                cells_per_row[(name, row)],
                                 XLSX_MAX_CELLS_PER_ROW,
                             )
                         elif is_worksheet and tag == "mergeCell":
@@ -507,7 +514,7 @@ def _used_sheet_region(
     )
 
 
-def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
+def _extract_xlsx_structured_units(content: bytes, images: dict[str, str] | None = None) -> List[StructuredSourceUnit]:
     """Return bounded deterministic units without rectangular expansion."""
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -515,7 +522,28 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
     _preflight_xlsx_structure(content)
     repaired = repair_xlsx_bytes(content)
     source = repaired if repaired is not None else content
-    workbook = load_workbook(BytesIO(source), data_only=False, read_only=False)
+    # openpyxl can silently discard unsupported/broken drawing images after a warning.
+    with warnings.catch_warnings(record=True) as image_warnings:
+        warnings.simplefilter("always")
+        workbook = load_workbook(BytesIO(source), data_only=False, read_only=False)
+    if any("image" in str(item.message).lower() and
+           any(word in str(item.message).lower() for word in ("removed", "dropped", "unsupported"))
+           for item in image_warnings):
+        workbook.close()
+        raise ValueError("XLSX_IMAGE_UNSUPPORTED: embedded drawing image was discarded")
+    # Account for every embedded drawing occurrence, including formats that
+    # openpyxl cannot expose. Never publish a complete contract after dropping one.
+    with zipfile.ZipFile(BytesIO(source)) as archive:
+        embedded_drawings = sum(
+            1 for name in archive.namelist()
+            if name.startswith("xl/drawings/") and name.endswith(".xml")
+            for element in ElementTree.fromstring(archive.read(name)).iter()
+            if element.tag.rsplit("}", 1)[-1] == "blip"
+            and any(key.rsplit("}", 1)[-1] in {"embed", "link"} for key in element.attrib)
+        )
+    if embedded_drawings != sum(len(sheet._images) for sheet in workbook.worksheets):
+        workbook.close()
+        raise ValueError("XLSX_IMAGE_UNSUPPORTED: drawing image occurrence was not extracted")
     try:
         cached_workbook = load_workbook(BytesIO(source), data_only=True, read_only=False)
     except Exception:
@@ -748,6 +776,26 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                         grid=_listobject_grid(used, all_cells, used_merges),
                     )
                 )
+            for image_ordinal, image in enumerate(sheet._images):
+                raw = image._data()
+                # openpyxl converts some supported formats to PNG in _data().
+                from PIL import Image as PillowImage
+                with PillowImage.open(BytesIO(raw)) as decoded:
+                    extension = (decoded.format or image.format).lower()
+                ref = f"images/{hashlib.sha256(raw).hexdigest()}.{extension}"
+                if images is not None:
+                    images[ref] = base64.b64encode(raw).decode("ascii")
+                emit(StructuredSourceUnit(
+                    key=f"sheet:{sheet_ordinal}:image:{image_ordinal}",
+                    ordinal=len(units),
+                    kind=StructuredSourceUnitKind.IMAGE_REGION,
+                    text="",
+                    locator=ImageLocator(
+                        original_ref=ref, width=int(image.width), height=int(image.height),
+                        media_type="image/jpeg" if extension in {"jpg", "jpeg"} else f"image/{extension}",
+                    ),
+                    physical_path=f"sheet:{sheet_ordinal}/drawing:image:{image_ordinal}",
+                ))
     finally:
         workbook.close()
         cached_workbook.close()

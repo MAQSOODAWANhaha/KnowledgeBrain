@@ -59,7 +59,7 @@ def render_units(units, media):
     # XLSX rows already include every value. Tables map to those same row
     # displays, avoiding a second contradictory rendering of the same cells.
     for unit in units:
-        if media in {"xlsx", "xls"}:
+        if media in {"xlsx", "xls"} and not isinstance(unit.locator, ImageLocator):
             rendered = unit.text if unit.kind == StructuredSourceUnitKind.TABLE_ROW else ""
         elif unit.grid is not None:
             rendered = _grid_markdown(unit.grid)

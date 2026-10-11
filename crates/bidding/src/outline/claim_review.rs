@@ -153,6 +153,7 @@ pub fn build(
     // Scope retrieval to the cited documents. Clause identifiers and rare label
     // phrases link complete rows; checkbox glyphs alone never make a row relevant.
     let mut documents = BTreeSet::new();
+    let mut owner_ids = BTreeSet::new();
     let mut source_text = record.description.clone();
     for group in &groups {
         for reference in &group.1 {
@@ -172,9 +173,24 @@ pub fn build(
                     .find(|s| s.source_unit_revision_id == id)
             }) {
                 documents.insert(source.document_id.clone());
+                owner_ids.insert(source.source_unit_revision_id.clone());
                 source_text.push('\n');
                 source_text.push_str(&source.text);
             }
+        }
+    }
+    // A cell's complete row can still omit a separate applicability paragraph.
+    // Show native structural context as candidates; comparisons must decide its
+    // applicability and fresh Check reads remain mandatory for any support.
+    for source in super::discover::section_context_sources(input, &owner_ids) {
+        let refs = vec![EvidenceRef::Text {
+            input_digest: digest.clone(),
+            unit_id: source.source_unit_revision_id.clone(),
+            start_byte: 0,
+            end_byte: source.text.len(),
+        }];
+        if seen.insert(super::canonical_sha256(&refs)?) {
+            groups.push(("related_section_context".into(), refs));
         }
     }
     let clause = regex::Regex::new(r"(?m)^[ \t#]*([0-9]+(?:[ \t]*\.[ \t]*[0-9]+)+)")

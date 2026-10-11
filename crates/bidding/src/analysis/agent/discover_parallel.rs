@@ -463,9 +463,41 @@ impl<J: Journal> Host for PackHost<'_, J> {
             .state
             .outline_run
             .reading_packs
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| invalid("reading plan missing"))?;
-        work.claim(coordinator::WORKERS);
+        let mut settled = BTreeSet::new();
+        for id in work.pack_ids() {
+            let Some(worker) = self.state.outline_run.discover_workers.get(&id) else {
+                continue;
+            };
+            let Some(Pending::Failed { request, code }) = &worker.pending else {
+                continue;
+            };
+            if request.scope.pack != id {
+                continue;
+            }
+            let exhausted = worker.rejected_turns >= self.config.limits.max_no_progress_turns
+                && matches!(
+                    code.as_str(),
+                    "BUSINESS_REJECTED" | "DISCOVER_RETRY_EXHAUSTED"
+                );
+            let identity = work.pack_wire_identity(&id).map_err(invalid)?;
+            // Mirror the terminal branches below, including exhausted failed
+            // repairs whose settled request precedes the rotated pack revision.
+            // Sending/Received and retryable business failures never free slots.
+            if request.scope.run == identity["run"]
+                && ((exhausted
+                    && identity["revision"]
+                        .as_u64()
+                        .is_some_and(|revision| request.scope.revision <= revision))
+                    || (code != "BUSINESS_REJECTED"
+                        && request.scope.revision == identity["revision"]))
+            {
+                settled.insert(id);
+            }
+        }
+        let work = self.state.outline_run.reading_packs.as_mut().unwrap();
+        work.claim_excluding_settled(coordinator::WORKERS, &settled);
         let ids = work
             .pack_ids()
             .into_iter()
@@ -1008,6 +1040,10 @@ pub(super) async fn run<J: Journal, M: Model>(
 #[cfg(test)]
 #[path = "discover_parallel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "discover_s1_tests.rs"]
+mod s1_tests;
 
 // Append inside analysis/agent/discover_parallel.rs; test-only, no transport.
 #[cfg(test)]

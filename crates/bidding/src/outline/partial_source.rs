@@ -94,6 +94,19 @@ pub(crate) fn eligible(input: &FrozenInput, state: &Checkpoint) -> Option<BTreeS
                                 && r.status == DocumentRelationStatus::Confirmed
                         })
                     }
+                    discover::ConditionSupportOrigin::StructuralContext {
+                        source_unit_revision_id,
+                    } => {
+                        !input.source_units.iter().any(|source| {
+                            source.source_unit_revision_id == *source_unit_revision_id
+                        }) || blocked.iter().any(|other| {
+                            work.canonical_pack(other).is_some_and(|pack| {
+                                pack.atoms.iter().any(|atom| {
+                                    atom.source_unit_revision_id == *source_unit_revision_id
+                                })
+                            })
+                        })
+                    }
                 });
             if relation_dep || support_dep {
                 added.insert(id.clone());

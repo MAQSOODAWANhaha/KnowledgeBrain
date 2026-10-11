@@ -2080,8 +2080,9 @@ async fn prepare_fitted_request(
             json!({"role":"user","content":brief.to_string()}),
         ];
         let mut visible_views = std::collections::BTreeSet::new();
-        let projected_history =
+        let mut projected_history =
             discover_parallel::project_settled_submission_history(&state.transcript);
+        context::project_repeated_requirement_reads(&mut projected_history, turn_duty);
         for message in &projected_history {
             if let Some(refs) = message["source_view_refs"].as_array() {
                 for id in refs {

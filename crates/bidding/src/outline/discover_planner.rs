@@ -283,17 +283,10 @@ fn split_carrier(input: &FrozenInput, carrier: &PackCarrier) -> Result<Vec<PackC
             row_count,
             column_count,
             cells,
-            header_context,
+            ..
         } => {
-            if !header_context.is_empty() {
-                return Ok(vec![PackCarrier::Grid {
-                    table_id: table_id.clone(),
-                    row_count: *row_count,
-                    column_count: *column_count,
-                    cells: cells.clone(),
-                    header_context: vec![],
-                }]);
-            }
+            // Budget pressure may shrink primary cell ranges, never erase the
+            // native headers needed to interpret them. Context is support-only.
             let def = super::super::evidence::table_definition(input, table_id)?;
             let original = grid_carrier(def, table_id)?;
             let PackCarrier::Grid {
@@ -332,7 +325,11 @@ fn split_carrier(input: &FrozenInput, carrier: &PackCarrier) -> Result<Vec<PackC
                     source["text"].as_str().ok_or("cell text missing")?,
                     cell.start_byte,
                     cell.end_byte,
-                )?;
+                ).map_err(|error| {
+                    if headers.is_empty() { error } else {
+                        format!("required grid header context and minimum cell range exceed the context budget: {error}")
+                    }
+                })?;
                 let mut left = cell.clone();
                 left.end_byte = middle;
                 let mut right = cell.clone();
@@ -345,11 +342,11 @@ fn split_carrier(input: &FrozenInput, carrier: &PackCarrier) -> Result<Vec<PackC
             Ok(pieces
                 .into_iter()
                 .map(|cells| {
-                    let header_context = if cells.iter().all(|cell| cell.header_role == "none") {
-                        headers.clone()
-                    } else {
-                        vec![]
-                    };
+                    let header_context = headers
+                        .iter()
+                        .filter(|header| !cells.contains(header))
+                        .cloned()
+                        .collect();
                     PackCarrier::Grid {
                         table_id: table_id.clone(),
                         row_count: *row_count,
@@ -522,10 +519,18 @@ fn fitted_chapter_prefix(
 ) -> Result<PrefixOutcome, String> {
     let mut atoms = Vec::new();
     let mut ends = Vec::new();
-    for chapter in chapters {
+    // A measured hint already bounds the first candidate. Do not clone the
+    // unused suffix merely to discard it below; relation checks still apply.
+    let proposed = capacity_hint
+        .get()
+        .map(|capacity| hinted_prefix(chapter_prefix, capacity))
+        .unwrap_or(chapters.len());
+    for chapter in chapters.iter().take(proposed) {
         if !atoms.is_empty() && !related_atoms(input, &atoms, chapter) {
             break;
         }
+        #[cfg(test)]
+        crate::analysis::agent::profile::observe("chapter_atoms_copied_before_hint", chapter.len());
         atoms.extend_from_slice(chapter);
         ends.push(atoms.len());
     }
@@ -722,6 +727,57 @@ mod endpoint_tests {
             }).collect(), structured_forms: vec![], decisions: vec![],
         }
     }
+    #[test]
+    fn split_chapter_tail_is_not_backfilled_with_next_chapter() {
+        let mut input = synthetic_input(4, true);
+        input.source_units[3].locator["section_id"] = json!("next-section");
+        let packs = plan_packs_with_measured_budget(&input, &|sessions| {
+            Ok(PlanningFit::Measured {
+                estimated_input: sessions[0]["pack"]["atoms"].as_array().unwrap().len() * 100,
+                available_input: 200,
+            })
+        })
+        .unwrap();
+        let ordinals: Vec<Vec<_>> = packs
+            .iter()
+            .map(|pack| pack.atoms.iter().map(|atom| atom.unit_ordinal).collect())
+            .collect();
+        assert_eq!(ordinals, vec![vec![0, 1], vec![2], vec![3]]);
+    }
+
+    #[test]
+    fn weighted_hint_bounds_remaining_chapter_copy_scaling() {
+        for count in [64, 128, 256] {
+            let input = synthetic_input(count, false);
+            crate::analysis::agent::profile::reset();
+            let start = std::time::Instant::now();
+            let packs = plan_packs_with_measured_budget(&input, &|sessions| {
+                let atoms = sessions[0]["pack"]["atoms"].as_array().unwrap().len();
+                Ok(PlanningFit::Measured {
+                    estimated_input: atoms * 100,
+                    available_input: 400,
+                })
+            })
+            .unwrap();
+            let micros = start.elapsed().as_micros();
+            let counters = crate::analysis::agent::profile::finish_counters();
+            crate::analysis::agent::profile::finish();
+            let copied = counters["chapter_atoms_copied_before_hint"];
+            assert!(packs.iter().all(|pack| pack.atoms.len() <= 4));
+            assert_eq!(
+                packs.iter().map(|pack| pack.atoms.len()).sum::<usize>(),
+                count
+            );
+            assert!(
+                copied as usize <= count * 3,
+                "measured hints must avoid repeatedly cloning the entire unused suffix"
+            );
+            eprintln!(
+                "synthetic_copy_audit n={count} k=4 copied_atoms={copied} elapsed_us={micros}"
+            );
+        }
+    }
+
     #[test]
     fn bounded_prefix_keeps_exact_coverage_with_nonmonotone_fits() {
         let input = synthetic_input(17, false);
@@ -1013,3 +1069,7 @@ mod endpoint_tests {
 #[cfg(test)]
 #[path = "private_planner_profile.rs"]
 mod private_planner_profile;
+
+#[cfg(test)]
+#[path = "discover_header_budget_tests.rs"]
+mod header_budget_tests;

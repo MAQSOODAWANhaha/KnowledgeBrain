@@ -20,6 +20,34 @@ impl FixtureDelivery for Checkpoint {
         self.turn += 1;
     }
 }
+// Domain seed setup: explicitly read and confirm all structural originals.
+// Durable worker response authorization is covered separately by s1_tests.
+fn deliver_structural_context_fixture(
+    input: &FrozenInput,
+    work: &mut DiscoverWork,
+    pack: &super::discover::ParsePack,
+) {
+    let owners = pack
+        .atoms
+        .iter()
+        .map(|atom| atom.source_unit_revision_id.clone())
+        .collect();
+    let refs = super::discover::section_context_sources(input, &owners)
+        .into_iter()
+        .map(|source| evidence::EvidenceRef::Text {
+            input_digest: pack.input_digest.clone(),
+            unit_id: source.source_unit_revision_id.clone(),
+            start_byte: 0,
+            end_byte: source.text.len(),
+        })
+        .collect::<Vec<_>>();
+    if !refs.is_empty() {
+        let (_, options) = work.related_read(input, &pack.id, &refs).unwrap();
+        work.confirm_related_read(input, &pack.id, &options)
+            .unwrap();
+    }
+}
+
 fn apply(
     input: &FrozenInput,
     state: &mut Checkpoint,
@@ -512,6 +540,7 @@ fn real_python_pdf_fixture_runs_through_freeze_discovery_targets_and_publication
             assert!(!packs.is_empty());
             for pack in packs {
                 let refs = work.pack_evidence(&input, &pack.id).unwrap();
+                deliver_structural_context_fixture(&input, &mut work, &pack);
                 for reference in &refs {
                     if let evidence::EvidenceRef::ImageRegion { image_id, .. } = reference {
                         work.confirm_visual_delivery(&input, image_id, &"a".repeat(64))
@@ -2563,6 +2592,7 @@ fn mixed_normal_review_and_document_issue_continue_independent_scopes_after_relo
         assert!(!packs.is_empty());
         for pack in packs {
             let refs = work.pack_evidence(&input, &pack.id).unwrap();
+            deliver_structural_context_fixture(&input, &mut work, &pack);
             let healthy = selected.is_empty();
             work.submit(&input,&pack.id,PackSubmit {
                 issues: vec![],

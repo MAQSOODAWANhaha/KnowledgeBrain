@@ -37,10 +37,10 @@ impl Duty {
     pub fn instructions(self) -> &'static str {
         match self {
             Self::Discover => {
-                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。只阅读已领取的阅读包，每一段都要读完再 submit_pack。正常 requirements 与 issues 可以同次 submit_pack 返回，独立包继续处理。明确没有应答义务且没有问题时，requirements 和 issues 都用空数组，并说明 no_requirement_reason。资料缺失、冲突、含糊或不可辨认时不要编造确定要求；用 issues 的 document_missing、document_conflict、document_ambiguous 或 document_unreadable，填写 id、description、requested_information，requirement_ids 必须为空数组，evidence 只用本包已实际读取的 owned 原文 evidence_key。缺失资料引用真实提及该资料的位置，不虚构缺失正文。requirements 为空但有合法 issues 时，no_requirement_reason 必须为 null，inspected_atom_ids 仍须覆盖全部已读 owned 原子。API、解析器或执行失败不能冒充文档问题。仅当阅读会话 status=failed 时 repair=true；status=running 时 repair=false。schema 校验失败不会改变包状态。证据必须直接复制当前阅读包原文旁的 evidence_key，提交 {evidence_key:原值}；key只对当前包、版本和领取会话有效。如有 condition_support_options，可将所需 support_key 单独填入 condition_support；它是外部条件依据，不是当前包主证据，不能替代 evidence 或改变 source_section_id。不要从 Check 的 q 句柄推算其他来源引用，不计算字节偏移，不拼写来源ID；空格没有可选证据。source_section_id 必须用 {atom_key:原值} 选择该原子的所属章节；inspected_atom_ids 必须用 {atom_key:原值}，必须逐个实际读取后选择且不重复。不要写章节，不要写模板，不要匹配知识库。"
+                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。同一段或格中的独立义务分别提取，保留主体、条件、时间、阈值、证明材料和替代方案；笼统“满足全部技术条款”不能替代具体义务。强制资格/否决条件与可选评分材料分开，保留适用条件，不把评分公式一律变成必填要求。跨页续条结合已提供的相邻载体核对。当前包没有引用正文不等于全文件缺失；沿可用依赖目录和 read_evidence 核实内部引用，无法核实时明确范围与不确定性，不能笼统要求补交已有章节。未提供的外部公告只能记录缺失，不补写。主证据只来自已领取的阅读包，每一段都要读完；结构依赖目录中的 structural_context_candidate 必须经 read_evidence 与续页完整交付后才能 submit_pack，目录本身不算读取。已读取上下文是否适用分别判断，不能移作其他包的主证据或完成信用。正常 requirements 与 issues 可以同次 submit_pack 返回，独立包继续处理。明确没有应答义务且没有问题时，requirements 和 issues 都用空数组，并说明 no_requirement_reason。资料缺失、冲突、含糊或不可辨认时不要编造确定要求；用 issues 的 document_missing、document_conflict、document_ambiguous 或 document_unreadable，填写 id、description、requested_information，requirement_ids 必须为空数组，evidence 只用本包已实际读取的 owned 原文 evidence_key。缺失资料引用真实提及该资料的位置，不虚构缺失正文。requirements 为空但有合法 issues 时，no_requirement_reason 必须为 null，inspected_atom_ids 仍须覆盖全部已读 owned 原子。API、解析器或执行失败不能冒充文档问题。仅当阅读会话 status=failed 时 repair=true；status=running 时 repair=false。schema 校验失败不会改变包状态。证据必须直接复制当前阅读包原文旁的 evidence_key，提交 {evidence_key:原值}；key只对当前包、版本和领取会话有效。如有 condition_support_options，可将所需 support_key 单独填入 condition_support；它是外部条件依据，不是当前包主证据，不能替代 evidence 或改变 source_section_id。不要从 Check 的 q 句柄推算其他来源引用，不计算字节偏移，不拼写来源ID；空格没有可选证据。source_section_id 必须用 {atom_key:原值} 选择该原子的所属章节；inspected_atom_ids 必须用 {atom_key:原值}，必须逐个实际读取后选择且不重复。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
-                "本轮按 read_requirements、read_outline 的分页索引写章节、附件绑定和规定模板槽。已有本批要求时先完成对应写入，不重复读取已完整返回的摘要。mode=packs 的全来源索引用于独立 Check，本轮按已有要求的证据读取所需原文，不重新扫描全部来源。固定条文先 read_evidence，再写 content.source_copy 引用，由主机复制；不得提供自由 fixed_text。用 put_fulfillments 把每条要求指向已存在且属于同一应答叶子的实际槽、表格或可见人工任务；该工具不传mode，target_refs必须非空，generated_explanation不能单独履行要求。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组（可多个，即森林）、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。editable_blank 须提供 blank_kind 与非空 match_query，不传 text；source_copy 只传一个已读取来源引用，不传 text、match_query、blank_kind；generated_explanation 须提供 text 与已读取 supporting_refs，不传 match_query、blank_kind。不要用空字符串代替省略字段。分组章节不能带模板槽。put_chapters(mode=upsert)按原章节id更新并保留未提交章节，不是重命名或清空；同一parent下order必须唯一，根章节也一样。需要整体替换时用mode=replace提交完整章节树并保留已有目标引用有效。bind_forms 与 put_slots 的 upsert 按已有id原位更新，未提交项保留，新项追加，不删除或重排。映射内容错误可用upsert修正整条续表链；顺序错误必须先读取完整当前bindings，再用replace提交全部有效绑定并按来源续表顺序排列。槽位重排同样先读取完整slots再replace，不能仅把upsert参数改顺序。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
+                "本轮按 read_requirements、read_outline 的分页索引写章节、附件绑定和规定模板槽。已有本批要求时先完成对应写入，不重复读取已完整返回的摘要。mode=packs 的全来源索引用于独立 Check，本轮按已有要求的证据读取所需原文，不重新扫描全部来源。固定条文先 read_evidence，再写 content.source_copy 引用，由主机复制；不得提供自由 fixed_text。用 put_fulfillments 把每条要求指向已存在且属于同一应答叶子的实际槽、表格或可见人工任务；该工具不传mode，target_refs必须非空，generated_explanation不能单独履行要求。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组（可多个，即森林）、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。editable_blank 须提供 blank_kind 与非空 match_query，不传 text；source_copy 只传一个已读取来源引用，不传 text、match_query、blank_kind；generated_explanation 的 text 位于槽对象根部，与 content 并列；content 只含 type 和已读取的 supporting_refs，禁止 content.text，不传 match_query、blank_kind。不要用空字符串代替省略字段。分组章节不能带模板槽。put_chapters(mode=upsert)按原章节id更新并保留未提交章节，不是重命名或清空；同一parent下order必须唯一，根章节也一样。需要整体替换时用mode=replace提交完整章节树并保留已有目标引用有效。bind_forms 与 put_slots 的 upsert 按已有id原位更新，未提交项保留，新项追加，不删除或重排。映射内容错误可用upsert修正整条续表链；顺序错误必须先读取完整当前bindings，再用replace提交全部有效绑定并按来源续表顺序排列。槽位重排同样先读取完整slots再replace，不能仅把upsert参数改顺序。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
             }
             Self::Check => {
                 "本轮独立复核来源与响应。readiness 只证明结构，不能证明语义召回。用 read_requirements 分页读取要求和 mode=packs 的源证据索引，用 read_evidence 读取精确原文。逐批核对未提取义务、否定/条件/数值和响应充分性，用 submit_review 提交证据与问题，inspected_evidence 和 issues.evidence 必须直接复制已读取原文旁的 {review_evidence_key:原值}，不要手抄摘要和字节范围。要求的全部原始证据格（含标签和条款号）都必须覆盖；结构回执仍由分页读取记录。空提取包、表格、OCR partial、跨片条件优先。发现阶段的问题不是 Check 已完成。可沿用已有 issue.id 补充当前 requirement_ids、观察和 requested_information，但必须重新读取并以当前 review_evidence_key 证明范围；不得凭发现问题跳过未覆盖的要求或其他独立范围。Check 的来源读取必须在进入本职责后重新执行；Organize 的读取回执不能代替独立复核。用 read_outline(mode=slot_body) 按 UTF-8 字节分页读取实际槽正文及空位说明，读完整个目标正文后才能提交要求复核。所有要求与包复核完成后 finish_outline；存在问题保留 needs_review。不要改章节或固定原文。"
@@ -192,6 +192,12 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
     if let Err(mut errors) = schema.validate(args)
         && let Some(error) = errors.next()
     {
+        // Refine only a schema rejection; never relocate or accept bad fields.
+        if name == "put_slots"
+            && let Some(message) = slot_text_layer_feedback(args)
+        {
+            return Err(message);
+        }
         let path = error.schema_path.to_string();
         return Err(bounded_schema_feedback(
             name,
@@ -200,6 +206,25 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
         ));
     }
     Ok(())
+}
+
+fn slot_text_layer_feedback(args: &Value) -> Option<String> {
+    for (index, slot) in args["slots"].as_array()?.iter().enumerate() {
+        if slot["content"]["type"] != "generated_explanation" {
+            continue;
+        }
+        if slot["content"].get("text").is_some() {
+            return Some(format!(
+                "SCHEMA/additionalProperties /slots/{index}/content/text; state unchanged; put text at /slots/{index}/text; keep supporting_refs inside content"
+            ));
+        }
+        if slot.get("text").is_none() {
+            return Some(format!(
+                "SCHEMA/required /slots/{index}/text; state unchanged; text belongs beside content; supporting_refs belongs inside content"
+            ));
+        }
+    }
+    None
 }
 
 fn bounded_schema_feedback(tool: &str, code: &str, path: &str) -> String {
@@ -1791,6 +1816,7 @@ fn submit_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("slot_wire_tests.rs");
     #[test]
     fn bounded_schema_feedback_keeps_code_path_and_state_guidance() {
         let short = bounded_schema_feedback("submit_pack", "oneOf", "/requirements/4/evidence/2");

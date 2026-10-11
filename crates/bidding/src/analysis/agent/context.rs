@@ -691,6 +691,58 @@ pub(super) fn compact_delivered_navigation(transcript: &mut [Value]) -> bool {
     false
 }
 
+/// Project duplicate completed requirement pages out of an Organize request.
+/// Keep the newest full response and every protocol message. This operates on
+/// a request copy, never the checkpoint or its delivery/progress receipts.
+pub(super) fn project_repeated_requirement_reads(
+    transcript: &mut [Value],
+    duty: crate::outline::agent::Duty,
+) -> usize {
+    if duty != crate::outline::agent::Duty::Organize {
+        return 0;
+    }
+    let names: BTreeMap<_, _> = transcript
+        .iter()
+        .flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
+        .filter_map(|call| Some((call["id"].as_str()?, call["function"]["name"].as_str()?)))
+        .collect();
+    let mut latest = BTreeMap::<&str, &str>::new();
+    let mut replacements = Vec::new();
+    for (index, message) in transcript.iter().enumerate().rev() {
+        let Some(id) = message["tool_call_id"].as_str() else {
+            continue;
+        };
+        if message["role"] != "tool" || names.get(id) != Some(&"read_requirements") {
+            continue;
+        }
+        let Some(content) = message["content"].as_str() else {
+            continue;
+        };
+        let Ok(output) = serde_json::from_str::<Value>(content) else {
+            continue;
+        };
+        if output["ok"] != true || output["result"]["selection_complete"] != true {
+            continue;
+        }
+        if let Some(retained) = latest.get(content) {
+            let compact = json!({"ok":true,"result":{
+                "history_omitted":true,"identical_page_retained_in_tool_call":retained,
+                "note":"The identical complete requirement page is retained below. Use it to write outstanding targets; reread only if the selection changed or the page is no longer available."
+            }}).to_string();
+            if compact.len() < content.len() {
+                replacements.push((index, compact));
+            }
+        } else {
+            latest.insert(content, id);
+        }
+    }
+    let count = replacements.len();
+    for (index, content) in replacements {
+        transcript[index]["content"] = json!(content);
+    }
+    count
+}
+
 /// Evict one delivered discovery turn represented by durable pack receipts.
 ///
 /// Failed submissions require an exact saved receipt and retained feedback.

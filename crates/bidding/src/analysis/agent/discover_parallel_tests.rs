@@ -3462,3 +3462,5 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         "AGENT_TURN_BUDGET_EXCEEDED"
     );
 }
+
+include!("discover_f1_tests.rs");

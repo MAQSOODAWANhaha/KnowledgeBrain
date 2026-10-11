@@ -206,6 +206,95 @@ pub struct ConditionSupport {
 pub enum ConditionSupportOrigin {
     ReviewedRequirement { requirement_id: String },
     ConfirmedRelation { relation_id: String },
+    StructuralContext { source_unit_revision_id: String },
+}
+
+/// Native same-section introductions and ancestor prose are reading candidates,
+/// never a claim that their conditions apply. Keep document and source order
+/// boundaries; headings alone do not authorize unrelated earlier sections.
+pub(crate) fn section_context_sources<'a>(
+    input: &'a FrozenInput,
+    owner_ids: &BTreeSet<String>,
+) -> Vec<&'a Source> {
+    let mut selected = BTreeSet::new();
+    for owner in input
+        .source_units
+        .iter()
+        .filter(|s| owner_ids.contains(&s.source_unit_revision_id))
+    {
+        let Some(section) = owner.locator["section_id"].as_str() else {
+            continue;
+        };
+        let mut sections = BTreeSet::from([section.to_owned()]);
+        let mut parent = owner.locator["parent_section_id"].as_str();
+        while let Some(id) = parent {
+            if !sections.insert(id.to_owned()) {
+                break;
+            }
+            parent = input
+                .source_units
+                .iter()
+                .find(|source| {
+                    source.document_id == owner.document_id && source.locator["section_id"] == id
+                })
+                .and_then(|source| source.locator["parent_section_id"].as_str());
+        }
+        for source in &input.source_units {
+            if source.document_id == owner.document_id
+                && source.ordinal < owner.ordinal
+                && !source.text.is_empty()
+                && source.locator["kind"] != "image_region"
+                && source.locator["section_id"]
+                    .as_str()
+                    .is_some_and(|id| sections.contains(id))
+                && !owner_ids.contains(&source.source_unit_revision_id)
+                && !input
+                    .structured_forms
+                    .iter()
+                    .any(|form| form["source_unit_revision_id"] == source.source_unit_revision_id)
+            {
+                selected.insert(source.source_unit_revision_id.clone());
+            }
+        }
+    }
+    input
+        .source_units
+        .iter()
+        .filter(|s| selected.contains(&s.source_unit_revision_id))
+        .collect()
+}
+
+fn pack_section_context<'a>(input: &'a FrozenInput, pack: &ParsePack) -> Vec<&'a Source> {
+    section_context_sources(
+        input,
+        &pack
+            .atoms
+            .iter()
+            .map(|atom| atom.source_unit_revision_id.clone())
+            .collect(),
+    )
+}
+
+fn section_context_key(pack: &ParsePack, source: &Source) -> Result<String, String> {
+    Ok(format!(
+        "context_{}",
+        super::canonical_sha256(&(
+            &pack.input_digest,
+            &pack.id,
+            pack.pack_revision,
+            &pack.claim_token,
+            &source.source_unit_revision_id,
+        ))?
+    ))
+}
+
+fn section_context_ref(pack: &ParsePack, source: &Source) -> EvidenceRef {
+    EvidenceRef::Text {
+        input_digest: pack.input_digest.clone(),
+        unit_id: source.source_unit_revision_id.clone(),
+        start_byte: 0,
+        end_byte: source.text.len(),
+    }
 }
 
 fn support_key(pack: &ParsePack, support: &ConditionSupport) -> Result<String, String> {
@@ -465,10 +554,24 @@ impl DiscoverWork {
         self.planning_error.as_deref()
     }
     pub fn claim(&mut self, limit: usize) -> Vec<ParsePack> {
+        self.claim_excluding_settled(limit, &BTreeSet::new())
+    }
+
+    /// Settled worker failures retain canonical pack state and audit, but no
+    /// longer occupy a physical concurrency slot. The coordinator derives this
+    /// set from its durable worker journals; it is never a second stored state.
+    pub(crate) fn claim_excluding_settled(
+        &mut self,
+        limit: usize,
+        settled: &BTreeSet<String>,
+    ) -> Vec<ParsePack> {
         let inflight = self
             .packs
             .values()
-            .filter(|r| matches!(r.status, PackStatus::Running | PackStatus::Failed))
+            .filter(|r| {
+                matches!(r.status, PackStatus::Running | PackStatus::Failed)
+                    && !settled.contains(&r.pack.id)
+            })
             .count();
         let mut pending: Vec<_> = self
             .packs
@@ -843,6 +946,33 @@ impl DiscoverWork {
             })
             .collect::<Vec<_>>();
         let mut errors = Vec::new();
+        // Structural context is a reading prerequisite, not an applicability
+        // conclusion or primary ownership. Only this claim's delivered ranges
+        // count; separate continuation pages may jointly cover the original.
+        for source in pack_section_context(input, pack) {
+            let current = section_context_key(pack, source);
+            let delivered = pack
+                .condition_support_options
+                .iter()
+                .filter(|option| {
+                    matches!(&option.origin, ConditionSupportOrigin::StructuralContext {
+                        source_unit_revision_id
+                    } if source_unit_revision_id == &source.source_unit_revision_id)
+                        && current
+                            .as_ref()
+                            .is_ok_and(|key| key == &option.review_version)
+                })
+                .flat_map(|option| option.evidence.iter().cloned())
+                .collect::<Vec<_>>();
+            if !super::evidence::covered_by_union(&section_context_ref(pack, source), &delivered) {
+                errors.push(field(
+                    "/pack_id",
+                    "structural_context_not_delivered",
+                    "Read every structural_context_candidate completely through read_evidence and its continuation pages in completed worker requests before submitting any result; determine applicability separately without treating support as primary ownership or Check approval",
+                ));
+                break;
+            }
+        }
         for atom in &pack.atoms {
             if let PackCarrier::Image {
                 evidence: EvidenceRef::ImageRegion { image_id, .. },
@@ -1077,6 +1207,7 @@ impl DiscoverWork {
         }
         let pack = &self.packs.get(pack_id).ok_or("unknown pack")?.pack;
         let excerpts = resolve_evidence(input, refs)?;
+        let context = pack_section_context(input, pack);
         let mut grouped = BTreeMap::<String, Vec<EvidenceRef>>::new();
         let mut reviewed = Vec::<ConditionSupport>::new();
         for reference in refs {
@@ -1114,6 +1245,25 @@ impl DiscoverWork {
                 .iter()
                 .find(|source| source.source_unit_revision_id == unit_id)
                 .ok_or("related source missing")?;
+            if matches!(reference, EvidenceRef::Text { .. })
+                && context.iter().any(|candidate| {
+                    candidate.source_unit_revision_id == source.source_unit_revision_id
+                })
+            {
+                let origin = ConditionSupportOrigin::StructuralContext {
+                    source_unit_revision_id: source.source_unit_revision_id.clone(),
+                };
+                if let Some(group) = reviewed.iter_mut().find(|group| group.origin == origin) {
+                    group.evidence.push(reference.clone());
+                } else {
+                    reviewed.push(ConditionSupport {
+                        origin,
+                        review_version: section_context_key(pack, source)?,
+                        evidence: vec![reference.clone()],
+                    });
+                }
+                continue;
+            }
             let relation = input
                 .document_relations
                 .iter()
@@ -1207,6 +1357,11 @@ impl DiscoverWork {
         {
             resolve_evidence(input, &option.evidence)?;
             return Ok(option.evidence.clone());
+        }
+        for source in pack_section_context(input, pack) {
+            if section_context_key(pack, source)? == dependency_id {
+                return Ok(vec![section_context_ref(pack, source)]);
+            }
         }
         let relation = dependency_relations(input, pack)
             .into_iter()
@@ -1904,13 +2059,15 @@ fn dependency_directory(
     cursor: Option<&str>,
 ) -> Result<Value, String> {
     let relations = dependency_relations(input, pack);
+    let context = pack_section_context(input, pack);
+    let total = relations.len() + context.len();
     let index = if let Some(cursor) = cursor {
         let index = cursor
             .strip_prefix("dependency_")
             .and_then(|s| s.split('_').next())
             .and_then(|s| s.parse::<usize>().ok())
             .ok_or("invalid dependency directory cursor")?;
-        if index >= relations.len() || dependency_cursor(pack, index)? != cursor {
+        if index >= total || dependency_cursor(pack, index)? != cursor {
             return Err("stale dependency directory cursor".into());
         }
         index
@@ -1940,9 +2097,18 @@ fn dependency_directory(
             })
         });
         rows.push(json!({"relation":{"id":relation.id,"from":relation.from,"to":relation.to,"kind":relation.kind,"status":relation.status,"required":relation.required},"target_in_pack":target_in_pack,"available_originals":originals,"originals_preview_only":true,"read":{"tool":"read_evidence","args":{"dependency_id":relation.id}},"read_policy":"Preview is not full source coverage. Read dependency_id for all native ranges using continuation pages; metadata grants no source or review credit."}));
+    } else if let Some(source) = index
+        .checked_sub(relations.len())
+        .and_then(|n| context.get(n))
+    {
+        rows.push(json!({"type":"structural_context_candidate",
+            "heading_path":source.locator["heading_path"],
+            "evidence_preview":section_context_ref(pack, source),
+            "read":{"tool":"read_evidence","args":{"dependency_id":section_context_key(pack, source)?}},
+            "read_policy":"Earlier prose in the same native section or an ancestor section may qualify these rows. Read all structural context originals completely in completed worker requests before submitting any result; decide applicability separately. This directory grants no reading credit, no primary evidence ownership, and no completion of another pack."}));
     }
     Ok(
-        json!({"read_dependencies":rows,"next_dependency_cursor":if index + 1 < relations.len() { Some(dependency_cursor(pack,index+1)?) } else { None },"directory_complete":index + 1 >= relations.len()}),
+        json!({"read_dependencies":rows,"next_dependency_cursor":if index + 1 < total { Some(dependency_cursor(pack,index+1)?) } else { None },"directory_complete":index + 1 >= total}),
     )
 }
 
@@ -2595,7 +2761,7 @@ mod tests {
         let input = input(
             vec![source("t", 0, "", "一")],
             vec![
-                json!({"source_unit_revision_id":"t","form_definition_revision_id":"table","definition":{"row_count":1,"column_count":1,"cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":original}]}}),
+                json!({"source_unit_revision_id":"t","form_definition_revision_id":"table","definition":{"row_count":1,"column_count":1,"cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"header_role":"none","text":original}]}}),
             ],
         );
         let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
@@ -2605,7 +2771,13 @@ mod tests {
             }
             test_sessions_fit(sessions, 2048)
         });
+        assert!(
+            work.planning_error().is_none(),
+            "{:?}",
+            work.planning_error()
+        );
         let packs = work.claim(100);
+        assert!(packs.len() > 1, "the non-header cell must actually split");
         let mut covered = String::new();
         for (n, pack) in packs.iter().enumerate() {
             let scope = work.pack_evidence(&input, &pack.id).unwrap();
