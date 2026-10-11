@@ -3406,7 +3406,6 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         first_count.total_context_tokens * 5 >= count.total_context_tokens * 4,
         "fixture first wire must already occupy at least 80% of the measured repair window"
     );
-    drop(host);
     // The actual compact wire fits at its measured context boundary; no extra
     // hypothetical future output is reserved. Original audit is far larger.
     config.limits.max_context_tokens = count.total_context_tokens;
@@ -3446,7 +3445,6 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .evidence
             .is_empty()
     );
-    drop(tight);
     config.limits.max_context_tokens = 1;
     let mut too_small = PackHost {
         input: &input,
