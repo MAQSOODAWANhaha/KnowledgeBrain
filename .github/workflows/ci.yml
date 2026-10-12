@@ -4,10 +4,9 @@ on:
   pull_request:
   push:
     # One workflow run per PR commit: pull_request covers PR heads, and push
-    # covers only CI_PUSH_BRANCH. Concurrency cancel does not dedupe those two
-    # events, because their refs differ. GitHub cannot read the default branch
-    # inside `on:`. scripts/ci_check_sources.sh fails when CI_PUSH_BRANCH is not
-    # that default branch. Images still publish only on the default branch.
+    # covers only CI_PUSH_BRANCH. GitHub cannot read the default branch inside
+    # `on:`. scripts/ci_check_sources.sh fails when CI_PUSH_BRANCH is not that
+    # default branch. Images still publish only on the default branch.
     branches: [main]
 
 permissions:
@@ -15,7 +14,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # The latest run replaces older CI runs across PR and main push events.
+  group: ci-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
