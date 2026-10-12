@@ -56,6 +56,7 @@ pub(super) fn config() -> Config {
             max_focus_replans: 2,
 
             max_context_tokens: 131_072,
+            max_correction_context_tokens: None,
             tokenizer: crate::agent_runtime::chat::TokenizerProfile {
                 model_id: "test-frozen-model".into(),
                 encoding: crate::agent_runtime::chat::TokenEncoding::O200kBase,

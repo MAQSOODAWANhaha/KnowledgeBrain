@@ -260,7 +260,7 @@ async fn production_budget_denial_drains_and_preserves_first_response() {
     );
 }
 #[tokio::test]
-async fn production_cancel_retains_unknown_send_and_resume_does_not_repeat() {
+async fn production_cancel_retains_unknown_charge_and_fresh_resume_retries() {
     let (input, config, journal) = fixture(2);
     let model = Delayed {
         delay_ms: 1000,
@@ -293,6 +293,13 @@ async fn production_cancel_retains_unknown_send_and_resume_does_not_repeat() {
     assert_eq!(charged, 2);
     let replay = Delayed::default();
     assert_eq!(
+        invoke(&input, &config, &journal, &replay, &cancel)
+            .await
+            .code,
+        "INTERNAL"
+    );
+    assert!(replay.calls.lock().unwrap().is_empty());
+    assert_eq!(
         invoke(
             &input,
             &config,
@@ -302,19 +309,20 @@ async fn production_cancel_retains_unknown_send_and_resume_does_not_repeat() {
         )
         .await
         .code,
-        "AGENT_SEND_OUTCOME_UNKNOWN"
+        "TEST_ALL_PACKS_BARRIER"
     );
-    assert!(replay.calls.lock().unwrap().is_empty());
-    assert_eq!(
-        journal
-            .state
-            .lock()
-            .unwrap()
-            .journal
-            .accounting
-            .physical_calls,
-        charged
-    );
+    assert_eq!(replay.calls.lock().unwrap().len(), 2);
+    let saved = journal.state.lock().unwrap();
+    assert_eq!(saved.journal.accounting.physical_calls, charged + 2);
+    for worker in saved.outline_run.discover_workers.values() {
+        assert_eq!(worker.retry.attempts.len(), 2);
+        assert_eq!(
+            worker.retry.attempts[0].outcome,
+            "AGENT_SEND_OUTCOME_UNKNOWN"
+        );
+        assert!(worker.retry.attempts[0].usage_unknown);
+        assert_eq!(worker.retry.attempts[1].outcome, "received");
+    }
 }
 #[tokio::test]
 async fn production_failed_pack_does_not_discard_peer_commit() {
@@ -591,18 +599,57 @@ impl Model for CycleModel {
                 Ordering::SeqCst,
             );
         }
+        // Empty source scopes are now scheduled before requirement review.
+        // After the real packs/evidence reads, settle only the advertised empty
+        // scope. Do not advance the requirement cycle or borrow its version.
+        if self.automatic
+            && allows("submit_review")
+            && self.step.load(Ordering::SeqCst) >= 5
+            && host["check_work"]["requirement_id"].is_null()
+            && host["check_work"]["source_scope"].is_object()
+        {
+            let current_pack = &host["check_work"]["source_scope"]["pack_id"];
+            let dispositions = source_dispositions
+                .iter()
+                .filter(|row| &row["pack_id"] == current_pack)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                dispositions.len(),
+                1,
+                "current source must have fresh read results"
+            );
+            assert_eq!(dispositions[0]["verdict"], "no_response_obligation");
+            let evidence = dispositions[0]["evidence"].clone();
+            assert!(!evidence.as_array().unwrap().is_empty());
+            return Ok(ChatTurn {
+                content: String::new(),
+                finish_reason: "tool_calls".into(),
+                usage: None,
+                tool_calls: vec![knowledge::models::ChatToolCall {
+                    id: format!("cycle-empty-source-{}", current_pack.as_str().unwrap()),
+                    name: "submit_review".into(),
+                    arguments: json!({"wire_scope":host["wire_scope"],
+                        "requirement_ids":[],"pack_ids":[current_pack],
+                        "inspected_evidence":evidence,"issues":[],
+                        "source_dispositions":dispositions,"template_reviews":[]})
+                    .to_string(),
+                }],
+            });
+        }
         let step = self.step.fetch_add(1, Ordering::SeqCst);
         let (name, mut args) = if self.automatic {
-            let id = ids
-                .first()
-                .cloned()
-                .or_else(|| {
-                    results
-                        .iter()
-                        .rev()
-                        .find_map(|r| r.get("requirement_id").cloned())
-                })
-                .expect("requirement must be visible in request");
+            let id = if (5..=8).contains(&step) {
+                assert!(
+                    host["check_work"]["requirement_id"].is_string(),
+                    "requirement review must follow the current source scope"
+                );
+                host["check_work"]["requirement_id"].clone()
+            } else {
+                ids.first()
+                    .cloned()
+                    .expect("requirement must be visible in request")
+            };
             match step {
                 0 => (
                     "put_chapters",
@@ -3278,6 +3325,13 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             );
             assert!(!worker.source_keys.contains_key("old-source-key"));
             assert_eq!(worker.rejected_turns, 2);
+            if matches!(pending_kind, "failed" | "prepared" | "prepared_other_run") {
+                assert_eq!(
+                    worker.correction_active,
+                    pending_kind != "prepared_other_run",
+                    "same-pack repair keeps correction, a foreign run cannot inherit it"
+                );
+            }
             if pending_kind != "prepared_other_run" {
                 assert_eq!(worker.reduced_context_tokens, Some(reduced_limit));
                 assert!(fresh.input_reserve + fresh.output_reserve <= reduced_limit as u64);
@@ -3432,11 +3486,11 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
     .unwrap();
     assert!(first_count.total_context_tokens <= count.total_context_tokens);
     assert!(
-        first_count.total_context_tokens * 5 >= count.total_context_tokens * 4,
-        "fixture first wire must already occupy at least 80% of the measured repair window"
+        count.total_context_tokens > first_count.total_context_tokens,
+        "retained candidates consume real request capacity"
     );
-    // The actual compact wire fits at its measured context boundary; no extra
-    // hypothetical future output is reserved. Original audit is far larger.
+    // Exact full-candidate boundary succeeds. This is a measured request, not
+    // permission to enlarge the original failed window or omit candidate text.
     config.limits.max_context_tokens = count.total_context_tokens;
     let mut restored = journal.load().await.unwrap().unwrap();
     let mut tight = PackHost {
@@ -3455,7 +3509,24 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         tight.state.outline_run.discover_workers["pack-0"].history,
         audit
     );
-    assert!(fitted.body.len() < serde_json::to_vec(&audit).unwrap().len());
+    let fitted_wire: Value = serde_json::from_slice(&fitted.body).unwrap();
+    let candidate_texts = fitted_wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .filter_map(|v| {
+            v["rejected_submission_audit"]["original_arguments_text"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_texts.len(), 1);
+    assert_eq!(
+        candidate_texts[0],
+        audit[2]["tool_calls"][0]["function"]["arguments"]
+    );
     assert!(
         !tight
             .state
@@ -3474,7 +3545,7 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .evidence
             .is_empty()
     );
-    config.limits.max_context_tokens = 1;
+    config.limits.max_context_tokens = first_count.total_context_tokens;
     let mut too_small = PackHost {
         input: &input,
         config: &config,
@@ -3489,6 +3560,19 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .unwrap_err()
             .code,
         "DISCOVER_READ_CAPACITY_EXCEEDED"
+    );
+    assert_eq!(
+        too_small.state.outline_run.discover_workers["pack-0"].history,
+        audit
+    );
+    assert!(
+        !too_small
+            .state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .complete()
     );
 }
 
@@ -3507,6 +3591,241 @@ include!("discover_s2_tests.rs");
 include!("discover_s5_tests.rs");
 
 include!("discover_first_support_plan_tests.rs");
+
+include!("discover_worker_prompt_tests.rs");
+
+include!("discover_batch_repair_tests.rs");
+
+include!("discover_reference_progress_tests.rs");
+
+include!("discover_correction_window_tests.rs");
+
+include!("discover_read_budget_tests.rs");
+
+struct RetryFixtureModel {
+    retry_after_ms: u64,
+    fail_count: usize,
+    code: &'static str,
+    requests: Mutex<Vec<(std::time::Instant, Vec<u8>)>>,
+    accepted: Delayed,
+}
+#[async_trait]
+impl Model for RetryFixtureModel {
+    async fn turn(&self, config: &Config, body: &[u8]) -> Result<ChatTurn, AgentError> {
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            let index = requests.len();
+            requests.push((std::time::Instant::now(), body.to_vec()));
+            index
+        };
+        if index < self.fail_count {
+            let mut error = error(self.code, "synthetic provider failure");
+            error.retry_after_ms = Some(self.retry_after_ms);
+            error = error.with_usage(Some(knowledge::models::ChatUsage {
+                total_tokens: Some(7),
+                ..Default::default()
+            }));
+            return Err(error);
+        }
+        self.accepted.turn(config, body).await
+    }
+}
+
+#[tokio::test]
+async fn discover_retry_keeps_exact_wire_and_does_not_block_ready_peers() {
+    struct StopAfterPeers {
+        inner: Durable,
+        cancel: CancellationToken,
+    }
+    #[async_trait]
+    impl Journal for StopAfterPeers {
+        async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
+            self.inner.load().await
+        }
+        async fn reserve(
+            &self,
+            state: &Checkpoint,
+            body: &[u8],
+        ) -> Result<Option<usize>, AgentError> {
+            self.inner.reserve(state, body).await
+        }
+        async fn save(&self, state: &Checkpoint, progress: &Value) -> Result<(), AgentError> {
+            self.inner.save(state, progress).await?;
+            let committed = state
+                .outline_run
+                .discover_workers
+                .values()
+                .filter(|worker| matches!(worker.pending, Some(Pending::Committed { .. })))
+                .count();
+            if committed == 2 {
+                self.cancel.cancel();
+            }
+            Ok(())
+        }
+    }
+    let (input, config, mut durable) = fixture(3);
+    durable.stop_barrier = false;
+    let mut state = durable.state.lock().unwrap().clone();
+    let cancel = CancellationToken::new();
+    let journal = StopAfterPeers {
+        inner: durable,
+        cancel: cancel.clone(),
+    };
+    let model = RetryFixtureModel {
+        retry_after_ms: 60 * 60 * 1000,
+        fail_count: 1,
+        code: "AGENT_PROVIDER_TRANSIENT",
+        requests: Mutex::default(),
+        accepted: Delayed {
+            delay_ms: 2,
+            ..Default::default()
+        },
+    };
+    let provider = PackProvider {
+        config: &config,
+        model: &model,
+    };
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    // Cancellation is triggered by durable peer commits, never a wall-clock
+    // race against the cost of preparing a third pack under CPU contention.
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(120),
+        coordinator::drive(&mut host, &provider, &cancel),
+    )
+    .await
+    .expect("ready peers must finish without waiting for the one-hour retry deadline");
+    assert_eq!(stopped.unwrap_err().code, "AGENT_CANCELLED");
+    assert_eq!(model.requests.lock().unwrap().len(), 3);
+    let mut restored = journal.load().await.unwrap().unwrap();
+    assert_eq!(restored.journal.accounting.physical_calls, 3);
+    assert_eq!(restored.journal.usage.total_tokens, 31);
+    let mut committed_before = Vec::new();
+    let mut delayed = 0;
+    for (id, worker) in &mut restored.outline_run.discover_workers {
+        match &worker.pending {
+            Some(Pending::Committed { .. }) => {
+                committed_before.push((id.clone(), serde_json::to_value(&*worker).unwrap()))
+            }
+            Some(Pending::Prepared { request }) => {
+                delayed += 1;
+                assert!(worker.retry.remaining() > Duration::from_secs(30 * 60));
+                assert_eq!(worker.retry.attempts.len(), 1);
+                assert_eq!(worker.retry.attempts[0].outcome, "AGENT_PROVIDER_TRANSIENT");
+                assert!(worker.retry.attempts[0].usage_unknown);
+                assert_eq!(request.body, model.requests.lock().unwrap()[0].1);
+                // Only the synthetic persisted deadline is advanced. Request,
+                // reservation, peer results and usage remain as saved.
+                worker.retry.not_before_ms =
+                    crate::agent_runtime::retry::now_ms().saturating_sub(1);
+            }
+            other => panic!("unexpected saved worker state: {other:?}"),
+        }
+    }
+    assert_eq!(committed_before.len(), 2);
+    assert_eq!(delayed, 1);
+    let resumed_cancel = CancellationToken::new();
+    let mut resumed = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut restored,
+        journal: &journal.inner,
+        cancel: &resumed_cancel,
+    };
+    assert!(
+        coordinator::drive(&mut resumed, &provider, &resumed_cancel)
+            .await
+            .unwrap()
+    );
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].1, requests[3].1,
+        "retry must reuse exact frozen bytes"
+    );
+    assert_eq!(restored.journal.accounting.physical_calls, 4);
+    assert_eq!(restored.journal.usage.total_tokens, 43);
+    for (id, before) in committed_before {
+        assert_eq!(
+            serde_json::to_value(&restored.outline_run.discover_workers[&id]).unwrap(),
+            before,
+            "committed peers must not be resent or rewritten during retry recovery"
+        );
+    }
+    assert!(
+        restored
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .complete()
+    );
+}
+
+#[tokio::test]
+async fn discover_retry_exhaustion_and_permanent_errors_survive_reload() {
+    for (code, attempts) in [
+        ("AGENT_PROVIDER_TRANSIENT", 3),
+        ("AGENT_TRANSPORT_INTERRUPTED", 3),
+        ("AGENT_PROVIDER_UNAVAILABLE", 1),
+    ] {
+        let (input, config, mut journal) = fixture(1);
+        journal.stop_barrier = false;
+        let mut state = journal.state.lock().unwrap().clone();
+        let cancel = CancellationToken::new();
+        let model = RetryFixtureModel {
+            retry_after_ms: 60,
+            fail_count: 99,
+            code,
+            requests: Mutex::default(),
+            accepted: Delayed::default(),
+        };
+        let mut host = PackHost {
+            input: &input,
+            config: &config,
+            state: &mut state,
+            journal: &journal,
+            cancel: &cancel,
+        };
+        assert!(
+            !coordinator::drive(
+                &mut host,
+                &PackProvider {
+                    config: &config,
+                    model: &model
+                },
+                &cancel
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(model.requests.lock().unwrap().len(), attempts);
+        assert_eq!(
+            host.state.journal.accounting.physical_calls as usize,
+            attempts
+        );
+        assert_eq!(host.state.journal.usage.total_tokens, attempts as u64 * 7);
+        *host.state = serde_json::from_value(serde_json::to_value(&*host.state).unwrap()).unwrap();
+        assert!(
+            !coordinator::drive(
+                &mut host,
+                &PackProvider {
+                    config: &config,
+                    model: &model
+                },
+                &cancel
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(model.requests.lock().unwrap().len(), attempts);
+    }
+}
 
 #[tokio::test]
 async fn confirmed_context_replanning_is_bounded_and_preserves_physical_ledger() {

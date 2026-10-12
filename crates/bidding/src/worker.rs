@@ -147,6 +147,7 @@ pub async fn run_tender_document_process(
     pool: &PgPool,
     job: &TenderDocumentProcessJobV2,
     cancel: &CancellationToken,
+    final_attempt: bool,
 ) -> Result<(), String> {
     job.request
         .validate()
@@ -188,23 +189,29 @@ pub async fn run_tender_document_process(
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
-    loop {
+    let result = loop {
         tokio::select! {
             biased;
-            result = &mut run => {
-                return match result {
-                    Ok(_) => Ok(()),
-                    Err(error) => {
-                        if let Err(release_error) = journal.release().await {
-                            tracing::warn!(%release_error, "outline lease retained until expiry");
-                        }
-                        Err(agent_error_message(&error))
-                    }
-                };
+            result = &mut run => break result.map(|_| ()).map_err(|error| agent_error_message(&error)),
+            _ = heartbeat.tick() => {
+                if let Err(error) = journal.renew().await {
+                    break Err(error);
+                }
             }
-            _ = heartbeat.tick() => journal.renew().await?,
+        }
+    };
+    if result.is_err() {
+        // Only a successfully acquired, still-live lease may settle this run;
+        // the SQL fence also rejects a lost lease following heartbeat failure.
+        // Pre-acquisition errors never enter this path.
+        let settled = journal
+            .settle_failure(final_attempt, cancel.is_cancelled())
+            .await;
+        if let Err(settlement_error) = settled {
+            tracing::warn!(%settlement_error, "outline failure state could not be persisted");
         }
     }
+    result
 }
 
 /// Resolve the currently supported v2 retrieval policy.
@@ -307,11 +314,15 @@ impl TenderDocumentProcessV2Worker {
         Self { pool, shutdown }
     }
 
-    pub async fn run(&self, job: &TenderDocumentProcessJobV2) -> Result<(), String> {
+    pub async fn run(
+        &self,
+        job: &TenderDocumentProcessJobV2,
+        final_attempt: bool,
+    ) -> Result<(), String> {
         let Some(pool) = self.pool.clone() else {
             return Err("postgres not configured".into());
         };
-        run_tender_document_process(&pool, job, &self.shutdown).await
+        run_tender_document_process(&pool, job, &self.shutdown, final_attempt).await
     }
 }
 

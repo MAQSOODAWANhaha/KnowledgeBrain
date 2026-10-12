@@ -30,6 +30,13 @@ fn invalid() -> AgentError {
     )
 }
 
+fn incomplete() -> AgentError {
+    AgentError::new(
+        "AGENT_RESPONSE_INCOMPLETE",
+        "provider returned incomplete tool output; no tools accepted",
+    )
+}
+
 fn unavailable() -> AgentError {
     AgentError::new(
         "AGENT_PROVIDER_UNAVAILABLE",
@@ -94,7 +101,11 @@ fn transport_unavailable(error: reqwest::Error) -> AgentError {
         connect=error.is_connect(), status=error.status().map(|s| s.as_u16()),
         cause_chain=?chain);
     AgentError::new(
-        "AGENT_PROVIDER_UNAVAILABLE",
+        if error.is_builder() || chain.iter().any(|cause| cause == "tls_certificate") {
+            "AGENT_PROVIDER_CONFIGURATION"
+        } else {
+            "AGENT_PROVIDER_TRANSIENT"
+        },
         format!(
             "configured provider transport failed (timeout={}, connect={}, causes={})",
             error.is_timeout(),
@@ -165,6 +176,53 @@ fn confirmed_context_rejection(status: u16, body: &[u8]) -> bool {
     )
 }
 
+fn http_failure(status: u16, headers: &reqwest::header::HeaderMap) -> AgentError {
+    let code = if matches!(status, 408 | 429 | 500 | 502 | 503 | 504) {
+        "AGENT_PROVIDER_TRANSIENT"
+    } else {
+        "AGENT_PROVIDER_UNAVAILABLE"
+    };
+    let mut error = AgentError::new(
+        code,
+        format!(
+            "configured provider returned HTTP {status}; request_ids={:?}",
+            safe_request_ids(headers)
+        ),
+    );
+    if code == "AGENT_PROVIDER_TRANSIENT"
+        && let Some(value) = headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+    {
+        let seconds = value.trim().parse::<u64>().ok().or_else(|| {
+            chrono::DateTime::parse_from_rfc2822(value)
+                .ok()
+                .map(|date| {
+                    date.timestamp()
+                        .saturating_sub(chrono::Utc::now().timestamp())
+                        .max(0) as u64
+                })
+        });
+        if let Some(seconds) = seconds {
+            // Do not send earlier than requested. An unreasonably distant
+            // deadline is rejected, never clamped into an early retry.
+            if seconds > 7 * 24 * 3600 {
+                return AgentError::new(
+                    "AGENT_RETRY_AFTER_UNSUPPORTED",
+                    "provider Retry-After exceeds the supported seven-day wait; no automatic resend",
+                );
+            }
+            error.retry_after_ms = Some(seconds * 1000);
+        } else if value.trim().bytes().all(|b| b.is_ascii_digit()) && !value.trim().is_empty() {
+            return AgentError::new(
+                "AGENT_RETRY_AFTER_UNSUPPORTED",
+                "provider Retry-After overflows the supported delay; no automatic resend",
+            );
+        }
+    }
+    error
+}
+
 fn client() -> Result<reqwest::Client, AgentError> {
     static CLIENT: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
     CLIENT
@@ -187,6 +245,7 @@ struct StreamStats {
     text_delta_bytes: u64,
     tool_events: u64,
     last_event_ms: Option<u64>,
+    usage: Option<ChatUsage>,
 }
 
 fn log_stream(
@@ -219,6 +278,18 @@ pub(crate) async fn provider_turn(
         &key,
         body,
         Duration::from_millis(runtime.timeout_ms),
+        Arc::default(),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(super) async fn fixture_send(endpoint: &str, body: &[u8]) -> Result<ChatTurn, AgentError> {
+    send(
+        endpoint,
+        "local-fixture",
+        body,
+        Duration::from_secs(5),
         Arc::default(),
     )
     .await
@@ -275,7 +346,7 @@ async fn send(
                 return Err(AgentError::new(
                     "AGENT_TURN_TIMEOUT",
                     "configured provider timed out",
-                ));
+                ).with_usage(stats.lock().expect("stream statistics").usage.clone()));
             }
             _ = heartbeat.tick() => {
                 tracing::info!(
@@ -314,35 +385,32 @@ async fn read_provider_events(
     );
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let request_ids = safe_request_ids(response.headers());
-        // Only explicit, complete provider codes establish a rejected context.
-        // Never infer this from arbitrary messages, HTTP 413, or transport errors.
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        let body = tokio::time::timeout(Duration::from_millis(250), async {
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.ok()?;
-                if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
-                    return None;
+        let mut error = http_failure(status, response.headers());
+        if matches!(status, 400 | 413 | 422) {
+            // Only a complete provider code establishes a rejected context.
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            let body = tokio::time::timeout(Duration::from_millis(250), async {
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.ok()?;
+                    if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
+                        return None;
+                    }
+                    bytes.extend_from_slice(&chunk);
                 }
-                bytes.extend_from_slice(&chunk);
+                Some(bytes)
+            })
+            .await
+            .ok()
+            .flatten();
+            if body
+                .as_deref()
+                .is_some_and(|bytes| confirmed_context_rejection(status, bytes))
+            {
+                error.code = "AGENT_PROVIDER_CONTEXT_EXCEEDED".into();
             }
-            Some(bytes)
-        })
-        .await
-        .ok()
-        .flatten();
-        let rejected_context = body
-            .as_deref()
-            .is_some_and(|bytes| confirmed_context_rejection(status, bytes));
-        return Err(AgentError::new(
-            if rejected_context {
-                "AGENT_PROVIDER_CONTEXT_EXCEEDED"
-            } else {
-                "AGENT_PROVIDER_UNAVAILABLE"
-            },
-            format!("configured provider returned HTTP {status}; request_ids={request_ids:?}"),
-        ));
+        }
+        return Err(error);
     }
     let stream = response.bytes_stream().map(move |chunk| {
         if let Ok(bytes) = &chunk {
@@ -368,7 +436,7 @@ async fn read_provider_events(
     while let Some(event) = events.next().await {
         let event = event.map_err(|_| {
             tracing::warn!(event = "llm_stream_failure", stage = "sse_frame");
-            interrupted()
+            interrupted().with_usage(turn.usage.clone())
         })?;
         if event.data == "[DONE]" {
             tracing::info!(
@@ -378,20 +446,36 @@ async fn read_provider_events(
             done = true;
             break;
         }
-        apply_event(&mut turn, &mut calls, &event.data, &stats, started)?;
+        if let Err(error) = apply_event(&mut turn, &mut calls, &event.data, &stats, started) {
+            return Err(error.with_usage(turn.usage.clone()));
+        }
     }
     if !done {
-        return Err(interrupted());
+        return Err(interrupted().with_usage(turn.usage.clone()));
     }
     turn.tool_calls = calls.into_values().collect();
     if turn.finish_reason != "tool_calls" {
-        return Err(invalid());
+        let error = if matches!(turn.finish_reason.as_str(), "length" | "stop" | "") {
+            incomplete()
+        } else {
+            invalid()
+        };
+        return Err(error.with_usage(turn.usage.clone()));
     }
     for call in &turn.tool_calls {
-        serde_json::from_str::<Value>(&call.arguments).map_err(|_| invalid())?;
+        serde_json::from_str::<Value>(&call.arguments)
+            .map_err(|_| incomplete().with_usage(turn.usage.clone()))?;
+    }
+    if turn.tool_calls.is_empty()
+        || turn
+            .tool_calls
+            .iter()
+            .any(|call| call.id.trim().is_empty() || call.name.trim().is_empty())
+    {
+        return Err(incomplete().with_usage(turn.usage.clone()));
     }
     if !super::valid_tool_turn(&turn) {
-        return Err(invalid());
+        return Err(invalid().with_usage(turn.usage.clone()));
     }
     Ok(turn)
 }
@@ -403,7 +487,7 @@ fn apply_event(
     stats: &Arc<Mutex<StreamStats>>,
     started: Instant,
 ) -> Result<(), AgentError> {
-    let value: Value = serde_json::from_str(data).map_err(|_| invalid())?;
+    let value: Value = serde_json::from_str(data).map_err(|_| interrupted())?;
     if value.get("error").is_some() {
         return Err(invalid());
     }
@@ -419,6 +503,7 @@ fn apply_event(
                 .as_u64()
                 .filter(|&count| count != 0),
         });
+        stats.lock().expect("stream statistics").usage = turn.usage.clone();
     }
     if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
         turn.finish_reason = reason.to_owned();
@@ -487,6 +572,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn http_retry_policy_keeps_auth_context_and_retry_after_separate() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "180".parse().unwrap());
+        for status in [408, 429, 500, 502, 503, 504] {
+            let error = super::http_failure(status, &headers);
+            assert!(crate::agent_runtime::retry::retryable(&error.code));
+            assert_eq!(error.retry_after_ms, Some(180_000));
+        }
+        for status in [400, 401, 403, 404, 413, 422, 501] {
+            assert!(!crate::agent_runtime::retry::retryable(
+                &super::http_failure(status, &headers).code
+            ));
+        }
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "999999999999999999999999".parse().unwrap(),
+        );
+        assert_eq!(
+            super::http_failure(429, &headers).code,
+            "AGENT_RETRY_AFTER_UNSUPPORTED"
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            (chrono::Utc::now() + chrono::Duration::seconds(10))
+                .to_rfc2822()
+                .parse()
+                .unwrap(),
+        );
+        let delay = super::http_failure(503, &headers).retry_after_ms.unwrap();
+        assert!((9000..=10000).contains(&delay));
+    }
+
     use super::*;
     use serde_json::{Value, json};
     use tokio::{
@@ -500,6 +618,39 @@ mod tests {
             "data: {}\n\n",
             json!({"id":"fixture-response","model":"fixture-model","choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
         )
+    }
+
+    #[tokio::test]
+    async fn actual_http_incomplete_tool_output_is_retryable_but_policy_and_duplicate_ids_are_not()
+    {
+        let call = json!({"index":0,"id":"c1","function":{"name":"read_source","arguments":"{"}});
+        for response in [
+            event(json!({}), json!("stop")),
+            event(json!({"tool_calls":[]}), json!("tool_calls")),
+            event(json!({"tool_calls":[call]}), json!("tool_calls")),
+            event(
+                json!({"tool_calls":[{"index":0,"id":"c1","function":{"arguments":"{}"}}]}),
+                json!("tool_calls"),
+            ),
+        ] {
+            let (result, requests, _) =
+                exchange(200, format!("{response}data: [DONE]\n\n"), false).await;
+            assert_eq!(result.unwrap_err().code, "AGENT_RESPONSE_INCOMPLETE");
+            assert_eq!(requests.len(), 1);
+        }
+        for response in [
+            event(json!({}), json!("content_filter")),
+            event(
+                json!({"tool_calls":[
+                    {"index":0,"id":"duplicate","function":{"name":"read_source","arguments":"{}"}},
+                    {"index":1,"id":"duplicate","function":{"name":"read_source","arguments":"{}"}}
+                ]}),
+                json!("tool_calls"),
+            ),
+        ] {
+            let (result, _, _) = exchange(200, format!("{response}data: [DONE]\n\n"), false).await;
+            assert_eq!(result.unwrap_err().code, "AGENT_OUTPUT_INVALID");
+        }
     }
 
     #[tokio::test]
@@ -758,7 +909,14 @@ mod tests {
             let (result, _, _) =
                 exchange(status, "truncated provider error body".into(), true).await;
             let error = result.unwrap_err();
-            assert_eq!(error.code, "AGENT_PROVIDER_UNAVAILABLE");
+            assert_eq!(
+                error.code,
+                if status == 429 || status == 503 {
+                    "AGENT_PROVIDER_TRANSIENT"
+                } else {
+                    "AGENT_PROVIDER_UNAVAILABLE"
+                }
+            );
             assert!(error.message.contains(&format!("HTTP {status}")));
             assert!(!error.message.contains("truncated provider"));
         }
@@ -775,7 +933,21 @@ mod tests {
         assert!(!error.message.contains("synthetic private input"));
         assert_eq!(requests.len(), 1);
         let (result, _, _) = exchange(429, body, false).await;
-        assert_eq!(result.unwrap_err().code, "AGENT_PROVIDER_UNAVAILABLE");
+        assert_eq!(result.unwrap_err().code, "AGENT_PROVIDER_TRANSIENT");
+    }
+
+    #[tokio::test]
+    async fn timeout_preserves_observed_usage_without_returning_partial_tools() {
+        let response = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"partial\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":4,\"total_tokens\":17}}\n\n"
+        );
+        let (result, requests, stats) = exchange(200, response.into(), true).await;
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "AGENT_TURN_TIMEOUT");
+        assert_eq!(error.usage.unwrap().total_tokens, Some(17));
+        assert_eq!(stats.usage.unwrap().total_tokens, Some(17));
+        assert_eq!(requests.len(), 1, "transport must send exactly once");
     }
 
     #[tokio::test]

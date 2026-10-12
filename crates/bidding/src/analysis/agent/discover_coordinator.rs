@@ -67,8 +67,13 @@ pub(crate) struct Worker {
     pub retired_read_calls: BTreeSet<String>,
     pub pending: Option<Pending>,
     pub generation: u64,
+    /// Host-confirmed correction remains active until this pack settles.
+    #[serde(default)]
+    pub correction_active: bool,
     #[serde(default)]
     pub reduced_context_tokens: Option<usize>,
+    #[serde(default)]
+    pub retry: crate::agent_runtime::retry::RetryJournal,
     pub registry: crate::outline::model_wire::Registry,
     pub rejected_turns: usize,
     pub failure_signatures: BTreeSet<String>,
@@ -94,6 +99,9 @@ pub(super) trait Host: Send {
     /// Mark all dispatched but unresolved requests unknown; keep reservations.
     async fn cancelled(&mut self, active: &BTreeSet<String>) -> Result<(), AgentError>;
     fn all_committed(&self) -> bool;
+    fn retry_delay(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 #[async_trait]
 pub(super) trait Provider: Sync {
@@ -104,6 +112,12 @@ pub(super) async fn drive<H: Host, P: Provider>(
     provider: &P,
     cancel: &CancellationToken,
 ) -> Result<bool, AgentError> {
+    if cancel.is_cancelled() {
+        return Err(AgentError::new(
+            "AGENT_CANCELLED",
+            "Discover cancelled before recovery",
+        ));
+    }
     host.replay_received().await?;
     let mut active = BTreeSet::new();
     let mut calls = FuturesUnordered::new();
@@ -148,11 +162,32 @@ pub(super) async fn drive<H: Host, P: Provider>(
             if let Some(error) = admission_error {
                 return Err(error);
             }
+            if let Some(delay) = host.retry_delay() {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => { host.cancelled(&active).await?; return Err(AgentError::new("AGENT_CANCELLED", "Discover retry cancelled")); },
+                    _ = tokio::time::sleep(delay) => {}
+                }
+                continue;
+            }
             return Ok(host.all_committed());
         }
+        let retry_delay = if active.len() < WORKERS {
+            host.retry_delay()
+        } else {
+            None
+        };
+        let retry_wakeup = async {
+            if let Some(delay) = retry_delay {
+                tokio::time::sleep(delay).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
         let result = tokio::select! {
             biased;
             _=cancel.cancelled()=>{host.cancelled(&active).await?;return Err(AgentError::new("AGENT_CANCELLED","Discover cancelled; unresolved sends retain reservations"));},
+            _ = retry_wakeup => continue,
             result=calls.next()=>result.expect("inflight request"),
         };
         let (request, response) = result;

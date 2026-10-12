@@ -390,7 +390,7 @@ BEGIN
       lease_until = clock_timestamp() + make_interval(secs => p_seconds),
       updated_at = clock_timestamp()
   WHERE id = p_run_id AND project_id = p_project_id
-    AND frozen_input_sha256 = p_frozen_input_sha256 AND status IN ('pending','running','failed')
+    AND frozen_input_sha256 = p_frozen_input_sha256 AND status IN ('pending','running')
     AND (lease_until IS NULL OR lease_until <= clock_timestamp())
   RETURNING * INTO claimed;
   IF claimed.id IS NULL THEN
@@ -422,6 +422,19 @@ CREATE FUNCTION kb_bid_v2_outline_release(
 ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN
   UPDATE bid_outline_runs SET status = 'pending', lease_token = NULL,
+    lease_until = NULL, updated_at = clock_timestamp()
+  WHERE id = p_run_id AND status = 'running' AND lease_token = p_token
+    AND lease_epoch = p_epoch AND lease_until > clock_timestamp();
+  RETURN FOUND;
+END $$;
+
+-- Queue retry exhaustion is terminal for this acquisition, never for a
+-- different owner or an expired lease. Keep the full checkpoint for diagnosis.
+CREATE FUNCTION kb_bid_v2_outline_fail(
+  p_run_id uuid, p_token uuid, p_epoch bigint
+) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  UPDATE bid_outline_runs SET status = 'failed', lease_token = NULL,
     lease_until = NULL, updated_at = clock_timestamp()
   WHERE id = p_run_id AND status = 'running' AND lease_token = p_token
     AND lease_epoch = p_epoch AND lease_until > clock_timestamp();
@@ -873,6 +886,7 @@ REVOKE ALL ON FUNCTION
   kb_bid_v2_outline_checkpoint(uuid, uuid, bigint, jsonb),
   kb_bid_v2_outline_pause_budget(uuid, uuid, bigint),
   kb_bid_v2_outline_release(uuid, uuid, bigint),
+  kb_bid_v2_outline_fail(uuid, uuid, bigint),
   kb_bid_v2_outline_paused_checkpoint(uuid),
   kb_bid_v2_outline_resume_budget(uuid, kb_sha256, jsonb),
   kb_bid_v2_publish_document(uuid, uuid, text, text, kb_object_ref, kb_sha256, bigint, uuid, kb_actor_identity),

@@ -172,18 +172,25 @@ pub fn ready(input: &FrozenInput, draft: &super::tools::Draft) -> Result<(), Str
 /// A scope remains active through source disposition, linked claim and target
 /// review. Delivery and source-only completion cannot advance the work cursor.
 pub fn next_scope<'a>(input: &FrozenInput, draft: &'a super::tools::Draft) -> Option<&'a String> {
-    draft.required_pack_ids.iter().find(|pack| {
-        !execution_complete(input, draft, pack).unwrap_or(false)
-            || linked_requirements(draft, pack)
-                .iter()
-                .filter(|id| !has_document_issue(input, draft, id))
-                .any(|id| {
-                    !draft.reviewed_requirement_ids.contains(id)
-                        || draft.template_reviews.get(id).is_none_or(|review| {
-                            !super::template_review::validate(input, draft, review).unwrap_or(false)
-                        })
-                })
-    })
+    draft
+        .required_pack_ids
+        .iter()
+        .filter(|pack| {
+            !execution_complete(input, draft, pack).unwrap_or(false)
+                || linked_requirements(draft, pack)
+                    .iter()
+                    .filter(|id| !has_document_issue(input, draft, id))
+                    .any(|id| {
+                        !draft.reviewed_requirement_ids.contains(id)
+                            || draft.template_reviews.get(id).is_none_or(|review| {
+                                !super::template_review::validate(input, draft, review)
+                                    .unwrap_or(false)
+                            })
+                    })
+        })
+        // Empty extraction is a hypothesis to verify first, never completion credit.
+        // Keep the normal Check entry gate and the full completion predicate above.
+        .min_by_key(|pack| !linked_requirements(draft, pack).is_empty())
 }
 
 pub fn linked_requirements(draft: &super::tools::Draft, pack: &str) -> BTreeSet<String> {
@@ -393,6 +400,45 @@ mod scope_boundary_tests {
                 end_byte: *end_byte,
             },
         )
+    }
+
+    #[test]
+    fn check_prioritizes_empty_scope_then_advances_after_valid_no_obligation_and_reload() {
+        let (input, state, _, _) = crate::outline::fixture_organized(false);
+        let mut draft = state.outline_run.tool_draft;
+        // Sort last to prove this is semantic scheduling, not lexical ordering.
+        let empty = "zz-empty-source".to_string();
+        let scope = Scope {
+            evidence: vec![],
+            structure_keys: BTreeSet::from(["synthetic-empty-structure".into()]),
+        };
+        draft.required_pack_ids.insert(empty.clone());
+        draft.source_scopes.insert(empty.clone(), scope.clone());
+        assert_eq!(next_scope(&input, &draft), Some(&empty));
+        let row = Disposition {
+            pack_id: empty.clone(),
+            version: version(&input, &draft, &empty, &scope).unwrap(),
+            evidence: vec![],
+            verdict: Verdict::NoResponseObligation,
+            requirement_ids: BTreeSet::new(),
+            reason: "Synthetic structure has no response obligation".into(),
+        };
+        assert!(validate(&input, &draft, &scope, &row).is_err());
+        draft
+            .check_reads
+            .structure_keys
+            .extend(scope.structure_keys.clone());
+        validate(&input, &draft, &scope, &row).unwrap();
+        draft.source_dispositions.insert(key(&row).unwrap(), row);
+        assert!(complete(&input, &draft, &empty).unwrap());
+        let draft: super::super::tools::Draft =
+            serde_json::from_value(serde_json::to_value(&draft).unwrap()).unwrap();
+        assert_ne!(next_scope(&input, &draft), Some(&empty));
+        assert!(next_scope(&input, &draft).is_some());
+        assert!(
+            ready(&input, &draft).is_err(),
+            "other sources still need Check"
+        );
     }
 
     #[test]

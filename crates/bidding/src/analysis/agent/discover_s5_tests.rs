@@ -474,6 +474,8 @@ impl Model for S5CheckTransportOracle {
 
 #[tokio::test]
 async fn s5_fresh_check_uses_serial_image_transport_for_each_occurrence_before_publication() {
+    super::super::profile::reset();
+    let profile_started = std::time::Instant::now();
     let (input, config, state) = s5_occurrences();
     let expected_image_urls = state
         .source_views
@@ -505,6 +507,10 @@ async fn s5_fresh_check_uses_serial_image_transport_for_each_occurrence_before_p
     let result = super::super::run(&input, &config, &journal, &model, &cancel)
         .await
         .unwrap_err();
+    eprintln!(
+        "S5_PROFILE {}",
+        json!({"wall_ms":profile_started.elapsed().as_millis(),"model_calls":model.inner.total_calls.load(Ordering::SeqCst),"inclusive_count_micros":super::super::profile::finish(),"counters":super::super::profile::finish_counters()})
+    );
     assert_eq!(result.code, "INTERNAL", "{}", result.message);
     assert_eq!(result.message, "Agent run cancelled");
     assert!(

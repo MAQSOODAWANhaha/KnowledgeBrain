@@ -37,7 +37,7 @@ impl Duty {
     pub fn instructions(self) -> &'static str {
         match self {
             Self::Discover => {
-                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。同一段或格中的独立义务分别提取，保留主体、条件、时间、阈值、证明材料和替代方案；笼统“满足全部技术条款”不能替代具体义务。强制资格/否决条件与可选评分材料分开，保留适用条件，不把评分公式一律变成必填要求。跨页续条结合已提供的相邻载体核对。当前包没有引用正文不等于全文件缺失；沿可用依赖目录和 read_evidence 核实内部引用，无法核实时明确范围与不确定性，不能笼统要求补交已有章节。未提供的外部公告只能记录缺失，不补写。主证据只来自已领取的阅读包，每一段都要读完；结构依赖目录中的 structural_context_candidate 必须经 read_evidence 与续页完整交付后才能 submit_pack，目录本身不算读取。已读取上下文是否适用分别判断，不能移作其他包的主证据或完成信用。正常 requirements 与 issues 可以同次 submit_pack 返回，独立包继续处理。明确没有应答义务且没有问题时，requirements 和 issues 都用空数组，并说明 no_requirement_reason。资料缺失、冲突、含糊或不可辨认时不要编造确定要求；用 issues 的 document_missing、document_conflict、document_ambiguous 或 document_unreadable，填写 id、description、requested_information，requirement_ids 必须为空数组，evidence 只用本包已实际读取的 owned 原文 evidence_key。缺失资料引用真实提及该资料的位置，不虚构缺失正文。requirements 为空但有合法 issues 时，no_requirement_reason 必须为 null，inspected_atom_ids 仍须覆盖全部已读 owned 原子。API、解析器或执行失败不能冒充文档问题。仅当阅读会话 status=failed 时 repair=true；status=running 时 repair=false。schema 校验失败不会改变包状态。证据必须直接复制当前阅读包原文旁的 evidence_key，提交 {evidence_key:原值}；key只对当前包、版本和领取会话有效。如有 condition_support_options，可将所需 support_key 单独填入 condition_support；它是外部条件依据，不是当前包主证据，不能替代 evidence 或改变 source_section_id。不要从 Check 的 q 句柄推算其他来源引用，不计算字节偏移，不拼写来源ID；空格没有可选证据。source_section_id 必须用 {atom_key:原值} 选择该原子的所属章节；inspected_atom_ids 必须用 {atom_key:原值}，必须逐个实际读取后选择且不重复。不要写章节，不要写模板，不要匹配知识库。"
+                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。同一段或格中的独立义务分别提取，保留主体、条件、时间、阈值、证明材料和替代方案；笼统“满足全部技术条款”不能替代具体义务。强制资格/否决条件与可选评分材料分开，保留适用条件，不把评分公式一律变成必填要求。跨页续条结合已提供的相邻载体核对。当前包没有引用正文不等于全文件缺失；沿可用依赖目录和 read_evidence 核实内部引用，无法核实时明确范围与不确定性，不能笼统要求补交已有章节。未提供的外部公告只能记录缺失，不补写。主证据只来自已领取的阅读包，每一段都要读完；必读支持由宿主选择并自动附在当前请求中，必须逐页读完；阅读当前请求全部原文页后，按 next_required_read 指示继续读取，正文有续页时读到 selection_complete，再提交。next_required_read 是按消费当前页后的状态计算的导航，不授予已读信用；目录和原文预览也不算完整读取。structural_context_candidate 是可选语义候选，不是统一的提交前置条件；需判断其是否影响当前要求，必要时沿 read_evidence 核实，不能因为可选就忽略已发现的相关限定。已读取上下文是否适用分别判断，不能移作其他包的主证据、完成信用或已通过 Check。正常 requirements 与 issues 可以同次 submit_pack 返回，独立包继续处理。明确没有应答义务且没有问题时，requirements 和 issues 都用空数组，并说明 no_requirement_reason。资料缺失、冲突、含糊或不可辨认时不要编造确定要求；用 issues 的 document_missing、document_conflict、document_ambiguous 或 document_unreadable，填写 id、description、requested_information，requirement_ids 必须为空数组，evidence 只用本包已实际读取的 owned 原文 evidence_key。缺失资料引用真实提及该资料的位置，不虚构缺失正文。requirements 为空但有合法 issues 时，no_requirement_reason 必须为 null，inspected_atom_ids 仍须覆盖全部已读 owned 原子。API、解析器或执行失败不能冒充文档问题。仅当阅读会话 status=failed 时 repair=true；status=running 时 repair=false。schema 校验失败不会改变包状态。证据必须直接复制当前阅读包原文旁的 evidence_key，提交 {evidence_key:原值}；key只对当前包、版本和领取会话有效。如有 condition_support_options，可将所需 support_key 单独填入 condition_support；它是外部条件依据，不是当前包主证据，不能替代 evidence 或改变 source_section_id。不要从 Check 的 q 句柄推算其他来源引用，不计算字节偏移，不拼写来源ID；空格没有可选证据。source_section_id 必须用 {atom_key:原值} 选择该原子的所属章节；inspected_atom_ids 必须用 {atom_key:原值}，必须逐个实际读取后选择且不重复。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
                 "本轮按 read_requirements、read_outline 的分页索引写章节、附件绑定和规定模板槽。已有本批要求时先完成对应写入，不重复读取已完整返回的摘要。mode=packs 的全来源索引用于独立 Check，本轮按已有要求的证据读取所需原文，不重新扫描全部来源。固定条文先 read_evidence，再写 content.source_copy 引用，由主机复制；不得提供自由 fixed_text。用 put_fulfillments 把每条要求指向已存在且属于同一应答叶子的实际槽、表格或可见人工任务；该工具不传mode，target_refs必须非空，generated_explanation不能单独履行要求。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组（可多个，即森林）、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。editable_blank 须提供 blank_kind 与非空 match_query，不传 text；source_copy 只传一个已读取来源引用，不传 text、match_query、blank_kind；generated_explanation 的 text 位于槽对象根部，与 content 并列；content 只含 type 和已读取的 supporting_refs，禁止 content.text，不传 match_query、blank_kind。不要用空字符串代替省略字段。分组章节不能带模板槽。put_chapters(mode=upsert)按原章节id更新并保留未提交章节，不是重命名或清空；同一parent下order必须唯一，根章节也一样。需要整体替换时用mode=replace提交完整章节树并保留已有目标引用有效。bind_forms 与 put_slots 的 upsert 按已有id原位更新，未提交项保留，新项追加，不删除或重排。映射内容错误可用upsert修正整条续表链；顺序错误必须先读取完整当前bindings，再用replace提交全部有效绑定并按来源续表顺序排列。槽位重排同样先读取完整slots再replace，不能仅把upsert参数改顺序。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
@@ -189,23 +189,156 @@ pub(crate) fn validate_arguments(name: &str, args: &Value) -> Result<(), String>
         .ok_or("unknown outline tool")?;
     let schema = jsonschema::JSONSchema::compile(&spec.schema["function"]["parameters"])
         .map_err(|e| e.to_string())?;
-    if let Err(mut errors) = schema.validate(args)
-        && let Some(error) = errors.next()
-    {
-        // Refine only a schema rejection; never relocate or accept bad fields.
-        if name == "put_slots"
-            && let Some(message) = slot_text_layer_feedback(args)
-        {
-            return Err(message);
+    if let Err(errors) = schema.validate(args) {
+        use jsonschema::error::ValidationErrorKind;
+        let parameters = &spec.schema["function"]["parameters"];
+        let mut diagnostics = SchemaDiagnostics::default();
+        for error in errors {
+            let schema_path = error.schema_path.to_string();
+            let code = schema_path.rsplit('/').next().unwrap_or("constraint");
+            let path = error.instance_path.to_string();
+            let constraint = parameters
+                .pointer(&schema_path)
+                .cloned()
+                .unwrap_or(Value::Null);
+            match &error.kind {
+                ValidationErrorKind::Required { property } => {
+                    let field = property
+                        .as_str()
+                        .unwrap_or("")
+                        .replace('~', "~0")
+                        .replace('/', "~1");
+                    diagnostics.push(
+                        format!("{schema_path}/{field}"),
+                        json!({"code":code,"path":format!("{path}/{field}"),
+                        "received":{"missing":true},"allowed":{"required":true}}),
+                    );
+                }
+                ValidationErrorKind::AdditionalProperties { unexpected } => {
+                    for field in unexpected {
+                        let escaped = field.replace('~', "~0").replace('/', "~1");
+                        diagnostics.push(
+                            schema_path.clone(),
+                            json!({"code":code,"path":format!("{path}/{escaped}"),
+                            "received":schema_received_value(&error.instance[field]),
+                            "allowed":{"additional_property":false}}),
+                        );
+                    }
+                }
+                _ => {
+                    let allowed = match &error.kind {
+                        ValidationErrorKind::Enum { options } => options.clone(),
+                        ValidationErrorKind::Constant { expected_value } => json!([expected_value]),
+                        _ if constraint.is_object()
+                            || constraint
+                                .as_array()
+                                .is_some_and(|items| items.iter().any(Value::is_object)) =>
+                        {
+                            json!({"schema_path":schema_path})
+                        }
+                        _ => constraint,
+                    };
+                    diagnostics.push(
+                        schema_path.clone(),
+                        json!({"code":code,"path":path,
+                        "received":schema_received_value(&error.instance),"allowed":allowed}),
+                    );
+                }
+            }
         }
-        let path = error.schema_path.to_string();
-        return Err(bounded_schema_feedback(
-            name,
-            path.rsplit('/').next().unwrap_or("constraint"),
-            &error.instance_path.to_string(),
-        ));
+        // Inspect every rejection, but bound model-facing feedback independently
+        // of candidate size. The unchanged original arguments in the durable
+        // tool-call audit plus this revision's schema reproduce all diagnostics.
+        let hint = if name == "put_slots" {
+            slot_text_layer_feedback(args)
+        } else {
+            None
+        };
+        return Err(diagnostics.feedback(name, hint));
     }
     Ok(())
+}
+
+// Limits apply only to host diagnostics, never to the submitted candidate.
+const SCHEMA_FEEDBACK_MAX_BYTES: usize = 8192;
+const SCHEMA_FEEDBACK_MAX_GROUPS: usize = 24;
+const SCHEMA_FEEDBACK_PATHS_PER_GROUP: usize = 3;
+
+#[derive(Default)]
+struct SchemaDiagnostics {
+    total: usize,
+    groups: Vec<(String, Value)>,
+}
+
+impl SchemaDiagnostics {
+    fn push(&mut self, schema_path: String, mut diagnostic: Value) {
+        self.total += 1;
+        if let Some(path) = diagnostic["path"].as_str().filter(|path| path.len() > 256) {
+            let mut end = 256;
+            while !path.is_char_boundary(end) {
+                end -= 1;
+            }
+            diagnostic["path"] = json!(format!("{}...", &path[..end]));
+            diagnostic["path_truncated"] = json!(true);
+        }
+        let matching = self.groups.iter_mut().find(|(key, existing)| {
+            key == &schema_path
+                && existing["code"] == diagnostic["code"]
+                && existing["received"] == diagnostic["received"]
+                && existing["allowed"] == diagnostic["allowed"]
+        });
+        if let Some((_, existing)) = matching {
+            existing["count"] = json!(existing["count"].as_u64().unwrap() + 1);
+            let samples = existing["other_paths"].as_array_mut().unwrap();
+            if samples.len() + 1 < SCHEMA_FEEDBACK_PATHS_PER_GROUP {
+                // Keep truncation explicit for each sampled path.
+                samples.push(json!({"path":diagnostic["path"],
+                    "path_truncated":diagnostic["path_truncated"] == true}));
+            }
+        } else if self.groups.len() < SCHEMA_FEEDBACK_MAX_GROUPS {
+            diagnostic["count"] = json!(1);
+            diagnostic["other_paths"] = json!([]);
+            self.groups.push((schema_path, diagnostic));
+        }
+    }
+
+    fn feedback(mut self, tool: &str, hint: Option<String>) -> String {
+        loop {
+            let shown: usize = self
+                .groups
+                .iter()
+                .map(|(_, group)| 1 + group["other_paths"].as_array().unwrap().len())
+                .sum();
+            let feedback = format!(
+                "SCHEMA/validation {}",
+                json!({
+                    "tool":tool,"state_changed":false,
+                    "errors":self.groups.iter().map(|(_, group)|group).collect::<Vec<_>>(),
+                    "total_errors":self.total,"shown_errors":shown,
+                    "omitted_errors":self.total - shown,
+                    "hint":hint
+                })
+            );
+            if feedback.len() <= SCHEMA_FEEDBACK_MAX_BYTES {
+                return feedback;
+            }
+            // Tool names and hints are host-defined and fit even without groups.
+            self.groups
+                .pop()
+                .expect("schema feedback header fits byte limit");
+        }
+    }
+}
+
+fn schema_received_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) if text.len() > 96 => {
+            json!({"type":"string","bytes":text.len(),"omitted":true})
+        }
+        Value::Array(items) => json!({"type":"array","items":items.len(),"omitted":true}),
+        Value::Object(fields) => json!({"type":"object","properties":fields.len(),"omitted":true}),
+        _ => value.clone(),
+    }
 }
 
 fn slot_text_layer_feedback(args: &Value) -> Option<String> {
@@ -225,29 +358,6 @@ fn slot_text_layer_feedback(args: &Value) -> Option<String> {
         }
     }
     None
-}
-
-fn bounded_schema_feedback(tool: &str, code: &str, path: &str) -> String {
-    let prefix = format!("SCHEMA/{code} ");
-    let suffix = match tool {
-        "submit_pack" => "; state unchanged; repair=true only if status=failed",
-        "put_slots" => "; state unchanged; fields must match content.type",
-        "put_fulfillments" => "; state unchanged; no mode; use existing same-chapter targets",
-        _ => "; state unchanged; correct the named field",
-    };
-    let budget = 160usize.saturating_sub(prefix.len() + suffix.len());
-    let mut end = path.len().min(budget);
-    if end < path.len() {
-        end = end.saturating_sub(3);
-    }
-    while !path.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{prefix}{}{ellipsis}{suffix}",
-        &path[..end],
-        ellipsis = if end < path.len() { "..." } else { "" }
-    )
 }
 
 pub fn schemas_for(duty: Duty) -> Vec<Value> {
@@ -1825,20 +1935,7 @@ fn submit_review(
 mod tests {
     use super::*;
     include!("slot_wire_tests.rs");
-    #[test]
-    fn bounded_schema_feedback_keeps_code_path_and_state_guidance() {
-        let short = bounded_schema_feedback("submit_pack", "oneOf", "/requirements/4/evidence/2");
-        assert!(short.contains("SCHEMA/oneOf /requirements/4/evidence/2"));
-        assert!(
-            !bounded_schema_feedback("put_slots", "required", "/slots/0").contains("repair=true")
-        );
-        for path in ["/材料😀".repeat(200), "/field".repeat(200)] {
-            let value = bounded_schema_feedback("submit_pack", "type", &path);
-            assert!(value.len() <= 160);
-            assert!(value.starts_with("SCHEMA/type /"));
-            assert!(value.ends_with("repair=true only if status=failed"));
-        }
-    }
+    include!("schema_feedback_tests.rs");
     #[test]
     fn large_invalid_atom_array_returns_bounded_repair_feedback() {
         let id = "private-instance-do-not-echo".repeat(1024);

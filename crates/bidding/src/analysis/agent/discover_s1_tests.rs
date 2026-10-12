@@ -732,12 +732,17 @@ impl Journal for S1Journal {
 
 #[tokio::test]
 async fn s1_actual_worker_rejects_reads_continuations_repairs_reloads_and_requires_fresh_check() {
-    s1_worker_observation_lifecycle(false).await;
+    s1_worker_observation_lifecycle(false, false).await;
 }
 
 #[tokio::test]
 async fn s1_unique_observations_stop_at_capacity_without_losing_notes_or_retrying_after_reload() {
-    s1_worker_observation_lifecycle(true).await;
+    s1_worker_observation_lifecycle(true, true).await;
+}
+
+#[tokio::test]
+async fn s1_repeated_observations_complete_at_original_narrow_window_with_full_durable_audit() {
+    s1_worker_observation_lifecycle(false, true).await;
 }
 
 fn s1_plain_assistant_text(message: &Value) -> Option<String> {
@@ -771,7 +776,7 @@ fn s1_plain_assistant_text(message: &Value) -> Option<String> {
     }
 }
 
-async fn s1_worker_observation_lifecycle(unique_observations: bool) {
+async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_window: bool) {
     // The source is derived from the synthetic native DOCX, with a longer
     // synthetic introduction solely to force production source pagination.
     let (mut input, _, _) = fixture();
@@ -780,13 +785,13 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
         .iter_mut()
         .find(|source| source.text.contains("Only if"))
         .unwrap();
-    intro.text = intro.text.repeat(128);
+    intro.text = intro.text.repeat(if narrow_window { 128 } else { 1024 });
     let intro_id = intro.source_unit_revision_id.clone();
     let intro_text = intro.text.clone();
     assert_eq!(
         intro_text.len(),
-        22_528,
-        "use the same source in both capacity scenarios"
+        if narrow_window { 22_528 } else { 180_224 },
+        "original narrow window stays unchanged; longer functional source separates paging cost from audit cost"
     );
     let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
         Ok(serde_json::to_vec(sessions).unwrap().len() <= 20_000)
@@ -868,10 +873,107 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
     .prepare_candidate(&target.id, false)
     .await
     .unwrap();
-    // Keep the original failing window. A larger window must not mask linear
-    // duplicate-observation growth or discard distinct notes to make progress.
+    // The narrow regression retains its original window. The functional
+    // fixture measures retained-candidate space and the actual full first
+    // support request, then selects an explicit intermediate pagination window.
+    // This is test-only sizing; production config and admission are unchanged.
     config.limits.max_context_tokens =
         baseline.input_reserve as usize + baseline.output_reserve as usize + 1300;
+    if !narrow_window {
+        let work = state.outline_run.reading_packs.as_ref().unwrap();
+        let required = work.required_support_refs(&input, &target.id).unwrap();
+        let mut envelope: Value = serde_json::from_slice(&baseline.body).unwrap();
+        let (page, _) =
+            crate::outline::discover::automatic_support_page(&input, &target, &required).unwrap();
+        envelope["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role":"user","content":page.to_string()}));
+        let packet = envelope["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .find(|p| p["reading_packs"].is_array())
+            .unwrap();
+        let session = &packet["reading_packs"][0];
+        let pack = &session["pack"];
+        let rejected = json!({"pack_id":pack["id"],"call_id":session["submission_operation_id"],"claim_token":pack["claim_token"],"pack_revision":pack["pack_revision"],"repair":true,"requirements":[],"issues":[],"no_requirement_reason":"Synthetic host protocol response only; no semantic extraction assertion.","inspected_atom_ids":pack["atoms"].as_array().unwrap().iter().filter(|a|a["context_only"]!=true).map(|a|json!({"atom_key":a["atom_key"]})).collect::<Vec<_>>()});
+        for _ in 0..=required.len() {
+            envelope["messages"].as_array_mut().unwrap().push(json!({"role":"user","content":json!({"rejected_submission_audit":{"original_arguments_text":rejected.to_string(),"settled_submission_failure":"Required structural support pages remain"}}).to_string()}));
+        }
+        // Measure the real first support request separately, at the unchanged
+        // roomy synthetic config. The functional window must be below this
+        // full-page size, otherwise this fixture never exercises pagination.
+        let roomy_config = crate::analysis::tests::config();
+        let mut full_probe = state.clone();
+        let long_original = required
+            .iter()
+            .find(|r| matches!(r,EvidenceRef::Text{unit_id,..} if unit_id==&intro_id))
+            .unwrap()
+            .clone();
+        let (full_page, full_options) =
+            crate::outline::discover::automatic_support_page(&input, &target, &[long_original])
+                .unwrap();
+        full_probe
+            .outline_run
+            .discover_workers
+            .get_mut(&target.id)
+            .unwrap()
+            .related_read_frames
+            .push(coordinator::RelatedReadFrame {
+                user_page: Some(full_page),
+                directory_page: None,
+                call_id: String::new(),
+                pack_revision: target.pack_revision,
+                input_digest: full_probe.input_sha256.clone(),
+                options: full_options,
+                sealed_sha256: None,
+            });
+        let full_request = PackHost {
+            input: &input,
+            config: &roomy_config,
+            state: &mut full_probe,
+            journal: &probe_journal,
+            cancel: &cancel,
+        }
+        .prepare_candidate(&target.id, false)
+        .await
+        .unwrap();
+        let full_total = (full_request.input_reserve + full_request.output_reserve) as usize;
+        // Remove only the planned original page; the measured envelope keeps
+        // complete rejected arguments. Thus the floor explicitly includes
+        // audit space rather than reclaiming it by dropping failed candidates.
+        let baseline_message_count: usize = serde_json::from_slice::<Value>(&baseline.body)
+            .unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len();
+        envelope["messages"]
+            .as_array_mut()
+            .unwrap()
+            .remove(baseline_message_count);
+        let audit_floor = crate::agent_runtime::chat::estimate_request_tokens_with_reserve(
+            &envelope,
+            &config.limits.tokenizer,
+            config.limits.image_token_reserve,
+            config.limits.token_safety_margin,
+            config.provider.output_token_reserve as usize,
+        )
+        .unwrap()
+        .total_context_tokens;
+        assert!(
+            audit_floor < full_total,
+            "synthetic fixture needs room between retained-candidate floor and full source page: floor={audit_floor},full={full_total}"
+        );
+        config.limits.max_context_tokens = audit_floor + (full_total - audit_floor) * 3 / 4;
+        eprintln!(
+            "S1 functional measured audit_floor={audit_floor}, full_long_page={full_total}, window={}",
+            config.limits.max_context_tokens
+        );
+        assert!(config.limits.max_context_tokens < full_total);
+    }
     state.config_sha256 = digest(&config).unwrap();
     let journal = S1Journal(std::sync::Mutex::new(state.clone()));
     let mut continuation_calls = 0;
@@ -881,6 +983,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
     let mut capacity_stopped = false;
     let mut saw_repeated_retired = false;
     let mut emitted_observations = Vec::<String>::new();
+    let mut rejected_arguments = Vec::<String>::new();
     for step in 0..64 {
         // Recreate the borrowing adapter over the same persisted checkpoint;
         // no frame, request identity or worker status is manually injected.
@@ -892,7 +995,11 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             cancel: &cancel,
         };
         let Some(request) = host.next(&BTreeSet::new()).await.unwrap() else {
-            assert!(unique_observations);
+            assert!(
+                narrow_window && unique_observations,
+                "repeated-observation lifecycle must not accept capacity as success: calls={physical_calls}, intro_pages={continuation_calls}, window={}",
+                config.limits.max_context_tokens
+            );
             assert!(
                 matches!(&host.state.outline_run.discover_workers[&target.id].pending,Some(Pending::Failed {code,..}) if code=="DISCOVER_READ_CAPACITY_EXCEEDED")
             );
@@ -945,6 +1052,21 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
                 serde_json::from_str::<Value>(&text).ok()
             })
             .collect::<Vec<_>>();
+        let wire_candidates = payloads
+            .iter()
+            .filter_map(|payload| {
+                payload["rejected_submission_audit"]["original_arguments_text"].as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            wire_candidates,
+            rejected_arguments
+                .last()
+                .map(String::as_str)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "wire must retain exactly the latest complete failed candidate"
+        );
         let page = &payloads
             .iter()
             .find(|p| p["automatic_support_page"].is_object())
@@ -1043,6 +1165,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             before_options,
             "a received response is not yet source credit"
         );
+        let submitted_arguments = response.tool_calls[0].arguments.clone();
         host.commit(&request, response).await.unwrap();
         let worker = &host.state.outline_run.discover_workers[&target.id];
         let audit_observations = worker
@@ -1062,6 +1185,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             assert_eq!(result["result"]["status"], "committed");
             finished = true;
         } else {
+            rejected_arguments.push(submitted_arguments);
             assert!(
                 result
                     .to_string()
@@ -1079,10 +1203,28 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
             break;
         }
     }
-    if unique_observations {
+    assert!(
+        !rejected_arguments.is_empty(),
+        "lifecycle fixture must retain at least one failed candidate"
+    );
+    // Wire projection never removes durable rejected arguments; state here has
+    // been reloaded after every commit in both success and capacity paths.
+    let worker = &state.outline_run.discover_workers[&target.id];
+    for original in &rejected_arguments {
+        assert!(
+            worker
+                .history
+                .iter()
+                .any(|m| m["tool_calls"].as_array().is_some_and(|calls| calls
+                    .iter()
+                    .any(|c| c["function"]["arguments"] == *original))),
+            "complete failed candidate must remain in canonical audit"
+        );
+    }
+    if narrow_window && unique_observations {
         assert!(
             capacity_stopped && !finished,
-            "distinct observations must be preserved and produce an explicit bounded host stop"
+            "unique observations must produce an explicit bounded host stop"
         );
         let work = state.outline_run.reading_packs.as_ref().unwrap();
         assert_ne!(work.status(&target.id), Some(PackStatus::Committed));
@@ -1131,13 +1273,15 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool) {
         return;
     }
     assert!(finished, "bounded lifecycle must commit");
+    if physical_calls > 2 {
+        assert!(
+            saw_repeated_retired,
+            "third request must retire duplicate projected observations while preserving audit"
+        );
+    }
     assert!(
-        saw_repeated_retired,
-        "fixture must actually exercise repeated canonical observations"
-    );
-    assert!(
-        continuation_calls > 6,
-        "more than six genuinely new source pages must remain schedulable"
+        continuation_calls > 1,
+        "functional fixture must deliver multiple genuine source pages; >6-page scheduling is covered by automatic_nine_pages_then_cross_claim_redelivery"
     );
     assert_eq!(
         delivered_intro, intro_text,

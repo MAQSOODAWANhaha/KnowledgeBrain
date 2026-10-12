@@ -35,6 +35,10 @@ pub struct Limits {
     pub max_focus_replans: usize,
     /// Application token budget, including estimated input and reserved output.
     pub max_context_tokens: usize,
+    /// Optional internal admission override for host-confirmed corrections.
+    /// Defaults to twice the normal context; does not declare provider capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_correction_context_tokens: Option<usize>,
     pub image_token_reserve: usize,
     pub token_safety_margin: usize,
     pub max_source_view_bytes: usize,
@@ -48,13 +52,21 @@ impl Limits {
     /// Bounded transport allocation derived from the context allowance. Token
     /// accounting governs segmentation; the final 256 MiB cap protects memory.
     pub fn context_wire_ceiling(&self) -> usize {
-        let text = self
-            .max_context_tokens
-            .saturating_mul(self.tokenizer.max_piece_bytes());
-        let images = self.max_context_tokens / self.image_token_reserve.max(1);
+        let context = self.request_context_limit(true);
+        let text = context.saturating_mul(self.tokenizer.max_piece_bytes());
+        let images = context / self.image_token_reserve.max(1);
         let encoded_image = (self.max_source_view_bytes.saturating_add(2) / 3).saturating_mul(4);
         text.saturating_add(images.saturating_mul(encoded_image.saturating_add(32)))
             .min(256 * 1024 * 1024)
+    }
+
+    fn request_context_limit(&self, correction: bool) -> usize {
+        if correction {
+            self.max_correction_context_tokens
+                .unwrap_or_else(|| self.max_context_tokens.saturating_mul(2))
+        } else {
+            self.max_context_tokens
+        }
     }
 
     fn progress(&self) -> crate::agent_runtime::progress::ProgressLimits {
@@ -115,6 +127,7 @@ impl Config {
             max_focus_turns: crate::agent_runtime::progress::default_focus_turns(),
             max_focus_replans: crate::agent_runtime::progress::default_focus_replans(),
             max_context_tokens: context,
+            max_correction_context_tokens: None,
             image_token_reserve: 16384,
             token_safety_margin: (context / 16).clamp(1, 4096),
             // Image decode/resize safeguards; never a cumulative reading allowance.
@@ -187,6 +200,13 @@ impl Config {
         {
             return Err(invalid(
                 "max_context_tokens exceeds the supported resource range",
+            ));
+        }
+        if l.max_correction_context_tokens.is_some_and(|limit| {
+            limit < l.max_context_tokens || limit > l.max_context_tokens.saturating_mul(2)
+        }) {
+            return Err(invalid(
+                "max_correction_context_tokens must be between max_context_tokens and twice max_context_tokens; local admission only",
             ));
         }
         l.tokenizer.validate_for_model(&self.provider.model_id)?;
@@ -403,6 +423,36 @@ impl Checkpoint {
         }
         progress
     }
+}
+
+/// Only the most recent completed tool group can authorize one correction.
+/// Receipts are host-authored; assistant text/arguments and older failures grant nothing.
+fn correction_retry(history: &[Value]) -> bool {
+    let Some(start) = history.iter().rposition(|m| m["role"] == "assistant") else {
+        return false;
+    };
+    let Some(calls) = history[start]["tool_calls"]
+        .as_array()
+        .filter(|c| !c.is_empty())
+    else {
+        return false;
+    };
+    let receipts = &history[start + 1..];
+    if receipts.len() != calls.len() || receipts.iter().any(|m| m["role"] != "tool") {
+        return false;
+    }
+    calls.iter().all(|call| {
+        receipts
+            .iter()
+            .filter(|r| r["tool_call_id"] == call["id"])
+            .count()
+            == 1
+    }) && receipts.iter().any(|receipt| {
+        receipt["content"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .is_some_and(|result| result["ok"] == false)
+    })
 }
 
 fn tool_result_envelope(value: Value) -> Value {
@@ -659,6 +709,11 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             if let Some(pending) = self.state.journal.pending.as_mut() {
                 pending.physical_attempts = pending.physical_attempts.saturating_sub(1);
             }
+            self.state.journal.retry.complete(
+                &format!("serial:{}", self.state.journal.sequence),
+                "not_sent",
+                true,
+            );
             self.journal
                 .save(self.state, &self.state.progress(self.input))
                 .await?;
@@ -745,6 +800,21 @@ async fn run_seeded<J: Journal, M: Model>(
             "this frozen tender requires original-image evidence; use an image-capable Chat model and confirm KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES=true for an unlisted model before starting the run",
         ));
     }
+    crate::outline::evidence::with_input_digest(
+        input,
+        run_validated(input, config, journal, model, cancel),
+    )
+    .await
+    .map_err(invalid)?
+}
+
+async fn run_validated<J: Journal, M: Model>(
+    input: &FrozenInput,
+    config: &Config,
+    journal: &J,
+    model: &M,
+    cancel: &CancellationToken,
+) -> Result<AnalysisResult, AgentError> {
     let started = Instant::now();
     let input_sha256 = digest(input).map_err(invalid)?;
     let config_sha256 = digest(config).map_err(invalid)?;
@@ -1774,6 +1844,13 @@ fn deferred_message(id: &str) -> Value {
     json!({"role":"tool","tool_call_id":id,"content":json!({"ok":false,"error":BATCH_OUTPUT_DEFERRED}).to_string()})
 }
 
+fn sizing_message(id: &str) -> Value {
+    // An unexecuted operation reserves the full deferral message but has no
+    // failure authority. This clone-only placeholder is never persisted/sent.
+    // Keep a string value (rather than a shorter null) for conservative sizing.
+    json!({"role":"tool","tool_call_id":id,"content":json!({"ok":"pending","error":BATCH_OUTPUT_DEFERRED}).to_string()})
+}
+
 /// Reserve serialized space for every outstanding tool response, not only for
 /// the current tool. This never sends, reserves a call, or confirms delivery.
 async fn fit_batch(
@@ -1792,7 +1869,7 @@ async fn fit_batch(
     let mut sizing = state.clone();
     sizing
         .transcript
-        .extend(remaining.iter().map(|c| deferred_message(&c.id)));
+        .extend(remaining.iter().map(|c| sizing_message(&c.id)));
     if !views.is_empty() {
         sizing
             .transcript
@@ -2249,10 +2326,13 @@ async fn prepare_fitted_request(
         // The input estimate already includes actual history, feedback, images,
         // protocol framing and the configured safety margin. Reserve only this
         // request's output; hypothetical later repair turns are counted later.
+        let context_limit = config.limits.request_context_limit(
+            reading_sessions.is_empty() && correction_retry(&state.transcript),
+        );
         let input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
         let context_excess = input_tokens
             .saturating_add(config.provider.output_token_reserve as usize)
-            .saturating_sub(config.limits.max_context_tokens);
+            .saturating_sub(context_limit);
         #[cfg(test)]
         if let Ok(root) = std::env::var("KB_PRIVATE_BUDGET_DIAGNOSTIC_DIR") {
             let mut parts = Vec::new();
@@ -2265,7 +2345,7 @@ async fn prepare_fitted_request(
             }
             let mut without_tools = body.clone();
             without_tools.as_object_mut().unwrap().remove("tools");
-            let entry = json!({"input_tokens":input_tokens,"serialized_bytes":bytes.len(),"output_reserve":config.provider.output_token_reserve,"context_limit":config.limits.max_context_tokens,"excess":context_excess,"tools_marginal_tokens":input_tokens.saturating_sub(context::estimate_input_tokens(&without_tools,&config.limits)?),"messages":parts});
+            let entry = json!({"input_tokens":input_tokens,"serialized_bytes":bytes.len(),"output_reserve":config.provider.output_token_reserve,"context_limit":context_limit,"excess":context_excess,"tools_marginal_tokens":input_tokens.saturating_sub(context::estimate_input_tokens(&without_tools,&config.limits)?),"messages":parts});
             use std::io::Write;
             let path = std::path::Path::new(&root).join("budget-preparation-iterations.jsonl");
             writeln!(
@@ -2315,7 +2395,7 @@ async fn prepare_fitted_request(
                     required["messages"] = json!(kept);
                     let tokens = context::estimate_input_tokens(&required, &config.limits)?;
                     if tokens.saturating_add(config.provider.output_token_reserve as usize)
-                        > config.limits.max_context_tokens
+                        > context_limit
                     {
                         return Err(error(
                             "AGENT_TURN_BUDGET_EXCEEDED",
@@ -2599,6 +2679,8 @@ mod provider_defaults_tests {
             let restored: Config = serde_json::from_slice(&encoded).unwrap();
             restored.validate().unwrap();
             assert_eq!(restored.limits.max_context_tokens, context);
+            assert_eq!(restored.limits.request_context_limit(false), context);
+            assert_eq!(restored.limits.request_context_limit(true), context * 2);
             assert_eq!(serde_json::to_vec(&restored).unwrap(), encoded);
         }
     }
@@ -2647,3 +2729,7 @@ mod partial_source_runtime_tests;
 
 #[cfg(test)]
 mod canonical_recovery_tests;
+
+#[cfg(test)]
+#[path = "agent/correction_window_tests.rs"]
+mod correction_window_tests;

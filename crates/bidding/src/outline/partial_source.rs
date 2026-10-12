@@ -388,6 +388,26 @@ pub(crate) mod tests {
             super::super::agent::Duty::Discover
         );
         assert!(repair_stopped(&state));
+        let reloaded: Checkpoint =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert!(repair_stopped(&reloaded));
+        assert!(
+            !reloaded
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .unwrap()
+                .complete()
+        );
+        assert!(!reloaded.done);
+        assert_eq!(
+            reloaded.outline_run.tool_draft.required_pack_ids,
+            state.outline_run.tool_draft.required_pack_ids
+        );
+        assert_eq!(
+            super::super::agent::current(&input, &reloaded),
+            super::super::agent::Duty::Discover
+        );
         assert!(
             !state.outline_run.repair_events.last().unwrap()["source_only_findings"]
                 .as_array()

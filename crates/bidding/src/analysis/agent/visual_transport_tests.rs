@@ -138,5 +138,5 @@ async fn original_pixels_reach_configured_model_before_discovery_can_commit() {
     let work = saved.outline_run.reading_packs.as_ref().unwrap();
     assert!(work.complete());
     assert_eq!(work.requirement_count(), 0);
-    assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(model.calls.load(Ordering::SeqCst), 4);
 }
