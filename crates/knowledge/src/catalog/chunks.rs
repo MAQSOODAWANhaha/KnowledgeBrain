@@ -23,7 +23,7 @@ pub async fn delete_image_chunks(
 
 /// Strictness of image OCR artifact registration.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ArtifactMode {
+pub(crate) enum ArtifactMode {
     /// Fail the whole write when an image_ocr chunk lacks a valid
     /// `objects/{sha256}` source identity (previous behavior).
     Strict,
@@ -32,7 +32,7 @@ enum ArtifactMode {
     Lenient,
 }
 
-struct PreparedImage {
+pub(crate) struct PreparedImage {
     chunk_id: Uuid,
     product_version_id: Uuid,
     document_id: Uuid,
@@ -50,7 +50,7 @@ struct PreparedImage {
 /// Validate image_ocr chunks and read/verify their media blobs.
 /// Performs no DB writes; runs before the transaction is opened so blob
 /// I/O failures never hold a transaction open.
-async fn prepare_image_artifacts(
+pub(crate) async fn prepare_image_artifacts(
     chunks: &[crate::Chunk],
     mode: ArtifactMode,
 ) -> Result<Vec<PreparedImage>, sqlx::Error> {
@@ -196,7 +196,7 @@ async fn register_image_artifacts_tx(
 }
 
 /// Chunk upsert + artifact registration + embeddings inside `tx`.
-async fn append_document_chunks_tx(
+pub(crate) async fn append_document_chunks_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chunks: &[crate::Chunk],
     embeddings: &[crate::ChunkEmbedding],
@@ -423,7 +423,7 @@ pub async fn load_document_chunks(
         "SELECT id, document_id, product_version_id, chunk_type, content,
                 context_header, start_at, end_at, parent_chunk_id, generated_questions,
                 source_locator
-         FROM chunks WHERE document_id = $1
+         FROM chunks WHERE document_id = $1 AND generation = (SELECT attempt FROM documents WHERE id=$1)
          ORDER BY start_at, id",
     )
     .bind(document_id)

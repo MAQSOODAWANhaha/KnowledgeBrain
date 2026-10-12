@@ -6,6 +6,7 @@ from docreader.parser.pdf_parser import (
     _demote_banner_headings,
     _drop_repeating_lines,
     _merge_short_index_continuations,
+    _sectionize_pages,
 )
 
 
@@ -76,6 +77,42 @@ class ShortIndexContinuationTest(unittest.TestCase):
         out = _merge_short_index_continuations(texts, ["text", "scanned", "text"])
         self.assertIn("第三章 评标办法 ………", out[0])
         self.assertEqual(out[1], "图片页")
+
+
+class FinalChapterIdentityTest(unittest.TestCase):
+    def test_long_and_short_toc_rows_never_repromote_after_demotion(self):
+        entries = ["第一章 示例条件" + "." * 130 + "12", "第二章 示例表格 ……… 25", "1.1 范围......13"]
+        text = "\n".join("# " + entry for entry in entries)
+        cleaned = _merge_short_index_continuations([text], ["text"])
+        promoted, fragments = _sectionize_pages(cleaned + ["第一章 示例条件\n本章正文。"])
+        self.assertEqual(promoted[0].splitlines(), entries)
+        self.assertEqual([fragment[1] for fragment in fragments[0]], [""])
+        self.assertEqual(fragments[1][0][1], "第一章 示例条件")
+        # Final sectionization must also reject untouched font-derived ATX.
+        self.assertEqual(_sectionize_pages([text])[0][0].splitlines(), entries)
+
+    def test_volume_chapters_and_subheadings_have_consistent_ownership(self):
+        promoted, fragments = _sectionize_pages([
+            "# 第一卷 示例商务\n## 第一章 示例公告\n公告正文。",
+            "第二章 示例须知\n1. 总则\n正文。\n一、示例材料\n正文。",
+            "# 第三章 示例评审\n正文。",
+            "第二卷 示例技术\n第五章 示例规格\n正文。",
+        ])
+        paths = [fragment[1] for page in fragments for fragment in page]
+        self.assertIn("第一卷 示例商务 > 第一章 示例公告", paths)
+        self.assertIn("第一卷 示例商务 > 第二章 示例须知", paths)
+        self.assertIn("第一卷 示例商务 > 第二章 示例须知 > 1. 总则", paths)
+        self.assertIn("第一卷 示例商务 > 第三章 示例评审", paths)
+        self.assertIn("第二卷 示例技术 > 第五章 示例规格", paths)
+        self.assertTrue(promoted[1].startswith("## 第二章"))
+        self.assertTrue(promoted[2].startswith("## 第三章"))
+
+    def test_genuine_long_heading_or_numbered_body_is_not_removed(self):
+        title = "第一章 " + "示例条件" * 30 + "2026"
+        promoted, fragments = _sectionize_pages([title + "\n数值1.25保持原样。"])
+        self.assertEqual(fragments[0][0][1], title)
+        self.assertIn("数值1.25保持原样。", promoted[0])
+
 
 
 if __name__ == "__main__":

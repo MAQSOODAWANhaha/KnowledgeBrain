@@ -12,7 +12,7 @@ cd "$root"
 : "${CI_CONTRACT_FEATURES:?}"
 : "${CI_DOCREADER_FEATURE:?}"
 : "${CI_DOCREADER_PYTEST_PATHS:?}"
-: "${CI_SAMPLE_SOURCE_PYTEST:?}"
+: "${CI_SOURCE_CAPTIONS_PYTEST:?}"
 : "${CI_DOCREADER_PYTHONPATH:?}"
 : "${CI_RUNNER:?}"
 : "${CI_ACTION_CHECKOUT:?}"
@@ -111,9 +111,9 @@ grep -Fq "127.0.0.1:${CI_POSTGRES_PORT}" scripts/bidding_v2_phase_fixture_accept
 grep -Fq "127.0.0.1:${CI_POSTGRES_PORT}:5432" scripts/bidding_v2_content_stack_e2e.sh
 grep -Fq "redis_port=\$((${CI_REDIS_PORT} + offset))" scripts/bidding_v2_content_stack_e2e.sh
 grep -Fq 'Path("deploy/images.lock.json")' scripts/bidding_v2_content_stack_e2e.sh
-sample_test=$(realpath -m "services/docreader/${CI_SAMPLE_SOURCE_PYTEST}")
+sample_test=$(realpath -m "services/docreader/${CI_SOURCE_CAPTIONS_PYTEST}")
 docreader_tests=$(realpath -m "services/docreader/${CI_DOCREADER_PYTEST_PATHS}")
-[[ -f "$sample_test" ]] || { echo "missing sample-source test $sample_test" >&2; exit 1; }
+[[ -f "$sample_test" ]] || { echo "missing source-caption test $sample_test" >&2; exit 1; }
 [[ -d "$docreader_tests" ]] || { echo "missing docreader pytest path $docreader_tests" >&2; exit 1; }
 if grep -Fq 'pgvector/pgvector@sha256:' scripts/bidding_v2_content_stack_e2e.sh \
   || grep -Fq 'redis@sha256:' scripts/bidding_v2_content_stack_e2e.sh; then

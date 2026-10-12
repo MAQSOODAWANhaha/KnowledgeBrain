@@ -6,9 +6,14 @@ structured Document objects with text content and chunks. It supports multiple
 sheets and handles various Excel formats using pandas.
 """
 import logging
+import base64
+import hashlib
+import warnings
 import os
 import re
 import zipfile
+from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from collections import defaultdict
 from io import BytesIO
 from typing import List
@@ -20,6 +25,7 @@ from openpyxl.utils.cell import range_boundaries
 from docreader.models.document import (
     Chunk,
     Document,
+    ImageLocator,
     PdfTableCell,
     SpreadsheetCell,
     SpreadsheetLocator,
@@ -151,8 +157,9 @@ class ExcelParser(BaseParser):
         # pandas first can expand a single XFD1048576 cell into a huge rectangle.
         fmt = detect_excel_format(content)
         structured_units: List[StructuredSourceUnit] = []
+        images: dict[str, str] = {}
         if fmt == "xlsx":
-            structured_units = _extract_xlsx_structured_units(content)
+            structured_units = _extract_xlsx_structured_units(content, images)
             for unit in structured_units:
                 if unit.kind is not StructuredSourceUnitKind.TABLE_ROW or not unit.text:
                     continue
@@ -167,11 +174,12 @@ class ExcelParser(BaseParser):
                 content="".join(text),
                 chunks=chunks,
                 structured_source_units=structured_units,
+                images=images,
             )
         if fmt == "xls":
             converted = convert_excel_to_xlsx_bytes(content, suffix=".xls")
             if converted and detect_excel_format(converted) == "xlsx":
-                structured_units = _extract_xlsx_structured_units(converted)
+                structured_units = _extract_xlsx_structured_units(converted, images)
 
         excel_file = _open_excel_file(content, file_type=self.file_type)
         for excel_sheet_name in excel_file.sheet_names:
@@ -196,6 +204,7 @@ class ExcelParser(BaseParser):
             content="".join(text),
             chunks=chunks,
             structured_source_units=structured_units,
+            images=images,
         )
 
 
@@ -225,15 +234,68 @@ def _range_model(a1_range: str) -> SpreadsheetRange:
     )
 
 
-def _cell_model(cell) -> SpreadsheetCell | None:
+def _display_value(value: object, number_format: str) -> tuple[str | None, str | None]:
+    # Render only known exact formats; preserve unsupported ones as incomplete.
+    if isinstance(value, (date, datetime)):
+        if number_format.lower() == "yyyy-mm-dd":
+            return value.strftime("%Y-%m-%d"), None
+        return None, "unsupported_date_format"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE", None
+    if number_format == "General":
+        if isinstance(value, (int, float)):
+            return None, "general_numeric_display_not_rendered"
+        return str(value), None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        match = re.fullmatch(r'(0|#,##0)(\.0+)?(%)?(?:"([^"\n]*)")?', number_format)
+        if match:
+            places = max(len(match.group(2) or "") - 1, 0)
+            scaled = Decimal(str(value)) * (100 if match.group(3) else 1)
+            if places > 64 or not scaled.is_finite() or abs(scaled.adjusted()) > 308:
+                return None, "numeric_display_out_of_supported_range"
+            with localcontext() as context:
+                context.prec = 400
+                rounded = scaled.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+            grouping = "," if match.group(1) == "#,##0" else ""
+            return format(rounded, f"{grouping}.{places}f") + (match.group(3) or "") + (match.group(4) or ""), None
+    return None, "unsupported_number_format"
+
+
+def _cell_model(cell, cached_value=None, cached_type=None) -> SpreadsheetCell | None:
+    from openpyxl.formula.tokenizer import Tokenizer, TokenizerError
+
     value = cell.value
     if value is None or _is_image_function(value):
         return None
+    formula = str(value) if cell.data_type == "f" else None
+    raw = value.isoformat() if isinstance(value, (date, datetime)) else str(value)
+    value_type = ("formula" if formula else "date" if isinstance(value, (date, datetime))
+                  else "boolean" if isinstance(value, bool) else "number" if isinstance(value, (int, float))
+                  else "error" if cell.data_type == "e" else "string")
+    references = []
+    formula_error = None
+    if formula:
+        try:
+            references = list(dict.fromkeys(token.value for token in Tokenizer(formula).items
+                                            if token.type == "OPERAND" and token.subtype == "RANGE"))
+        except TokenizerError:
+            formula_error = "formula_reference_parse_incomplete"
+    display, reason = _display_value(cached_value if formula else value, cell.number_format)
+    if formula and cached_value is None:
+        display, reason = None, "formula_cached_value_missing"
+    if formula and cached_type == "e":
+        display, reason = None, "formula_cached_error"
+    if formula_error:
+        display, reason = None, formula_error
     return SpreadsheetCell(
-        address=cell.coordinate,
-        row=cell.row,
-        column=cell.column,
-        text=str(value),
+        address=cell.coordinate, row=cell.row, column=cell.column,
+        text=display if display is not None else raw,
+        raw_value=raw, value_type=value_type, number_format=cell.number_format,
+        display_text=display, display_complete=reason is None,
+        display_incomplete_reason=reason, formula=formula,
+        formula_references=references,
+        cached_value=str(cached_value) if formula and cached_value is not None else None,
+        cached_value_type=cached_type if formula and cached_value is not None else None,
     )
 
 
@@ -267,7 +329,7 @@ def _preflight_xlsx_structure(content: bytes) -> None:
         tables = 0
         cells = 0
         merges = 0
-        cells_per_row: dict[int, int] = defaultdict(int)
+        cells_per_row: dict[tuple[str, int], int] = defaultdict(int)
         cell_references: set[tuple[str, str]] = set()
         archive_names: set[str] = set()
         for info in infos:
@@ -337,10 +399,10 @@ def _preflight_xlsx_structure(content: bytes) -> None:
                                 cells,
                                 XLSX_MAX_MATERIALIZED_CELLS,
                             )
-                            cells_per_row[row] += 1
+                            cells_per_row[(name, row)] += 1
                             _limit(
                                 "cells_per_row",
-                                cells_per_row[row],
+                                cells_per_row[(name, row)],
                                 XLSX_MAX_CELLS_PER_ROW,
                             )
                         elif is_worksheet and tag == "mergeCell":
@@ -452,7 +514,7 @@ def _used_sheet_region(
     )
 
 
-def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
+def _extract_xlsx_structured_units(content: bytes, images: dict[str, str] | None = None) -> List[StructuredSourceUnit]:
     """Return bounded deterministic units without rectangular expansion."""
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -460,7 +522,33 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
     _preflight_xlsx_structure(content)
     repaired = repair_xlsx_bytes(content)
     source = repaired if repaired is not None else content
-    workbook = load_workbook(BytesIO(source), data_only=False, read_only=False)
+    # openpyxl can silently discard unsupported/broken drawing images after a warning.
+    with warnings.catch_warnings(record=True) as image_warnings:
+        warnings.simplefilter("always")
+        workbook = load_workbook(BytesIO(source), data_only=False, read_only=False)
+    if any("image" in str(item.message).lower() and
+           any(word in str(item.message).lower() for word in ("removed", "dropped", "unsupported"))
+           for item in image_warnings):
+        workbook.close()
+        raise ValueError("XLSX_IMAGE_UNSUPPORTED: embedded drawing image was discarded")
+    # Account for every embedded drawing occurrence, including formats that
+    # openpyxl cannot expose. Never publish a complete contract after dropping one.
+    with zipfile.ZipFile(BytesIO(source)) as archive:
+        embedded_drawings = sum(
+            1 for name in archive.namelist()
+            if name.startswith("xl/drawings/") and name.endswith(".xml")
+            for element in ElementTree.fromstring(archive.read(name)).iter()
+            if element.tag.rsplit("}", 1)[-1] == "blip"
+            and any(key.rsplit("}", 1)[-1] in {"embed", "link"} for key in element.attrib)
+        )
+    if embedded_drawings != sum(len(sheet._images) for sheet in workbook.worksheets):
+        workbook.close()
+        raise ValueError("XLSX_IMAGE_UNSUPPORTED: drawing image occurrence was not extracted")
+    try:
+        cached_workbook = load_workbook(BytesIO(source), data_only=True, read_only=False)
+    except Exception:
+        workbook.close()
+        raise
     units: List[StructuredSourceUnit] = []
     total_text_bytes = 0
     total_cell_payload_bytes = 0
@@ -488,16 +576,16 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
         locator = unit.locator
         if isinstance(locator, SpreadsheetLocator):
             total_cell_payload_bytes += sum(
-                len(cell.address.encode("utf-8")) + len(cell.text.encode("utf-8"))
+                len(cell.model_dump_json().encode("utf-8"))
                 for cell in locator.cells
             )
         if unit.grid is not None:
             total_cell_payload_bytes += sum(len(cell.text.encode("utf-8")) for cell in unit.grid.cells)
-            _limit(
-                "cell_payload_bytes",
-                total_cell_payload_bytes,
-                XLSX_MAX_CELL_PAYLOAD_BYTES,
-            )
+        _limit(
+            "cell_payload_bytes",
+            total_cell_payload_bytes,
+            XLSX_MAX_CELL_PAYLOAD_BYTES,
+        )
         units.append(unit)
 
     try:
@@ -519,7 +607,8 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 (
                     model
                     for cell in raw_cells.values()
-                    if (model := _cell_model(cell)) is not None
+                    if (model := _cell_model(cell, cached_workbook.worksheets[sheet_ordinal].cell(cell.row, cell.column).value,
+                                             cached_workbook.worksheets[sheet_ordinal].cell(cell.row, cell.column).data_type)) is not None
                 ),
                 key=lambda cell: (cell.row, cell.column, cell.address),
             )
@@ -558,11 +647,13 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 XLSX_MAX_TABLE_CELL_SCANS,
             )
             tables: List[tuple[SpreadsheetTableIdentity, SpreadsheetRange]] = []
+            header_rows = {}
             for raw_table in raw_tables:
                 region = _range_model(raw_table.ref)
                 _limit("table_end_row", region.end_row, XLSX_MAX_LOGICAL_ROW)
                 _limit("table_end_column", region.end_column, XLSX_MAX_LOGICAL_COLUMN)
                 range_area(region, "table")
+                header_rows[raw_table.name] = raw_table.headerRowCount or 0
                 tables.append(
                     (
                         SpreadsheetTableIdentity(
@@ -643,6 +734,7 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 table_merges = [
                     region for region in merged if contains(table_region, region)
                 ]
+                grid = _listobject_grid(table_region, table_cells, table_merges)
                 emit(
                     StructuredSourceUnit(
                         key=f"sheet:{sheet_ordinal}:table:{table.name}",
@@ -653,11 +745,14 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                             sheet_ordinal=sheet_ordinal,
                             sheet_name=sheet.title,
                             region=table_region,
-                            cells=[],
-                            merged_ranges=[],
+                            cells=table_cells,
+                            merged_ranges=table_merges,
                             defined_tables=[table],
                         ),
-                        grid=_listobject_grid(table_region, table_cells, table_merges),
+                        grid=grid,
+                        header_cells=[{"row": cell.row, "column": cell.column, "role": "column_header"}
+                                      for cell in grid.cells
+                                      if cell.row < header_rows[table.name]],
                     )
                 )
             if not tables and all_cells:
@@ -674,15 +769,36 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                             sheet_ordinal=sheet_ordinal,
                             sheet_name=sheet.title,
                             region=used,
-                            cells=[],
-                            merged_ranges=[],
+                            cells=all_cells,
+                            merged_ranges=used_merges,
                             defined_tables=[],
                         ),
                         grid=_listobject_grid(used, all_cells, used_merges),
                     )
                 )
+            for image_ordinal, image in enumerate(sheet._images):
+                raw = image._data()
+                # openpyxl converts some supported formats to PNG in _data().
+                from PIL import Image as PillowImage
+                with PillowImage.open(BytesIO(raw)) as decoded:
+                    extension = (decoded.format or image.format).lower()
+                ref = f"images/{hashlib.sha256(raw).hexdigest()}.{extension}"
+                if images is not None:
+                    images[ref] = base64.b64encode(raw).decode("ascii")
+                emit(StructuredSourceUnit(
+                    key=f"sheet:{sheet_ordinal}:image:{image_ordinal}",
+                    ordinal=len(units),
+                    kind=StructuredSourceUnitKind.IMAGE_REGION,
+                    text="",
+                    locator=ImageLocator(
+                        original_ref=ref, width=int(image.width), height=int(image.height),
+                        media_type="image/jpeg" if extension in {"jpg", "jpeg"} else f"image/{extension}",
+                    ),
+                    physical_path=f"sheet:{sheet_ordinal}/drawing:image:{image_ordinal}",
+                ))
     finally:
         workbook.close()
+        cached_workbook.close()
     return units
 
 

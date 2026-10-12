@@ -49,12 +49,13 @@ pub struct VersionCloneJob {
 pub struct LowQueue;
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "knowledge:post_process:{document_id}", on_conflict = Skip)]
+#[oxana(unique_id = "knowledge:post_process:{document_id}:{attempt}", on_conflict = Skip)]
 pub struct PostProcessJob {
     pub document_id: Uuid,
     pub product_version_id: Uuid,
     pub clone_keep: bool,
     pub task_type: String,
+    pub attempt: i32,
 }
 
 #[derive(oxana::Queue)]
@@ -85,7 +86,7 @@ pub struct SummaryJob {
 pub struct SummaryQueue;
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "question:generation:{document_id}:{batch}", on_conflict = Skip)]
+#[oxana(unique_id = "question:generation:{document_id}:{attempt}:{batch}", on_conflict = Skip)]
 pub struct QuestionJob {
     pub document_id: Uuid,
     pub chunk_ids: Vec<Uuid>,
@@ -116,10 +117,11 @@ pub struct ExtractJob {
 pub struct GraphQueue;
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "datatable:summary:{document_id}", on_conflict = Skip)]
+#[oxana(unique_id = "datatable:summary:{document_id}:{attempt}", on_conflict = Skip)]
 pub struct DatatableJob {
     pub document_id: Uuid,
     pub task_type: String,
+    pub attempt: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
@@ -145,10 +147,11 @@ pub struct ListReparseJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "index:delete:{document_id}", on_conflict = Skip)]
+#[oxana(unique_id = "index:delete:{document_id}:{attempt}", on_conflict = Skip)]
 pub struct IndexDeleteJob {
     pub document_id: Uuid,
     pub task_type: String,
+    pub attempt: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
@@ -171,20 +174,22 @@ pub struct ImageMultimodalJob {
 pub struct MultimodalQueue;
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "wiki-ingest:{product_version_id}:{document_id}:{operation}", on_conflict = Skip)]
+#[oxana(unique_id = "wiki-ingest:{product_version_id}:{document_id}:{operation}:{attempt}", on_conflict = Skip)]
 pub struct WikiIngestJob {
     pub product_version_id: Uuid,
     pub document_id: Uuid,
     pub operation: String,
     pub task_type: String,
+    pub attempt: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "wiki-finalize:{product_version_id}:{document_id}", on_conflict = Skip)]
+#[oxana(unique_id = "wiki-finalize:{product_version_id}:{document_id}:{attempt}", on_conflict = Skip)]
 pub struct WikiFinalizeJob {
     pub product_version_id: Uuid,
     pub document_id: Uuid,
     pub task_type: String,
+    pub attempt: i32,
 }
 
 #[derive(oxana::Queue)]
@@ -497,6 +502,7 @@ pub async fn enqueue_post_process(
     document_id: Uuid,
     product_version_id: Uuid,
     clone_keep: bool,
+    attempt: i32,
 ) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
         return Ok(None);
@@ -506,6 +512,7 @@ pub async fn enqueue_post_process(
             .enqueue(
                 PostprocessQueue,
                 PostProcessJob {
+                    attempt,
                     document_id,
                     product_version_id,
                     clone_keep,
@@ -719,12 +726,14 @@ pub async fn enqueue_wiki_ingest(
     product_version_id: Uuid,
     document_id: Uuid,
     operation: &str,
+    attempt: i32,
 ) -> Result<Option<String>, String> {
     enqueue_wiki_ingest_in(
         product_version_id,
         document_id,
         operation,
         WIKI_INGEST_DEBOUNCE_SECS,
+        attempt,
     )
     .await
 }
@@ -734,6 +743,7 @@ pub async fn enqueue_wiki_ingest_in(
     document_id: Uuid,
     operation: &str,
     delay_secs: u64,
+    attempt: i32,
 ) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
         return Ok(None);
@@ -743,6 +753,7 @@ pub async fn enqueue_wiki_ingest_in(
             .enqueue_in(
                 WikiQueue,
                 WikiIngestJob {
+                    attempt,
                     product_version_id,
                     document_id,
                     operation: operation.to_owned(),
@@ -879,7 +890,7 @@ pub async fn enqueue_extract(
     )
 }
 
-pub async fn enqueue_datatable(document_id: Uuid) -> Result<Option<String>, String> {
+pub async fn enqueue_datatable(document_id: Uuid, attempt: i32) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
         return Ok(None);
     };
@@ -888,6 +899,7 @@ pub async fn enqueue_datatable(document_id: Uuid) -> Result<Option<String>, Stri
             .enqueue(
                 SummaryQueue,
                 DatatableJob {
+                    attempt,
                     document_id,
                     task_type: crate::TYPE_DATATABLE.to_string(),
                 },
@@ -930,7 +942,10 @@ pub async fn enqueue_kb_delete(product_version_id: Uuid) -> Result<Option<String
     )
 }
 
-pub async fn enqueue_index_delete(document_id: Uuid) -> Result<Option<String>, String> {
+pub async fn enqueue_index_delete(
+    document_id: Uuid,
+    attempt: i32,
+) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
         return Ok(None);
     };
@@ -939,6 +954,7 @@ pub async fn enqueue_index_delete(document_id: Uuid) -> Result<Option<String>, S
             .enqueue(
                 LowQueue,
                 IndexDeleteJob {
+                    attempt,
                     document_id,
                     task_type: crate::TYPE_INDEX_DELETE.to_string(),
                 },
@@ -971,14 +987,22 @@ pub async fn enqueue_list_reparse(
 pub async fn enqueue_wiki_finalize(
     product_version_id: Uuid,
     document_id: Uuid,
+    attempt: i32,
 ) -> Result<Option<String>, String> {
-    enqueue_wiki_finalize_in(product_version_id, document_id, WIKI_FINALIZE_DEBOUNCE_SECS).await
+    enqueue_wiki_finalize_in(
+        product_version_id,
+        document_id,
+        WIKI_FINALIZE_DEBOUNCE_SECS,
+        attempt,
+    )
+    .await
 }
 
 pub async fn enqueue_wiki_finalize_in(
     product_version_id: Uuid,
     document_id: Uuid,
     delay_secs: u64,
+    attempt: i32,
 ) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
         return Ok(None);
@@ -988,6 +1012,7 @@ pub async fn enqueue_wiki_finalize_in(
             .enqueue_in(
                 WikiQueue,
                 WikiFinalizeJob {
+                    attempt,
                     product_version_id,
                     document_id,
                     task_type: crate::TYPE_WIKI_FINALIZE.to_string(),
@@ -1280,7 +1305,7 @@ mod tests {
         let mut n = 0;
         for _ in 0..5 {
             let did = Uuid::new_v4();
-            let pushed = enqueue_index_delete(did).await.expect("enqueue");
+            let pushed = enqueue_index_delete(did, 1).await.expect("enqueue");
             assert!(pushed.is_some());
             n = storage.enqueued_count(LowQueue).await.unwrap();
             if n >= 1 {
@@ -1350,7 +1375,7 @@ mod tests {
         };
         let mut found = false;
         for _ in 0..5 {
-            let pushed = enqueue_wiki_ingest(vid, did, "ingest")
+            let pushed = enqueue_wiki_ingest(vid, did, "ingest", 1)
                 .await
                 .expect("enqueue");
             assert!(pushed.is_some());
@@ -1364,7 +1389,7 @@ mod tests {
             }
         }
         assert!(found, "wiki ingest job missing from scheduled set");
-        let _ = enqueue_wiki_ingest(vid, did, "ingest")
+        let _ = enqueue_wiki_ingest(vid, did, "ingest", 1)
             .await
             .expect("coalesce");
         let scheduled2 = storage.list_scheduled(&opts).await.unwrap();

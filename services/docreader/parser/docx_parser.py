@@ -318,15 +318,24 @@ def _drawing_units(
         relation_id = blip.get(qn("r:embed"))
         part = doc.part.related_parts.get(relation_id) if relation_id else None
         raw = getattr(part, "blob", None)
-        if not isinstance(raw, bytes) or not raw:
-            continue
         try:
+            if not isinstance(raw, bytes) or not raw:
+                raise ValueError("missing drawing image bytes")
             with Image.open(BytesIO(raw)) as image:
                 width, height = image.size
                 media_type = Image.MIME.get(
                     image.format or "", getattr(part, "content_type", "")
                 )
         except Exception:
+            units.append(StructuredSourceUnit(
+                key=f"unsupported-image:{image_ordinal}", ordinal=len(units),
+                kind=StructuredSourceUnitKind.ATTACHMENT_REGION,
+                text="", locator=AttachmentLocator(
+                    part_name=str(getattr(part, "partname", relation_id or "unresolved-drawing")),
+                    relationship_type="unsupported_drawing_image",
+                ), source_issues=["drawing_image_missing_or_unsupported"],
+            ))
+            image_ordinal += 1
             continue
         extension = os.path.splitext(str(getattr(part, "partname", "")))[1].lower()
         if not extension:
@@ -372,7 +381,8 @@ def _tc_vmerge(tc) -> Optional[str]:
 
 
 def _tc_text(tc) -> str:
-    return "".join(node.text or "" for node in tc.iter(qn("w:t"))).strip()
+    from docreader.parser.ooxml_text import cell_text
+    return cell_text(tc)
 
 
 def _tbl_grid_widths_mm(table: Table) -> Optional[List[float]]:
@@ -446,6 +456,12 @@ def _docx_table_anchors(table: Table) -> Tuple[TableGrid, List[Tuple[int, int, A
     )
 
 
+def rows_are_headers(table: Table, row: int) -> bool:
+    properties = table._tbl.tr_lst[row].find(qn("w:trPr"))
+    header = properties.find(qn("w:tblHeader")) if properties is not None else None
+    return header is not None and header.get(qn("w:val"), "true") not in {"false", "0", "off"}
+
+
 def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
     """Extract deterministic typed occurrences in one pass over the DOCX body."""
     doc = Document(BytesIO(content))
@@ -457,8 +473,10 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
     numbering = _DocxNumbering(doc)
     heading_stack: List[str] = []
     pending_paragraphs: List[str] = []
+    pending_paths: List[str] = []
     current_section: Optional[int] = None
     next_section = 0
+    logical_section = "section:0"
     table_ordinal = 0
     form_ordinal = 0
     image_ordinal = 0
@@ -485,13 +503,17 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
                     section_ordinal=section,
                     heading_path=heading_path(),
                 ),
+                source_section_id=logical_section,
+                physical_path=";".join(pending_paths) or "/word/document.xml/body",
             )
         )
         pending_paragraphs.clear()
+        pending_paths.clear()
         current_section = section
         return section
 
-    for child in doc.element.body.iterchildren():
+    for body_ordinal, child in enumerate(doc.element.body.iterchildren()):
+        physical_path = f"/word/document.xml/body/*[{body_ordinal + 1}]"
         if child.tag == qn("w:p"):
             paragraph = Paragraph(child, doc)
             text = numbering.display(paragraph)
@@ -499,14 +521,17 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
             if level is not None and text:
                 if pending_paragraphs:
                     flush_section()
+                logical_section = f"section:{next_section}"
                 heading_stack = heading_stack[: level - 1]
                 while len(heading_stack) < level - 1:
                     heading_stack.append("")
                 heading_stack.append(text)
                 pending_paragraphs.append(text)
+                pending_paths.append(physical_path)
                 current_section = None
             elif text:
                 pending_paragraphs.append(text)
+                pending_paths.append(physical_path)
 
             drawings = child.xpath(".//*[local-name()='blip']")
             if drawings:
@@ -540,6 +565,12 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
                         heading_path=heading_path(),
                     ),
                     grid=grid,
+                    physical_path=physical_path,
+                    source_section_id=logical_section,
+                    source_issues=["nested_table_flattened_for_display"] if child.xpath(".//w:tc/w:tbl") else [],
+                    header_cells=[{"row": cell.row, "column": cell.column, "role": "column_header"}
+                                  for cell in grid.cells
+                                  if rows_are_headers(table, cell.row)],
                 )
             )
             for row_ordinal, column, tc in anchors:
@@ -560,13 +591,16 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
 
         if child.tag == qn("w:sdt"):
             section = flush_section(force=current_section is None)
-            text = "".join(node.text or "" for node in child.iter(qn("w:t"))).strip()
+            from docreader.parser.ooxml_text import cell_text
+            text = cell_text(child)
             units.append(
                 StructuredSourceUnit(
                     key=f"form:{form_ordinal}",
                     ordinal=len(units),
                     kind=StructuredSourceUnitKind.FORM_REGION,
                     text=text,
+                    physical_path=physical_path,
+                    source_section_id=logical_section,
                     locator=DocumentLocator(
                         section_ordinal=section,
                         form_ordinal=form_ordinal,

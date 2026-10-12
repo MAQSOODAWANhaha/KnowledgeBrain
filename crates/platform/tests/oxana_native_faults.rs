@@ -204,6 +204,31 @@ impl oxana::Worker<DeadJob> for CountWorker {
     }
 }
 
+// A resurrectable job returning cancellation as an ordinary worker error has
+// exactly the same queue contract as the production adapter on shutdown.
+#[async_trait::async_trait]
+impl oxana::Worker<ResurrectJob> for CountWorker {
+    type Error = FaultError;
+
+    async fn process(
+        &self,
+        _job: ResurrectJob,
+        ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        assert_eq!(ctx.meta.retries, 0);
+        let n = self.hits.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == 1 {
+            Err(FaultError::Message("CANCELLED: worker shutdown"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn max_retries(&self, _job: &ResurrectJob) -> u32 {
+        0 // The first delivery is already the final permitted attempt.
+    }
+}
+
 async fn wait_until<F, Fut>(deadline: Instant, mut check: F, what: &str)
 where
     F: FnMut() -> Fut,
@@ -525,4 +550,113 @@ async fn dead_revive_allows_reconsume_without_duplicate_agent() {
         .expect("second succeeding runtime");
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert_eq!(storage.dead_count().await.expect("final dead"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_shutdown_error_requires_explicit_revive_even_for_resurrectable_jobs() {
+    if child_mode().is_some() {
+        return;
+    }
+    let Some((storage, url, namespace)) = connect_storage("final shutdown error").await else {
+        return;
+    };
+    assert!(<ResurrectJob as oxana::Job>::should_resurrect());
+    let hits = Arc::new(AtomicU32::new(0));
+    let cancelled_id = storage
+        .enqueue(
+            FaultQueue,
+            ResurrectJob {
+                key: format!("cancelled-{namespace}"),
+            },
+        )
+        .await
+        .expect("enqueue cancellation job");
+    storage
+        .runtime(CountCtx { hits: hits.clone() })
+        .queue::<FaultQueue>()
+        .worker::<CountWorker, ResurrectJob>()
+        .exit_when_processed(1)
+        .dequeue_timeout(Duration::from_millis(200))
+        .run()
+        .await
+        .expect("final cancelled runtime");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(storage.dead_count().await.expect("cancelled dead"), 1);
+    assert_eq!(storage.enqueued_count(FaultQueue).await.expect("count"), 0);
+
+    // Positive control: kill a process while it owns a different job, then
+    // wait for that job's native resurrection. This proves a scan completed
+    // without relying on a sleep to infer that the dead job stayed dead.
+    let control_id = storage
+        .enqueue(
+            FaultQueue,
+            ResurrectJob {
+                key: format!("control-{namespace}"),
+            },
+        )
+        .await
+        .expect("enqueue crash control");
+    let child = spawn_child(
+        "resurrect",
+        "crash_resurrection_reenqueues_job_and_keeps_get_job",
+        &url,
+        &namespace,
+    );
+    wait_until(
+        Instant::now() + Duration::from_secs(8),
+        || {
+            let storage = storage.clone();
+            let control_id = control_id.clone();
+            async move {
+                storage.enqueued_count(FaultQueue).await.ok() == Some(0)
+                    && storage.get_job(&control_id).await.ok().flatten().is_some()
+            }
+        },
+        "child to take crash control",
+    )
+    .await;
+    kill_child(child);
+    let (stop_tx, handle) = run_scanner(storage.clone()).await;
+    wait_until(
+        Instant::now() + Duration::from_secs(8),
+        || {
+            let storage = storage.clone();
+            async move { storage.enqueued_count(FaultQueue).await.ok() == Some(1) }
+        },
+        "crash control native resurrection",
+    )
+    .await;
+    stop_scanner(stop_tx, handle).await;
+    let dead = storage
+        .list_dead(&oxana::QueueListOpts {
+            count: 10,
+            offset: 0,
+        })
+        .await
+        .expect("dead after native resurrection");
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].id, cancelled_id);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(storage.enqueued_count(FaultQueue).await.expect("count"), 1);
+
+    assert_eq!(storage.revive_all_dead().await.expect("explicit revive"), 1);
+    assert_eq!(storage.enqueued_count(FaultQueue).await.expect("count"), 2);
+    storage
+        .runtime(CountCtx { hits: hits.clone() })
+        .queue::<FaultQueue>()
+        .worker::<CountWorker, ResurrectJob>()
+        .exit_when_processed(2)
+        .dequeue_timeout(Duration::from_millis(200))
+        .run()
+        .await
+        .expect("consume control and explicitly revived cancellation");
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    assert_eq!(storage.dead_count().await.expect("final dead"), 0);
+    assert_eq!(
+        storage
+            .enqueued_count(FaultQueue)
+            .await
+            .expect("final queued"),
+        0
+    );
 }

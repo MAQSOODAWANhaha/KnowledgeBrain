@@ -36,8 +36,63 @@ pub async fn persist_wiki_changes_atomic(
     changed_slugs: &[String],
     chunks: &[crate::Chunk],
     embeddings: &[crate::ChunkEmbedding],
+    source_generations: &[(Uuid, i32)],
+    guard: Option<(Uuid, i32, &str)>,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    // A version-level page can be hosted on a different document than any of
+    // its sources. Lock every dependency before publishing, so a concurrent
+    // tombstone either invalidates this commit afterwards or makes it fail now.
+    let mut source_ids = pages
+        .iter()
+        .flat_map(|page| page.source_refs.iter().copied())
+        .collect::<Vec<_>>();
+    source_ids.sort_unstable();
+    source_ids.dedup();
+    let mut lock_ids = source_ids.clone();
+    if let Some((document_id, _, _)) = guard {
+        lock_ids.push(document_id);
+        lock_ids.sort_unstable();
+        lock_ids.dedup();
+    }
+    let locked = sqlx::query("SELECT id,attempt,parse_status,deleted_at IS NULL AS live FROM documents WHERE product_version_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE")
+        .bind(version_id).bind(&lock_ids).fetch_all(&mut *tx).await?;
+    for source_id in source_ids {
+        let expected = source_generations
+            .iter()
+            .find(|(id, _)| *id == source_id)
+            .map(|(_, attempt)| *attempt);
+        let current = locked
+            .iter()
+            .find(|row| row.get::<Uuid, _>("id") == source_id);
+        if expected.is_none()
+            || current.is_none_or(|row| {
+                !row.get::<bool, _>("live")
+                    || expected != Some(row.get::<i32, _>("attempt"))
+                    || matches!(
+                        row.get::<String, _>("parse_status").as_str(),
+                        "cancelled" | "deleting" | "deleted" | "failed"
+                    )
+            })
+        {
+            return Err(sqlx::Error::Protocol(
+                "Wiki source generation changed; publication must be rebuilt".into(),
+            ));
+        }
+    }
+    if let Some((document_id, attempt, receipt)) = guard {
+        let current:Option<String>=sqlx::query_scalar("SELECT parse_status FROM documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL FOR UPDATE").bind(document_id).bind(attempt).fetch_optional(&mut *tx).await?;
+        if current.is_none()
+            || current.as_deref() == Some("cancelled")
+            || (current.as_deref() == Some("deleting") && receipt != "wiki-retract")
+        {
+            return Ok(());
+        }
+        if !crate::workflow::complete_tx(&mut tx, document_id, attempt, receipt).await? {
+            return Ok(());
+        }
+    }
+
     if !removed_page_ids.is_empty() {
         sqlx::query("DELETE FROM wiki_pages WHERE product_version_id=$1 AND id=ANY($2::uuid[])")
             .bind(version_id)

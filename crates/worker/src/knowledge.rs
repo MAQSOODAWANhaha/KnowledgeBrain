@@ -263,12 +263,17 @@ pub async fn process_version_clone(pool: &PgPool, job: &VersionCloneJob) -> Resu
                 f.product_version_id,
                 f.document_id,
                 knowledge::wiki::OP_INGEST,
+                1,
             )
             .await;
         } else if f.clone_keep || f.task_type == platform::TYPE_POST_PROCESS {
-            let _ =
-                platform::enqueue_post_process(f.document_id, f.product_version_id, f.clone_keep)
-                    .await;
+            let _ = platform::enqueue_post_process(
+                f.document_id,
+                f.product_version_id,
+                f.clone_keep,
+                1,
+            )
+            .await;
         } else {
             let _ =
                 platform::enqueue_document_process(f.document_id, f.product_version_id, 1).await;
@@ -319,6 +324,7 @@ impl oxana::Worker<PostProcessJob> for PostProcessWorker {
                     job.document_id,
                     job.product_version_id,
                     job.clone_keep,
+                    job.attempt,
                 )
                 .await
                 .map_err(JobErr)
@@ -514,8 +520,16 @@ pub async fn process_post_process(
     document_id: Uuid,
     product_version_id: Uuid,
     clone_keep: bool,
+    attempt: i32,
 ) -> Result<(), String> {
-    knowledge::pipeline::run_post_process(pool, document_id, product_version_id, clone_keep).await
+    knowledge::pipeline::run_post_process(
+        pool,
+        document_id,
+        product_version_id,
+        clone_keep,
+        attempt,
+    )
+    .await
 }
 
 pub struct HousekeepWorker {
@@ -549,9 +563,6 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
         _job: HousekeepJob,
         _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
-        if !platform::housekeep_enabled() {
-            return Ok(());
-        }
         let Some(pool) = self.pool.clone() else {
             return Err(JobErr("postgres not configured".into()));
         };
@@ -561,9 +572,12 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
         let local_cancel = CancellationToken::new();
         let run = run_owned_handler(
             async move {
-                knowledge::housekeep_documents(&pool, platform::HOUSEKEEP_STALE_SECS)
-                    .await
-                    .map_err(|error| JobErr(error.to_string()))?;
+                knowledge::workflow::dispatch(&pool).await.map_err(JobErr)?;
+                if platform::housekeep_enabled() {
+                    knowledge::housekeep_documents(&pool, platform::HOUSEKEEP_STALE_SECS)
+                        .await
+                        .map_err(|error| JobErr(error.to_string()))?;
+                }
                 let _ = platform::HOUSEKEEP_STALE_SECS;
                 Ok(())
             },
@@ -656,10 +670,11 @@ impl oxana::Worker<ImageMultimodalJob> for ImageMultimodalWorker {
                 .err()
                 .map(String::as_str)
                 .unwrap_or("timeout");
-            let _ = knowledge::set_parse_status(
+            let _ = knowledge::workflow::update_status(
                 pool,
                 document_id,
-                "finalizing",
+                attempt,
+                "failed",
                 &format!("ocr_error: {error}; caption_error: {error}"),
             )
             .await;
@@ -698,8 +713,9 @@ pub async fn process_wiki_finalize(
     pool: &PgPool,
     version_id: Uuid,
     document_id: Uuid,
+    attempt: i32,
 ) -> Result<(), String> {
-    knowledge::pipeline::run_wiki_finalize(pool, version_id, document_id).await
+    knowledge::pipeline::run_wiki_finalize(pool, version_id, document_id, attempt).await
 }
 
 pub struct WikiIngestWorker {
@@ -747,6 +763,7 @@ impl oxana::Worker<WikiIngestJob> for WikiIngestWorker {
                     job.product_version_id,
                     job.document_id,
                     &job.operation,
+                    job.attempt,
                 )
                 .await
                 .map_err(JobErr)
@@ -802,7 +819,7 @@ impl oxana::Worker<WikiFinalizeJob> for WikiFinalizeWorker {
         let local_cancel = CancellationToken::new();
         let run = run_owned_handler(
             async move {
-                process_wiki_finalize(&pool, job.product_version_id, job.document_id)
+                process_wiki_finalize(&pool, job.product_version_id, job.document_id, job.attempt)
                     .await
                     .map_err(JobErr)
             },
@@ -826,8 +843,9 @@ pub async fn process_wiki_ingest(
     version_id: Uuid,
     document_id: Uuid,
     operation: &str,
+    attempt: i32,
 ) -> Result<(), String> {
-    knowledge::pipeline::run_wiki_ingest(pool, version_id, document_id, operation).await
+    knowledge::pipeline::run_wiki_ingest(pool, version_id, document_id, operation, attempt).await
 }
 
 pub async fn process_summary_pg(
@@ -964,7 +982,7 @@ simple_worker!(
     DatatableJob,
     platform::POST_PROCESS_TIMEOUT_SECS,
     |pool: PgPool, job: DatatableJob| async move {
-        knowledge::pipeline::run_datatable(&pool, job.document_id).await
+        knowledge::pipeline::run_datatable(&pool, job.document_id, job.attempt).await
     }
 );
 simple_worker!(
@@ -996,8 +1014,6 @@ simple_worker!(
     IndexDeleteJob,
     platform::POST_PROCESS_TIMEOUT_SECS,
     |pool: PgPool, job: IndexDeleteJob| async move {
-        knowledge::purge_document_index(&pool, job.document_id)
-            .await
-            .map_err(|e| e.to_string())
+        knowledge::workflow::delete_generation(&pool, job.document_id, job.attempt).await
     }
 );

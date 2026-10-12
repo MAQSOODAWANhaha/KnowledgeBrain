@@ -1635,7 +1635,7 @@ async fn enqueue_ingest_document(doc: &Document) -> Result<(), ApiErr> {
             || doc.file_name.ends_with(".xls")
         {
             require_enqueued(
-                platform::enqueue_datatable(doc.id).await,
+                platform::enqueue_datatable(doc.id, doc.attempt).await,
                 "datatable processing",
             )?;
         }

@@ -1,6 +1,7 @@
 //! MinerU / PaddleOCR-VL HTTP convert (spec §5.2).
 
-use crate::{ConvertError, NOT_CONFIGURED, ReadResult};
+use crate::engines::EffectiveEngineConfig;
+use crate::{ConvertError, ReadResult};
 use tokio_util::sync::CancellationToken;
 
 async fn wait_cancel<T>(
@@ -14,20 +15,8 @@ async fn wait_cancel<T>(
     }
 }
 
-pub fn mineru_endpoint() -> String {
-    std::env::var("KNOWLEDGEBRAIN_MINERU_ENDPOINT")
-        .or_else(|_| std::env::var("MINERU_ENDPOINT"))
-        .unwrap_or_default()
-}
-
-pub fn paddle_endpoint() -> String {
-    std::env::var("KNOWLEDGEBRAIN_PADDLE_ENDPOINT")
-        .or_else(|_| std::env::var("PADDLEOCR_VL_ENDPOINT"))
-        .unwrap_or_default()
-}
-
 pub async fn convert_http(
-    engine: &str,
+    config: &EffectiveEngineConfig,
     file_name: &str,
     bytes: Vec<u8>,
     cancel: &CancellationToken,
@@ -35,28 +24,20 @@ pub async fn convert_http(
     if cancel.is_cancelled() {
         return Err(ConvertError("cancelled".into()));
     }
-    match engine {
-        "mineru" | "mineru_cloud" => mineru_parse(file_name, &bytes, cancel).await,
-        "paddleocr_vl" | "paddleocr_vl_cloud" => paddle_parse(file_name, &bytes, cancel).await,
-        _ => Ok(ReadResult {
-            error: NOT_CONFIGURED.into(),
-            ..ReadResult::default()
-        }),
+    match config.engine.as_str() {
+        "mineru" => mineru_parse(config, file_name, &bytes, cancel).await,
+        "paddleocr_vl" => paddle_parse(config, file_name, &bytes, cancel).await,
+        _ => Err(ConvertError("unsupported HTTP parser engine".into())),
     }
 }
 
 async fn mineru_parse(
+    config: &EffectiveEngineConfig,
     file_name: &str,
     bytes: &[u8],
     cancel: &CancellationToken,
 ) -> Result<ReadResult, ConvertError> {
-    let base = mineru_endpoint();
-    if base.is_empty() {
-        return Ok(ReadResult {
-            error: NOT_CONFIGURED.into(),
-            ..ReadResult::default()
-        });
-    }
+    let base = &config.endpoint;
     let url = format!("{}/file_parse", base.trim_end_matches('/'));
     let part = reqwest::multipart::Part::bytes(bytes.to_vec())
         .file_name(file_name.to_string())
@@ -68,19 +49,20 @@ async fn mineru_parse(
         .build()
         .map_err(|e| ConvertError(e.to_string()))?;
     let resp = wait_cancel(cancel, async {
-        client
-            .post(url)
+        authenticate(client.post(url), config)
             .multipart(form)
             .send()
             .await
-            .map_err(|e| ConvertError(e.to_string()))
+            .map_err(|_| ConvertError("parser HTTP request failed".into()))
     })
     .await?;
     if !resp.status().is_success() {
         return Err(ConvertError(format!("mineru {}", resp.status())));
     }
     let v: serde_json::Value = wait_cancel(cancel, async {
-        resp.json().await.map_err(|e| ConvertError(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|_| ConvertError("parser HTTP request failed".into()))
     })
     .await?;
     Ok(ReadResult {
@@ -90,17 +72,12 @@ async fn mineru_parse(
 }
 
 async fn paddle_parse(
+    config: &EffectiveEngineConfig,
     file_name: &str,
     bytes: &[u8],
     cancel: &CancellationToken,
 ) -> Result<ReadResult, ConvertError> {
-    let base = paddle_endpoint();
-    if base.is_empty() {
-        return Ok(ReadResult {
-            error: NOT_CONFIGURED.into(),
-            ..ReadResult::default()
-        });
-    }
+    let base = &config.endpoint;
     let url = format!("{}/layout-parsing", base.trim_end_matches('/'));
     let body = serde_json::json!({
         "file": data_encoding_base64(bytes),
@@ -111,25 +88,36 @@ async fn paddle_parse(
         .build()
         .map_err(|e| ConvertError(e.to_string()))?;
     let resp = wait_cancel(cancel, async {
-        client
-            .post(url)
+        authenticate(client.post(url), config)
             .json(&body)
             .send()
             .await
-            .map_err(|e| ConvertError(e.to_string()))
+            .map_err(|_| ConvertError("parser HTTP request failed".into()))
     })
     .await?;
     if !resp.status().is_success() {
         return Err(ConvertError(format!("paddle {}", resp.status())));
     }
     let v: serde_json::Value = wait_cancel(cancel, async {
-        resp.json().await.map_err(|e| ConvertError(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|_| ConvertError("parser HTTP request failed".into()))
     })
     .await?;
     Ok(ReadResult {
         markdown: extract_markdown(&v),
         ..ReadResult::default()
     })
+}
+
+fn authenticate(
+    request: reqwest::RequestBuilder,
+    config: &EffectiveEngineConfig,
+) -> reqwest::RequestBuilder {
+    match &config.bearer_token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
 }
 
 fn extract_markdown(v: &serde_json::Value) -> String {
@@ -189,21 +177,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_endpoints_are_not_configured() {
-        unsafe {
-            std::env::remove_var("KNOWLEDGEBRAIN_MINERU_ENDPOINT");
-            std::env::remove_var("MINERU_ENDPOINT");
-            std::env::remove_var("KNOWLEDGEBRAIN_PADDLE_ENDPOINT");
-            std::env::remove_var("PADDLEOCR_VL_ENDPOINT");
+    async fn conversion_sends_override_endpoint_and_auth_for_both_engines() {
+        use std::collections::HashMap;
+        use std::io::{Read, Write};
+        for (engine, endpoint_key, token_key, path) in [
+            (
+                "mineru",
+                "mineru_endpoint",
+                "mineru_api_key",
+                "/override/file_parse",
+            ),
+            (
+                "paddleocr_vl",
+                "paddleocr_vl_endpoint",
+                "paddleocr_vl_token",
+                "/override/layout-parsing",
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let size = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + size {
+                            break;
+                        }
+                    }
+                }
+                let body = r##"{"markdown":"# received"}"##;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                String::from_utf8_lossy(&request).to_ascii_lowercase()
+            });
+            let overrides = HashMap::from([
+                (endpoint_key.into(), format!("http://{addr}/override")),
+                (token_key.into(), "test-bearer".into()),
+            ]);
+            let parsed = crate::convert_with(crate::ConvertInput {
+                engine,
+                file_name: "fixture.pdf",
+                file_type: "pdf",
+                is_url: false,
+                bytes: b"%PDF fixture".to_vec(),
+                url: "",
+                title: "",
+                overrides: &overrides,
+            })
+            .await
+            .unwrap();
+            assert_eq!(parsed.markdown, "# received");
+            let request = server.join().unwrap();
+            assert!(request.starts_with(&format!("post {path} http/1.1")));
+            assert!(request.contains("authorization: bearer test-bearer"));
         }
-        let cancel = CancellationToken::new();
-        let r = convert_http("mineru", "a.pdf", b"%PDF".to_vec(), &cancel)
-            .await
-            .unwrap();
-        assert_eq!(r.error, NOT_CONFIGURED);
-        let r = convert_http("paddleocr_vl", "a.pdf", b"%PDF".to_vec(), &cancel)
-            .await
-            .unwrap();
-        assert_eq!(r.error, NOT_CONFIGURED);
+    }
+
+    #[tokio::test]
+    async fn cloud_only_configuration_is_explicitly_unsupported() {
+        let overrides =
+            std::collections::HashMap::from([("mineru_api_key".into(), "do-not-log".into())]);
+        let error = crate::convert_with(crate::ConvertInput {
+            engine: "mineru_cloud",
+            file_name: "a.pdf",
+            file_type: "pdf",
+            is_url: false,
+            bytes: vec![],
+            url: "",
+            title: "",
+            overrides: &overrides,
+        })
+        .await
+        .unwrap_err();
+        assert!(error.0.contains("unsupported"));
+        assert!(!error.0.contains("do-not-log"));
     }
 }

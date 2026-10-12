@@ -309,3 +309,37 @@ class ExcelParserTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_native_numeric_and_formula_fidelity_is_not_flattened_to_str():
+    """Synthetic workbook: preserve field meaning before any model sees it."""
+    from datetime import datetime
+    from docreader.parser.excel_parser import _cell_model
+
+    wb = openpyxl.Workbook()
+    ws = _active_sheet(wb)
+    ws["A1"], ws["A1"].number_format = 0.15, "0%"
+    ws["B1"], ws["B1"].number_format = datetime(2026, 1, 2), "yyyy-mm-dd"
+    ws["C1"], ws["C1"].number_format = 1234.5, '#,##0.00"元"'
+    ws["D1"] = "=C1*(1+A1)"
+    cells = [_cell_model(ws[address]).model_dump() for address in ("A1", "B1", "C1", "D1")]
+    assert cells[0]["number_format"] == "0%"
+    assert cells[0]["display_text"] == "15%"
+    assert cells[0]["display_complete"] is True
+    assert cells[1]["value_type"] == "date"
+    assert cells[1]["display_text"] == "2026-01-02"
+    assert cells[2]["display_text"] == "1,234.50元"
+    assert cells[3]["formula"] == "=C1*(1+A1)"
+    assert cells[3]["formula_references"] == ["C1", "A1"]
+    assert cells[3]["cached_value"] is None
+    assert cells[3]["display_complete"] is False
+
+
+def test_unsupported_general_numeric_and_boolean_display_are_explicit():
+    from docreader.parser.excel_parser import _display_value
+
+    assert _display_value(True, "General") == ("TRUE", None)
+    assert _display_value(False, "0.00") == ("FALSE", None)
+    assert _display_value(1.23456789, "General") == (None, "general_numeric_display_not_rendered")
+    assert _display_value(12, "[Red]0;[Blue]-0") == (None, "unsupported_number_format")
+    assert _display_value(1.225, "0.00") == ("1.23", None)

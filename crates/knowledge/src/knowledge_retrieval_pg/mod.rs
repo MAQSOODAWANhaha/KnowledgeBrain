@@ -150,8 +150,8 @@ impl PostgresKnowledgeRetrievalAdapter {
                JOIN products p ON p.workspace_id=w.id
                JOIN product_versions pv ON pv.product_id=p.id AND p.current_version_id=pv.id
                LEFT JOIN documents d ON d.product_version_id=pv.id
-                AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
-               LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id
+                AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND d.enable_status='enabled' AND d.index_ready
+               LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id AND c.generation=d.active_generation
                 AND octet_length(convert_to(c.content,'UTF8')) <= $3
               WHERE w.kind=$1 AND pv.status='active' AND pv.deleted_at IS NULL
                 AND (($1='product_line' AND p.kind='product') OR ($1='company' AND p.kind='library'))
@@ -503,8 +503,8 @@ impl PostgresKnowledgeRetrievalAdapter {
                JOIN products p ON p.workspace_id=w.id
                JOIN product_versions pv ON pv.product_id=p.id
                LEFT JOIN documents d ON d.product_version_id=pv.id
-                AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
-               LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id
+                AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND d.enable_status='enabled' AND d.index_ready
+               LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id AND c.generation=d.active_generation
                 AND c.chunk_type=ANY($3::text[])
                 AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
               WHERE w.kind=$1

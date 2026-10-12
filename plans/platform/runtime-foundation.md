@@ -6,7 +6,7 @@
 | 所有者 | Shared Platform |
 | 消费方 | 知识库、招投标 |
 
-本文是 fresh baseline、schema snapshot、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 的唯一活动定义。队列能力由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的 target、业务引用和技术消费校验。招投标产品目标见 [PRD](../../docs/bidding/prd.md) 和 [ONLYOFFICE](../../docs/bidding/onlyoffice.md)，来源/身份接缝见 [领域契约](../../docs/bidding/authoring.md)；不以业务检查阻断编辑/导出。旧 first-launch/intended-state/verifier 与 V1 slice 已删除；最终系统使用三份 clean baseline、单行 release receipt 与 runtime read-only catalog verification。
+本文是 fresh baseline、schema snapshot、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 的唯一活动定义。队列能力由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的 target、业务引用和技术消费校验。招投标产品目标见 [PRD](../../docs/bidding/README.md) 和 [ONLYOFFICE](../../docs/bidding/onlyoffice.md)，来源/身份接缝见 [领域契约](../../docs/bidding/authoring.md)；不以业务检查阻断编辑/导出。旧 first-launch/intended-state/verifier 与 V1 slice 已删除；最终系统使用三份 clean baseline、单行 release receipt 与 runtime read-only catalog verification。
 
 ## 1. 所有权边界
 

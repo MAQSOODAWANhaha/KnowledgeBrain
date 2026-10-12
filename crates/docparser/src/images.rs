@@ -48,6 +48,139 @@ pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8
     (md, blobs)
 }
 
+/// Evidence-aware persistence preparation. Every advertised or displayed image
+/// must resolve, and all exact parser offsets are remapped with each edit.
+pub async fn rewrite_images_with_contract(
+    result: &ReadResult,
+) -> Result<
+    (
+        String,
+        Vec<(String, Vec<u8>)>,
+        Option<crate::SourceContract>,
+    ),
+    crate::ConvertError,
+> {
+    use std::collections::BTreeMap;
+    let mut contract = crate::parse_source_contract(result)?;
+    let mut markdown = result.markdown.clone();
+    let mut payloads = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
+    for image in &result.images {
+        let data = if !image.data.is_empty() {
+            image.data.clone()
+        } else if image.storage_key.starts_with("https://")
+            || image.storage_key.starts_with("http://")
+        {
+            fetch_image(&image.storage_key)
+                .await
+                .map_err(|_| crate::ConvertError("required image could not be fetched".into()))?
+        } else {
+            return Err(crate::ConvertError("required image has no payload".into()));
+        };
+        if data.is_empty() {
+            return Err(crate::ConvertError(
+                "required image payload is empty".into(),
+            ));
+        }
+        let hash = platform::sha256_hex(&data);
+        let key = format!("objects/{hash}");
+        payloads.insert(hash, data);
+        let nested = format!("images/{}", image.filename);
+        for alias in [&image.original_ref, &image.storage_key, &nested] {
+            if alias.is_empty() || alias == "images/" {
+                continue;
+            }
+            if aliases
+                .insert(alias.clone(), key.clone())
+                .is_some_and(|previous| previous != key)
+            {
+                return Err(crate::ConvertError("conflicting image identities".into()));
+            }
+        }
+    }
+    // Longer aliases first so an overlapping basename cannot split a URL.
+    let mut aliases: Vec<_> = aliases.into_iter().collect();
+    aliases.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
+    for (from, to) in aliases {
+        replace_mapped(&mut markdown, &mut contract, &from, &to)?;
+    }
+    let mut remote = Vec::new();
+    for reference in markdown_image_refs(&markdown) {
+        if let Some(hash) = reference.strip_prefix("objects/") {
+            if !payloads.contains_key(hash) {
+                return Err(crate::ConvertError(
+                    "rewritten image has no verified original payload".into(),
+                ));
+            }
+            continue;
+        }
+        if !(reference.starts_with("https://") || reference.starts_with("http://")) {
+            return Err(crate::ConvertError(
+                "unresolved required image reference".into(),
+            ));
+        }
+        if !remote.contains(&reference) {
+            remote.push(reference);
+        }
+    }
+    if remote.len() > MAX_REMOTE_IMAGES {
+        return Err(crate::ConvertError(
+            "required remote images exceed persistence budget".into(),
+        ));
+    }
+    for reference in remote {
+        let data = fetch_image(&reference).await.map_err(|_| {
+            crate::ConvertError("required remote image could not be fetched".into())
+        })?;
+        if data.is_empty() {
+            return Err(crate::ConvertError(
+                "required remote image payload is empty".into(),
+            ));
+        }
+        let hash = platform::sha256_hex(&data);
+        replace_mapped(
+            &mut markdown,
+            &mut contract,
+            &reference,
+            &format!("objects/{hash}"),
+        )?;
+        payloads.insert(hash, data);
+    }
+    Ok((markdown, payloads.into_iter().collect(), contract))
+}
+
+fn replace_mapped(
+    markdown: &mut String,
+    contract: &mut Option<crate::SourceContract>,
+    from: &str,
+    to: &str,
+) -> Result<(), crate::ConvertError> {
+    if let Some(contract) = contract {
+        contract.replace_rendered(markdown, from, to)?;
+    } else {
+        *markdown = markdown.replace(from, to);
+    }
+    Ok(())
+}
+
+fn markdown_image_refs(markdown: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut remaining = markdown;
+    while let Some(start) = remaining.find("![") {
+        remaining = &remaining[start + 2..];
+        let Some(target) = remaining.find("](") else {
+            break;
+        };
+        remaining = &remaining[target + 2..];
+        let Some(end) = remaining.find(')') else {
+            break;
+        };
+        refs.push(remaining[..end].to_owned());
+        remaining = &remaining[end + 1..];
+    }
+    refs
+}
+
 fn remote_image_candidates(md: &str) -> Vec<String> {
     remote_urls(md)
         .into_iter()

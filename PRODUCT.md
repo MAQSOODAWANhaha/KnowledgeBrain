@@ -56,7 +56,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 生成合同在 `docs/bidding/`。本页是工作台的产品设想。
 
-- [业务 PRD](docs/bidding/prd.md)、[大纲运行时](docs/bidding/outline.md)、[ONLYOFFICE 技术契约](docs/bidding/onlyoffice.md)、[领域边界](docs/bidding/authoring.md)、[编辑与出件顺序](plans/bidding/onlyoffice-integration.md)、[未完成缺口](plans/bidding/outline-gaps.md)
+- [业务 PRD](docs/bidding/README.md)、[大纲运行时](docs/design/evidence-runtime-contract.md)、[ONLYOFFICE 技术契约](docs/bidding/onlyoffice.md)、[领域边界](docs/bidding/authoring.md)、[编辑与出件顺序](plans/bidding/onlyoffice-integration.md)、[未完成缺口](docs/design/check-execution-plan.md)
 - `docs/knowledge-base/domain.md`（知识库领域与证据检索端口）
 - `1.png`：Plannotator 三栏编辑器仅作结构参照（左树 / 中文稿 / 右检查器）；外壳外观以 `DESIGN.md` 为准，不再仿 iCloud，也不走 Cloudflare 锌灰密表
 - 无客户照片、无真实标书样张可当品牌图

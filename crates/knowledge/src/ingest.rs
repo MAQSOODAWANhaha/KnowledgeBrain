@@ -20,6 +20,10 @@ pub async fn run_convert(
     manual: bool,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
+    let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status IN ('pending','processing','finalizing','failed')) AND EXISTS(SELECT 1 FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=$2 AND job_key='convert' AND state IN ('pending','published')) AND NOT EXISTS(SELECT 1 FROM knowledge_job_receipts WHERE document_id=$1 AND attempt=$2 AND job_key='convert')").bind(document_id).bind(attempt).fetch_one(pool).await.map_err(|e|e.to_string())?;
+    if !current {
+        return Ok(());
+    }
     let row = sqlx::query_as::<
         _,
         (
@@ -76,9 +80,8 @@ pub async fn run_convert(
     if matches!(parse_status.as_str(), "cancelled" | "deleting") {
         return Ok(());
     }
-    let flipped = crate::try_set_processing(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let flipped = sqlx::query("UPDATE documents SET parse_status='processing',error_message='',updated_at=now() WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status IN ('pending','failed')")
+        .bind(document_id).bind(attempt).execute(pool).await.map_err(|e|e.to_string())?.rows_affected()==1;
     if !flipped {
         return match crate::document_parse_status(pool, document_id)
             .await
@@ -88,6 +91,10 @@ pub async fn run_convert(
             Some("completed") => {
                 crate::pipeline::schedule_semantic_index_v2_if_ready(pool, version_id).await
             }
+            // A duplicate delivery does not own the running generation.
+            // Durable conversion obligations are reclaimed with a new attempt
+            // after the bounded processing lease, never by failing this worker.
+            Some("processing") => Ok(()),
             _ => Ok(()),
         };
     }
@@ -127,7 +134,8 @@ pub async fn run_convert(
             None,
         )
         .await;
-        let indexed = persist_passage_index(pool, document_id, version_id, passages).await?;
+        let indexed =
+            persist_passage_index(pool, document_id, version_id, attempt, passages).await?;
         let _ = crate::finish_span(
             pool,
             document_id,
@@ -167,6 +175,7 @@ pub async fn run_convert(
     let mut convert_image_source = String::new();
     // D3: structured source units from docparser (empty when markdown is reused/manual).
     let mut source_units: Vec<docparser::StructuredSourceUnit> = Vec::new();
+    let mut source_contract: Option<docparser::SourceContract> = None;
     let prior_spans = document_stage_spans(pool, document_id, attempt).await;
     let markdown = if manual {
         let bytes = platform::read_blob(&file_hash).map_err(|e| e.to_string())?;
@@ -180,7 +189,12 @@ pub async fn run_convert(
             Some(serde_json::json!({"engine": "manual", "file": file_name})),
         )
         .await;
-        let _ = platform::write_blob_async(&format!("{file_hash}.md"), md.as_bytes()).await;
+        platform::write_blob_async(
+            &format!("{file_hash}.{document_id}.{attempt}.md"),
+            md.as_bytes(),
+        )
+        .await
+        .map_err(|e| format!("persist manual markdown: {e}"))?;
         let _ = crate::finish_span(
             pool,
             document_id,
@@ -191,8 +205,26 @@ pub async fn run_convert(
         )
         .await;
         md
-    } else if let Some(md) = reused_markdown(&prior_spans, &file_hash) {
+    } else if let Some(md) = reused_markdown(&prior_spans, &file_hash, document_id, attempt) {
         convert_image_source = reused_image_source(&prior_spans);
+        let manifest = platform::read_blob(&format!(
+            "{file_hash}.{document_id}.{attempt}.manifest.json"
+        ))
+        .map_err(|e| format!("read persisted parse manifest: {e}"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&manifest).map_err(|e| e.to_string())?;
+        source_units =
+            serde_json::from_value(parsed["source_units"].clone()).map_err(|e| e.to_string())?;
+        source_contract =
+            serde_json::from_value(parsed["source_contract"].clone()).map_err(|e| e.to_string())?;
+        if let Some(contract) = &source_contract {
+            let persisted = docparser::ReadResult {
+                markdown: md.clone(),
+                structured_source_units: source_units.clone(),
+                ..Default::default()
+            };
+            contract.validate(&persisted).map_err(|e| e.0)?;
+        }
         tracing::info!(
             document_id = %document_id,
             md_bytes = md.len(),
@@ -325,10 +357,26 @@ pub async fn run_convert(
             "parse convert done"
         );
         // D3: keep structured units before markdown is rewritten/consumed.
+        let (rewritten, contract) = persist_and_rewrite_images(&result).await?;
+        source_contract = contract;
         source_units = std::mem::take(&mut result.structured_source_units);
-        result.markdown = persist_and_rewrite_images(&result).await;
-        let _ = platform::write_blob_async(&format!("{file_hash}.md"), result.markdown.as_bytes())
-            .await;
+        result.markdown = rewritten;
+        let manifest = serde_json::to_vec(
+            &serde_json::json!({"source_units":source_units,"source_contract":source_contract}),
+        )
+        .map_err(|e| e.to_string())?;
+        platform::write_blob_async(
+            &format!("{file_hash}.{document_id}.{attempt}.manifest.json"),
+            &manifest,
+        )
+        .await
+        .map_err(|e| format!("persist parse manifest: {e}"))?;
+        platform::write_blob_async(
+            &format!("{file_hash}.{document_id}.{attempt}.md"),
+            result.markdown.as_bytes(),
+        )
+        .await
+        .map_err(|e| format!("persist converted markdown: {e}"))?;
         let _ = crate::finish_span(
             pool,
             document_id,
@@ -393,14 +441,16 @@ pub async fn run_convert(
             opts.child_size,
         );
         // D3: attach structured source locators (page/bbox/table grid) to chunks.
-        crate::chunker::annotate_source_locators(&mut split, &markdown, &source_units);
+        crate::chunker::annotate_source_locators(
+            &mut split,
+            &markdown,
+            &source_units,
+            source_contract.as_ref(),
+        );
         let kept = crate::index::keep_nonempty_chunks(split);
-        crate::delete_graph_for_document(pool, document_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        crate::replace_document_chunks(pool, document_id, &kept, &[])
-            .await
-            .map_err(|e| e.to_string())?;
+        if !crate::workflow::stage_index(pool, document_id, attempt, &kept, &[], true).await? {
+            return Ok(());
+        }
         let _ = crate::finish_span(
             pool,
             document_id,
@@ -417,9 +467,6 @@ pub async fn run_convert(
         );
         kept
     };
-    if crate::obs::stage_satisfied(&prior_spans, crate::obs::SPAN_EMBEDDING) {
-        return Ok(());
-    }
     let _ = crate::start_span(
         pool,
         document_id,
@@ -429,22 +476,28 @@ pub async fn run_convert(
         None,
     )
     .await;
-    let indexed =
-        match persist_document_embeddings(pool, document_id, &chunks, opts.vector, opts.keyword)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                return fail_stage_retryable(
-                    pool,
-                    document_id,
-                    attempt,
-                    crate::obs::SPAN_EMBEDDING,
-                    &e,
-                )
-                .await;
-            }
-        };
+    let indexed = match persist_document_embeddings(
+        pool,
+        document_id,
+        attempt,
+        &chunks,
+        opts.vector,
+        opts.keyword,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return fail_stage_retryable(
+                pool,
+                document_id,
+                attempt,
+                crate::obs::SPAN_EMBEDDING,
+                &e,
+            )
+            .await;
+        }
+    };
     let _ = crate::finish_span(
         pool,
         document_id,
@@ -493,6 +546,7 @@ async fn persist_passage_index(
     pool: &PgPool,
     document_id: Uuid,
     version_id: Uuid,
+    attempt: i32,
     passages: &[String],
 ) -> Result<PersistIndexResult, String> {
     let file_hash: String =
@@ -503,8 +557,11 @@ async fn persist_passage_index(
             .unwrap_or_default();
     if !file_hash.is_empty() {
         let joined = passages.join("\n\n");
-        let _ =
-            platform::write_blob_async(format!("{file_hash}.md").as_str(), joined.as_bytes()).await;
+        let _ = platform::write_blob_async(
+            format!("{file_hash}.{document_id}.{attempt}.md").as_str(),
+            joined.as_bytes(),
+        )
+        .await;
     }
     let chunks: Vec<crate::Chunk> = passages
         .iter()
@@ -527,6 +584,7 @@ async fn persist_passage_index(
         pool,
         document_id,
         version_id,
+        attempt,
         &chunks,
         opts.vector,
         opts.keyword,
@@ -561,122 +619,86 @@ pub async fn after_index_fanout(
     images: &[String],
     file_name: &str,
 ) -> Result<(), String> {
+    if !crate::workflow::current(pool, document_id, attempt)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
     if !images.is_empty() {
-        if !platform::vlm_configured() {
-            let _ = crate::skip_span(
-                pool,
-                document_id,
-                attempt,
-                crate::obs::SPAN_MULTIMODAL,
-                "vlm not configured",
-            )
-            .await;
-            let _ = crate::set_parse_status(
-                pool,
-                document_id,
-                "finalizing",
-                "ocr_error: vlm not configured; caption_error: vlm not configured",
-            )
-            .await;
-            let _ = crate::set_index_ready(pool, document_id, false).await;
-            tracing::warn!(
-                document_id = %document_id,
-                reason = "vlm not configured",
-                images = images.len(),
-                "parse multimodal hold"
-            );
-            if text_count > 0 {
-                crate::pipeline::maybe_start_postprocess(pool, document_id, version_id, attempt)
-                    .await;
-            }
-            return Ok(());
-        }
-        let _ = crate::start_span(
+        crate::start_span(
             pool,
             document_id,
             attempt,
             crate::obs::SPAN_MULTIMODAL,
             Some(crate::obs::ROOT_NAME),
-            Some(serde_json::json!({"images": images.len()})),
+            Some(serde_json::json!({"images":images.len()})),
         )
-        .await;
-        tracing::info!(
-            document_id = %document_id,
-            images = images.len(),
-            "parse multimodal enqueue"
-        );
-        crate::enrichment::set_pending_count(document_id, images.len() as i32)?;
-        let mut leftover = images.len() as i32;
+        .await
+        .map_err(|e| e.to_string())?;
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+        if !crate::workflow::lock_current(&mut tx, document_id, attempt)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(());
+        }
         for key in images {
-            match platform::enqueue_image_multimodal(
+            crate::workflow::put_tx(
+                &mut tx,
                 document_id,
-                key,
-                file_name,
-                true,
-                true,
+                version_id,
                 attempt,
+                &crate::workflow::Work::Image {
+                    image_key: key.clone(),
+                    image_source_type: file_name.to_owned(),
+                },
             )
             .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) | Err(_) => {
-                    leftover -= 1;
-                    crate::enrichment::decr_pending_count(document_id)?;
-                }
-            }
+            .map_err(|e| e.to_string())?;
         }
-        if leftover <= 0 {
-            let _ = crate::skip_span(
-                pool,
-                document_id,
-                attempt,
-                crate::obs::SPAN_MULTIMODAL,
-                "enqueue failed",
-            )
-            .await;
-            let _ = crate::set_parse_status(
-                pool,
-                document_id,
-                "finalizing",
-                "ocr_error: image enqueue failed; caption_error: image enqueue failed",
-            )
-            .await;
-            let _ = crate::set_index_ready(pool, document_id, false).await;
-            tracing::warn!(
-                document_id = %document_id,
-                reason = "enqueue failed",
-                "parse multimodal hold"
-            );
-            if text_count > 0 {
-                crate::pipeline::maybe_start_postprocess(pool, document_id, version_id, attempt)
-                    .await;
-            }
-        }
-        return Ok(());
+        crate::workflow::complete_tx(&mut tx, document_id, attempt, "convert")
+            .await
+            .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return crate::workflow::dispatch(pool).await;
     }
-    let _ = crate::skip_span(
+    crate::skip_span(
         pool,
         document_id,
         attempt,
         crate::obs::SPAN_MULTIMODAL,
         "no images",
     )
-    .await;
-    let _ = crate::set_index_ready(pool, document_id, true).await;
-    tracing::info!(document_id = %document_id, index_ready = true, "parse completed");
-    if text_count == 0 {
-        let _ = crate::set_parse_status(pool, document_id, "completed", "").await;
-        let _ = crate::skip_span(
-            pool,
-            document_id,
-            attempt,
-            crate::obs::SPAN_POSTPROCESS,
-            "no further work",
-        )
-        .await;
-        return crate::pipeline::schedule_semantic_index_v2_if_ready(pool, version_id).await;
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    if !crate::workflow::lock_current(&mut tx, document_id, attempt)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
     }
-    crate::pipeline::maybe_start_postprocess(pool, document_id, version_id, attempt).await;
+    if text_count > 0 {
+        crate::workflow::put_tx(
+            &mut tx,
+            document_id,
+            version_id,
+            attempt,
+            &crate::workflow::Work::Postprocess { clone_keep: false },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    if text_count == 0 {
+        sqlx::query("UPDATE documents SET parse_status='completed',active_generation=$2,index_ready=true,enable_status='enabled',updated_at=now() WHERE id=$1 AND attempt=$2")
+            .bind(document_id).bind(attempt).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+    }
+    crate::workflow::complete_tx(&mut tx, document_id, attempt, "convert")
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    crate::workflow::dispatch(pool).await?;
     crate::pipeline::schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
@@ -805,6 +827,7 @@ pub async fn persist_indexed_chunks(
     pool: &PgPool,
     document_id: Uuid,
     _version_id: Uuid,
+    attempt: i32,
     chunks: &[crate::Chunk],
     vector_on: bool,
     keyword_on: bool,
@@ -813,19 +836,16 @@ pub async fn persist_indexed_chunks(
         return Ok(PersistIndexResult::Aborted);
     }
     let kept = crate::index::keep_nonempty_chunks(chunks.to_vec());
-    crate::delete_graph_for_document(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    // Chunk rows first so an embed failure does not throw away the split.
-    crate::replace_document_chunks(pool, document_id, &kept, &[])
-        .await
-        .map_err(|e| e.to_string())?;
-    persist_document_embeddings(pool, document_id, &kept, vector_on, keyword_on).await
+    if !crate::workflow::stage_index(pool, document_id, attempt, &kept, &[], true).await? {
+        return Ok(PersistIndexResult::Aborted);
+    }
+    persist_document_embeddings(pool, document_id, attempt, &kept, vector_on, keyword_on).await
 }
 
 async fn persist_document_embeddings(
     pool: &PgPool,
     document_id: Uuid,
+    attempt: i32,
     chunks: &[crate::Chunk],
     vector_on: bool,
     keyword_on: bool,
@@ -851,25 +871,12 @@ async fn persist_document_embeddings(
     if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
         return Ok(PersistIndexResult::Aborted);
     }
-    crate::replace_document_embeddings(pool, document_id, &embeddings)
-        .await
-        .map_err(|e| e.to_string())?;
-    let st = document_parse_status(pool, document_id).await;
-    if status_aborted(st.as_deref()) {
-        if st.as_deref() == Some("deleting") {
-            let _ = crate::purge_document_index(pool, document_id).await;
-        }
+    if !crate::workflow::stage_index(pool, document_id, attempt, chunks, &embeddings, false).await?
+    {
         return Ok(PersistIndexResult::Aborted);
     }
-    sqlx::query(
-        "UPDATE documents SET enable_status = 'enabled', processed_at = now(),
-                summary_status = 'none', updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(document_id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE documents SET processed_at=now(),updated_at=now() WHERE id=$1 AND attempt=$2 AND parse_status='processing'")
+        .bind(document_id).bind(attempt).execute(pool).await.map_err(|e|e.to_string())?;
     let text_count = chunks.iter().filter(|c| c.chunk_type == "text").count();
     Ok(PersistIndexResult::Written { text_count })
 }
@@ -907,11 +914,16 @@ pub fn image_source_from_docreader_output(output: Option<&serde_json::Value>) ->
     String::new()
 }
 
-fn reused_markdown(spans: &[crate::Span], file_hash: &str) -> Option<String> {
+fn reused_markdown(
+    spans: &[crate::Span],
+    file_hash: &str,
+    document_id: Uuid,
+    attempt: i32,
+) -> Option<String> {
     if !crate::obs::stage_satisfied(spans, crate::obs::SPAN_DOCREADER) {
         return None;
     }
-    let bytes = platform::read_blob(&format!("{file_hash}.md")).ok()?;
+    let bytes = platform::read_blob(&format!("{file_hash}.{document_id}.{attempt}.md")).ok()?;
     if bytes.is_empty() {
         return None;
     }
@@ -931,20 +943,41 @@ pub fn parse_stored_url(bytes: &[u8]) -> (bool, String) {
     }
 }
 
-async fn persist_and_rewrite_images(result: &docparser::ReadResult) -> String {
-    let (md, blobs) = docparser::rewrite_images(result).await;
-    if blobs.is_empty() {
-        return md;
-    }
-    let _ = tokio::task::spawn_blocking(move || {
+async fn persist_and_rewrite_images(
+    result: &docparser::ReadResult,
+) -> Result<(String, Option<docparser::SourceContract>), String> {
+    let (md, blobs, contract) = docparser::rewrite_images_with_contract(result)
+        .await
+        .map_err(|e| e.0)?;
+    let rewritten = md.clone();
+    persist_image_work(move || -> Result<(), String> {
         for (hash, data) in blobs {
-            if let Err(e) = platform::write_blob(&hash, &data) {
-                tracing::warn!(hash = %hash, error = %e, "image persist failed");
+            platform::write_blob(&hash, &data)
+                .map_err(|e| format!("persist required image {hash}: {e}"))?;
+        }
+        // Verify all owned Markdown targets, including references which the
+        // parser already expressed as object keys, before publishing Markdown.
+        for key in crate::enrichment::markdown_image_keys(&md) {
+            if let Some(hash) = key.strip_prefix("objects/") {
+                let bytes = platform::read_blob(hash)
+                    .map_err(|e| format!("required image {hash} unavailable: {e}"))?;
+                if platform::sha256_hex(&bytes) != hash {
+                    return Err(format!("required image {hash} digest mismatch"));
+                }
             }
         }
+        Ok(())
     })
-    .await;
-    md
+    .await?;
+    Ok((rewritten, contract))
+}
+
+async fn persist_image_work(
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("join required image persistence: {e}"))?
 }
 
 async fn fail_stage_retryable(
@@ -964,6 +997,7 @@ async fn fail_stage_retryable(
     )
     .await;
     let _ = crate::cancel_dependent_stages(pool, document_id, attempt, stage).await;
+    crate::workflow::update_status(pool, document_id, attempt, "failed", message).await?;
     tracing::error!(document_id = %document_id, stage, error = %message, "parse stage fail");
     Err(message.into())
 }
@@ -1004,10 +1038,7 @@ pub async fn fail_now(
     attempt: i32,
     message: &str,
 ) -> Result<(), String> {
-    let _ = attempt;
-    crate::set_parse_status(pool, document_id, "failed", message)
-        .await
-        .map_err(|e| e.to_string())?;
+    crate::workflow::update_status(pool, document_id, attempt, "failed", message).await?;
     Ok(())
 }
 
@@ -1056,96 +1087,44 @@ pub async fn run_kb_delete(pool: &PgPool, product_version_id: Uuid) -> Result<()
     Ok(())
 }
 
-fn require_worker_enqueue(
-    result: Result<Option<String>, String>,
-    task: &str,
-) -> Result<(), String> {
-    match result {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(format!("Oxana Redis is not configured for {task}")),
-        Err(error) => Err(format!("enqueue {task}: {error}")),
-    }
-}
-
+/// Reparse publication is owned by the fresh attempt's durable conversion
+/// obligation. A delayed reparse envelope must never retract newly built data.
 pub async fn run_reparse(pool: &PgPool, document_id: Uuid, attempt: i32) -> Result<(), String> {
-    let vid: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-    let current_attempt: Option<i32> =
-        sqlx::query_scalar("SELECT attempt FROM documents WHERE id=$1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| error.to_string())?;
-    if current_attempt != Some(attempt) {
-        return Ok(());
-    }
-    crate::open_attempt(pool, document_id, attempt)
-        .await
-        .map_err(|error| error.to_string())?;
-    if let Some(vid) = vid {
-        crate::pipeline::run_wiki_ingest(pool, vid, document_id, crate::wiki::OP_RETRACT).await?;
-        crate::graph::delete_document(vid, document_id)?;
-    }
-    crate::purge_document_index(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    require_worker_enqueue(
-        platform::enqueue_index_delete(document_id).await,
-        "index deletion",
-    )?;
-    let vid = vid.unwrap_or_default();
-    let source: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-        "SELECT COALESCE(type, 'file'), source_passages FROM documents WHERE id = $1",
-    )
-    .bind(document_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    match source.as_ref() {
-        Some((kind, Some(raw))) if kind == "passage" => {
-            let passages: Vec<String> = serde_json::from_value(raw.clone()).unwrap_or_default();
-            require_worker_enqueue(
-                platform::enqueue_document_process_with(document_id, vid, attempt, passages).await,
-                "passage processing",
-            )?;
-        }
-        Some((kind, _)) if kind == "manual" => {
-            require_worker_enqueue(
-                platform::enqueue_manual_process(document_id, vid, attempt).await,
-                "manual processing",
-            )?;
-        }
-        _ => {
-            require_worker_enqueue(
-                platform::enqueue_document_process(document_id, vid, attempt).await,
-                "document processing",
-            )?;
-        }
-    }
-    let file_name: Option<String> =
-        sqlx::query_scalar("SELECT file_name FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-    if file_name.as_deref().is_some_and(|n| {
-        matches!(
-            n.rsplit('.')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str(),
-            "csv" | "xlsx" | "xls"
+    let row:Option<(Uuid,String,Option<serde_json::Value>)>=sqlx::query_as("SELECT product_version_id,type,source_passages FROM documents WHERE id=$1 AND attempt=$2 AND parse_status='pending' AND deleted_at IS NULL")
+        .bind(document_id).bind(attempt).fetch_optional(pool).await.map_err(|e|e.to_string())?;
+    if let Some((version_id, kind, source)) = row {
+        let passages = source
+            .filter(|v| !v.is_null())
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        crate::workflow::put(
+            pool,
+            document_id,
+            version_id,
+            attempt,
+            crate::workflow::Work::Convert {
+                passages,
+                manual: kind == "manual",
+            },
         )
-    }) {
-        require_worker_enqueue(
-            platform::enqueue_datatable(document_id).await,
-            "datatable processing",
-        )?;
+        .await?;
+        crate::workflow::dispatch(pool).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod persistence_fault_tests {
+    #[tokio::test]
+    async fn required_image_write_and_join_failures_are_not_acknowledged() {
+        let write = super::persist_image_work(|| Err("injected object write failure".into())).await;
+        assert_eq!(write.unwrap_err(), "injected object write failure");
+        let join = super::persist_image_work(|| panic!("injected object worker panic")).await;
+        assert!(
+            join.unwrap_err()
+                .contains("join required image persistence")
+        );
+    }
 }

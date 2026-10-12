@@ -207,6 +207,22 @@ fn post_llm_turn(
     sse::consume_sse_read(&mut resp)
 }
 
+pub fn chat_complete_text_once(
+    url: &str,
+    api_key: &str,
+    body: Value,
+    timeout: Duration,
+) -> Result<ChatTurn, String> {
+    let turn = post_llm_turn(url, api_key, body, timeout)?;
+    if turn.finish_reason != "stop" || !turn.tool_calls.is_empty() {
+        return Err(format!(
+            "incomplete literal text: finish_reason={}",
+            turn.finish_reason
+        ));
+    }
+    Ok(turn)
+}
+
 pub fn chat_sse_turn_once(
     url: &str,
     api_key: &str,
@@ -258,6 +274,35 @@ pub async fn chat_sse_turn_once_async_bytes(
     body: &[u8],
     timeout: Duration,
 ) -> Result<ChatTurn, ChatTransportError> {
+    chat_sse_turn_bytes(url, api_key, body, timeout, false).await
+}
+
+pub async fn chat_complete_text_once_async(
+    url: &str,
+    api_key: &str,
+    mut body: Value,
+    timeout: Duration,
+) -> Result<ChatTurn, ChatTransportError> {
+    body["stream"] = json!(true);
+    let bytes =
+        serde_json::to_vec(&body).map_err(|e| ChatTransportError::Response(e.to_string()))?;
+    let turn = chat_sse_turn_bytes(url, api_key, &bytes, timeout, true).await?;
+    if turn.finish_reason != "stop" || !turn.tool_calls.is_empty() {
+        return Err(ChatTransportError::Response(format!(
+            "incomplete literal text: finish_reason={}",
+            turn.finish_reason
+        )));
+    }
+    Ok(turn)
+}
+
+async fn chat_sse_turn_bytes(
+    url: &str,
+    api_key: &str,
+    body: &[u8],
+    timeout: Duration,
+    allow_empty: bool,
+) -> Result<ChatTurn, ChatTransportError> {
     let started = Instant::now();
     let mut request = async_client()
         .map_err(ChatTransportError::Unavailable)?
@@ -293,6 +338,7 @@ pub async fn chat_sse_turn_once_async_bytes(
     let mut line_start = 0;
     let mut event_data_lines = 0;
     let mut event_done = false;
+    let mut terminal_seen = false;
     let mut first_chunk_received = false;
     'body: while let Some(chunk) = response.chunk().await.map_err(|error| {
         let timed_out = error.is_timeout();
@@ -328,6 +374,7 @@ pub async fn chat_sse_turn_once_async_bytes(
                 // unfinished data line. Preserve the existing turn parser.
                 if event_data_lines == 1 && event_done {
                     bytes.truncate(end + 1);
+                    terminal_seen = true;
                     break 'body;
                 }
                 event_data_lines = 0;
@@ -339,9 +386,15 @@ pub async fn chat_sse_turn_once_async_bytes(
             line_start = end + 1;
         }
     }
-    let text = String::from_utf8_lossy(&bytes);
+    if !terminal_seen {
+        return Err(ChatTransportError::Response(
+            "incomplete SSE response: missing terminal event".into(),
+        ));
+    }
+    let text = String::from_utf8(bytes.clone())
+        .map_err(|e| ChatTransportError::Response(format!("invalid UTF-8 SSE response: {e}")))?;
     let turn = sse::collect_chat_turn(&text).map_err(ChatTransportError::Response)?;
-    if turn.content.trim().is_empty() && turn.tool_calls.is_empty() {
+    if !allow_empty && turn.content.trim().is_empty() && turn.tool_calls.is_empty() {
         return Err(ChatTransportError::Response("chat returned empty".into()));
     }
     tracing::info!(

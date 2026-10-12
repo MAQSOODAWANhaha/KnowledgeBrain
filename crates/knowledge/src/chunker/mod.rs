@@ -199,58 +199,40 @@ pub fn split_from_config(
     out
 }
 
-/// D3: annotate chunks with structured source locators from docparser.
-///
-/// Each source unit's `text` is located in the markdown (scanned in ordinal
-/// order so repeated texts map to successive occurrences); a chunk receives
-/// the units whose match offset falls inside its `[start_at, end_at)` char
-/// range. `start_at`/`end_at` are char offsets into the same markdown.
-/// Units that cannot be located (e.g. rewritten image refs) are skipped.
+/// Attach authoritative rendered-span intersections. Missing mappings retain
+/// native units as explicitly unresolved metadata instead of guessed offsets.
 pub fn annotate_source_locators(
     chunks: &mut [Chunk],
     markdown: &str,
     units: &[docparser::StructuredSourceUnit],
+    contract: Option<&docparser::SourceContract>,
 ) {
-    if chunks.is_empty() || units.is_empty() || markdown.is_empty() {
-        return;
-    }
-    let mut order: Vec<usize> = (0..units.len()).collect();
-    order.sort_by_key(|&i| units[i].ordinal);
-    // (char_offset, unit_index)
-    let mut located: Vec<(usize, usize)> = Vec::new();
-    let mut search_from: usize = 0;
-    for i in order {
-        let text = units[i].text.trim();
-        if text.is_empty() || search_from >= markdown.len() {
-            continue;
+    let mut char_bytes: Vec<_> = markdown.char_indices().map(|(i, _)| i).collect();
+    char_bytes.push(markdown.len());
+    for (chunk_index, chunk) in chunks.iter_mut().enumerate() {
+        let start = char_bytes
+            .get(chunk.start_at.max(0) as usize)
+            .copied()
+            .unwrap_or(markdown.len());
+        let end = char_bytes
+            .get(chunk.end_at.max(0) as usize)
+            .copied()
+            .unwrap_or(markdown.len());
+        let mut hits = Vec::new();
+        for unit in units {
+            let identity = contract.and_then(|c| c.unit(&unit.key));
+            let mapped = identity.is_some_and(|u| !u.rendered_spans.is_empty());
+            let intersects = identity.is_some_and(|u| {
+                u.rendered_spans
+                    .iter()
+                    .any(|span| span.start_byte < end && start < span.end_byte)
+            });
+            if intersects || (!mapped && chunk_index == 0) {
+                hits.push(serde_json::json!({"key":unit.key,"unit_id":unit.key,"ordinal":unit.ordinal,"kind":unit.kind,
+                    "locator":unit.locator,"grid":unit.grid,"identity":identity,
+                    "resolution":if intersects {"resolved"} else {"unresolved"}}));
+            }
         }
-        if let Some(rel) = markdown[search_from..].find(text) {
-            let abs_byte = search_from + rel;
-            let char_pos = markdown[..abs_byte].chars().count();
-            located.push((char_pos, i));
-            search_from = abs_byte + text.len();
-        }
-    }
-    if located.is_empty() {
-        return;
-    }
-    for chunk in chunks.iter_mut() {
-        let start = chunk.start_at.max(0) as usize;
-        let end = chunk.end_at.max(0) as usize;
-        let hits: Vec<serde_json::Value> = located
-            .iter()
-            .filter(|(pos, _)| *pos >= start && *pos < end)
-            .map(|(_, ui)| {
-                let u = &units[*ui];
-                serde_json::json!({
-                    "key": u.key,
-                    "ordinal": u.ordinal,
-                    "kind": u.kind,
-                    "locator": u.locator,
-                    "grid": u.grid,
-                })
-            })
-            .collect();
         if !hits.is_empty() {
             chunk.source_locator = Some(serde_json::Value::Array(hits));
         }
@@ -415,7 +397,7 @@ mod tests {
                 key: "u1".into(),
                 ordinal: 1,
                 kind: StructuredSourceUnitKind::TableRegion,
-                text: "| a | b |".into(),
+                text: String::new(),
                 locator: StructuredSourceLocator::PageTable {
                     page_ordinal: 1,
                     table_ordinal: 0,
@@ -434,7 +416,7 @@ mod tests {
         ];
         let mut chunks = split(md, Uuid::new_v4(), Uuid::new_v4(), 512, 0);
         assert!(!chunks.is_empty());
-        annotate_source_locators(&mut chunks, md, &units);
+        annotate_source_locators(&mut chunks, md, &units, None);
         // section chunk carries the Page locator
         let sec = chunks
             .iter()
@@ -456,10 +438,59 @@ mod tests {
             .find(|h| h["kind"] == "table_region")
             .expect("table_region hit");
         assert_eq!(thit["grid"]["row_count"], 2);
+        assert_eq!(thit["resolution"], "unresolved");
         assert_eq!(thit["locator"]["locator_kind"], "page_table");
+        let contract = docparser::SourceContract {
+            schema_version: 2,
+            document_revision: "a".repeat(64),
+            parser_version: "fixture".into(),
+            markdown_sha256: platform::sha256_hex(md.as_bytes()),
+            page_manifest: vec![],
+            glyph_normalizations: vec![],
+            units: units
+                .iter()
+                .map(|unit| docparser::SourceUnitIdentity {
+                    unit_id: unit.key.clone(),
+                    ordinal: unit.ordinal,
+                    kind: unit.kind.clone(),
+                    text_sha256: platform::sha256_hex(unit.text.as_bytes()),
+                    grid_sha256: unit.grid.as_ref().map(docparser::table_grid_digest),
+                    section_id: None,
+                    parent_section_id: None,
+                    heading_level: None,
+                    heading_path: String::new(),
+                    physical_locator: Some(unit.locator.clone()),
+                    physical_path: None,
+                    physical_locator_unavailable_reason: None,
+                    rendered_spans: vec![docparser::RenderedSpan {
+                        start_byte: if unit.ordinal == 0 { 10 } else { 27 },
+                        end_byte: if unit.ordinal == 0 { 26 } else { md.len() },
+                    }],
+                    completeness: docparser::SourceCompleteness::Complete,
+                    reasons: vec![],
+                    table_id: unit.grid.as_ref().map(|_| "table-1".into()),
+                    header_cells: vec![],
+                })
+                .collect(),
+        };
+        let mut mapped = split(md, Uuid::new_v4(), Uuid::new_v4(), 512, 0);
+        annotate_source_locators(&mut mapped, md, &units, Some(&contract));
+        let native_grid = mapped
+            .iter()
+            .flat_map(|c| {
+                c.source_locator
+                    .as_ref()
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .find(|u| u["unit_id"] == "u1")
+            .unwrap();
+        assert_eq!(native_grid["resolution"], "resolved");
+        assert_eq!(native_grid["grid"]["row_count"], 2);
         // unknown units leave chunks untouched
         let mut chunks2 = split(md, Uuid::new_v4(), Uuid::new_v4(), 512, 0);
-        annotate_source_locators(&mut chunks2, md, &[]);
+        annotate_source_locators(&mut chunks2, md, &[], None);
         assert!(chunks2.iter().all(|c| c.source_locator.is_none()));
     }
 }

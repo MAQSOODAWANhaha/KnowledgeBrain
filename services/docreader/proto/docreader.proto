@@ -136,6 +136,16 @@ message SpreadsheetCell {
   uint32 row = 2;    // one based, matching XLSX
   uint32 column = 3; // one based, matching XLSX
   string text = 4;
+  string raw_value = 5;
+  string value_type = 6;
+  string number_format = 7;
+  optional string display_text = 8;
+  bool display_complete = 9;
+  optional string display_incomplete_reason = 10;
+  optional string formula = 11;
+  repeated string formula_references = 12;
+  optional string cached_value = 13;
+  optional string cached_value_type = 14;
 }
 
 message SpreadsheetRange {

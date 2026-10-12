@@ -7,7 +7,6 @@
 //! The shared checkpoint turn still runs here. Outline and response apply
 //! their own tools.
 pub mod agent;
-pub mod budget;
 pub mod draft;
 pub mod evidence_refs;
 pub mod outline;
@@ -17,7 +16,8 @@ pub mod readback;
 pub mod relations;
 pub mod rule_contract;
 pub mod semantic_compare;
-pub mod source_review;
+pub mod source_manifest;
+pub use source_manifest::{DocumentAvailability, DocumentRelation, DocumentRole, FrozenDocument};
 pub mod tools;
 pub mod views;
 
@@ -69,8 +69,8 @@ pub struct FrozenInput {
     pub schema_version: u32,
     pub project_id: String,
     pub document_set_id: String,
-    pub documents: Vec<Value>,
-    pub document_relations: Vec<Value>,
+    pub documents: Vec<FrozenDocument>,
+    pub document_relations: Vec<DocumentRelation>,
     pub source_units: Vec<Source>,
     pub structured_forms: Vec<Value>,
     pub decisions: Vec<Value>,
@@ -496,13 +496,10 @@ impl AnalysisResult {
     pub fn open_items(&self, input: &FrozenInput) -> Vec<SourceOpenItem> {
         let mut items = Vec::new();
         for (index, document) in input.documents.iter().enumerate() {
-            if document["disposition"]
-                .as_str()
-                .is_some_and(|s| s != "ready")
-            {
+            if document.availability != DocumentAvailability::Available {
                 items.push(SourceOpenItem::Document {
                     index,
-                    document: document.clone(),
+                    document: serde_json::to_value(document).expect("serializable frozen member"),
                 });
             }
         }
@@ -546,10 +543,7 @@ impl AnalysisResult {
                 });
             }
         }
-        for (role, coverage) in [
-            (agent::Role::Main, &self.analysis.coverage),
-            (agent::Role::Reviewer, &self.review.coverage),
-        ] {
+        for (role, coverage) in [(agent::Role::Main, &self.analysis.coverage)] {
             for (source_id, error) in &coverage.view_failures {
                 items.push(SourceOpenItem::View {
                     source_id: source_id.clone(),

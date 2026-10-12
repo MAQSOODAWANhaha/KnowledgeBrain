@@ -4,14 +4,17 @@ use crate::agent_error::AgentError;
 use knowledge::models::ChatTurn;
 use serde::{Deserialize, Serialize};
 
+pub mod budget;
 pub(crate) mod chat;
+pub use chat::{TokenEncoding, TokenizerCalibration, TokenizerProfile};
 mod driver;
 pub mod progress;
+pub mod retry;
 mod session;
 pub(crate) use driver::{Driver, Status, drive};
 
 /// Versioned persistence contract, independent of provider and business rules.
-pub const CHECKPOINT_CONTRACT_VERSION: u32 = 14;
+pub const CHECKPOINT_CONTRACT_VERSION: u32 = 34;
 /// Freeze the SDK/adapter separately from the Journal's persistence format.
 pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/4";
 
@@ -61,6 +64,10 @@ impl TokenUsage {
 #[serde(deny_unknown_fields)]
 pub struct TurnJournal {
     pub sequence: usize,
+    #[serde(default)]
+    pub retry: retry::RetryJournal,
+    pub accounting: budget::ModelAccounting,
+    pub publication_receipt: Option<PublicationReceipt>,
     pub pending: Option<PendingTurn>,
     pub session: Option<session::Session>,
     /// Survives `session = None`. Absent on older checkpoints.
@@ -68,9 +75,19 @@ pub struct TurnJournal {
     pub usage: TokenUsage,
 }
 
+/// Frozen host projection prepared before terminal publication. SQL compares
+/// the exact artifact byte digest and binding JSON under the same fenced lock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationReceipt {
+    pub artifact_sha256: String,
+    pub bindings: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingTurn {
+    pub physical_attempts: usize,
     pub turn: usize,
     pub role: String,
     /// Exact JCS request bytes represented as UTF-8, not a second serialization.
@@ -79,29 +96,58 @@ pub struct PendingTurn {
 }
 
 fn invalid(message: &str) -> AgentError {
-    AgentError::new("FROZEN_INPUT_DIGEST_MISMATCH", message)
+    AgentError::new("AGENT_CHECKPOINT_INVALID", message)
+}
+
+/// Final provider wire contract, independent of serde_json map-order features.
+pub(crate) fn canonical_request_bytes(body: &serde_json::Value) -> Result<Vec<u8>, AgentError> {
+    if !body.is_object() {
+        return Err(invalid("request must be a JSON object"));
+    }
+    serde_json_canonicalizer::to_vec(body).map_err(|_| invalid("request cannot be canonicalized"))
+}
+
+fn noncanonical() -> AgentError {
+    AgentError::new(
+        "AGENT_CHECKPOINT_NONCANONICAL",
+        "saved request bytes are not canonical; sent requests cannot be rewritten",
+    )
 }
 
 impl TurnJournal {
+    #[cfg(test)]
+    pub(crate) fn fixture_sdk_tools(
+        &mut self,
+        body: &[u8],
+        response: &ChatTurn,
+    ) -> Result<std::collections::BTreeMap<String, String>, AgentError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| invalid("SDK session missing"))?
+            .tools(body, response)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_sdk_finish(
+        &mut self,
+        results: Vec<serde_json::Value>,
+    ) -> Result<(), AgentError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| invalid("SDK session missing"))?
+            .finish(results)
+    }
+
     pub(crate) fn prepare_session(
         &mut self,
         body: &[u8],
         prefix: usize,
         suffix: usize,
-        remaining_turns: usize,
         max_bytes: usize,
     ) -> Result<(), AgentError> {
         if self.pending.is_some() {
             return Err(invalid("cannot replace a pending SDK session"));
         }
-        session::Session::prepare(
-            &mut self.session,
-            body,
-            prefix,
-            suffix,
-            remaining_turns,
-            max_bytes,
-        )
+        session::Session::prepare(&mut self.session, body, prefix, suffix, max_bytes)
     }
     fn advance(&mut self) -> Result<(), AgentError> {
         self.sequence = self
@@ -115,9 +161,15 @@ impl TurnJournal {
         if self.pending.is_some() || !matches!(role, "main" | "reviewer") {
             return Err(invalid("finish the pending turn before preparing another"));
         }
+        let value: serde_json::Value =
+            serde_json::from_slice(body).map_err(|_| invalid("request is not JSON"))?;
+        if canonical_request_bytes(&value)? != body {
+            return Err(noncanonical());
+        }
         let body = String::from_utf8(body.to_vec()).map_err(|_| invalid("request is not UTF-8"))?;
         self.advance()?;
         self.pending = Some(PendingTurn {
+            physical_attempts: 0,
             turn,
             role: role.into(),
             body,
@@ -171,7 +223,7 @@ impl TurnJournal {
                     .map_err(|_| invalid("saved request is not canonical"))?
                     != pending.body.as_bytes()
             {
-                return Err(invalid("saved request is not canonical"));
+                return Err(noncanonical());
             }
             self.session
                 .as_ref()
@@ -179,6 +231,42 @@ impl TurnJournal {
                 .validate(&body)?;
         }
         Ok(())
+    }
+
+    /// Repair serialization only before any physical attempt. The parsed request,
+    /// SDK session, turn identity, usage and accounting are not regenerated.
+    /// The caller must persist this result before admission or provider dispatch.
+    pub(crate) fn recover_unsent_canonical_request(
+        &mut self,
+        turn: usize,
+        role: &str,
+    ) -> Result<bool, AgentError> {
+        let Some(pending) = &self.pending else {
+            self.validate(turn, role)?;
+            return Ok(false);
+        };
+        let value: serde_json::Value = serde_json::from_str(&pending.body)
+            .map_err(|_| invalid("saved request is not JSON"))?;
+        let canonical = canonical_request_bytes(&value)?;
+        if canonical == pending.body.as_bytes() {
+            self.validate(turn, role)?;
+            return Ok(false);
+        }
+        if pending.physical_attempts != 0 || pending.response.is_some() {
+            return Err(noncanonical());
+        }
+        self.session
+            .as_ref()
+            .ok_or_else(|| invalid("pending SDK session missing"))?
+            .validate_unsent(&value)?;
+        // Validate a candidate before changing the live journal. This includes
+        // the saved SDK conversation and all existing sequence/turn/role gates.
+        let mut candidate = self.clone();
+        candidate.pending.as_mut().expect("pending checked").body =
+            String::from_utf8(canonical).map_err(|_| invalid("request is not UTF-8"))?;
+        candidate.validate(turn, role)?;
+        *self = candidate;
+        Ok(true)
     }
 
     pub fn body(&self) -> Result<&[u8], AgentError> {
@@ -233,8 +321,129 @@ mod tests {
 
     fn prepared(journal: &mut TurnJournal) {
         let body = br#"{"messages":[{"content":"test","role":"system"}]}"#;
-        journal.prepare_session(body, 1, 0, 4, 4096).unwrap();
+        journal.prepare_session(body, 1, 0, 4096).unwrap();
         journal.prepare(0, "main", body).unwrap();
+    }
+
+    #[test]
+    fn canonical_wire_is_stable_across_map_order_and_checkpoint_roundtrip() {
+        // Deliberately inserted schema pattern after type: preserve_order builds
+        // must produce the same bytes as sorted-map builds, including nested keys.
+        let mut body: serde_json::Value = serde_json::from_str(
+            r#"{"tools":[{"type":"function","function":{"parameters":{"type":"string"},"name":"review"}}],"messages":[{"role":"system","content":"test"}]}"#,
+        ).unwrap();
+        body["tools"][0]["function"]["parameters"]["pattern"] = serde_json::json!("^scope$");
+        let bytes = canonical_request_bytes(&body).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            r#"{"messages":[{"content":"test","role":"system"}],"tools":[{"function":{"name":"review","parameters":{"pattern":"^scope$","type":"string"}},"type":"function"}]}"#
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, body);
+        let mut journal = TurnJournal::default();
+        journal.prepare_session(&bytes, 1, 0, 4096).unwrap();
+        journal.prepare(0, "main", &bytes).unwrap();
+        let restored: TurnJournal =
+            serde_json::from_value(serde_json::to_value(&journal).unwrap()).unwrap();
+        restored.validate(0, "main").unwrap();
+        assert_eq!(restored.body().unwrap(), bytes);
+    }
+
+    fn legacy_unsent() -> TurnJournal {
+        let mut journal = TurnJournal::default();
+        prepared(&mut journal);
+        journal.pending.as_mut().unwrap().body =
+            r#"{ "messages": [ { "role": "system", "content": "test" } ] }"#.into();
+        journal
+    }
+
+    #[test]
+    fn unsent_canonical_recovery_preserves_identity_session_accounting_and_is_idempotent() {
+        let journal = legacy_unsent();
+        let mut journal: TurnJournal =
+            serde_json::from_value(serde_json::to_value(journal).unwrap()).unwrap();
+        let before = serde_json::to_value(&journal).unwrap();
+        assert!(journal.recover_unsent_canonical_request(0, "main").unwrap());
+        let mut expected = before;
+        expected["pending"]["body"] =
+            serde_json::json!(r#"{"messages":[{"content":"test","role":"system"}]}"#);
+        assert_eq!(serde_json::to_value(&journal).unwrap(), expected);
+        journal.validate(0, "main").unwrap();
+        assert!(!journal.recover_unsent_canonical_request(0, "main").unwrap());
+        assert_eq!(serde_json::to_value(&journal).unwrap(), expected);
+    }
+
+    #[test]
+    fn canonical_recovery_never_rewrites_sent_received_or_inconsistent_journals() {
+        for corruption in [
+            "sent",
+            "received",
+            "session",
+            "sdk_usage",
+            "sdk_stage",
+            "sdk_streamed",
+            "sdk_content",
+            "turn",
+            "role",
+            "sequence",
+            "malformed",
+        ] {
+            let mut journal = legacy_unsent();
+            match corruption {
+                "sent" => journal.pending.as_mut().unwrap().physical_attempts = 1,
+                "received" => {
+                    journal.pending.as_mut().unwrap().response = Some(ChatTurn::default())
+                }
+                "session" => journal.session = None,
+                "sdk_usage" => {
+                    let mut value = serde_json::to_value(&journal.session).unwrap();
+                    value["usage_noted"] = serde_json::json!(true);
+                    journal.session = Some(serde_json::from_value(value).unwrap());
+                }
+                "sdk_stage" | "sdk_streamed" => {
+                    let mut value = serde_json::to_value(&journal.session).unwrap();
+                    if corruption == "sdk_stage" {
+                        value["run"]["state"] = serde_json::json!("PreparingRequest");
+                    } else {
+                        value["run"]["streamed_completion_call_recorded"] = serde_json::json!(true);
+                    }
+                    journal.session = Some(serde_json::from_value(value).unwrap());
+                }
+                "sdk_content" => {
+                    journal.pending.as_mut().unwrap().body =
+                        r#"{ "messages": [{"role":"system","content":"changed"}] }"#.into()
+                }
+                "turn" => journal.pending.as_mut().unwrap().turn = 1,
+                "role" => journal.pending.as_mut().unwrap().role = "reviewer".into(),
+                "sequence" => journal.sequence = 0,
+                "malformed" => journal.pending.as_mut().unwrap().body = "{".into(),
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&journal).unwrap();
+            let error = journal
+                .recover_unsent_canonical_request(0, "main")
+                .unwrap_err();
+            assert_ne!(error.code, "FROZEN_INPUT_DIGEST_MISMATCH");
+            assert_eq!(
+                serde_json::to_value(&journal).unwrap(),
+                before,
+                "{corruption}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_rejects_noncanonical_wire_before_advancing_journal() {
+        let mut journal = TurnJournal::default();
+        let before = serde_json::to_value(&journal).unwrap();
+        assert_eq!(
+            journal
+                .prepare(0, "main", br#"{ "messages":[] }"#)
+                .unwrap_err()
+                .code,
+            "AGENT_CHECKPOINT_NONCANONICAL"
+        );
+        assert_eq!(serde_json::to_value(&journal).unwrap(), before);
     }
 
     #[test]
@@ -272,7 +481,8 @@ mod tests {
     #[test]
     fn recovery_rejects_corrupt_saved_request_and_incomplete_response() {
         let mut journal = TurnJournal::default();
-        journal.prepare(0, "main", br#"{ "messages":[] }"#).unwrap();
+        prepared(&mut journal);
+        journal.pending.as_mut().unwrap().body = r#"{ "messages":[] }"#.into();
         assert!(
             journal.validate(0, "main").is_err(),
             "saved exact bytes must be JCS"

@@ -1171,7 +1171,7 @@ mod tests {
             document_id: Uuid::new_v4(),
             product_version_id: Uuid::new_v4(),
             chunk_type: "text".into(),
-            content: "完全公开\n版权声明\nCopyright 2020\n地址：北京\n邮编：100044\n奇安信集团"
+            content: "完全公开\n版权声明\nCopyright 2020\n地址：北京\n邮编：100044\n合成示例集团"
                 .into(),
             context_header: String::new(),
             start_at: 0,
@@ -1185,7 +1185,7 @@ mod tests {
             document_id: cover.document_id,
             product_version_id: cover.product_version_id,
             chunk_type: "text".into(),
-            content: "奇安信集团提供云安全管理平台与安全资源池。".into(),
+            content: "合成示例集团提供云安全管理平台与安全资源池。".into(),
             context_header: String::new(),
             start_at: 40,
             end_at: 60,
@@ -1194,7 +1194,7 @@ mod tests {
             source_locator: None,
         };
         let items = vec![Candidate {
-            title: "奇安信集团".into(),
+            title: "合成示例集团".into(),
             slug: "entity/qianxin".into(),
             page_type: PAGE_ENTITY.into(),
             aliases: Vec::new(),
@@ -1214,7 +1214,7 @@ mod tests {
             document_id: Uuid::new_v4(),
             product_version_id: Uuid::new_v4(),
             chunk_type: "text".into(),
-            content: "完全公开\n版权声明\nCopyright 2020\n地址：北京\n邮编：100044\n奇安信集团"
+            content: "完全公开\n版权声明\nCopyright 2020\n地址：北京\n邮编：100044\n合成示例集团"
                 .into(),
             context_header: String::new(),
             start_at: 0,
@@ -1228,7 +1228,7 @@ mod tests {
             document_id: cover.document_id,
             product_version_id: cover.product_version_id,
             chunk_type: "text".into(),
-            content: "奇安信集团提供云安全管理平台与安全资源池。".into(),
+            content: "合成示例集团提供云安全管理平台与安全资源池。".into(),
             context_header: String::new(),
             start_at: 40,
             end_at: 60,
@@ -1236,7 +1236,7 @@ mod tests {
             generated_questions: Vec::new(),
             source_locator: None,
         };
-        let ids = cite_chunks(&[cover.clone(), body.clone()], "奇安信集团", &[]);
+        let ids = cite_chunks(&[cover.clone(), body.clone()], "合成示例集团", &[]);
         assert_eq!(ids, vec![body.id]);
     }
 

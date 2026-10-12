@@ -18,7 +18,7 @@ def provider_environment(env_file, inherited):
     config = dotenv_values(env_file, interpolate=False)
     keys = ('KNOWLEDGEBRAIN_CHAT_BASE_URL', 'KNOWLEDGEBRAIN_CHAT_API_KEY',
             'KNOWLEDGEBRAIN_CHAT_MODEL', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL',
-            'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT', 'KB_AUTHORING_MAX_OUTPUT_TOKENS',
+            'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT', 'KB_AUTHORING_OUTPUT_TOKEN_RESERVE',
             'KB_AUTHORING_TIMEOUT_MS')
     env = {k: v for k, v in inherited.items() if k not in keys}
     for key in keys:
@@ -39,7 +39,7 @@ def main():
     parser.add_argument('--source-directory', required=True, type=Path)
     parser.add_argument('--limits', required=True, type=Path)
     parser.add_argument('--run-directory', required=True, type=Path)
-    parser.add_argument('--mode', required=True, choices=['extract', 'review', 'repair', 'compose'])
+    parser.add_argument('--mode', required=True, choices=['extract'])
     args = parser.parse_args()
     try:
         env = provider_environment(args.env_file, os.environ)

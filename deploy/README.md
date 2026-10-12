@@ -6,13 +6,13 @@ Redis、MinIO；Neo4j 可选。
 
 ## 招投标编辑接入状态
 
-[ONLYOFFICE/DOCX 技术方向](../docs/bidding/onlyoffice.md)已确认。编辑器约束见 [接入计划](../plans/bidding/onlyoffice-integration.md)。大纲生成合同见 [运行时](../docs/bidding/outline.md)，未完成项见 [缺口计划](../plans/bidding/outline-gaps.md)。
+[ONLYOFFICE/DOCX 技术方向](../docs/bidding/onlyoffice.md)已确认。编辑器约束见 [接入计划](../plans/bidding/onlyoffice-integration.md)。大纲生成合同见 [运行时](../docs/design/evidence-runtime-contract.md)，未完成项见 [缺口计划](../docs/design/check-execution-plan.md)。
 
 本地 `--profile runtime` **包含** Community Document Server（`onlyoffice`，映射 `ONLYOFFICE_HOST_PORT`，默认 18081）。`deploy/.env.example` 必须填写 `KB_ONLYOFFICE_*`（浏览器 origin、容器内 command origin、API origin、两套独立 secret）；缺项时打开编辑器 fail-closed。Community 镜像只用于本地闭环，不代表生产嵌入许可、字体或并发已验收。同版 PDF 由 ONLYOFFICE 转换同一已保存 DOCX，验收见 [接入计划](../plans/bidding/onlyoffice-integration.md)。基础编辑/保存不依赖外部 Automation API。
 
 ### Agent 与模型配置改造（待实施）
 
-投标大纲沿用 Chat Completions，不新增 Responses 或协议切换配置。模型与凭据来自 `deploy/.env`。大纲运行只有一次成稿，工具合同见 [大纲运行时](../docs/bidding/outline.md)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为大纲缺口的前置。
+投标大纲沿用 Chat Completions，不新增 Responses 或协议切换配置。模型与凭据来自 `deploy/.env`。大纲运行只有一次成稿，工具合同见 [大纲运行时](../docs/design/evidence-runtime-contract.md)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md)，不作为大纲缺口的前置。
 
 ## Fresh 启动
 
@@ -47,7 +47,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env \
 
 字段 exact、`additionalProperties=false`，images key set 固定，JSON 键顺序由 JCS 规范化。`release_revision` 与 `platform_schema_revision` 都使用 exact ASCII grammar `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`（1～128 bytes，不 trim/normalize）。`release_descriptor_sha256=SHA256("KB:ReleaseDescriptor:v1\0" || RFC8785_JCS(document))` 是整组组件 identity，不把多个 image 误称为“一个 image digest”。入口复用平台 typed validator/JCS，并核对 Compose 同目录的 checked schema 与编译内嵌合同一致；缺文件、重复字段或合同漂移均拒绝。
 
-宿主 Rust binary `knowledgebrain-release` 已实现，完成脚本 Engine 故障测试、真实 Compose 配置合并及生产 Dockerfile 镜像构建。修复无显式环境的依赖校验问题后，真实隔离启动、receipt/readiness、只读重放及对象上传/引用保护/最终回收已通过，专属资源清理后零残留，见[真实隔离验收](../docs/bidding/archive/release-live-results.md)；**干净发布候选及 R1 完整验收尚未完成，不能据此放行生产**。从审核后的候选构建并将 binary 安装到 PATH：
+宿主发布入口为 `knowledgebrain-release`，边界和当前候选门槛见[发布入口](../docs/bidding/release-entry.md)。旧本机结果不等于候选或生产放行。从审核后的候选构建并将 binary 安装到 PATH：
 
 ```bash
 cargo build --locked --release -p platform --bin knowledgebrain-release

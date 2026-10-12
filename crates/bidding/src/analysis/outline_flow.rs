@@ -253,6 +253,10 @@ pub struct OutlineState {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutlineRun {
+    pub(crate) discover_workers:
+        BTreeMap<String, crate::analysis::agent::discover_coordinator::Worker>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_events: Vec<serde_json::Value>,
     pub phase: Phase,
     pub chunk_plan_sha256: String,
     pub chunk_cursor: usize,
@@ -263,10 +267,9 @@ pub struct OutlineRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading_packs: Option<crate::outline::discover::DiscoverWork>,
     /// Chapters, attachment bindings, and template slots written by the outline tools.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::outline::tools::Draft::is_empty"
-    )]
+    // Even before chapters exist, the draft owns issued request scopes and
+    // pending read receipts. They must survive every journal round trip.
+    #[serde(default)]
     pub tool_draft: crate::outline::tools::Draft,
     /// `finish_outline` was rejected. The next outline duty is Organize until
     /// chapters, bindings, or slots are written again.
@@ -337,20 +340,19 @@ pub fn source_scanned(input: &FrozenInput, state: &OutlineState, id: &str) -> bo
 
 pub fn scan_complete(input: &FrozenInput, state: &OutlineState) -> bool {
     !input.source_units.is_empty()
-        && input.documents.iter().all(|document| {
-            !document
-                .get("disposition")
-                .and_then(Value::as_str)
-                .is_some_and(|value| matches!(value, "failed" | "pending" | "unresolved"))
-        })
+        && input
+            .documents
+            .iter()
+            .all(|document| document.availability == super::DocumentAvailability::Available)
+        && input.required_relations_ready()
         && [
-            ("documents", &input.documents),
-            ("document_relations", &input.document_relations),
-            ("decisions", &input.decisions),
+            ("documents", input.documents.len()),
+            ("document_relations", input.document_relations.len()),
+            ("decisions", input.decisions.len()),
         ]
         .iter()
         .all(|(kind, values)| {
-            values.is_empty() || tools::contains(state.scanned.metadata.get(*kind), 0, values.len())
+            *values == 0 || tools::contains(state.scanned.metadata.get(*kind), 0, *values)
         })
         && input
             .source_units
@@ -2469,14 +2471,14 @@ mod tests {
     #[test]
     fn project_info_uses_inspected_sources_and_survives_checkpoint_round_trip() {
         let mut input = review_input();
-        input.source_units[0].text = "南自华盾2024-2025年广域网防火墙框架采购\n投标文件\n投标人：（盖单位章）\n法定代表人或其委托代理人：（签字）\n年 月 日".into();
+        input.source_units[0].text = "合成示例项目甲\n投标文件\n投标人：（盖单位章）\n法定代表人或其委托代理人：（签字）\n年 月 日".into();
         // The source is deliberately located outside chapter six/page 73.
         input.source_units[0].locator = json!({"page_ordinal":9,"heading_path":"附件：响应格式"});
         let mut state = checked_state(&input);
         state.analysis.outline.phase = Phase::Discover;
         state.analysis.outline.project_info = None;
         let grounds = vec![span("source", input.source_units[0].text.len())];
-        let info = json!({"fields":{"project_name":{"value":"南自华盾2024-2025年广域网防火墙框架采购","grounds":grounds}},
+        let info = json!({"fields":{"project_name":{"value":"合成示例项目甲","grounds":grounds}},
             "cover_status":"prescribed","cover_lines":[{"value":input.source_units[0].text,"grounds":grounds}],"cover_requirement_ids":[]});
         let mut args = json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[],"references":[],"issues":[],"review_fragments":[],"project_info":info});
         assert!(apply(&input, &mut state, "submit_outline_scan", &args, 64000).is_err());
@@ -2499,7 +2501,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .title()
-                .starts_with("南自华盾")
+                .starts_with("合成示例")
         );
         compose_check_packets(&input, &mut state);
         let before = packet_snapshot(&input, &state, "composition").unwrap();
@@ -2679,29 +2681,18 @@ mod tests {
             role: crate::analysis::agent::Role::Main,
             analysis: Analysis::default(),
             review: None,
-            review_draft: Default::default(),
-            source_review: None,
-            repair: Default::default(),
-            dispatch: Default::default(),
-            reviewer_coverage: Coverage::default(),
             pending_coverage: None,
             transcript: vec![],
             main_progress: Default::default(),
-            reviewer_progress: Default::default(),
             main_work: None,
-            reviewer_work: None,
             done: false,
             source_views: Default::default(),
             draft_stage: Default::default(),
-            draft_active_id: None,
             draft_outline_gaps: None,
             draft_outline_stalls: 0,
             draft_outline_window: 0,
-            draft_stopped: false,
-            draft_compile_object_id: None,
-            draft_docx_base64: None,
             outline_config_sha256: None,
-            fill_config_sha256: None,
+
             outline_run: Default::default(),
         };
         state.analysis.outline.project_info = Some(ProjectInfo {
@@ -2782,7 +2773,7 @@ mod tests {
     #[test]
     fn a08_content_only_unresolved_reference_does_not_block() {
         let input = FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -2824,7 +2815,7 @@ mod tests {
     #[test]
     fn a08_missing_qualification_attachment_blocks_unmapped() {
         let input = FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -2862,7 +2853,7 @@ mod tests {
     #[test]
     fn a08_missing_pricing_format_blocks() {
         let input = FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -2900,7 +2891,7 @@ mod tests {
     #[test]
     fn check_phase_rejects_rescans_and_reads_saved_fragments() {
         let input = FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -3034,7 +3025,7 @@ mod tests {
     #[test]
     fn checked_requires_all_packets_current() {
         let input = FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -3062,7 +3053,7 @@ mod tests {
     }
     fn review_input() -> FrozenInput {
         FrozenInput {
-            schema_version: 1,
+            schema_version: crate::outline::frozen::FROZEN_SCHEMA_VERSION,
             project_id: "p".into(),
             document_set_id: "d".into(),
             documents: vec![],
@@ -3209,9 +3200,9 @@ mod tests {
     fn failed_document_cannot_become_complete_by_reading_metadata() {
         let mut input = review_input();
         let mut state = checked_state(&input);
-        input
-            .documents
-            .push(json!({"document_id":"missing","disposition":"failed"}));
+        let mut missing = crate::analysis::FrozenDocument::fixture("missing");
+        missing.availability = crate::analysis::DocumentAvailability::Failed;
+        input.documents.push(missing);
         state
             .analysis
             .outline

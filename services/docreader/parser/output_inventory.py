@@ -20,11 +20,11 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from docreader.models.document import (
-    AttachmentLocator, Document, DocumentLocator, ParagraphImageParent,
+    AttachmentLocator, Document, DocumentLocator, ImageLocator, ParagraphImageParent,
     StructuredSourceUnit, StructuredSourceUnitKind, TableCellImageParent,
 )
 from docreader.parser.docx_parser import (
-    _docx_package_image_payloads, _docx_table_anchors, _drawing_units,
+    _docx_package_image_payloads, _docx_table_anchors, _drawing_units, rows_are_headers,
 )
 
 PROFILE = "output_inventory_v1"
@@ -432,6 +432,9 @@ def _docx(content):
                 key=f"story:{len(units)}", ordinal=len(units),
                 kind=StructuredSourceUnitKind.TABLE_REGION if grid else StructuredSourceUnitKind.SECTION,
                 text=text, locator=locator, grid=grid,
+                physical_path=f"{name}/*[{ordinal + 1}]",
+                header_cells=[{"row": cell.row, "column": cell.column, "role": "column_header"}
+                              for cell in grid.cells if rows_are_headers(Table(child, owner), cell.row)] if grid else [],
             )
             units.append(unit)
             entries.append(_entry(unit, name, ordinal, kind, bookmarks=bookmarks, fields=fields,
@@ -459,9 +462,12 @@ def _docx(content):
             else:
                 image_ordinal = _drawing_units(child, owner, units, image_ordinal,
                     ParagraphImageParent(section_ordinal=section, paragraph_ordinal=ordinal))
-            extracted_image_refs = {image.locator.original_ref for image in units[before:]}
+            extracted_image_refs = {image.locator.original_ref for image in units[before:]
+                                    if isinstance(image.locator, ImageLocator)}
             for image in units[before:]:
-                entries.append(_entry(image, name, ordinal, "image", reason="image requires visual review"))
+                is_image = isinstance(image.locator, ImageLocator)
+                entries.append(_entry(image, name, ordinal, "image" if is_image else "not_checked",
+                                      reason="image requires visual review" if is_image else "drawing image missing or unsupported"))
             # Never silently treat unsupported XML carriers as ordinary text.
             unsupported_tags = {qn(f"w:{tag}") for tag in (
                 "drawing", "pict", "object", "txbxContent", "altChunk", "sdt", "del", "ins",
@@ -511,16 +517,15 @@ def parse_output_inventory(file_name, file_type, content):
     elif media == "pdf":
         from docreader.parser.pdf_parser import PDFParser
         document = PDFParser(file_name=file_name, file_type="pdf", output_inventory=True).parse_into_text(content)
+        from docreader.parser.source_contract import attach_source_contract
+        document = attach_source_contract(document, content, media)
         entries = []
         for unit in document.structured_source_units:
-            page = getattr(unit.locator, "page_ordinal", None)
-            if page is None and ":page:" in unit.key:
-                tail = unit.key.rsplit(":page:", 1)[-1]
-                page = int(tail) if tail.isdigit() else None
+            physical = unit.physical_locator or unit.locator
+            page = getattr(physical, "page_ordinal", None)
             if page is None:
-                part = f"pdf:section:{getattr(unit.locator, 'section_ordinal', unit.ordinal)}"
-            else:
-                part = f"pdf:page:{page + 1}"
+                raise ValueError("PDF inventory unit has no physical page")
+            part = f"pdf:page:{page + 1}"
             image = unit.kind == StructuredSourceUnitKind.IMAGE_REGION
             kind = "image" if image else "table" if unit.grid else "section"
             entries.append(_entry(unit, part, unit.ordinal, kind,
@@ -543,12 +548,16 @@ def parse_output_inventory(file_name, file_type, content):
         "layout_ordering": pdf_parser.LAYOUT_ORDERING,
         "extract_embedded_images": pdf_parser.EXTRACT_EMBEDDED_IMAGES,
     }
+    from docreader.parser.source_contract import attach_source_contract
+    document = attach_source_contract(document, content, media)
+    source_contract = json.loads(document.metadata["source_contract"])
     image_sha256 = {ref: hashlib.sha256(base64.b64decode(data)).hexdigest()
                     for ref, data in (document.images or {}).items()}
     manifest = {
         "schema_version": 1, "profile": PROFILE,
         "file_sha256": hashlib.sha256(content).hexdigest(), "parser": parser,
-        "config": config, "image_sha256": image_sha256, "page_count": document.metadata.get("page_count"), "units": entries,
+        "config": config, "image_sha256": image_sha256, "page_count": document.metadata.get("page_count"),
+        "page_manifest": source_contract["page_manifest"], "units": entries,
     }
     document.metadata["output_inventory_manifest"] = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     return document

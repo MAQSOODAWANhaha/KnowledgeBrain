@@ -75,7 +75,8 @@ impl SourceView {
             || i.width == 0
             || i.height == 0
             || i.width.max(i.height) > max_edge
-            || !i.renderer.starts_with("docreader-source-view-v1/")
+            || !(i.renderer.starts_with("docreader-source-view-v1/")
+                || i.renderer.starts_with("frozen-source-view-v2/"))
             || i.original_sha256.len() != 64
             || !i.original_sha256.bytes().all(|b| b.is_ascii_hexdigit())
             || self.jpeg_base64.len() > max_bytes.saturating_add(2) / 3 * 4

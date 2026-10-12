@@ -1,0 +1,27 @@
+{
+  "samples": [
+    {
+      "utc": "2026-10-11T11:59:15.429837+00:00",
+      "user_ticks": 72243,
+      "system_ticks": 194,
+      "thread_wait_channels": {
+        "0": 5
+      }
+    },
+    {
+      "utc": "2026-10-11T11:59:16.431215+00:00",
+      "user_ticks": 72344,
+      "system_ticks": 194,
+      "thread_wait_channels": {
+        "0": 5
+      }
+    }
+  ],
+  "cpu_seconds_delta": 1.01,
+  "last_observed_action": "read_evidence",
+  "reference_count": 165,
+  "function_stack_available": false,
+  "no_debugger_or_perf": true,
+  "code_path_read_only": "analysis/agent.rs read_evidence_in_context resolves refs, applies read, fit_batch probes full request, shrinks selection if over context; exact live function not established",
+  "no_restart_or_code_change": true
+}

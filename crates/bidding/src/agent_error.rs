@@ -19,6 +19,8 @@ pub struct AgentError {
     pub code: String,
     pub message: String,
     pub disposition: RetryDisposition,
+    pub retry_after_ms: Option<u64>,
+    pub usage: Option<Box<knowledge::models::ChatUsage>>,
 }
 
 impl AgentError {
@@ -31,8 +33,8 @@ impl AgentError {
         let disposition = match code {
             "REQUEST_OBSOLETE" | "REQUEST_ATTEMPT_SUPERSEDED" => RetryDisposition::Obsolete,
             // Only infrastructure failures automatically reenter the queue.
-            // Tender stream interruption is handled explicitly by its host:
-            // retain pending state and wait for the user's continue action.
+            // Provider retries are bounded and persisted by the agent host;
+            // queue redelivery must not reset their exhausted attempt budget.
             "INTERNAL" => RetryDisposition::Transient,
             _ => RetryDisposition::Deterministic,
         };
@@ -40,7 +42,14 @@ impl AgentError {
             code: code.to_owned(),
             message: message.into(),
             disposition,
+            retry_after_ms: None,
+            usage: None,
         }
+    }
+
+    pub fn with_usage(mut self, usage: Option<knowledge::models::ChatUsage>) -> Self {
+        self.usage = usage.map(Box::new);
+        self
     }
 
     /// What the Oxana job should do after this attempt. Decided by error code,

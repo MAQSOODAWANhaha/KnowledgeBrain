@@ -1,6 +1,6 @@
 # 招标抽取分类研究：要求类型不等于检索路由
 
-> 非规范性研究。保留早期分类调查的发现与推理，移除已废弃组卷/两类条款 schema 的施工建议。当前业务覆盖见 [PRD](../bidding/prd.md)，来源/候选边界见 [领域契约](../bidding/authoring.md)，正文编辑与出件见 [ONLYOFFICE](../bidding/onlyoffice.md)。研究不声明当前代码仍有相同缺陷。
+> 非规范性研究。保留早期分类调查的发现与推理，移除已废弃组卷/两类条款 schema 的施工建议。当前业务覆盖见 [PRD](../bidding/README.md)，来源/候选边界见 [领域契约](../bidding/authoring.md)，正文编辑与出件见 [ONLYOFFICE](../bidding/onlyoffice.md)。研究不声明当前代码仍有相同缺陷。
 
 ## 1. 当时观察与适用边界
 

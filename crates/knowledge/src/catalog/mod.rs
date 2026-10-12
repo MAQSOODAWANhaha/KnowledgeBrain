@@ -1,6 +1,6 @@
 //! Knowledge-asset SQL. Split from persist.rs; names and behavior unchanged.
 
-mod chunks;
+pub(crate) mod chunks;
 mod document;
 mod error;
 mod models;

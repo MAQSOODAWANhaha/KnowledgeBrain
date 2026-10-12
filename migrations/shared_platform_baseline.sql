@@ -460,6 +460,9 @@ DECLARE
 BEGIN
     SELECT * INTO STRICT staging FROM object_upload_staging
      WHERE id = p_staging_id FOR UPDATE;
+    IF staging.expires_at <= clock_timestamp() THEN
+        RAISE EXCEPTION 'object upload staging lease expired' USING ERRCODE = '40001';
+    END IF;
     IF staging.object_ref <> p_object_ref OR staging.created_by IS DISTINCT FROM p_actor THEN
         RAISE EXCEPTION 'object upload staging owner mismatch' USING ERRCODE = '23514';
     END IF;
@@ -484,6 +487,45 @@ BEGIN
     );
 END
 $$;
+
+-- Publication never creates an available registry entry from a bare digest.
+-- A new upload transfers its staging owner; an existing available object gains
+-- another domain owner. Both paths lock the registry against GC in this txn.
+CREATE FUNCTION kb_object_publish_reference(
+    p_staging_id uuid,
+    p_object_ref kb_object_ref,
+    p_digest kb_sha256,
+    p_media_type text,
+    p_byte_length bigint,
+    p_owner_kind text,
+    p_owner_id uuid,
+    p_occurrence text,
+    p_actor kb_actor_identity
+) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE registry object_registry%ROWTYPE;
+BEGIN
+    IF p_staging_id IS NOT NULL THEN
+        PERFORM kb_object_upload_commit(p_staging_id, p_object_ref, p_digest,
+            p_media_type, p_byte_length, p_owner_kind, p_owner_id, p_occurrence, p_actor);
+        RETURN;
+    END IF;
+    SELECT * INTO registry FROM object_registry WHERE object_ref = p_object_ref FOR UPDATE;
+    IF NOT FOUND OR registry.state <> 'available'
+        OR registry.digest IS DISTINCT FROM p_digest
+        OR registry.media_type IS DISTINCT FROM p_media_type
+        OR registry.byte_length IS DISTINCT FROM p_byte_length THEN
+        RAISE EXCEPTION 'object registry identity mismatch or object unavailable' USING ERRCODE = '23514';
+    END IF;
+    -- A staged-only object must transfer its valid staging identity. This also
+    -- prevents acquiring abandoned/expired temporary bytes via the null path.
+    IF NOT EXISTS (SELECT 1 FROM object_owner_references
+        WHERE object_ref = p_object_ref AND owner_kind <> 'object_upload_staging') THEN
+        RAISE EXCEPTION 'object requires a valid upload staging identity' USING ERRCODE = '23514';
+    END IF;
+    PERFORM kb_object_reference_add(p_object_ref, p_digest, p_media_type, p_byte_length,
+        p_owner_kind, p_owner_id, p_occurrence, p_actor);
+END $$;
 
 CREATE FUNCTION kb_object_upload_abandon(
     p_staging_id uuid,
@@ -517,6 +559,22 @@ BEGIN
 END
 $$;
 
+-- Cancel a producer session without a DB -> queue crash gap: retain the
+-- staging row as the durable expiry work item until retention consumes it.
+CREATE FUNCTION kb_object_upload_request_expiry(p_staging_id uuid, p_actor kb_actor_identity)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE staging object_upload_staging%ROWTYPE;
+BEGIN
+    SELECT * INTO staging FROM object_upload_staging WHERE id=p_staging_id FOR UPDATE;
+    IF NOT FOUND THEN RETURN; END IF;
+    IF staging.created_by IS DISTINCT FROM p_actor THEN
+        RAISE EXCEPTION 'object upload staging owner mismatch' USING ERRCODE = '42501';
+    END IF;
+    UPDATE object_upload_staging
+    SET expires_at=GREATEST(clock_timestamp(), created_at + interval '1 microsecond')
+    WHERE id=p_staging_id;
+END $$;
+
 CREATE FUNCTION kb_object_upload_expiry_candidates()
 RETURNS SETOF uuid
 LANGUAGE sql
@@ -549,7 +607,7 @@ BEGIN
             'digest',deletion.digest,'byte_length',deletion.byte_length));
     END IF;
     SELECT * INTO staging FROM object_upload_staging WHERE id=p_staging_id FOR UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR staging.expires_at > clock_timestamp() THEN
         RETURN jsonb_build_object('state','not_current','staging_id',p_staging_id,'deletion',NULL);
     END IF;
     DELETE FROM object_upload_staging WHERE id=p_staging_id;
@@ -591,7 +649,9 @@ BEGIN
        AND deletion.byte_length=p_byte_length AND registry.object_ref=p_object_ref
        AND registry.digest=p_digest AND registry.byte_length=p_byte_length
        AND registry.state='deleting'
-       AND NOT EXISTS (SELECT 1 FROM object_owner_references WHERE object_ref=p_object_ref) THEN
+       AND NOT EXISTS (SELECT 1 FROM object_owner_references WHERE object_ref=p_object_ref)
+       AND NOT EXISTS (SELECT 1 FROM object_upload_staging
+         WHERE object_ref=p_object_ref AND expires_at > clock_timestamp()) THEN
         RETURN jsonb_build_object('state','current');
     END IF;
     RETURN jsonb_build_object('state','mismatch');
@@ -682,7 +742,9 @@ BEGIN
     SELECT * INTO STRICT registry FROM object_registry WHERE object_ref=p_object_ref FOR UPDATE;
     IF deletion.object_ref<>p_object_ref OR deletion.digest<>p_digest
        OR registry.digest<>p_digest OR registry.state<>'deleting'
-       OR EXISTS (SELECT 1 FROM object_owner_references WHERE object_ref=p_object_ref) THEN
+       OR EXISTS (SELECT 1 FROM object_owner_references WHERE object_ref=p_object_ref)
+       OR EXISTS (SELECT 1 FROM object_upload_staging
+         WHERE object_ref=p_object_ref AND expires_at > clock_timestamp()) THEN
         RAISE EXCEPTION 'object deletion business fence mismatch' USING ERRCODE='40001';
     END IF;
     INSERT INTO object_retention_tombstones(
@@ -712,7 +774,8 @@ TO kb_runtime_api, kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_actor_identity_valid(text)
 TO kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
 GRANT EXECUTE ON FUNCTION kb_object_upload_stage(uuid, kb_object_ref, kb_sha256, text, bigint, kb_actor_identity),
-    kb_object_upload_abandon(uuid, kb_actor_identity)
+    kb_object_upload_abandon(uuid, kb_actor_identity),
+    kb_object_upload_request_expiry(uuid, kb_actor_identity)
 TO kb_runtime_api, kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_object_upload_expiry_candidates()
 TO kb_runtime_retention;

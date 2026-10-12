@@ -119,11 +119,24 @@ impl Progress {
         completion: Option<String>,
         limits: &ProgressLimits,
     ) {
+        self.observe_completions(versions, completion, limits);
+    }
+
+    /// Each domain completion identity receives credit once, including after reload.
+    pub fn observe_completions(
+        &mut self,
+        versions: impl IntoIterator<Item = String>,
+        completions: impl IntoIterator<Item = String>,
+        limits: &ProgressLimits,
+    ) {
         let mut changed = false;
         for version in versions {
             changed |= self.seen.insert(version);
         }
-        let completed = completion.is_some_and(|key| self.completions.insert(key));
+        let mut completed = false;
+        for key in completions {
+            completed |= self.completions.insert(key);
+        }
         self.watch.observe(changed, completed, limits);
     }
 

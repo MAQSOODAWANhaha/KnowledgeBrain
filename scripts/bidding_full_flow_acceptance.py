@@ -25,6 +25,7 @@ import urllib.request
 import uuid
 
 from bidding_sample_run import provider_environment
+from runtime_configuration import effective_provider_tuning
 
 
 def digest(data):
@@ -76,8 +77,8 @@ def read_connection(path, env_file):
                 or provider["protocol"] != "openai_chat_completions_sse" \
                 or provider.get("reasoning_effort") != (env.get("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT", "").strip() or None):
             raise ValueError("startup runtime snapshot differs from deploy/.env")
-        for field, key in (("max_tokens", "KB_AUTHORING_MAX_OUTPUT_TOKENS"), ("timeout_ms", "KB_AUTHORING_TIMEOUT_MS")):
-            if int(env.get(key, "0")) <= 0 or provider[field] != int(env[key]):
+        for field, effective in effective_provider_tuning(env).items():
+            if provider[field] != effective:
                 raise ValueError("startup provider budget differs from deploy/.env")
     return ticket
 
