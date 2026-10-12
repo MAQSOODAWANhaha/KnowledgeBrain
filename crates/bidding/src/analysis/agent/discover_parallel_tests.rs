@@ -3489,9 +3489,11 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         count.total_context_tokens > first_count.total_context_tokens,
         "retained candidates consume real request capacity"
     );
-    // Exact full-candidate boundary succeeds. This is a measured request, not
-    // permission to enlarge the original failed window or omit candidate text.
-    config.limits.max_context_tokens = count.total_context_tokens;
+    // Measure the exact correction boundary while keeping the ordinary window
+    // fixed. Retaining full candidate text still consumes correction capacity.
+    config.limits.max_context_tokens = first_count.total_context_tokens;
+    assert!(count.total_context_tokens <= config.limits.max_context_tokens * 2);
+    config.limits.max_correction_context_tokens = Some(count.total_context_tokens);
     let mut restored = journal.load().await.unwrap().unwrap();
     let mut tight = PackHost {
         input: &input,
@@ -3545,7 +3547,7 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .evidence
             .is_empty()
     );
-    config.limits.max_context_tokens = first_count.total_context_tokens;
+    config.limits.max_correction_context_tokens = Some(count.total_context_tokens - 1);
     let mut too_small = PackHost {
         input: &input,
         config: &config,
