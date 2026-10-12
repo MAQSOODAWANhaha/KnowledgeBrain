@@ -2,8 +2,8 @@
 """Launch the local real Agent acceptance runner from one explicit .env file.
 
 Provider settings come exclusively from that file. No model override/fallback,
-no shell evaluation and no credential printing. Budgets are a separate explicit
-JSON input, frozen by the Rust runner.
+no shell evaluation and no credential printing. The scalar model context and
+derived budgets are frozen by the Rust runner.
 """
 import argparse
 import json
@@ -19,7 +19,8 @@ def provider_environment(env_file, inherited):
     keys = ('KNOWLEDGEBRAIN_CHAT_BASE_URL', 'KNOWLEDGEBRAIN_CHAT_API_KEY',
             'KNOWLEDGEBRAIN_CHAT_MODEL', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL',
             'KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT', 'KB_AUTHORING_OUTPUT_TOKEN_RESERVE',
-            'KB_AUTHORING_TIMEOUT_MS')
+            'KB_AUTHORING_TIMEOUT_MS', 'KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS',
+            'KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES')
     env = {k: v for k, v in inherited.items() if k not in keys}
     for key in keys:
         value = config.get(key)
@@ -37,7 +38,6 @@ def main():
     parser.add_argument('--env-file', required=True, type=Path)
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--source-directory', required=True, type=Path)
-    parser.add_argument('--limits', required=True, type=Path)
     parser.add_argument('--run-directory', required=True, type=Path)
     parser.add_argument('--mode', required=True, choices=['extract'])
     args = parser.parse_args()
@@ -50,7 +50,7 @@ def main():
                       'mode': args.mode}), flush=True)
     binary = str(args.binary.resolve())
     os.execve(binary, [binary, args.mode, str(args.source_directory.resolve()),
-                       str(args.limits.resolve()), str(args.run_directory.resolve())], env)
+                       str(args.run_directory.resolve())], env)
 
 
 if __name__ == '__main__':

@@ -13,6 +13,12 @@ fn object_identity_requires_successful_persistence() {
             let (hash, reference) = result.unwrap();
             assert_eq!(reference, platform::object_ref(&hash));
             assert_eq!(platform::read_blob(&hash).unwrap(), bytes);
+            assert_eq!(
+                platform::blob_path(&hash).unwrap(),
+                std::path::PathBuf::from(std::env::var_os("OBJECT_DIR").unwrap())
+                    .join("objects")
+                    .join(&hash)
+            );
         } else {
             assert!(result.is_err(), "{case} must not return a stored identity");
         }
@@ -21,12 +27,7 @@ fn object_identity_requires_successful_persistence() {
     let root = std::env::temp_dir().join(format!("kb-persist-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     fs::write(root.join("file"), b"not a directory").unwrap();
-    for case in [
-        "success",
-        "missing_root",
-        "missing_namespace",
-        "invalid_root",
-    ] {
+    for case in ["success", "missing_root", "invalid_root"] {
         let mut child = Command::new(std::env::current_exe().unwrap());
         child
             .args([
@@ -36,18 +37,12 @@ fn object_identity_requires_successful_persistence() {
             ])
             .env(CASE, case)
             .env("OBJECT_DIR", root.join("objects"))
-            .env(
-                "KB_DEPLOYMENT_NAMESPACE_ID",
-                uuid::Uuid::new_v4().to_string(),
-            )
+            .env_remove("KB_DEPLOYMENT_NAMESPACE_ID")
             .env("KNOWLEDGEBRAIN_S3_BUCKET", "")
             .env("KNOWLEDGEBRAIN_S3_ENDPOINT", "");
         match case {
             "missing_root" => {
                 child.env_remove("OBJECT_DIR");
-            }
-            "missing_namespace" => {
-                child.env_remove("KB_DEPLOYMENT_NAMESPACE_ID");
             }
             "invalid_root" => {
                 child.env("OBJECT_DIR", root.join("file"));

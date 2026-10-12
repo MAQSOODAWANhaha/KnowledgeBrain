@@ -163,6 +163,19 @@ fn response_type(headers: &reqwest::header::HeaderMap) -> &'static str {
     }
 }
 
+fn confirmed_context_rejection(status: u16, body: &[u8]) -> bool {
+    if !matches!(status, 400 | 413 | 422) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    matches!(
+        value["error"]["code"].as_str(),
+        Some("context_length_exceeded" | "context_window_exceeded")
+    )
+}
+
 fn http_failure(status: u16, headers: &reqwest::header::HeaderMap) -> AgentError {
     let code = if matches!(status, 408 | 429 | 500 | 502 | 503 | 504) {
         "AGENT_PROVIDER_TRANSIENT"
@@ -371,7 +384,33 @@ async fn read_provider_events(
         elapsed_ms = started.elapsed().as_millis() as u64
     );
     if !response.status().is_success() {
-        return Err(http_failure(response.status().as_u16(), response.headers()));
+        let status = response.status().as_u16();
+        let mut error = http_failure(status, response.headers());
+        if matches!(status, 400 | 413 | 422) {
+            // Only a complete provider code establishes a rejected context.
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            let body = tokio::time::timeout(Duration::from_millis(250), async {
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.ok()?;
+                    if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
+                        return None;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Some(bytes)
+            })
+            .await
+            .ok()
+            .flatten();
+            if body
+                .as_deref()
+                .is_some_and(|bytes| confirmed_context_rejection(status, bytes))
+            {
+                error.code = "AGENT_PROVIDER_CONTEXT_EXCEEDED".into();
+            }
+        }
+        return Err(error);
     }
     let stream = response.bytes_stream().map(move |chunk| {
         if let Ok(bytes) = &chunk {
@@ -515,6 +554,24 @@ fn apply_event(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_rejection_requires_explicit_code_and_rejected_status() {
+        let body = br#"{"error":{"code":"context_length_exceeded","message":"private text"}}"#;
+        for status in [400, 413, 422] {
+            assert!(super::confirmed_context_rejection(status, body));
+        }
+        for status in [200, 401, 403, 429, 500, 503] {
+            assert!(!super::confirmed_context_rejection(status, body));
+        }
+        for body in [
+            br#"{"error":{"code":"insufficient_quota"}}"#.as_slice(),
+            br#"{"error":{"message":"context length exceeded"}}"#,
+            br#"{"error":{"code":"context_length_exceeded"}"#,
+        ] {
+            assert!(!super::confirmed_context_rejection(400, body));
+        }
+    }
+
     #[test]
     fn http_retry_policy_keeps_auth_context_and_retry_after_separate() {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -865,6 +922,18 @@ mod tests {
         }
         let (result, _, _) = exchange(200, tool, true).await;
         assert_eq!(result.unwrap_err().code, "AGENT_TURN_TIMEOUT");
+    }
+
+    #[tokio::test]
+    async fn complete_http_context_rejection_is_classified_without_disclosing_body() {
+        let body = serde_json::json!({"error":{"code":"context_length_exceeded","message":"synthetic private input"}}).to_string();
+        let (result, requests, _) = exchange(400, body.clone(), false).await;
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "AGENT_PROVIDER_CONTEXT_EXCEEDED");
+        assert!(!error.message.contains("synthetic private input"));
+        assert_eq!(requests.len(), 1);
+        let (result, _, _) = exchange(429, body, false).await;
+        assert_eq!(result.unwrap_err().code, "AGENT_PROVIDER_TRANSIENT");
     }
 
     #[tokio::test]

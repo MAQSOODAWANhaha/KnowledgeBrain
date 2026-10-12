@@ -260,18 +260,15 @@ mod tests {
             .await
     }
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/postgres.rs"
+    ));
+
     async fn reset_fresh_schema(pool: &sqlx::PgPool) {
-        sqlx::raw_sql(
-            "DROP SCHEMA public CASCADE;
-             CREATE SCHEMA public;
-             GRANT ALL ON SCHEMA public TO CURRENT_USER;
-             CREATE EXTENSION IF NOT EXISTS pgcrypto;
-             CREATE EXTENSION IF NOT EXISTS vector;
-             ALTER SCHEMA public OWNER TO kb_app_owner;",
-        )
-        .execute(pool)
-        .await
-        .expect("reset fresh test schema");
+        reset_isolated_schema(pool)
+            .await
+            .expect("reset isolated test schema");
         apply_fresh_baseline(pool).await.expect("migrate");
     }
 

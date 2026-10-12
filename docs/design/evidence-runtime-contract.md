@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-- FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 34；Discover 并发 2、每请求 1 包。新检查点包含自动 user 页和保留审计的请求投影，不迁移旧状态。
+- FrozenInput/OutlineArtifact schema 3、parser source-v2、checkpoint 35；Discover 并发 2、每请求 1 包。新检查点包含自动 user 页和保留审计的请求投影，不迁移旧状态。
 - 必需支持由原生合并格、适用表头、既有续表链及精确有向关系选择；同节/祖先正文仍是可选候选，不全部成为提交屏障。主证据严格属于 owned 范围。
 - 宿主自动附入尚未确认的必需支持页。重复失败比较使用归一化动作及错误类，不以固定六次拒绝判定停滞；不同自然语言改写不保证能被识别为同一业务失败。
 
@@ -25,7 +25,7 @@
 
 ## 容量、续页与真实交付
 
-`prepare_request` / `fit_batch` 对完整下一请求计量，包括系统提示、工具、历史、来源、图像与输出预留。自定义 tokenizer 需有可核实来源或实测校准；经验估算不代表长上下文能力证明。模型上下文与操作员调用/费用/时间限制独立。
+`prepare_request` / `fit_batch` 对完整下一请求计量，包括系统提示、工具、历史、来源、图像与输出预留。未知模型由程序使用显式标记的 UTF-8 字节保守估算，不要求用户提供 tokenizer 校准；该估算不是供应商精确 token 数或长上下文能力证明。模型上下文与操作员调用/费用/时间限制独立。
 
 `read_evidence`、`read_claim_evidence`、`read_requirements`、`read_outline` 由正式异步 runtime 决定容纳量和续页。完整段、原生行优先；单个载体过大时，宿主生成连续 UTF-8 子范围。超大元数据以稳定 record identity、命名字段和字段范围传递，宿主核对完整字段后恢复记录；模型不拼接 JSON 字节。缺页不能授予完整回执。
 
@@ -69,7 +69,7 @@ Check 重新读取完整原段、原生行、跨行合并格与适用表头；�
 
 ## 运行参数默认值与边界
 
-应用层 crates/bidding/config/request-defaults.json 提供请求输出预算 16384 token、单请求传输超时 180000 ms；环境变量仅作显式覆盖，非法正数仍拒绝。此默认值是保守请求预算，不冒称未知供应商的原生最大输出能力。完整请求继续计入输出预留并受上下文预算约束。隔离启动器无需复制这两个非秘密参数才能启动。环境覆盖名为 `KB_AUTHORING_OUTPUT_TOKEN_RESERVE`，它只参与本地上下文核算，不增加 provider 的 max_tokens/max_completion_tokens。Compose、示例与隔离脚本使用当前名称，空值统一回落共享默认。此前旧名 `KB_AUTHORING_MAX_OUTPUT_TOKENS` 的 8192 配置实际被运行时忽略，并非有效覆盖；该旧说明已纠正，不提供旧名兼容别名。
+应用层 crates/bidding/config/request-defaults.json 提供请求输出预算上界 16384 token、单请求传输超时 180000 ms；环境变量仅作显式覆盖，非法正数仍拒绝。输出预留默认取 min(16384, C/4)，至少 1；安全余量默认取 min(4096, C/16)，至少 1，C 为用户明确配置的上下文。显式覆盖不自动夹紧，预留与余量之和必须小于 C。此默认值是保守请求预算，不冒称未知供应商的原生最大输出能力。完整请求继续计入输出预留并受上下文预算约束。隔离启动器无需复制这两个非秘密参数才能启动。环境覆盖名为 `KB_AUTHORING_OUTPUT_TOKEN_RESERVE`，它只参与本地上下文核算，不增加 provider 的 max_tokens/max_completion_tokens。Compose、示例与隔离脚本使用当前名称，空值统一回落共享默认。此前旧名 `KB_AUTHORING_MAX_OUTPUT_TOKENS` 的 8192 配置实际被运行时忽略，并非有效覆盖；该旧说明已纠正，不提供旧名兼容别名。
 
 旧 source-review、finding repair、Reviewer/Fill 协议及其操作限额已经删除；实际生产只使用 Discover/Organize/Check，内容生成经 published outline → match_queries → retrieval → response::respond。旧检查点不兼容。分包根据包含提示、工具、历史、图片和输出预留的完整请求 token 判断。
 
@@ -79,11 +79,11 @@ Rust/API/worker 与 Python 验收入口共享 `crates/bidding/config/request-def
 
 ## 环境默认配置
 
-生产从所选 provider 解析模型身份。已核实的 tokenizer 映射不需要额外 Limits JSON；未知模型必须提供 `KB_AUTHORING_TOKENIZER_PROFILE` 的实测 encoding/calibration，不接受重复的 model_id。有效配置自动绑定 provider.model_id。`KB_TENDER_AGENT_LIMITS` 可省略，也可仅声明 `vision_enabled` 等单项覆盖；已删除的操作配额和工具字节上限字段会被拒绝。
+生产从所选 provider 解析模型身份。已核实模型使用内建 tokenizer 映射；未知模型冻结内部 `utf8_bytes` 保守估算，不要求 `KB_AUTHORING_TOKENIZER_PROFILE`。唯一上下文入口是必填正整数 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS`，有效值写入 `limits.max_context_tokens` 并随运行冻结，恢复不从环境替换。内部预算与原图尺寸使用默认值，不再提供环境变量 JSON 覆盖入口。招标原图复核使用同一 authoring provider；图像能力来自维护的准确名单或模型配置的显式声明，未知模型默认不宣称支持图像；实际要求原图时能力不足明确拒绝，不会自动切换模型或供应商。
 
-默认 `max_context_tokens=131072` 是应用层单请求预算，包含提示、历史、工具、图片估算和输出预留，不代表自动探测到供应商上下文能力。图片能力必须由同一模型的实测或资料确认。宿主预览明确给出省略数和正式分页入口，不构成读取回执；所有 canonical 要求保持不变，正式工具使用完整请求 token 适配和 opaque cursor 续读。
+当前用户选择的 `max_context_tokens=131072` 是应用层单请求预算，包含提示、历史、工具、图片估算和输出预留，不代表自动探测到供应商上下文能力。图片能力必须由同一模型的实测或资料确认。宿主预览明确给出省略数和正式分页入口，不构成读取回执；所有 canonical 要求保持不变，正式工具使用完整请求 token 适配和 opaque cursor 续读。
 
-当前profile的131072为硬上界，局部覆盖只能降低预算；更大窗口必须引入经过验证的新profile契约。分页续页仅传`{cursor}`，首次筛选保存在宿主cursor中，不再重复mode或筛选字段。
+131072 不再是模型上界；实现接受最多 4194304 token 的数值资源边界，并将传输分配限制在 256 MiB，避免异常配置导致无界内存分配。此资源边界不声称模型支持该窗口。分页续页仅传`{cursor}`，首次筛选保存在宿主cursor中，不再重复mode或筛选字段。
 
 ## 未发布阶段的变更原则
 
@@ -150,7 +150,11 @@ Organize 的新内容版本只计为工作；首次要求归属、表绑定、�
 
 ## 可选纠错请求准入
 
-`max_context_tokens` 继续约束正常分包和普通请求，默认 131072。可选 `max_correction_context_tokens` 最大 262144；未配置时行为不变。Discover 从当前 claim 的完整宿主回执派生尚未解决的提交失败；修正提交及宿主确认属于必要结构支持的补读可继续使用纠错额度。成功提交或 claim 变更结束该资格。可选补读和目录读取按普通窗口准入；若最小可选页也无法容纳，返回可恢复拒绝，说明未交付该页、可直接提交完整修正候选，不把可选阅读变成强制前提。模型自行标记 repair 或伪造必要性不增加额度。主流程仍仅对最近完整失败动作的下一次纠错放宽，规划始终用正常窗口。两类请求均计入完整输入、图片、安全余量及输出预留。生产不设置累计费用额度；私有验证器如设置累计预算，仍单独约束验证运行。此项为本地准入策略，不声明供应商支持 256K，不增加 wire 输出硬限制。持久重试审计记录每次物理尝试及下一次最早发送时间，既有 Prepared/Received 请求仍按其已保存字节处理。
+部署的唯一上下文配置为 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=C`。正常分包和普通请求使用 C，纠错请求默认使用 2×C；无需 limits JSON 或单独纠错配置。内部显式准入额度也不能超过 2×C，不再固定为 262144。
+
+Discover 的纠错资格只能由宿主确认的可纠正业务拒绝启动，并作为包状态持久化。该包后续必需/可选补读、目录读取、修正和提交保持 2×C；成功读取不撤销资格。同包 claim 修复、传输重试和检查点恢复保留资格，包提交完成或终止后结束；其他包不继承该资格。普通缩包学到的 `reduced_context_tokens` 仅约束普通请求，不能压低已进入纠错的包窗口。模型自行声明 repair 或伪造回执不授予资格。
+
+主流程保持既有完整失败动作的纠错资格判定；规划始终使用普通窗口。所有请求均计入完整输入、图片、安全余量及输出预留，保留持久物理重试和累计调用审计。2×C 为本地准入策略，不声明供应商支持该容量，不增加 wire 输出硬限制。供应商明确拒绝仍触发既有有界拆包；Prepared/Received 请求保持已保存字节。
 
 Discover 请求仅投影最新完整失败候选及其回执；所有历史候选继续保留在持久审计中，重载和重复投影不累积旧候选。Schema 拒绝一次返回相关错误的字段路径、收到值及允许值，大段内容仅反馈类型与大小，不替模型改写语义。owned 原子提供可复制的 `source_section_id`，原文旁保留提交用 `evidence_key`，导航引用命名为 `read_reference`；严格类型、范围和归属校验不变。
 

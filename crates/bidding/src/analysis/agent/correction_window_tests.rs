@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn correction_window_configuration_and_receipt_authority() {
     let mut config = crate::analysis::tests::config();
-    assert_eq!(config.limits.request_context_limit(true), 131072);
+    assert_eq!(config.limits.request_context_limit(true), 262144);
     config.limits.max_correction_context_tokens = Some(262144);
     config.validate().unwrap();
     assert_eq!(config.limits.request_context_limit(false), 131072);

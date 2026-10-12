@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           cargo build --locked -p "$CI_API_BIN" -p "$CI_WORKER_BIN"
           cargo build --locked -p bidding --bin "$CI_TENDER_PREPARE_BIN"
-          cargo build --locked -p "$CI_PLATFORM_PACKAGE" --bin "$CI_MIGRATOR_BIN" --bin "$CI_SCHEMA_VERIFIER_BIN"
+          cargo build --locked -p "$CI_PLATFORM_PACKAGE" --bin "$CI_MIGRATOR_BIN"
       - name: Package dev binaries and integration tests
         run: bash scripts/ci_package_binaries.sh
       - uses: actions/upload-artifact@v7
@@ -99,28 +99,19 @@ jobs:
           fi
       - name: Start PostgreSQL and Redis
         run: |
-          export CI_POSTGRES_USER="$CI_APP_POSTGRES_USER"
-          export CI_POSTGRES_PASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export CI_POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER"
+          export CI_POSTGRES_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export CI_POSTGRES_DB="$CI_APP_POSTGRES_DB"
           bash scripts/ci_services.sh start both
       - name: bootstrap isolated PostgreSQL acceptance schema
         run: |
-          export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
-          psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_APP_POSTGRES_DB" -v ON_ERROR_STOP=1 <<SQL
-          CREATE EXTENSION IF NOT EXISTS pgcrypto;
-          CREATE EXTENSION IF NOT EXISTS vector;
-          CREATE ROLE kb_app_owner NOLOGIN NOINHERIT;
-          CREATE ROLE kb_migrator LOGIN NOINHERIT PASSWORD '${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD}';
-          CREATE ROLE kb_runtime_api LOGIN PASSWORD '${KNOWLEDGEBRAIN_API_DB_PASSWORD}';
-          CREATE ROLE kb_runtime_worker LOGIN PASSWORD '${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD}';
-          CREATE ROLE kb_runtime_retention LOGIN PASSWORD '${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD}';
-          GRANT kb_app_owner TO kb_migrator;
-          ALTER SCHEMA public OWNER TO kb_app_owner;
-          REVOKE TEMPORARY,CREATE ON DATABASE ${CI_APP_POSTGRES_DB} FROM PUBLIC;
-          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-          SQL
-          { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql migrations/bidding_v2_baseline.sql; echo 'COMMIT;'; } \
-            | psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_APP_POSTGRES_DB" -v ON_ERROR_STOP=1
+          export PGHOST="$CI_POSTGRES_HOST" PGPORT="$CI_POSTGRES_PORT"
+          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
+          POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER" POSTGRES_DB="$CI_APP_POSTGRES_DB" \
+            KB_APP_DB_USER="$CI_APP_POSTGRES_USER" KB_APP_DB_PASSWORD="$CI_APP_POSTGRES_PASSWORD" \
+            sh deploy/postgres-init/010-runtime-identities.sh
+          { echo 'BEGIN;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql migrations/bidding_v2_baseline.sql; echo 'COMMIT;'; } \
+            | PGPASSWORD="$CI_APP_POSTGRES_PASSWORD" psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_APP_POSTGRES_DB" -v ON_ERROR_STOP=1
       - name: Content AgentRun and typed cleanup delivery PostgreSQL acceptance
         env:
           KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
@@ -128,9 +119,8 @@ jobs:
         run: |
           set -euo pipefail
           export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
-          export KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD
+          export KNOWLEDGEBRAIN_TEST_ADMIN_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
           export REDIS_URL="redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/"
-          export KB_DEPLOYMENT_NAMESPACE_ID="$CI_CONTENT_NAMESPACE_ID"
           export OBJECT_DIR
           OBJECT_DIR=$(mktemp -d "$RUNNER_TEMP/request-delivery-objects.XXXXXX")
           cleanup() {
@@ -167,9 +157,9 @@ jobs:
         run: |
           set -euo pipefail
           export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          export KNOWLEDGEBRAIN_TEST_ADMIN_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
           # Queue failure is deliberate: durable database obligations must survive it.
           export REDIS_URL="redis://127.0.0.1:1/"
-          export KB_DEPLOYMENT_NAMESPACE_ID="$CI_CONTENT_NAMESPACE_ID"
           for test_name in $CI_KNOWLEDGE_WORKFLOW_TESTS; do
             log="$RUNNER_TEMP/${test_name}.log"
             bash scripts/ci_run_packaged_test.sh "$test_name" "$log" -- --ignored --test-threads=1 --nocapture
@@ -177,27 +167,29 @@ jobs:
       - name: Frozen exact-version retrieval PostgreSQL acceptance
         run: |
           set -euo pipefail
-          export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS=1
           export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_FROZEN_DATABASE}"
-          cleanup() { dropdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" --if-exists --force "$CI_FROZEN_DATABASE"; }
+          cleanup() { dropdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_SCHEMA_POSTGRES_USER" --if-exists --force "$CI_FROZEN_DATABASE"; }
           trap cleanup EXIT
-          createdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -T template0 "$CI_FROZEN_DATABASE"
-          psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
+          createdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_SCHEMA_POSTGRES_USER" -T template0 "$CI_FROZEN_DATABASE"
+          psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_SCHEMA_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
           CREATE EXTENSION pgcrypto;
           CREATE EXTENSION vector;
-          ALTER SCHEMA public OWNER TO kb_app_owner;
+          ALTER SCHEMA public OWNER TO "$CI_APP_POSTGRES_USER";
           REVOKE TEMPORARY,CREATE ON DATABASE ${CI_FROZEN_DATABASE} FROM PUBLIC;
           REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
-          { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql; echo 'COMMIT;'; } \
-            | psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1
+          { echo 'BEGIN;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql; echo 'COMMIT;'; } \
+            | PGPASSWORD="$CI_APP_POSTGRES_PASSWORD" psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1
           log="$RUNNER_TEMP/frozen-exact.log"
           bash scripts/ci_run_packaged_test.sh "$CI_FROZEN_TEST_BIN" "$log" -- "$CI_FROZEN_EXACT_TEST" --exact --test-threads=1
       - name: Outline/response SQL publish acceptance
         run: |
-          export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          export KNOWLEDGEBRAIN_TEST_ADMIN_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          export KNOWLEDGEBRAIN_TEST_ADMIN_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/postgres"
           bash scripts/bidding_v2_phase_fixture_acceptance.sh
       - name: Stop services
         if: always()
@@ -229,7 +221,7 @@ jobs:
           export CI_POSTGRES_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export CI_POSTGRES_DB="$CI_SCHEMA_POSTGRES_DB"
           bash scripts/ci_services.sh start postgres
-      - name: Fresh lifecycle and required catalog PostgreSQL acceptance
+      - name: Fresh baseline and application permissions acceptance
         run: |
           set -euo pipefail
           export PGHOST="$CI_POSTGRES_HOST"
@@ -237,11 +229,8 @@ jobs:
           export PGUSER="$CI_SCHEMA_POSTGRES_USER"
           export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER"
-          export KNOWLEDGEBRAIN_MIGRATOR_PASSWORD KNOWLEDGEBRAIN_API_DB_PASSWORD KNOWLEDGEBRAIN_WORKER_DB_PASSWORD KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD
-          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_SCHEMA_LIFECYCLE_DATABASE}"
-          export KNOWLEDGEBRAIN_CATALOG_TEST_DATABASE_URL="postgres://kb_migrator:${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_SCHEMA_CATALOG_DATABASE}"
-          export KNOWLEDGEBRAIN_CATALOG_TEST_ADMIN_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
-          export KNOWLEDGEBRAIN_REQUIRE_CATALOG_POSTGRES_TEST=1
+          export KB_APP_DB_USER="$CI_APP_POSTGRES_USER" KB_APP_DB_PASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_SCHEMA_LIFECYCLE_DATABASE}"
           created_databases=()
           cleanup() {
             result=$?
@@ -252,18 +241,26 @@ jobs:
             exit "$result"
           }
           trap cleanup EXIT
-          for database in "$CI_SCHEMA_LIFECYCLE_DATABASE" "$CI_SCHEMA_CATALOG_DATABASE"; do
-            bash scripts/ci_services.sh createdb -T template0 "$database"
-            created_databases+=("$database")
-            POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
-          done
+          database="$CI_SCHEMA_LIFECYCLE_DATABASE"
+          bash scripts/ci_services.sh createdb -T template0 "$database"
+          created_databases+=("$database")
+          POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
+          unset POSTGRES_USER POSTGRES_DB
           bash scripts/fresh_schema_acceptance.sh
-          log="$RUNNER_TEMP/${CI_CATALOG_TEST}.log"
-          bash scripts/ci_run_packaged_test.sh "$CI_CATALOG_TEST" "$log" --unfiltered -- --test-threads=1 --nocapture
-          if grep -Eq 'skipped catalog manifest PostgreSQL fixture:' "$log"; then
-            echo "required catalog PostgreSQL fixture was skipped" >&2
-            exit 1
-          fi
+          bash scripts/ci_services.sh createdb -T template0 "$CI_FRESH_DATABASE"
+          created_databases+=("$CI_FRESH_DATABASE")
+          psql -d "$CI_FRESH_DATABASE" -v ON_ERROR_STOP=1 -v app_user="$CI_APP_POSTGRES_USER" <<'SQL'
+          CREATE EXTENSION vector;
+          CREATE EXTENSION pgcrypto;
+          SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database()) \gexec
+          SELECT format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'app_user') \gexec
+          SELECT format('ALTER SCHEMA public OWNER TO %I', :'app_user') \gexec
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          SQL
+          export KNOWLEDGEBRAIN_FRESH_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_FRESH_DATABASE}"
+          export KNOWLEDGEBRAIN_REQUIRE_FRESH_DATABASE_TEST=1
+          log="$RUNNER_TEMP/${CI_FRESH_TEST}.log"
+          bash scripts/ci_run_packaged_test.sh "$CI_FRESH_TEST" "$log" --unfiltered -- --test-threads=1
       - name: Stop services
         if: always()
         run: bash scripts/ci_services.sh stop
@@ -287,7 +284,7 @@ jobs:
       - name: Required native Oxana faults against isolated Redis
         run: |
           set -euo pipefail
-          unset OXANA_NATIVE_FAULTS_CHILD OXANA_NATIVE_FAULTS_NAMESPACE
+          unset OXANA_NATIVE_FAULTS_CHILD
           export KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS=1
           export REDIS_URL="redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/"
           log="$RUNNER_TEMP/queue-faults.log"

@@ -896,31 +896,3 @@ REVOKE ALL ON FUNCTION
   kb_bid_v2_open_docx_editor(uuid, kb_sha256, uuid, kb_actor_identity),
   kb_bid_v2_publish_submission_export(uuid, kb_sha256, kb_sha256, kb_object_ref, kb_sha256, text, bigint, uuid, kb_actor_identity)
 FROM PUBLIC;
-
-GRANT SELECT ON
-  bid_projects, bid_documents, bid_frozen_inputs, bid_frozen_input_objects, bid_outline_runs, bid_outline_artifacts, bid_outline_chapters,
-  bid_outline_attachment_bindings, bid_outline_template_slots, bid_response_sets, bid_response_slots,
-  bid_docx_versions, bid_docx_current, bid_submission_exports
-TO kb_runtime_api, kb_runtime_worker;
-
-GRANT INSERT, UPDATE ON bid_projects TO kb_runtime_api;
-
-GRANT EXECUTE ON FUNCTION
-  kb_bid_v2_sha256_bytes(bytea),
-  kb_bid_v2_require_project_owner(uuid, kb_actor_identity),
-  kb_bid_v2_publish_frozen_input(uuid, kb_sha256, bytea, text, uuid, jsonb, kb_actor_identity),
-  kb_bid_v2_outline_claim(uuid, uuid, kb_sha256, uuid, integer),
-  kb_bid_v2_outline_renew(uuid, uuid, bigint, integer),
-  kb_bid_v2_outline_checkpoint(uuid, uuid, bigint, jsonb),
-  kb_bid_v2_outline_pause_budget(uuid, uuid, bigint),
-  kb_bid_v2_outline_release(uuid, uuid, bigint),
-  kb_bid_v2_outline_fail(uuid, uuid, bigint),
-  kb_bid_v2_outline_paused_checkpoint(uuid),
-  kb_bid_v2_outline_resume_budget(uuid, kb_sha256, jsonb),
-  kb_bid_v2_publish_document(uuid, uuid, text, text, kb_object_ref, kb_sha256, bigint, uuid, kb_actor_identity),
-  kb_bid_v2_publish_outline(uuid, uuid, kb_sha256, uuid, bigint, bytea, jsonb, kb_actor_identity),
-  kb_bid_v2_publish_response(uuid, kb_sha256, bytea, kb_actor_identity),
-  kb_bid_v2_put_docx_version(uuid, kb_sha256, kb_object_ref, kb_sha256, bigint, bigint, uuid, kb_actor_identity),
-  kb_bid_v2_open_docx_editor(uuid, kb_sha256, uuid, kb_actor_identity),
-  kb_bid_v2_publish_submission_export(uuid, kb_sha256, kb_sha256, kb_object_ref, kb_sha256, text, bigint, uuid, kb_actor_identity)
-TO kb_runtime_api, kb_runtime_worker;

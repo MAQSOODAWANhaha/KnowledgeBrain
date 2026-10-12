@@ -1614,20 +1614,20 @@ pub(super) mod tests {
         .await
         .unwrap();
         let runtime_execute: bool = sqlx::query_scalar(
-            "SELECT has_function_privilege('kb_runtime_api', 'public.kb_knowledge_lock_semantic_policy_v2(text)', 'EXECUTE')",
+            "SELECT has_function_privilege(current_user, 'public.kb_knowledge_lock_semantic_policy_v2(text)', 'EXECUTE')",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
         let runtime_tokenizer_execute: bool = sqlx::query_scalar(
-            "SELECT has_function_privilege('kb_runtime_api', 'public.kb_knowledge_keyword_token_stream_v2(text)', 'EXECUTE')",
+            "SELECT has_function_privilege(current_user, 'public.kb_knowledge_keyword_token_stream_v2(text)', 'EXECUTE')",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
         let runtime_registry_update: bool = sqlx::query_scalar(
-            "SELECT has_table_privilege('kb_runtime_api', 'public.knowledge_retrieval_policies_v2', 'UPDATE')
-                 OR has_table_privilege('kb_runtime_api', 'public.embedding_revisions_v2', 'UPDATE')",
+            "SELECT has_table_privilege(current_user, 'public.knowledge_retrieval_policies_v2', 'UPDATE')
+                 OR has_table_privilege(current_user, 'public.embedding_revisions_v2', 'UPDATE')",
         )
         .fetch_one(&pool)
         .await
@@ -1635,7 +1635,10 @@ pub(super) mod tests {
         assert!(!public_execute);
         assert!(runtime_execute);
         assert!(runtime_tokenizer_execute);
-        assert!(!runtime_registry_update);
+        assert!(
+            runtime_registry_update,
+            "the application owner manages registry data"
+        );
 
         let (identity, revision_sha, reranker_sha) = register_lock_policy(&pool).await;
         struct FailingCredentialResolver;
@@ -1664,15 +1667,17 @@ pub(super) mod tests {
             .execute(&mut *locked)
             .await
             .unwrap();
-        sqlx::query("CREATE TEMP TABLE knowledge_retrieval_policies_v2 (LIKE public.knowledge_retrieval_policies_v2 INCLUDING ALL) ON COMMIT DROP")
-            .execute(&mut *locked).await.unwrap();
-        sqlx::query("CREATE TEMP TABLE embedding_revisions_v2 (LIKE public.embedding_revisions_v2 INCLUDING ALL) ON COMMIT DROP")
-            .execute(&mut *locked).await.unwrap();
+        let temporary_allowed: bool = sqlx::query_scalar(
+            "SELECT has_database_privilege(current_user,current_database(),'TEMPORARY')",
+        )
+        .fetch_one(&mut *locked)
+        .await
+        .unwrap();
+        assert!(
+            !temporary_allowed,
+            "application identity cannot create temporary registry shadows"
+        );
         sqlx::query("SET LOCAL search_path = pg_temp, public, pg_catalog")
-            .execute(&mut *locked)
-            .await
-            .unwrap();
-        sqlx::query("SET LOCAL ROLE kb_runtime_api")
             .execute(&mut *locked)
             .await
             .unwrap();
@@ -1689,7 +1694,10 @@ pub(super) mod tests {
         .fetch_one(&mut *locked)
         .await
         .unwrap();
-        assert_eq!(count, 1, "temporary registry shadows must be ignored");
+        assert_eq!(
+            count, 1,
+            "qualified registry lookup remains correct with pg_temp first"
+        );
         let locked_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
             .fetch_one(&mut *locked)
             .await
@@ -2210,10 +2218,6 @@ pub(super) mod tests {
             .bind(i64::from(policy_identity.max_chunk_bytes))
             .bind(i64::try_from(policy_identity.max_total_bytes).unwrap())
             .execute(&mut *tx).await.unwrap();
-        sqlx::query("SET LOCAL ROLE kb_runtime_api")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
         let locked: i64 =
             sqlx::query_scalar("SELECT count(*) FROM kb_knowledge_lock_semantic_policy_v2($1)")
                 .bind(&policy_identity.policy_sha256)
@@ -2222,9 +2226,8 @@ pub(super) mod tests {
                 .unwrap();
         assert_eq!(
             locked, 1,
-            "runtime SELECT-only role can acquire semantic registry locks"
+            "shared application identity can acquire semantic registry locks"
         );
-        sqlx::query("RESET ROLE").execute(&mut *tx).await.unwrap();
         let first = recall_in_snapshot(
             &mut tx,
             "product_line",

@@ -25,7 +25,7 @@ import urllib.request
 import uuid
 
 from bidding_sample_run import provider_environment
-from runtime_configuration import effective_provider_tuning
+from runtime_configuration import effective_provider_tuning, context_tokens
 
 
 def digest(data):
@@ -73,9 +73,9 @@ def read_connection(path, env_file):
     for stage in ("analysis",):
         config = ticket["startup"]["runtime"][stage]
         provider = config["provider"]
-        if not config.get("limits") or provider["model_id"] != model or provider["base_url"] != base \
+        if config.get("limits", {}).get("max_context_tokens") != context_tokens(env) or provider["model_id"] != model or provider["base_url"] != base \
                 or provider["protocol"] != "openai_chat_completions_sse" \
-                or provider.get("reasoning_effort") != (env.get("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT", "").strip() or None):
+                or provider.get("reasoning_effort") != (env.get("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT", "").strip() or ("none" if model == "gpt-6-luna" else None)):
             raise ValueError("startup runtime snapshot differs from deploy/.env")
         for field, effective in effective_provider_tuning(env).items():
             if provider[field] != effective:

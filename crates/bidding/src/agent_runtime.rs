@@ -14,7 +14,7 @@ mod session;
 pub(crate) use driver::{Driver, Status, drive};
 
 /// Versioned persistence contract, independent of provider and business rules.
-pub const CHECKPOINT_CONTRACT_VERSION: u32 = 34;
+pub const CHECKPOINT_CONTRACT_VERSION: u32 = 35;
 /// Freeze the SDK/adapter separately from the Journal's persistence format.
 pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/4";
 

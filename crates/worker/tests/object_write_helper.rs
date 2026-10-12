@@ -3,20 +3,20 @@ use std::{path::PathBuf, process::Stdio};
 use tokio::{io::AsyncWriteExt, process::Command};
 use uuid::Uuid;
 
-struct Objects(PathBuf, platform::DeploymentNamespaceV1);
+struct Objects(PathBuf);
 impl Objects {
     fn new() -> Self {
         let path =
             std::env::temp_dir().join(format!("kb-composition-helper-test-{}", Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
-        Self(path, Uuid::new_v4().to_string().parse().unwrap())
+        Self(path)
     }
     fn command(&self, sha: &str, length: usize) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_worker"));
         command
             .args(["--kb-object-write-helper-v1", sha, &length.to_string()])
             .env("OBJECT_DIR", &self.0)
-            .env("KB_DEPLOYMENT_NAMESPACE_ID", self.1.to_string())
+            .env_remove("KB_DEPLOYMENT_NAMESPACE_ID")
             .env("KNOWLEDGEBRAIN_S3_BUCKET", "")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -26,10 +26,7 @@ impl Objects {
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.0
-            .join(self.1.storage_label())
-            .join("objects")
-            .join(name)
+        self.0.join("objects").join(name)
     }
 }
 impl Drop for Objects {

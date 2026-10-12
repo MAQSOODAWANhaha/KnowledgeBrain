@@ -67,6 +67,11 @@ pub(crate) struct Worker {
     pub retired_read_calls: BTreeSet<String>,
     pub pending: Option<Pending>,
     pub generation: u64,
+    /// Host-confirmed correction remains active until this pack settles.
+    #[serde(default)]
+    pub correction_active: bool,
+    #[serde(default)]
+    pub reduced_context_tokens: Option<usize>,
     #[serde(default)]
     pub retry: crate::agent_runtime::retry::RetryJournal,
     pub registry: crate::outline::model_wire::Registry,

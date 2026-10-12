@@ -3150,6 +3150,11 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         journal: &journal,
         cancel: &cancel,
     };
+    // Exercise a capacity-refined child through actual rejected submissions,
+    // claim rotation, and checkpoint restore rather than only checking a field.
+    host.next(&BTreeSet::new()).await.unwrap().unwrap();
+    let reduced_limit = config.limits.max_context_tokens / 2;
+    host.split_for_capacity("pack-0", reduced_limit).unwrap();
     let mut last_request = None;
     // Distinct rejected proposals keep this repair-rotation scenario live;
     // identical rejected actions terminate in the dedicated stall regressions.
@@ -3187,7 +3192,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
                 .reading_packs
                 .as_ref()
                 .unwrap()
-                .status("pack-0"),
+                .status("pack-0:split:0"),
             Some(PackStatus::Failed)
         );
         last_request = Some(request);
@@ -3199,7 +3204,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         .reading_packs
         .as_ref()
         .unwrap()
-        .pack_wire_identity("pack-0")
+        .pack_wire_identity("pack-0:split:0")
         .unwrap();
     assert!(
         identity["revision"].as_u64().unwrap() > request.scope.revision,
@@ -3209,7 +3214,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         .state
         .outline_run
         .discover_workers
-        .get_mut("pack-0")
+        .get_mut("pack-0:split:0")
         .unwrap();
     assert_eq!(worker.rejected_turns, 2);
     let reference = crate::outline::evidence::EvidenceRef::Text {
@@ -3239,9 +3244,9 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             options: vec![],
             sealed_sha256: None,
         });
-    let snapshot = host.state.clone();
+    let snapshot: Checkpoint = serde_json::from_value(json!(host.state)).unwrap();
     let retained_audit =
-        settled_submission_audit(&snapshot.outline_run.discover_workers["pack-0"].history);
+        settled_submission_audit(&snapshot.outline_run.discover_workers["pack-0:split:0"].history);
     assert!(!retained_audit.is_empty());
     for pending_kind in [
         "failed",
@@ -3255,7 +3260,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         candidate
             .outline_run
             .discover_workers
-            .get_mut("pack-0")
+            .get_mut("pack-0:split:0")
             .unwrap()
             .pending = Some(match pending_kind {
             "failed" => Pending::Failed {
@@ -3307,7 +3312,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         } else {
             let fresh = result.unwrap().unwrap();
             assert_eq!(fresh.scope.revision, identity["revision"].as_u64().unwrap());
-            let worker = &candidate.outline_run.discover_workers["pack-0"];
+            let worker = &candidate.outline_run.discover_workers["pack-0:split:0"];
             assert!(worker.delivered_related_evidence.is_empty());
             assert!(worker.delivered_dependency_pages.is_empty());
             assert!(worker.related_read_frames.is_empty());
@@ -3320,13 +3325,24 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
             );
             assert!(!worker.source_keys.contains_key("old-source-key"));
             assert_eq!(worker.rejected_turns, 2);
+            if matches!(pending_kind, "failed" | "prepared" | "prepared_other_run") {
+                assert_eq!(
+                    worker.correction_active,
+                    pending_kind != "prepared_other_run",
+                    "same-pack repair keeps correction, a foreign run cannot inherit it"
+                );
+            }
+            if pending_kind != "prepared_other_run" {
+                assert_eq!(worker.reduced_context_tokens, Some(reduced_limit));
+                assert!(fresh.input_reserve + fresh.output_reserve <= reduced_limit as u64);
+            }
         }
     }
     let mut high_audit_count = snapshot;
     high_audit_count
         .outline_run
         .discover_workers
-        .get_mut("pack-0")
+        .get_mut("pack-0:split:0")
         .unwrap()
         .rejected_turns = 100;
     assert!(
@@ -3343,7 +3359,7 @@ async fn failed_repair_revision_retires_reads_without_resetting_no_progress_or_u
         .is_some()
     );
     assert_eq!(
-        high_audit_count.outline_run.discover_workers["pack-0"].rejected_turns,
+        high_audit_count.outline_run.discover_workers["pack-0:split:0"].rejected_turns,
         100
     );
 }
@@ -3473,9 +3489,11 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
         count.total_context_tokens > first_count.total_context_tokens,
         "retained candidates consume real request capacity"
     );
-    // Exact full-candidate boundary succeeds. This is a measured request, not
-    // permission to enlarge the original failed window or omit candidate text.
-    config.limits.max_context_tokens = count.total_context_tokens;
+    // Measure the exact correction boundary while keeping the ordinary window
+    // fixed. Retaining full candidate text still consumes correction capacity.
+    config.limits.max_context_tokens = first_count.total_context_tokens;
+    assert!(count.total_context_tokens <= config.limits.max_context_tokens * 2);
+    config.limits.max_correction_context_tokens = Some(count.total_context_tokens);
     let mut restored = journal.load().await.unwrap().unwrap();
     let mut tight = PackHost {
         input: &input,
@@ -3529,7 +3547,7 @@ async fn near_window_worker_repair_projects_failure_but_retains_full_audit_after
             .evidence
             .is_empty()
     );
-    config.limits.max_context_tokens = first_count.total_context_tokens;
+    config.limits.max_correction_context_tokens = Some(count.total_context_tokens - 1);
     let mut too_small = PackHost {
         input: &input,
         config: &config,
@@ -3808,5 +3826,142 @@ async fn discover_retry_exhaustion_and_permanent_errors_survive_reload() {
             .unwrap()
         );
         assert_eq!(model.requests.lock().unwrap().len(), attempts);
+    }
+}
+
+#[tokio::test]
+async fn confirmed_context_replanning_is_bounded_and_preserves_physical_ledger() {
+    let (input, mut config, mut journal) = fixture(2);
+    config.provider.output_token_reserve = 1;
+    config.limits.token_safety_margin = 1;
+    journal.stop_barrier = false;
+    let mut state = journal.state.lock().unwrap().clone();
+    let cancel = CancellationToken::new();
+    let mut host = PackHost {
+        input: &input,
+        config: &config,
+        state: &mut state,
+        journal: &journal,
+        cancel: &cancel,
+    };
+    let mut request = host.next(&BTreeSet::new()).await.unwrap().unwrap();
+    let peer = host
+        .state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .pack_wire_identity("pack-1")
+        .unwrap();
+    for round in 0..4 {
+        // Exercise the real reservation path; never erase the rejected call.
+        host.reserve(&request).await.unwrap();
+        let calls = host.state.journal.accounting.physical_calls;
+        host.failed(
+            &request,
+            &error("AGENT_PROVIDER_CONTEXT_EXCEEDED", "fixture rejection"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(host.state.journal.accounting.physical_calls, calls);
+        assert!(
+            matches!(&host.worker(&request.scope.pack).unwrap().pending, Some(Pending::Failed { code, .. }) if code == "AGENT_PROVIDER_CONTEXT_EXCEEDED")
+        );
+        let work = host.state.outline_run.reading_packs.as_ref().unwrap();
+        assert_eq!(work.context_replans, (round + 1).min(3));
+        assert_eq!(work.pack_wire_identity("pack-1").unwrap(), peer);
+        if round < 3 {
+            let child = format!("{}:split:0", request.scope.pack);
+            host.state
+                .outline_run
+                .reading_packs
+                .as_mut()
+                .unwrap()
+                .claim(99);
+            // Probe preparation still enforces reduced complete-wire capacity.
+            // The explicit fixture reserve here isolates the persisted retry cap
+            // from source-size fitting, which is tested separately.
+            host.worker_mut(&child).unwrap().reduced_context_tokens =
+                Some(config.limits.max_context_tokens);
+            request = host.prepare(&child).await.unwrap();
+        }
+    }
+    assert_eq!(host.state.journal.accounting.physical_calls, 4);
+    let restored: Checkpoint =
+        serde_json::from_slice(&serde_json::to_vec(host.state).unwrap()).unwrap();
+    assert_eq!(
+        restored.outline_run.reading_packs.unwrap().context_replans,
+        3
+    );
+}
+
+#[tokio::test]
+async fn provider_context_rejection_repartitions_pending_only_and_finishes() {
+    struct RejectOnce {
+        rejected: AtomicBool,
+        accepted: Delayed,
+    }
+    #[async_trait]
+    impl Model for RejectOnce {
+        async fn turn(&self, config: &Config, body: &[u8]) -> Result<ChatTurn, AgentError> {
+            if !self.rejected.swap(true, Ordering::SeqCst) {
+                return Err(error(
+                    "AGENT_PROVIDER_CONTEXT_EXCEEDED",
+                    "synthetic context rejection",
+                ));
+            }
+            self.accepted.turn(config, body).await
+        }
+    }
+    let input = super::super::token_transport_validation::synthetic_input(2000, 2);
+    let mut config = crate::analysis::tests::config();
+    config.provider.output_token_reserve = 128;
+    config.limits.token_safety_margin = 32;
+    let mut state = super::super::retirement::checkpoint(&input);
+    state.turn = 0;
+    state.config_sha256 = digest(&config).unwrap();
+    state.outline_run.reading_packs = Some(
+        crate::outline::discover::DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["atoms"].as_array().unwrap().len() == 1))
+        }),
+    );
+    let journal = Durable {
+        state: Mutex::new(state),
+        stop_barrier: true,
+        crash_received: AtomicBool::new(false),
+        call_limit: 12,
+    };
+    let model = RejectOnce {
+        rejected: AtomicBool::new(false),
+        accepted: Delayed::default(),
+    };
+    let result = super::super::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(result.code, "TEST_ALL_PACKS_BARRIER");
+    let saved = journal.state.lock().unwrap();
+    let work = saved.outline_run.reading_packs.as_ref().unwrap();
+    assert!(work.complete());
+    assert_eq!(work.context_replans, 1);
+    assert!(matches!(
+        saved.outline_run.discover_workers["pack-0"].pending,
+        Some(Pending::Failed { .. })
+    ));
+    assert!(matches!(
+        saved.outline_run.discover_workers["pack-1"].pending,
+        Some(Pending::Committed { .. })
+    ));
+    assert_eq!(
+        saved.journal.accounting.physical_calls as usize,
+        model.accepted.calls.lock().unwrap().len() + 1
+    );
+    for worker in saved.outline_run.discover_workers.values() {
+        if let (Some(limit), Some(Pending::Committed { request, .. })) =
+            (worker.reduced_context_tokens, &worker.pending)
+        {
+            assert!(request.input_reserve + request.output_reserve <= limit as u64);
+        }
     }
 }

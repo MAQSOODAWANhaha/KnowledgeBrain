@@ -78,9 +78,6 @@ bid:submission_export:v2
 共享属性：
 
 ```text
-receipt deployment_namespace_id = canonical UUID
-Oxana StorageBuilder namespace = kb:<32 lowercase hex derived from deployment_namespace_id>
-physical Redis key prefix = kb:<32 lowercase hex>:
 unique_id = <job-kind>:<request_artifact_id>:<request_revision>
 on_conflict = Skip
 resurrect = true
@@ -89,7 +86,7 @@ payload = frozen request identity only
 
 Payload 不携带大对象、结果、queue phase 或可漂移 snapshot。Worker 从 PostgreSQL 读取冻结业务输入。
 
-连接入口复用 typed `DeploymentNamespaceV1` 构造官方 Oxana Storage；`REDIS_URL` 和 `KB_DEPLOYMENT_NAMESPACE_ID` 都必须显式配置，缺失时不生成默认部署、不连接默认本机端口。旧 raw UUID 前缀不自动读取或重放；已有安装需要独立的停机与数据处置安排，不能混跑不同前缀的 producer/consumer。源码及专属 Redis 实测记录见[namespace 隔离](../../docs/platform/namespace-isolation.md#redisoxana-与多模态计数器隔离补充)。不修改 Oxana 私有键结构或增加调度层。
+连接入口使用显式 `REDIS_URL` 指定本安装独立的 Redis 数据库，复用官方 Oxana Storage，固定应用前缀为 `kb:`。不同安装不共享同一个 Redis 数据库。不修改 Oxana 私有键结构或增加调度层。
 
 清理任务是上述 transport unique/Skip 的明确例外：ObjectUploadExpireJob 携带 `staging_id`，ObjectRetentionJob 的 payload 固定包含 `deletion_id/object_ref/digest/byte_length`，PostgreSQL 仅保存不可变 deletion business identity 与完成 tombstone。Oxana 2.1.3 的 Skip 会返回既有 JobId，无法作为本次交接确认，因此仅这两类 job 不设 transport unique_id，使用 Oxana 原生独立 JobId；重复 envelope 由数据库业务身份/receipt 幂等收敛，原生 retry/resurrection 不变，不自建交接计数器或状态层。Knowledge Wiki 使用 `wiki:ingest:{product_version_id}:{document_id}:{operation}` 和 `wiki:finalize:{product_version_id}:{document_id}` typed jobs；页面/目录/日志与文档终态属于 PostgreSQL business state，但不存在 pending-op/dead-letter transport table。
 
@@ -224,8 +221,8 @@ Queue `Job finished success=true` 只表示 envelope 已被确认，不表示业
 - handler 的 timeout/shutdown/lease-loss 必须 cancel/join provider future、heartbeat、helper process 和 subprocess tree；
 - completion 后 cleanup 共享 `min(completion+30s, hard+30s)` 的同一绝对 deadline，并传播至 terminal write、tracker 与 supervisor；abort 后不得在该 deadline 外继续等待；
 - 未发布 object staging 先以携带 `staging_id` 的非 unique typed upload-expire job 调用官方 enqueue（§4 的清理例外）；只有拿到本次 `Some(job_id)` 确认才 disarm cleanup tracker，这只表示交接确认，不表示 staging 或 blob 已删除。Redis unavailable/结果未知时保留 staging 与可恢复身份并显式失败；清理消费、最终回收及已有 staging 到期业务处理统一见 [平台 §6](runtime-foundation.md#6-retention-consumer)。投递、重试、延迟、去重与崩溃恢复只复用 Oxana，不增加 scanner/outbox 或额外清理编排层；
-- Redis 使用 deployment namespace；AOF/managed durability 应配置并 crash-test；
-- PostgreSQL 不运行 delivery poll/re-enqueue；测试结束清理当前 namespace/container/network，不删除其它 deployment 数据。
+- Redis 使用独立数据库；AOF/managed durability 应配置并 crash-test；
+- PostgreSQL 不运行 delivery poll/re-enqueue；测试结束清理本次登记的专属容器和网络，不删除其它 deployment 数据。
 
 ## 10. 验收
 

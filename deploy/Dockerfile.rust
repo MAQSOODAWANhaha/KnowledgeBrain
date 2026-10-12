@@ -31,8 +31,7 @@ RUN mkdir -p deploy/postgres-init
 COPY deploy/queue-registry.toml deploy/queue-registry.toml
 COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-runtime-identities.sh
 # Compile-time platform contracts; keep deployment credentials outside the image.
-COPY deploy/catalog-manifest-v1.schema.json \
-     deploy/release-descriptor-v1.schema.json deploy/
+COPY deploy/release-descriptor-v1.schema.json deploy/
 RUN cargo build --locked --release -p api -p worker -p retention -p platform
 
 FROM debian:bookworm-slim

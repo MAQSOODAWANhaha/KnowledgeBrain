@@ -10,7 +10,7 @@ DO $$ BEGIN
     RAISE EXCEPTION 'collection fixture requires a dedicated knowledgebrain_test_* database';
   END IF;
 END $$;
-SET LOCAL ROLE kb_app_owner;
+-- Run all business transitions as the single application identity.
 
 -- Test-only protocol input: no provider is contacted. The publication below is
 -- deliberately needs_review with a finding, never a fabricated semantic pass.
@@ -453,9 +453,7 @@ BEGIN
       PERFORM kb_bid_v2_create_docx_round(workspace_id_value,docx_staging,round_input,wrong_actor,gen_random_uuid()::text);
       RAISE EXCEPTION 'cross-owner round creation accepted';
     EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-    PERFORM set_config('role','kb_runtime_api',true);
     docx_receipt := kb_bid_v2_create_docx_round(workspace_id_value,docx_staging,round_input,actor,docx_key);
-    PERFORM set_config('role','kb_app_owner',true);
     IF (docx_receipt->>'round_revision')::integer<>round
       OR (SELECT count(*) FROM bid_docx_round_artifacts WHERE workspace_id=workspace_id_value)<>round
       OR (SELECT count(*) FROM bid_docx_version_artifacts WHERE workspace_id=workspace_id_value)<>round
@@ -503,18 +501,15 @@ BEGIN
     PERFORM kb_bid_v2_get_docx_version(workspace_id_value,(first_docx_receipt->>'version_id')::uuid,wrong_actor);
     RAISE EXCEPTION 'cross-owner DOCX read accepted';
   EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-  PERFORM set_config('role','kb_runtime_api',true);
-  BEGIN
-    DELETE FROM bid_docx_current WHERE scope_id=workspace_id_value;
-    RAISE EXCEPTION 'runtime API bypassed the domain writer';
-  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-  PERFORM set_config('role','kb_runtime_worker',true);
-  BEGIN
-    PERFORM kb_bid_v2_get_current_docx(workspace_id_value,actor);
-    RAISE EXCEPTION 'worker inherited the API document read grant';
-  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-  PERFORM set_config('role','kb_app_owner',true);
-  RAISE NOTICE 'DOCX rounds: current basis/CAS/ownership/replay/history/role boundaries verified';
+  IF NOT has_table_privilege(current_user,'bid_docx_current','DELETE')
+     OR NOT has_function_privilege(current_user,'kb_bid_v2_get_current_docx(uuid,uuid)','EXECUTE') THEN
+    RAISE EXCEPTION 'application owner lacks shared API/worker rights';
+  END IF;
+  IF has_table_privilege('public','bid_docx_current','DELETE')
+     OR has_function_privilege('public','kb_bid_v2_get_current_docx(uuid,uuid)','EXECUTE') THEN
+    RAISE EXCEPTION 'PUBLIC can bypass the domain writer';
+  END IF;
+  RAISE NOTICE 'DOCX rounds: current basis/CAS/ownership/replay/history/PUBLIC denial verified';
   RAISE NOTICE 'document-collection-acceptance-ok';
 END $$;
 ROLLBACK;

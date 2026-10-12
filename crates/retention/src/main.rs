@@ -34,9 +34,14 @@ async fn run_upload_staging_expiry(pool: PgPool, expiry_interval: Duration) {
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
-    let pool = platform::connect_runtime_verified(platform::SchemaComponentKind::Retention)
+    let pool = platform::connect()
         .await
-        .context("retention schema readiness failed")
+        .context("retention postgres connection failed")
+        .unwrap_or_else(fail);
+
+    platform::verify_application_role(&pool)
+        .await
+        .context("invalid application database role")
         .unwrap_or_else(fail);
 
     let _expiry_task = spawn_upload_staging_expiry(pool.clone(), UPLOAD_STAGING_EXPIRY_INTERVAL);
@@ -67,7 +72,7 @@ async fn main() {
                 async move {
                     let check = platform::inspect_readiness(
                         &pool,
-                        platform::SchemaComponentKind::Retention,
+                        platform::ReleaseComponentKind::Retention,
                     )
                     .await;
                     let status = if check.is_ready() {
@@ -186,22 +191,10 @@ mod tests {
         }
     }
 
-    async fn retention_role_pool() -> Option<PgPool> {
-        let database_url = isolated_test_database_url("retention role contract")?;
-        let password = match std::env::var("KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD") {
-            Ok(password) => password,
-            Err(error) if postgres_contract_tests_required() => {
-                panic!("required retention role password unavailable: {error}")
-            }
-            Err(error) => {
-                eprintln!("skip: retention role password unavailable: {error}");
-                return None;
-            }
-        };
-        let options = PgConnectOptions::from_str(&database_url)
-            .expect("parse retention test database URL")
-            .username("kb_runtime_retention")
-            .password(&password);
+    async fn retention_application_identity_pool() -> Option<PgPool> {
+        let database_url = isolated_test_database_url("retention application identity contract")?;
+        let options =
+            PgConnectOptions::from_str(&database_url).expect("parse retention test database URL");
         match PgPoolOptions::new()
             .max_connections(1)
             .connect_with(options)
@@ -209,29 +202,29 @@ mod tests {
         {
             Ok(pool) => Some(pool),
             Err(error) if postgres_contract_tests_required() => {
-                panic!("required retention role connection unavailable: {error}")
+                panic!("required retention application identity connection unavailable: {error}")
             }
             Err(error) => {
-                eprintln!("skip: retention role connection unavailable: {error}");
+                eprintln!("skip: retention application identity connection unavailable: {error}");
                 None
             }
         }
     }
 
     #[tokio::test]
-    async fn retention_role_can_inspect_readiness_gate() {
+    async fn retention_application_identity_can_inspect_readiness_gate() {
         let _guard = db_lock().await;
         let require_ready =
             std::env::var("KNOWLEDGEBRAIN_REQUIRE_RETENTION_READY").as_deref() == Ok("1");
-        let Some(pool) = retention_role_pool().await else {
+        let Some(pool) = retention_application_identity_pool().await else {
             assert!(
                 !require_ready,
-                "required retention readiness needs a role pool"
+                "required retention readiness needs an application pool"
             );
             return;
         };
         let check =
-            platform::inspect_readiness(&pool, platform::SchemaComponentKind::Retention).await;
+            platform::inspect_readiness(&pool, platform::ReleaseComponentKind::Retention).await;
         if require_ready {
             match check {
                 platform::ReadyCheck::Ready { gate_mode, .. } => assert_eq!(gate_mode, "open"),
@@ -250,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_role_uses_only_fenced_preflight_and_completion_functions() {
+    async fn retention_application_identity_preserves_fenced_preflight_and_completion() {
         let _guard = db_lock().await;
         let Some(admin) = admin_test_pool().await else {
             return;
@@ -258,7 +251,7 @@ mod tests {
         if !retention_test_schema_is_ready(&admin).await {
             return;
         }
-        let Some(retention) = retention_role_pool().await else {
+        let Some(retention) = retention_application_identity_pool().await else {
             return;
         };
         let staging_id = Uuid::new_v4();
@@ -280,12 +273,17 @@ mod tests {
             .await
             .unwrap()
             .expect("sole staged owner creates deletion identity");
-        assert!(
-            sqlx::query("SELECT object_ref FROM object_registry LIMIT 1")
-                .execute(&retention)
-                .await
-                .is_err(),
-            "retention role must not read ObjectRegistry tables directly"
+        let registry_acl: (bool, bool) = sqlx::query_as(
+            "SELECT has_table_privilege(current_user,'object_registry','SELECT'),
+                    has_table_privilege('public','object_registry','SELECT')",
+        )
+        .fetch_one(&retention)
+        .await
+        .unwrap();
+        assert_eq!(
+            registry_acl,
+            (true, false),
+            "shared owner can inspect registry; PUBLIC cannot"
         );
         platform::process_object_deletion(&retention, &deletion)
             .await
@@ -319,7 +317,7 @@ mod tests {
         if !retention_test_schema_is_ready(&admin).await {
             return;
         }
-        let Some(retention) = retention_role_pool().await else {
+        let Some(retention) = retention_application_identity_pool().await else {
             return;
         };
         let staging_id = Uuid::new_v4();

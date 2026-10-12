@@ -178,6 +178,13 @@ pub struct DiscoverWork {
     input_digest: String,
     planning_error: Option<String>,
     packs: BTreeMap<String, PackRecord>,
+    /// Superseded uncommitted packs remain auditable; their workers and receipts
+    /// remain in the checkpoint. They never confer completed reading credit.
+    #[serde(default)]
+    superseded_packs: BTreeMap<String, PackRecord>,
+    #[serde(default)]
+    pub(crate) context_replans: usize,
+
     requirements: BTreeMap<String, RequirementRecord>,
     receipts: BTreeMap<String, Receipt>,
     reopen_receipts: BTreeMap<String, ReopenReceipt>,
@@ -397,6 +404,8 @@ impl DiscoverWork {
                     )
                 })
                 .collect(),
+            superseded_packs: BTreeMap::new(),
+            context_replans: 0,
             requirements: BTreeMap::new(),
             receipts: BTreeMap::new(),
             reopen_receipts: BTreeMap::new(),
@@ -554,6 +563,62 @@ impl DiscoverWork {
         body["claim_token"] = json!(canonical_claim);
         Ok(scope)
     }
+    /// Called only for a confirmed rejected request (or an unsent local probe).
+    /// Never change another pack: committed receipts and in-flight claims remain
+    /// byte-for-byte valid. Child requests must pass the complete wire gate.
+    pub(crate) fn split_rejected_pack(
+        &mut self,
+        input: &FrozenInput,
+        id: &str,
+    ) -> Result<Vec<String>, String> {
+        // Bound local refinement as well as provider retry rounds: an
+        // irreducible request envelope must not explode into byte-sized packs.
+        if self.superseded_packs.len() >= 128 {
+            return Err("context replan refinement exhausted".into());
+        }
+        let record = self.packs.get(id).ok_or("unknown rejected pack")?;
+        if record.status == PackStatus::Committed {
+            return Err("cannot replan a committed pack".into());
+        }
+        let children = planner::bisect_pack(input, &record.pack)?;
+        let ids = children
+            .iter()
+            .map(|pack| pack.id.clone())
+            .collect::<Vec<_>>();
+        if ids
+            .iter()
+            .any(|id| self.packs.contains_key(id) || self.superseded_packs.contains_key(id))
+        {
+            return Err("duplicate replan identity".into());
+        }
+        let record = self.packs.remove(id).unwrap();
+        self.superseded_packs.insert(id.into(), record);
+        // A reopened parent can still hold its previous committed extraction.
+        // Only child results remain live; the parent receipts and worker history
+        // retain the old submission for audit.
+        let prefix = format!("{id}:");
+        self.requirements.retain(|key, _| !key.starts_with(&prefix));
+        for pack in children {
+            self.packs.insert(
+                pack.id.clone(),
+                PackRecord {
+                    pack,
+                    status: PackStatus::Pending,
+                    attempt: 0,
+                    feedback: None,
+                    no_requirement_reason: None,
+                    issues: vec![],
+                    inspected_atom_ids: vec![],
+                    visual_receipts: BTreeMap::new(),
+                },
+            );
+        }
+        // Include the lineage so a new active plan is never confused with the
+        // initial one, without rewriting the immutable request identities.
+        self.plan_sha256 = super::canonical_sha256(&(&self.packs, &self.superseded_packs))?;
+        Ok(ids)
+    }
+
     pub fn planning_error(&self) -> Option<&str> {
         self.planning_error.as_deref()
     }
@@ -2714,6 +2779,115 @@ pub(crate) fn project_owned_pack_headers(session: &mut Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reopened_pack_split_removes_obsolete_requirements_but_preserves_audit() {
+        let input = input(
+            vec![
+                source("a", 0, "Old obligation", "one"),
+                source("b", 1, "Independent", "two"),
+            ],
+            vec![],
+        );
+        let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["atoms"].as_array().unwrap().len() == 1))
+        });
+        let packs = work.claim(2);
+        for (index, pack) in packs.iter().enumerate() {
+            let unit = &input.source_units[index];
+            work.submit(
+                &input,
+                &pack.id,
+                submission(
+                    pack,
+                    &format!("first-{index}"),
+                    vec![req(
+                        &input,
+                        &unit.source_unit_revision_id,
+                        0,
+                        unit.text.len(),
+                        if index == 0 { "one" } else { "two" },
+                    )],
+                ),
+            )
+            .unwrap();
+        }
+        let independent = work.requirement("pack-1:0").unwrap().clone();
+        let receipt = work.receipts["first-0"].clone();
+        work.reopen_committed(&input, "pack-0", packs[0].pack_revision, "recheck")
+            .unwrap();
+        let children = work.split_rejected_pack(&input, "pack-0").unwrap();
+        let mut restored: DiscoverWork = serde_json::from_value(json!(work)).unwrap();
+        for child in restored.claim(2) {
+            assert!(children.contains(&child.id));
+            restored
+                .submit(
+                    &input,
+                    &child.id,
+                    submission(&child, &format!("corrected-{}", child.id), vec![]),
+                )
+                .unwrap();
+        }
+        assert!(restored.complete());
+        assert_eq!(
+            restored.requirement_ids(),
+            BTreeSet::from(["pack-1:0".to_string()])
+        );
+        assert_eq!(restored.requirement("pack-1:0"), Some(&independent));
+        assert_eq!(restored.receipts["first-0"], receipt);
+        assert!(restored.superseded_packs.contains_key("pack-0"));
+    }
+
+    #[test]
+    fn rejected_pack_split_preserves_unicode_ranges_and_other_claims() {
+        let input = input(
+            vec![
+                source("a", 0, "甲乙丙丁🙂戊己", "one"),
+                source("b", 1, "Other completed evidence", "two"),
+            ],
+            vec![],
+        );
+        let mut work = DiscoverWork::plan_with_budget(&input, &|sessions| {
+            Ok(sessions
+                .iter()
+                .all(|s| s["pack"]["atoms"].as_array().unwrap().len() == 1))
+        });
+        work.claim(2);
+        let original = work.packs["pack-0"].clone();
+        work.packs.get_mut("pack-1").unwrap().status = PackStatus::Committed;
+        let committed = work.packs["pack-1"].clone();
+        let bindings = work.wire_bindings.clone();
+        let children = work.split_rejected_pack(&input, "pack-0").unwrap();
+        assert_eq!(work.packs["pack-1"], committed);
+        assert_eq!(work.wire_bindings, bindings);
+        assert_eq!(work.superseded_packs["pack-0"], original);
+        let mut rebuilt = String::new();
+        for id in children {
+            let child = &work.packs[&id];
+            assert_eq!(child.status, PackStatus::Pending);
+            assert!(child.visual_receipts.is_empty());
+            for atom in &child.pack.atoms {
+                let PackCarrier::Text {
+                    evidence:
+                        EvidenceRef::Text {
+                            start_byte,
+                            end_byte,
+                            ..
+                        },
+                } = atom.carrier
+                else {
+                    panic!("text expected")
+                };
+                rebuilt.push_str(&input.source_units[0].text[start_byte..end_byte]);
+            }
+        }
+        assert_eq!(rebuilt, input.source_units[0].text);
+        let before = work.clone();
+        assert!(work.split_rejected_pack(&input, "pack-1").is_err());
+        assert_eq!(work, before);
+    }
+
     use super::*;
     #[test]
     fn mixed_owned_and_support_primary_is_rejected_before_check() {

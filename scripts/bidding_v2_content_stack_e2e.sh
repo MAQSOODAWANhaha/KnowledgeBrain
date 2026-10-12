@@ -30,11 +30,6 @@ suffix="${GITHUB_RUN_ID:-local}-$$"
 pg_name="kb-content-e2e-pg-$suffix"
 redis_name="kb-content-e2e-redis-$suffix"
 database="knowledgebrain_test_content_e2e_${suffix//-/_}"
-namespace=$(python3 - <<'PY'
-import uuid
-print(uuid.uuid4())
-PY
-)
 offset=$(( $$ % 1000 ))
 redis_port=$((26379 + offset))
 # The frozen Content runtime contract pins the deterministic gateway to 127.0.0.1:18080.
@@ -79,28 +74,18 @@ docker exec "$redis_name" redis-cli ping | grep -q PONG
 
 docker exec -i \
   -e POSTGRES_USER=postgres -e POSTGRES_DB="$database" \
-  -e KNOWLEDGEBRAIN_MIGRATOR_PASSWORD=migrator \
-  -e KNOWLEDGEBRAIN_API_DB_PASSWORD=api \
-  -e KNOWLEDGEBRAIN_WORKER_DB_PASSWORD=worker \
-  -e KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD=retention \
+  -e KB_APP_DB_USER=kb_application -e KB_APP_DB_PASSWORD=synthetic-test-only \
   "$pg_name" sh -s < deploy/postgres-init/010-runtime-identities.sh
 
-common_release=(
-  KB_RELEASE_DESCRIPTOR_PATH="$PWD/deploy/release-descriptor-v1.development.json"
-  KB_RELEASE_DESCRIPTOR_SHA256=770ce81ba32a38ff76cdee4e26abe276e3645a07dd6a6bf9d14ebf2bee76d84c
-  KB_DEPLOYMENT_NAMESPACE_ID="$namespace"
-)
 if [[ -n "${KB_MIGRATOR_BIN:-}" && -n "${KB_API_BIN:-}" && -n "${KB_WORKER_BIN:-}" ]]; then
-  env "${common_release[@]}" KB_COMPONENT_KIND=migrator \
-    KB_COMPONENT_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-    DATABASE_URL="postgres://kb_migrator:migrator@127.0.0.1:25433/$database" \
+  env \
+    DATABASE_URL="postgres://kb_application:synthetic-test-only@127.0.0.1:25433/$database" \
     "$KB_MIGRATOR_BIN"
   api_bin=$KB_API_BIN
   worker_bin=$KB_WORKER_BIN
 else
-  env "${common_release[@]}" KB_COMPONENT_KIND=migrator \
-    KB_COMPONENT_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-    DATABASE_URL="postgres://kb_migrator:migrator@127.0.0.1:25433/$database" \
+  env \
+    DATABASE_URL="postgres://kb_application:synthetic-test-only@127.0.0.1:25433/$database" \
     cargo run --locked -q -p platform --bin migrator
   cargo build --locked -q -p api -p worker
   target_dir=$(cargo metadata --locked --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
@@ -116,19 +101,20 @@ common_runtime=(
   KNOWLEDGEBRAIN_CHAT_BASE_URL="http://127.0.0.1:$gateway_port"
   KNOWLEDGEBRAIN_CHAT_API_KEY=deterministic-test-key
   KNOWLEDGEBRAIN_CHAT_MODEL=scripted-content
-  KNOWLEDGEBRAIN_EMBEDDING_BASE_URL=http://127.0.0.1:9
-  KNOWLEDGEBRAIN_EMBEDDING_MODEL=acceptance
+  KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=131072
+  KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES=true
+  KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED=false
+  KB_ADMIN_USERNAME=fixture-admin
+  KB_ADMIN_PASSWORD=synthetic-test-only
   KB_AUTHORING_OUTPUT_TOKEN_RESERVE=
   KB_AUTHORING_TIMEOUT_MS=
   JWT_SECRET=content-e2e-secret
 )
-env "${common_release[@]}" "${common_runtime[@]}" KB_COMPONENT_KIND=api \
-  KB_COMPONENT_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222 \
-  DATABASE_URL="postgres://kb_runtime_api:api@127.0.0.1:25433/$database" API_PORT="$api_port" \
+env "${common_runtime[@]}" \
+  DATABASE_URL="postgres://kb_application:synthetic-test-only@127.0.0.1:25433/$database" API_PORT="$api_port" \
   "$api_bin" >"$api_log" 2>&1 & pids+=("$!")
-env "${common_release[@]}" "${common_runtime[@]}" KB_COMPONENT_KIND=worker \
-  KB_COMPONENT_IMAGE_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333 \
-  DATABASE_URL="postgres://kb_runtime_worker:worker@127.0.0.1:25433/$database" \
+env "${common_runtime[@]}" \
+  DATABASE_URL="postgres://kb_application:synthetic-test-only@127.0.0.1:25433/$database" \
   KB_V2_TEST_EMBEDDING_KEY=unused-exact-only KB_V2_TEST_RERANK_KEY=unused-exact-only \
   "$worker_bin" >"$worker_log" 2>&1 & pids+=("$!")
 
@@ -145,9 +131,9 @@ curl -fsS "http://127.0.0.1:$api_port/health" >/dev/null
 curl -fsS "http://127.0.0.1:$api_port/ready" | grep -q '"status":"ok"'
 curl -fsS "http://127.0.0.1:8081/ready" | grep -q '"status":"ok"'
 
-# Runtime schema identity is verified before the outline acceptance writes rows.
-{ echo 'SET ROLE kb_app_owner;'; cat crates/bidding/tests/sql/outline_response_acceptance.sql; } \
-  | docker exec -i "$pg_name" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 >/dev/null
+# The fresh baseline is installed before the outline acceptance writes rows.
+cat crates/bidding/tests/sql/outline_response_acceptance.sql \
+  | docker exec -i "$pg_name" psql -U kb_application -d "$database" -v ON_ERROR_STOP=1 >/dev/null
 
 # Shutdown is authoritative: terminate, join, require the Worker supervisor to
 # exit cleanly, and prove terminal business/object state cannot change later.

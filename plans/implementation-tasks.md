@@ -23,7 +23,7 @@
 
 - **目标 / 不做：** 在 P1 闭环后复跑完整数据库相关 suite 与平台/队列故障矩阵，区分完整 suite 和聚焦用例证据；不重做已有诊断修复，不以跳过用例获得绿色。hosted CI 与 named job `queue-faults` **不是本任务重点**，改挂 R3，不在 P2 剩余清单里追接线。
 - **产出：** 逐 suite 真实执行/退出码、数据库和队列故障覆盖表、必要的最小修复。本地分轮证据即可关闭本切片；不要求 hosted workflow 或新增 `queue-faults` job。
-- **可证实验收：** fresh→matching 只读重放→receipt/catalog/server/extensions/seed/ACL drift 拒绝，角色 allow/deny 及真实登录；五 writer 字节/NULL/错误码、AgentRun 锁后时钟、调用预算和原子终态；ObjectRegistry 引用竞态、queue 原生 retry/delay/reconnect/resurrection/dead revive、六 handler deadline、SIGINT/SIGTERM/fatal 与 helper cancel/kill/reap。完整 suite 不得 ignored/skipped/filtered/零执行；缺依赖与清理失败非绿。golden 每 kind/child owner/ACL/dependency 与生产应用启动分别记证据，不能用 shared verifier 冒充全应用启动。
+- **可证实验收：** fresh DDL、单账号权限边界及真实登录；五 writer 字节/NULL/错误码、AgentRun 锁后时钟、调用预算和原子终态；ObjectRegistry 引用竞态、queue 原生 retry/delay/reconnect/resurrection/dead revive、六 handler deadline、SIGINT/SIGTERM/fatal 与 helper cancel/kill/reap。完整 suite 不得 ignored/skipped/filtered/零执行；缺依赖与清理失败非绿。数据库行为验收与完整应用启动分别记证据。
 
 ### O0 — 许可、版本、字体与真实样稿 PoC
 
@@ -83,20 +83,14 @@
 ### R1 — release descriptor、RepoDigest 与启动验证
 
 - **目标 / 不做：** 落实已确认首发 identity 与启动 gate，不另建发布框架，不以 development synthetic digest 或 `latest` 作生产身份。
-- **产出：** 复用现有 checked schema 的唯一 release 工具、read-only descriptor mount 与启动顺序/实际 inspect 验证、拒绝矩阵及发布证据模板。
-- **可证实验收：** exact descriptor/JCS hash、mount/env/receipt、component kind/digest suffix 与实际 full RepoDigest inspect 一致；缺文件/非法字段/任一 mismatch fail-closed、无 tag fallback；migrator 先成功再启动 API/Worker/Retention，重复启动只读 readiness，DocReader 用 post-start inspect gate。空对象卷真实上传/读取/引用保护/最终回收，记录完整应用外部依赖启动而非仅 shared verifier。所有验收仅专用隔离环境。
-
-### R2 — 受保护 namespace reset
-
-- **目标 / 不做：** 落实平台现有 namespace reset 合同并故障注入；不是清理现有开发资料的任务，不用 `down -v`/全局 prune 或共享卷删除代替。
-- **产出：** 最小 reset 工具、checkpoint/逐 backend receipt、每 crash 边界恢复与拒绝证据。
-- **可证实验收：** drained/receipt/revision/mapping/containment 先验证；mode-0600 checkpoint atomic rename + file/directory fsync；按 OBJECT_DIR→MinIO→Neo4j→Redis→PostgreSQL 执行，每步 started/delete/done 注入失败。尤其 PostgreSQL 已 drop 仅凭合法 checkpoint 收敛；缺失/篡改/hash/token/mapping 漂移拒绝 resume。既有/非目标 namespace、共享卷、symlink escape 不受影响，失败也保留收据；清理仅本轮登记资源且零残留。
+- **产出：** 复用现有 checked schema 的唯一 release 工具、启动顺序/实际镜像 inspect 验证、拒绝矩阵及发布证据模板。
+- **可证实验收：** exact descriptor/JCS hash 与实际 full RepoDigest inspect 一致；缺文件/非法字段/任一 mismatch fail-closed、无 tag fallback；migrator 先成功再启动 API/Worker/Retention，重复启动只读 readiness，DocReader 用 post-start inspect gate。空对象卷真实上传/读取/引用保护/最终回收，记录完整应用外部依赖启动而非仅 shared verifier。所有验收仅专用隔离环境。
 
 ### R3 — 首发 named required jobs 闭环
 
 - **目标 / 不做：** 完成既定首发必跑接线并真实执行，不把 development checks 或历史 guard 探针称 release accepted，不在阶段 A/P1 顺手实施。
-- **产出：** `schema-contract`、`queue-faults`、`namespace-reset`、`outline-scripted-e2e`、`web-export-e2e`、`release-descriptor` 六个 named required jobs 的完整接线与同候选运行证据。
-- **可证实验收：** 六项均真实执行其业务/故障验收，新 DOCX 链不得用旧块 E2E 冒充；已有 rust/三个 suite guard、`--locked` 与 schema job 不丢失。依赖缺失、零用例、ignored/skipped 或 cleanup 失败使 job 失败；保留各命令退出码与资源零残留。无 hosted 结果时只能报告本地验证，正式发布仍不得放行。
+- **产出：** `schema-contract`、`queue-faults`、`outline-scripted-e2e`、`web-export-e2e`、`release-descriptor` 五个 named required jobs 的完整接线与同候选运行证据。
+- **可证实验收：** 五项均真实执行其业务/故障验收，新 DOCX 链不得用旧块 E2E 冒充；已有 rust/三个 suite guard、`--locked` 与 schema job 不丢失。依赖缺失、零用例、ignored/skipped 或 cleanup 失败使 job 失败；保留各命令退出码与资源零残留。无 hosted 结果时只能报告本地验证，正式发布仍不得放行。
 
 ### V1 — 条件式 pgvector 分域基准
 

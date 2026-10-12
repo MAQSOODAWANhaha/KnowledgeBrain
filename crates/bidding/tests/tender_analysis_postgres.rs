@@ -5,8 +5,8 @@ use bidding::analysis::FrozenInput;
 mod frozen_fixture;
 use bidding::outline::store::OutlineLease;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Executor, PgPool};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -23,12 +23,6 @@ async fn pool() -> PgPool {
     );
     PgPoolOptions::new()
         .max_connections(6)
-        .after_connect(|connection, _| {
-            Box::pin(async move {
-                connection.execute("SET ROLE kb_app_owner").await?;
-                Ok(())
-            })
-        })
         .connect_with(options)
         .await
         .unwrap()

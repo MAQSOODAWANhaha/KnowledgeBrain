@@ -35,8 +35,8 @@ pub struct Limits {
     pub max_focus_replans: usize,
     /// Application token budget, including estimated input and reserved output.
     pub max_context_tokens: usize,
-    /// Optional local admission ceiling for host-confirmed corrections.
-    /// Does not change planning or declare provider context capability.
+    /// Optional internal admission override for host-confirmed corrections.
+    /// Defaults to twice the normal context; does not declare provider capacity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_correction_context_tokens: Option<usize>,
     pub image_token_reserve: usize,
@@ -49,25 +49,21 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Normal planning/request ceiling for the admitted model profiles.
-    /// Optional correction admission does not change this provider declaration.
-    pub const PROFILE_CONTEXT_CEILING: usize = 131_072;
-    /// Allocation safeguard derived from the normal context allowance, not
-    /// an independent segmentation or token admission policy. Actual requests are
-    /// admitted exclusively by tokenizer accounting plus output reservation.
+    /// Bounded transport allocation derived from the context allowance. Token
+    /// accounting governs segmentation; the final 256 MiB cap protects memory.
     pub fn context_wire_ceiling(&self) -> usize {
-        let text = self
-            .max_context_tokens
-            .saturating_mul(self.tokenizer.max_piece_bytes());
-        let images = self.max_context_tokens / self.image_token_reserve.max(1);
+        let context = self.request_context_limit(true);
+        let text = context.saturating_mul(self.tokenizer.max_piece_bytes());
+        let images = context / self.image_token_reserve.max(1);
         let encoded_image = (self.max_source_view_bytes.saturating_add(2) / 3).saturating_mul(4);
         text.saturating_add(images.saturating_mul(encoded_image.saturating_add(32)))
+            .min(256 * 1024 * 1024)
     }
 
     fn request_context_limit(&self, correction: bool) -> usize {
         if correction {
             self.max_correction_context_tokens
-                .unwrap_or(self.max_context_tokens)
+                .unwrap_or_else(|| self.max_context_tokens.saturating_mul(2))
         } else {
             self.max_context_tokens
         }
@@ -109,69 +105,23 @@ impl Config {
     }
 
     fn environment_limits(provider: &AuthoringRuntimeContractV1) -> Result<Limits, AgentError> {
-        Self::configured_limits(
-            provider,
-            std::env::var("KB_AUTHORING_TOKENIZER_PROFILE")
-                .ok()
-                .as_deref(),
-            std::env::var("KB_TENDER_AGENT_LIMITS").ok().as_deref(),
-        )
+        let context =
+            crate::authoring_runtime::context_tokens_from_environment().map_err(invalid)?;
+        let mut limits = Self::configured_limits(provider, context)?;
+        limits.vision_enabled = platform::chat_supports_images().map_err(invalid)?;
+        Ok(limits)
     }
 
     fn configured_limits(
         provider: &AuthoringRuntimeContractV1,
-        profile: Option<&str>,
-        overrides: Option<&str>,
+        context: usize,
     ) -> Result<Limits, AgentError> {
-        let tokenizer = match profile.filter(|v| !v.trim().is_empty()) {
-            Some(raw) => {
-                // Model identity comes from the selected provider, not a duplicate setting.
-                let mut value: Value = serde_json::from_str(raw).map_err(invalid)?;
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| invalid("tokenizer profile must be an object"))?;
-                if object.contains_key("model_id") {
-                    return Err(invalid(
-                        "tokenizer profile model_id is derived from configured provider",
-                    ));
-                }
-                object.insert("model_id".into(), json!(provider.model_id));
-                serde_json::from_value(value).map_err(invalid)?
-            }
-            None => {
-                crate::agent_runtime::TokenizerProfile::published_for_model(&provider.model_id)?
-            }
-        };
-        let mut limits = Self::default_limits(provider, tokenizer)?;
-        // Optional scalar tuning. The model-bound tokenizer and capabilities
-        // are independent of this object; no complete Limits JSON is required.
-        if let Some(raw) = overrides.filter(|v| !v.trim().is_empty()) {
-            let overrides: Value = serde_json::from_str(raw).map_err(invalid)?;
-            let object = overrides
-                .as_object()
-                .ok_or_else(|| invalid("optional limits must be an object"))?;
-            if object.contains_key("tokenizer") {
-                return Err(invalid(
-                    "use model-bound KB_AUTHORING_TOKENIZER_PROFILE instead of limits.tokenizer",
-                ));
-            }
-            let mut effective = serde_json::to_value(&limits).map_err(invalid)?;
-            for (key, value) in object {
-                effective[key] = value.clone();
-            }
-            limits = serde_json::from_value(effective).map_err(invalid)?;
-        }
-        Ok(limits)
-    }
-
-    fn default_limits(
-        provider: &AuthoringRuntimeContractV1,
-        tokenizer: crate::agent_runtime::TokenizerProfile,
-    ) -> Result<Limits, AgentError> {
+        let tokenizer = crate::agent_runtime::TokenizerProfile::for_model(&provider.model_id)?;
         tokenizer.validate_for_model(&provider.model_id)?;
-        let context = Limits::PROFILE_CONTEXT_CEILING;
         Ok(Limits {
-            vision_enabled: false,
+            // Tender review uses original images with the same configured
+            // authoring model, which must support image input and tools.
+            vision_enabled: true,
             tokenizer,
             max_no_progress_turns: crate::agent_runtime::progress::default_no_progress_turns(),
             max_focus_turns: crate::agent_runtime::progress::default_focus_turns(),
@@ -179,7 +129,7 @@ impl Config {
             max_context_tokens: context,
             max_correction_context_tokens: None,
             image_token_reserve: 16384,
-            token_safety_margin: 4096,
+            token_safety_margin: (context / 16).clamp(1, 4096),
             // Image decode/resize safeguards; never a cumulative reading allowance.
             max_source_view_bytes: 1_500_000,
             max_source_view_edge: 1800,
@@ -245,16 +195,18 @@ impl Config {
         if self.provider.response_mode != "tool_calls" {
             return Err(invalid("response_mode must be tool_calls"));
         }
-        if l.max_context_tokens > Limits::PROFILE_CONTEXT_CEILING {
-            return Err(invalid(
-                "max_context_tokens exceeds the current model profile ceiling of 131072; a larger window requires a newly verified profile",
-            ));
-        }
-        if l.max_correction_context_tokens
-            .is_some_and(|limit| limit < l.max_context_tokens || limit > 262_144)
+        if l.max_context_tokens == 0
+            || l.max_context_tokens > crate::authoring_runtime::MAX_CONTEXT_TOKENS
         {
             return Err(invalid(
-                "max_correction_context_tokens must be between max_context_tokens and 262144; local admission only",
+                "max_context_tokens exceeds the supported resource range",
+            ));
+        }
+        if l.max_correction_context_tokens.is_some_and(|limit| {
+            limit < l.max_context_tokens || limit > l.max_context_tokens.saturating_mul(2)
+        }) {
+            return Err(invalid(
+                "max_correction_context_tokens must be between max_context_tokens and twice max_context_tokens; local admission only",
             ));
         }
         l.tokenizer.validate_for_model(&self.provider.model_id)?;
@@ -845,7 +797,7 @@ async fn run_seeded<J: Journal, M: Model>(
     {
         return Err(error(
             "AGENT_VISION_NOT_CONFIGURED",
-            "this frozen tender requires original-image evidence; configure the same authoring provider with an image-capable model and vision_enabled=true before starting the run",
+            "this frozen tender requires original-image evidence; use an image-capable Chat model and confirm KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES=true for an unlisted model before starting the run",
         ));
     }
     crate::outline::evidence::with_input_digest(
@@ -2661,17 +2613,12 @@ mod provider_defaults_tests {
     #[test]
     #[ignore = "isolated config-only entry probe; explicit synthetic loopback provider; never sends a request"]
     fn minimal_environment_entry_freezes_selected_model_and_defaults() {
-        if std::env::var_os("KB_TEST_EXPECT_UNKNOWN_PROFILE").is_some() {
-            assert!(
-                Config::from_environment()
-                    .unwrap_err()
-                    .message
-                    .contains("requires a measured")
-            );
-            return;
-        }
         let config = Config::from_environment().unwrap();
         assert_eq!(config.limits.max_context_tokens, 131072);
+        assert_eq!(
+            config.limits.vision_enabled,
+            platform::chat_supports_images().unwrap()
+        );
         assert_eq!(config.limits.tokenizer.model_id, config.provider.model_id);
         let frozen = serde_json::to_value(&config).unwrap();
         for field in [
@@ -2685,16 +2632,17 @@ mod provider_defaults_tests {
         }
     }
     #[test]
-    fn context_override_may_lower_but_cannot_exceed_profile_ceiling() {
+    fn frozen_context_respects_resource_bound_not_model_ceiling() {
         let mut provider = super::super::tests::config().provider;
         provider.model_id = "gpt-4.1".into();
-        for allowed in [32768, Limits::PROFILE_CONTEXT_CEILING] {
-            let limits = Config::configured_limits(
-                &provider,
-                None,
-                Some(&json!({"max_context_tokens":allowed}).to_string()),
-            )
-            .unwrap();
+        for allowed in [
+            32768,
+            131072,
+            262144,
+            crate::authoring_runtime::MAX_CONTEXT_TOKENS,
+        ] {
+            let mut limits = Config::configured_limits(&provider, 131072).unwrap();
+            limits.max_context_tokens = allowed;
             assert_eq!(
                 Config::with_provider(provider.clone(), limits)
                     .unwrap()
@@ -2703,69 +2651,76 @@ mod provider_defaults_tests {
                 allowed
             );
         }
-        for denied in [Limits::PROFILE_CONTEXT_CEILING + 1, usize::MAX] {
-            let limits = Config::configured_limits(
-                &provider,
-                None,
-                Some(&json!({"max_context_tokens":denied}).to_string()),
-            )
-            .unwrap();
+        for denied in [
+            0,
+            crate::authoring_runtime::MAX_CONTEXT_TOKENS + 1,
+            usize::MAX,
+        ] {
+            let mut limits = Config::configured_limits(&provider, 131072).unwrap();
+            limits.max_context_tokens = denied;
             assert!(
                 Config::with_provider(provider.clone(), limits)
                     .unwrap_err()
                     .message
-                    .contains("profile ceiling")
+                    .contains("resource range")
             );
         }
     }
     #[test]
-    fn basic_known_provider_needs_no_limits_blob_and_custom_profile_is_model_bound() {
+    fn chosen_context_and_derived_margin_survive_checkpoint_roundtrip() {
+        for context in [8192, 65536, 131072, 262144] {
+            let mut provider = super::super::tests::config().provider;
+            provider.model_id = "unknown-context-fixture".into();
+            provider.output_token_reserve = (context / 4).min(16384) as u32;
+            let limits = Config::configured_limits(&provider, context).unwrap();
+            assert_eq!(limits.token_safety_margin, (context / 16).clamp(1, 4096));
+            let config = Config::with_provider(provider, limits).unwrap();
+            let encoded = serde_json::to_vec(&config).unwrap();
+            let restored: Config = serde_json::from_slice(&encoded).unwrap();
+            restored.validate().unwrap();
+            assert_eq!(restored.limits.max_context_tokens, context);
+            assert_eq!(restored.limits.request_context_limit(false), context);
+            assert_eq!(restored.limits.request_context_limit(true), context * 2);
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn output_reserve_and_safety_margin_must_fit_context() {
         let mut provider = super::super::tests::config().provider;
         provider.model_id = "gpt-4.1".into();
-        let defaults = Config::configured_limits(&provider, None, None).unwrap();
+        let limits = Config::configured_limits(&provider, 131072).unwrap();
+        provider.output_token_reserve =
+            (limits.max_context_tokens - limits.token_safety_margin) as u32;
+        assert!(
+            Config::with_provider(provider.clone(), limits.clone())
+                .unwrap_err()
+                .message
+                .contains("output_token_reserve must fit")
+        );
+        provider.output_token_reserve -= 1;
+        Config::with_provider(provider, limits).unwrap();
+    }
+
+    #[test]
+    fn known_and_unknown_models_need_no_internal_configuration() {
+        let mut provider = super::super::tests::config().provider;
+        provider.model_id = "gpt-4.1".into();
+        let defaults = Config::configured_limits(&provider, 131072).unwrap();
         assert_eq!(defaults.max_context_tokens, 131072);
         assert_eq!(defaults.tokenizer.model_id, provider.model_id);
-        assert!(!defaults.vision_enabled);
+        assert!(defaults.vision_enabled);
         Config::with_provider(provider.clone(), defaults).unwrap();
         provider.model_id = "custom-unverified-model".into();
-        assert!(Config::configured_limits(&provider, None, None).is_err());
-        let profile = r#"{"encoding":"o200k_base","calibration":{"multiplier_bps":11500,"provenance":"synthetic measurement fixture only"}}"#;
-        let custom =
-            Config::configured_limits(&provider, Some(profile), Some(r#"{"vision_enabled":true}"#))
-                .unwrap();
+        let custom = Config::configured_limits(&provider, 262144).unwrap();
         assert_eq!(custom.tokenizer.model_id, provider.model_id);
-        assert_eq!(custom.max_context_tokens, 131072);
+        assert_eq!(custom.max_context_tokens, 262144);
         assert!(custom.vision_enabled);
-        for key in [
-            "run_budget",
-            "max_turns",
-            "max_tool_calls",
-            "max_read_bytes",
-            "max_review_rounds",
-            "reviewer_reserve",
-            "pack_max_units",
-            "pack_max_turns",
-            "max_tool_result_bytes",
-            "tokenizer",
-        ] {
-            assert!(
-                Config::configured_limits(
-                    &provider,
-                    Some(profile),
-                    Some(&json!({key:1}).to_string())
-                )
-                .is_err(),
-                "{key}"
-            );
-        }
-        assert!(
-            Config::configured_limits(
-                &provider,
-                Some(r#"{"model_id":"someone-else","encoding":"o200k_base"}"#),
-                None
-            )
-            .is_err()
+        assert_eq!(
+            custom.tokenizer.encoding,
+            crate::agent_runtime::chat::TokenEncoding::Utf8Bytes
         );
+        Config::with_provider(provider, custom).unwrap();
     }
 }
 

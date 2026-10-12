@@ -4,6 +4,7 @@
 
 ## 当前材料
 
+- [`configuration-simplification.md`](configuration-simplification.md)：待实施的配置与单数据库账号方案；仅全新部署，取代运行时基础方案中的多账号/角色权限目标，不涉及存量迁移。
 - [`runtime-foundation.md`](runtime-foundation.md)：fresh baseline、actor/idempotency/audit、`ObjectRegistry` 与 retention 的平台唯一活动实施定义。
 - [`queue-runtime.md`](queue-runtime.md)：Oxana/Redis transport interface、进程 identity、retry/resurrection 所有权与平台验收。
 - [`worker-runtime.md`](worker-runtime.md)：**已落地**。worker 只保留 Oxana adapter 与 helper；知识 ingest / 投标 content·export 在所属 crate。

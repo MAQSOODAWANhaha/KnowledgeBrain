@@ -84,16 +84,17 @@ pub fn build(state: AppState) -> Router {
             patch_s(patch_member).merge(delete_s(remove_member)),
         )
         .route(
-            "/api/v1/workspaces/{id}/retrieval-config",
-            get_s(get_retrieval).merge(patch_s(patch_retrieval)),
-        )
-        .route(
             "/api/v1/workspaces/{id}/api-keys",
             get_s(list_api_keys).merge(post_s(create_api_key)),
         )
         .route(
             "/api/v1/workspaces/{id}/api-keys/{key_id}",
             delete_s(delete_api_key),
+        );
+    let knowledge_routes = Router::<AppState>::new()
+        .route(
+            "/api/v1/workspaces/{id}/retrieval-config",
+            get_s(get_retrieval).merge(patch_s(patch_retrieval)),
         )
         .route(
             "/api/v1/workspaces/{id}/products",
@@ -172,6 +173,9 @@ pub fn build(state: AppState) -> Router {
             "/api/v1/products/{id}/versions/{vid}/files",
             get_s(version_file),
         )
+        .route_layer(middleware::from_fn(knowledge_gate));
+    let app = app
+        .merge(knowledge_routes)
         .route("/api/v1/files", get_s(global_file))
         .route("/api/v1/system/parser-engines", get_s(list_parser_engines))
         .route(
@@ -215,6 +219,24 @@ pub fn build(state: AppState) -> Router {
     app.with_state(state)
 }
 
+async fn knowledge_gate(request: Request, next: Next) -> Result<Response, ApiErr> {
+    let enabled = platform::knowledge_enabled().map_err(|_| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CONFIGURATION",
+            "invalid knowledge capability configuration",
+        )
+    })?;
+    if !enabled {
+        return Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "CAPABILITY_DISABLED",
+            "knowledge capability is not enabled",
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
 async fn oxana_admin_gate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -238,7 +260,7 @@ async fn live() -> Json<platform::LiveBody> {
 }
 
 async fn ready() -> (StatusCode, Json<platform::ReadyBody>) {
-    let check = platform::check_readiness(platform::SchemaComponentKind::Api).await;
+    let check = platform::check_readiness(platform::ReleaseComponentKind::Api).await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {
@@ -331,7 +353,7 @@ fn require_ws(_ws: Uuid, actor: &Actor, _write: bool, _admin: bool) -> Result<Ro
 
 #[derive(Deserialize)]
 struct AuthBody {
-    #[serde(default)]
+    #[serde(default, alias = "username")]
     email: String,
     #[serde(default)]
     password: String,
@@ -350,7 +372,7 @@ async fn register(
     Err(fail(
         StatusCode::GONE,
         "GONE",
-        "registration is disabled; use LDAP login",
+        "registration is disabled; use the configured account",
     ))
 }
 
@@ -358,31 +380,26 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<AuthBody>,
 ) -> Result<Json<TokenBody>, ApiErr> {
-    if platform::local_open() {
-        let email = {
-            let t = body.email.trim();
-            if t.is_empty() {
-                "dev@local".into()
-            } else {
-                t.to_string()
-            }
-        };
-        let id = ensure_local_user(&state, &email).await?;
-        let token =
-            platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
-        return Ok(Json(TokenBody { token, user_id: id }));
+    if body.email.trim().is_empty() || body.password.is_empty() {
+        return Err(unauthorized());
     }
+    let email = body.email.trim().to_owned();
     if !platform::ldap_url().is_empty() {
-        let _dn = platform::ldap_bind(&body.email, &body.password).map_err(|_| unauthorized())?;
+        let ldap_email = email.clone();
+        let password = body.password.clone();
+        tokio::task::spawn_blocking(move || platform::ldap_bind(&ldap_email, &password))
+            .await
+            .map_err(|_| unauthorized())?
+            .map_err(|_| unauthorized())?;
         let pool = pg().await?;
-        let id = if let Some((id, _, _)) = knowledge::find_user_by_email(&pool, &body.email)
+        let id = if let Some((id, _, _)) = knowledge::find_user_by_email(&pool, &email)
             .await
             .map_err(pg_err)?
         {
             id
         } else {
             let id = Uuid::new_v4();
-            knowledge::insert_user(&pool, id, &body.email, None)
+            knowledge::insert_user(&pool, id, &email, None)
                 .await
                 .map_err(pg_err)?;
             id
@@ -392,11 +409,16 @@ async fn login(
         return Ok(Json(TokenBody { token, user_id: id }));
     }
     let pool = pg().await?;
-    let (id, _email, password_hash) = knowledge::find_user_by_email(&pool, &body.email)
+    let (id, _email, password_hash) = knowledge::find_user_by_email(&pool, &email)
         .await
         .map_err(pg_err)?
         .ok_or_else(unauthorized)?;
-    if !platform::verify_password(&body.password, &password_hash) {
+    let valid = tokio::task::spawn_blocking(move || {
+        platform::verify_password(&body.password, &password_hash)
+    })
+    .await
+    .map_err(|_| unauthorized())?;
+    if !valid {
         return Err(unauthorized());
     }
     let token =
@@ -408,21 +430,6 @@ async fn login(
 struct MeBody {
     id: Uuid,
     email: String,
-}
-
-async fn ensure_local_user(_state: &AppState, email: &str) -> Result<Uuid, ApiErr> {
-    let pool = pg().await?;
-    if let Some((id, _, _)) = knowledge::find_user_by_email(&pool, email)
-        .await
-        .map_err(pg_err)?
-    {
-        return Ok(id);
-    }
-    let id = Uuid::new_v4();
-    knowledge::insert_user(&pool, id, email, None)
-        .await
-        .map_err(pg_err)?;
-    Ok(id)
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeBody>, ApiErr> {
@@ -440,12 +447,28 @@ struct PatchMe {
     email: Option<String>,
 }
 
+impl PatchMe {
+    fn validate(&self, local_auth: bool) -> Result<(), ApiErr> {
+        if local_auth && self.email.is_some() {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "LOGIN_IDENTITY_IMMUTABLE",
+                "the configured local login identity cannot be changed through profile updates",
+            ));
+        }
+        Ok(())
+    }
+}
+
 async fn patch_me(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<PatchMe>,
 ) -> Result<Json<MeBody>, ApiErr> {
     let uid = user_from(&headers, &state).await?;
+    // Local startup identifies the initialized account by its configured login.
+    // Reject changes before any database write so a profile edit cannot break restart.
+    body.validate(platform::ldap_url().is_empty())?;
     let pool = pg().await?;
     let (id, mut email) = knowledge::find_user_by_id(&pool, uid)
         .await
@@ -2959,18 +2982,15 @@ mod required_enqueue_tests {
         Some(url)
     }
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../test-support/postgres.rs"
+    ));
+
     async fn reset_test_schema(pool: &sqlx::PgPool) {
-        sqlx::raw_sql(
-            "DROP SCHEMA public CASCADE;
-             CREATE SCHEMA public;
-             GRANT ALL ON SCHEMA public TO CURRENT_USER;
-             CREATE EXTENSION IF NOT EXISTS pgcrypto;
-             CREATE EXTENSION IF NOT EXISTS vector;
-             ALTER SCHEMA public OWNER TO kb_app_owner;",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
+        reset_isolated_schema(pool)
+            .await
+            .expect("reset isolated test schema");
         platform::apply_fresh_baseline(pool).await.unwrap();
     }
 
@@ -3068,10 +3088,6 @@ mod required_enqueue_tests {
         };
         if !live_redis_url.contains("127.0.0.1:26379") {
             panic!("API queue acceptance requires isolated Redis on 127.0.0.1:26379");
-        }
-        if std::env::var_os("KB_DEPLOYMENT_NAMESPACE_ID").is_none() {
-            eprintln!("skip: KB_DEPLOYMENT_NAMESPACE_ID is not configured");
-            return;
         }
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(8)
@@ -3238,5 +3254,68 @@ mod required_enqueue_tests {
             assert!(error.1.0.error.message.contains("remains pending"));
             assert!(error.1.0.error.message.contains("retry"));
         }
+    }
+}
+
+#[cfg(test)]
+mod local_auth_contract_tests {
+    use super::*;
+
+    fn state() -> State<AppState> {
+        State(AppState {
+            jwt_secret: "synthetic-auth-test-secret".into(),
+            bootstrap_key: String::new(),
+        })
+    }
+
+    #[test]
+    fn local_profile_updates_cannot_rename_the_bootstrapped_login() {
+        for email in ["another-admin", "", " fixture-admin "] {
+            let update = PatchMe {
+                email: Some(email.into()),
+            };
+            let error = update.validate(true).expect_err("local login is immutable");
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(error.1.0.error.code, "LOGIN_IDENTITY_IMMUTABLE");
+            assert!(update.validate(false).is_ok(), "LDAP behavior is unchanged");
+        }
+        assert!(PatchMe { email: None }.validate(true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn empty_credentials_are_rejected_before_database_or_ldap_access() {
+        for (email, password) in [("", ""), ("fixture-user", ""), ("  ", "fixture-password")] {
+            let result = login(
+                state(),
+                Json(AuthBody {
+                    email: email.into(),
+                    password: password.into(),
+                }),
+            )
+            .await;
+            assert!(matches!(result, Err((StatusCode::UNAUTHORIZED, _))));
+        }
+    }
+
+    #[tokio::test]
+    async fn public_registration_remains_disabled() {
+        let result = register(
+            state(),
+            Json(AuthBody {
+                email: "fixture-user".into(),
+                password: "fixture-password".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err((StatusCode::GONE, _))));
+    }
+
+    #[test]
+    fn username_login_field_is_supported_without_an_email_requirement() {
+        let body: AuthBody = serde_json::from_value(
+            json!({"username":"fixture-admin","password":"fixture-password"}),
+        )
+        .unwrap();
+        assert_eq!(body.email, "fixture-admin");
     }
 }

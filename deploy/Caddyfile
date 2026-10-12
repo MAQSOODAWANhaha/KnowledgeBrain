@@ -6,7 +6,7 @@
 # Browser entry. Listen on all interfaces so LAN IPs work, not only 127.0.0.1.
 :28080 {
 	tls /etc/caddy/certs/localhost.crt /etc/caddy/certs/localhost.key
-	reverse_proxy api:8080
+	reverse_proxy {$API_UPSTREAM:api:8080}
 }
 
 # Document Server for the browser. Same cert; API still uses http://onlyoffice/.

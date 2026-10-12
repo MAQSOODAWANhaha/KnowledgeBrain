@@ -289,36 +289,15 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
     out
 }
 
-pub const OXANA_DEPLOYMENT_NAMESPACE_ID_ENV: &str = "KB_DEPLOYMENT_NAMESPACE_ID";
-
-fn validated_oxana_namespace(
-    raw: Option<String>,
-) -> Result<crate::DeploymentNamespaceV1, oxana::OxanaError> {
-    let raw = raw.ok_or_else(|| {
-        oxana::OxanaError::GenericError(format!("{OXANA_DEPLOYMENT_NAMESPACE_ID_ENV} is required"))
-    })?;
-    raw.parse::<crate::DeploymentNamespaceV1>().map_err(|_| {
-        oxana::OxanaError::GenericError(format!(
-            "{OXANA_DEPLOYMENT_NAMESPACE_ID_ENV} must be canonical lowercase UUID"
-        ))
-    })
-}
-
-/// Configure the pinned official client with the deployment's derived prefix.
-pub fn oxana_storage_in_namespace(
-    redis_url: &str,
-    namespace: crate::DeploymentNamespaceV1,
-) -> Result<oxana::Storage, oxana::OxanaError> {
+/// Use a fixed application prefix in the explicitly configured Redis database.
+pub fn oxana_storage(redis_url: &str) -> Result<oxana::Storage, oxana::OxanaError> {
     oxana::StorageBuilder::new()
-        .namespace(namespace.redis_namespace())
+        .namespace("kb")
         .build_from_redis_url(redis_url)
 }
 
 pub fn oxana_connect() -> Result<oxana::Storage, oxana::OxanaError> {
-    oxana_storage_in_namespace(
-        &redis_url()?,
-        validated_oxana_namespace(std::env::var(OXANA_DEPLOYMENT_NAMESPACE_ID_ENV).ok())?,
-    )
+    oxana_storage(&redis_url()?)
 }
 
 pub async fn connect_verified() -> Result<oxana::Storage, String> {
@@ -1046,24 +1025,62 @@ mod tests {
     use super::*;
 
     fn redis_tests_required() -> bool {
-        std::env::var("KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS")
-            .map(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false)
+        std::env::var("KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS").as_deref() == Ok("1")
     }
 
     fn redis_test_storage(test_name: &str) -> Option<oxana::Storage> {
-        if std::env::var_os("REDIS_URL").is_none() && !redis_tests_required() {
-            eprintln!("skip runtime test {test_name}: REDIS_URL is not configured");
+        if !validate_redis_test_target(
+            redis_tests_required(),
+            std::env::var("REDIS_URL").ok().as_deref(),
+        )
+        .unwrap_or_else(|error| panic!("runtime test {test_name}: {error}"))
+        {
+            eprintln!(
+                "skip runtime test {test_name}: disposable Redis tests not explicitly enabled"
+            );
             return None;
         }
         Some(oxana_connect().unwrap_or_else(|error| {
             panic!("required runtime test {test_name} could not configure redis: {error}")
         }))
+    }
+
+    fn validate_redis_test_target(required: bool, raw: Option<&str>) -> Result<bool, &'static str> {
+        if !required {
+            return Ok(false);
+        }
+        let url = raw
+            .and_then(|raw| reqwest::Url::parse(raw).ok())
+            .ok_or("disposable Redis tests require REDIS_URL")?;
+        if url.scheme() != "redis"
+            || url.host_str() != Some("127.0.0.1")
+            || url.port() != Some(26379)
+        {
+            return Err("disposable Redis tests require redis://127.0.0.1:26379");
+        }
+        Ok(true)
+    }
+
+    #[test]
+    fn destructive_redis_tests_require_explicit_opt_in_and_isolated_target() {
+        assert_eq!(validate_redis_test_target(false, None), Ok(false));
+        assert_eq!(
+            validate_redis_test_target(false, Some("redis://production:6379")),
+            Ok(false)
+        );
+        for url in [
+            None,
+            Some("invalid"),
+            Some("redis://127.0.0.1:16379"),
+            Some("redis://production:26379"),
+            Some("http://127.0.0.1:26379"),
+        ] {
+            assert!(validate_redis_test_target(true, url).is_err());
+        }
+        assert_eq!(
+            validate_redis_test_target(true, Some("redis://127.0.0.1:26379/1")),
+            Ok(true)
+        );
     }
 
     async fn redis_live_if_up(test_name: &str) -> Option<oxana::Storage> {
@@ -1086,69 +1103,11 @@ mod tests {
     }
 
     #[test]
-    fn oxana_namespace_is_required_exact_and_partitions_every_storage() {
+    fn queue_storage_requires_redis_but_no_deployment_identity() {
         assert!(required_redis_url(None).is_err());
         assert!(required_redis_url(Some(String::new())).is_err());
-        assert!(validated_oxana_namespace(None).is_err());
-        for invalid in [
-            " 00000000-0000-4000-8000-000000000001",
-            "00000000-0000-4000-8000-000000000001 ",
-            "00000000-0000-4000-8000-00000000000A",
-            "not-a-uuid",
-        ] {
-            assert!(validated_oxana_namespace(Some(invalid.into())).is_err());
-        }
-        let first = "00000000-0000-4000-8000-000000000001";
-        let second = "00000000-0000-4000-8000-000000000002";
-        let first_storage =
-            oxana_storage_in_namespace("redis://127.0.0.1:1", first.parse().unwrap()).unwrap();
-        let second_storage =
-            oxana_storage_in_namespace("redis://127.0.0.1:1", second.parse().unwrap()).unwrap();
-        assert_eq!(
-            first_storage.namespace(),
-            "kb:00000000000040008000000000000001"
-        );
-        assert_eq!(
-            second_storage.namespace(),
-            "kb:00000000000040008000000000000002"
-        );
-        assert_ne!(first_storage.namespace(), second_storage.namespace());
-    }
-
-    #[tokio::test]
-    async fn two_deployment_namespaces_do_not_share_jobs_or_uniqueness() {
-        let Some(_) = redis_live_if_up("two deployment namespaces").await else {
-            return;
-        };
-        let _guard = redis_test_lock().await;
-        let url = redis_url().unwrap();
-        let first = Uuid::new_v4().to_string();
-        let second = Uuid::new_v4().to_string();
-        let first_storage = oxana_storage_in_namespace(&url, first.parse().unwrap()).unwrap();
-        let second_storage = oxana_storage_in_namespace(&url, second.parse().unwrap()).unwrap();
-        let document_id = Uuid::new_v4();
-        let job = DocumentProcessJob {
-            document_id,
-            product_version_id: Uuid::new_v4(),
-            attempt: 1,
-            task_type: crate::TYPE_DOCUMENT_PROCESS.to_string(),
-            passages: Vec::new(),
-        };
-        first_storage
-            .enqueue(DefaultQueue, job.clone())
-            .await
-            .unwrap();
-        assert_eq!(first_storage.enqueued_count(DefaultQueue).await.unwrap(), 1);
-        assert_eq!(
-            second_storage.enqueued_count(DefaultQueue).await.unwrap(),
-            0
-        );
-        second_storage.enqueue(DefaultQueue, job).await.unwrap();
-        assert_eq!(first_storage.enqueued_count(DefaultQueue).await.unwrap(), 1);
-        assert_eq!(
-            second_storage.enqueued_count(DefaultQueue).await.unwrap(),
-            1
-        );
+        let storage = oxana_storage("redis://127.0.0.1:1").unwrap();
+        assert_eq!(storage.namespace(), "kb");
     }
 
     #[test]

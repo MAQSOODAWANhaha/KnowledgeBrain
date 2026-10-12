@@ -6,6 +6,7 @@ fn profile(encoding: TokenEncoding) -> TokenizerProfile {
         model_id: match encoding {
             TokenEncoding::O200kBase => "gpt-4o-2024-08-06",
             TokenEncoding::Cl100kBase => "gpt-4-0613",
+            TokenEncoding::Utf8Bytes => "unknown-fixture",
         }
         .into(),
         encoding,
@@ -278,4 +279,27 @@ fn profile_serialization_is_explicit_and_has_no_silent_default() {
         p
     );
     assert!(serde_json::from_value::<TokenizerProfile>(json!({"model_id":"test"})).is_err());
+}
+
+#[test]
+fn unknown_model_uses_frozen_conservative_byte_estimate_without_calibration() {
+    let profile = TokenizerProfile::for_model("gpt-6-luna").unwrap();
+    assert_eq!(profile.encoding, TokenEncoding::Utf8Bytes);
+    for text in ["hello world", "中文😀", "<|endoftext|>"] {
+        assert_eq!(profile.count_text_tokens(text).unwrap(), text.len());
+    }
+    let mut body = request();
+    body["model"] = json!(profile.model_id);
+    let estimate = estimate_request_tokens(&body, &profile, 16384, 4096).unwrap();
+    assert!(estimate.provenance.contains("estimate"));
+    assert_eq!(
+        estimate.text_tokens,
+        serde_json_canonicalizer::to_vec(&body).unwrap().len()
+    );
+    assert!(!estimate.calibrated);
+    assert_eq!(
+        serde_json::from_value::<TokenizerProfile>(serde_json::to_value(&profile).unwrap())
+            .unwrap(),
+        profile
+    );
 }

@@ -44,7 +44,9 @@ fn child_mode() -> Option<String> {
 }
 
 fn storage_from(url: &str, namespace: &str) -> oxana::Storage {
-    platform::oxana_storage_in_namespace(url, namespace.parse().expect("test deployment UUID"))
+    oxana::Storage::builder()
+        .namespace(format!("test:{namespace}"))
+        .build_from_redis_url(url)
         .unwrap_or_else(|error| panic!("oxana storage from redis url: {error}"))
 }
 
@@ -254,7 +256,6 @@ fn spawn_child(
         .env(CHILD_ENV, mode)
         .env(REDIS_ENV, redis_url)
         .env(NAMESPACE_ENV, namespace)
-        .env("KB_DEPLOYMENT_NAMESPACE_ID", namespace)
         .env("RUST_TEST_THREADS", "1")
         .args(["--exact", test_name, "--nocapture"])
         .stdout(Stdio::null())

@@ -4,7 +4,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 
 pub const REASON_POSTGRES_UNAVAILABLE: &str = "postgres_unavailable";
-pub const REASON_SCHEMA_REVISION_MISMATCH: &str = "schema_revision_mismatch";
+pub const REASON_DATABASE_ROLE_INVALID: &str = "database_role_invalid";
 pub const REASON_MAINTENANCE_GATE_UNREADABLE: &str = "maintenance_gate_unreadable";
 pub const REASON_MAINTENANCE: &str = "maintenance";
 pub const REASON_DRAINING: &str = "draining";
@@ -13,13 +13,33 @@ pub const REASON_GATE_MODE_NOT_LIVE_READY: &str = "gate_mode_not_live_ready";
 pub const REASON_QUEUE_REGISTRY_UNREADABLE: &str = "queue_registry_unreadable";
 pub const REASON_EMBEDDING_UNCONFIGURED: &str = "embedding_unconfigured";
 
-/// API/worker must have both embedding URL and model before taking traffic.
+/// Tender deployments do not require embedding; knowledge deployments do.
 pub fn embedding_config_not_ready_reason() -> Option<&'static str> {
-    embedding_config_not_ready_reason_for(&crate::embedding_base_url(), &crate::embedding_model())
+    match crate::knowledge_enabled() {
+        Ok(false) => None,
+        Ok(true) => embedding_readiness_for_capability(
+            true,
+            &crate::embedding_base_url(),
+            &crate::embedding_model(),
+        ),
+        Err(_) => Some("invalid_capability_configuration"),
+    }
+}
+
+pub fn embedding_readiness_for_capability(
+    enabled: bool,
+    url: &str,
+    model: &str,
+) -> Option<&'static str> {
+    if enabled {
+        embedding_config_not_ready_reason_for(url, model)
+    } else {
+        None
+    }
 }
 
 pub fn embedding_config_not_ready_reason_for(url: &str, model: &str) -> Option<&'static str> {
-    if url.trim().is_empty() || model.trim().is_empty() {
+    if !crate::vlm_endpoint_ready(url, model) || model == "stub-emb" {
         Some(REASON_EMBEDDING_UNCONFIGURED)
     } else {
         None
@@ -90,7 +110,7 @@ pub fn ready_body(service: &'static str, check: &ReadyCheck) -> ReadyBody {
     }
 }
 
-pub async fn check_readiness(expected_component: crate::SchemaComponentKind) -> ReadyCheck {
+pub async fn check_readiness(expected_component: crate::ReleaseComponentKind) -> ReadyCheck {
     match crate::connect().await {
         Ok(pool) => inspect_readiness(&pool, expected_component).await,
         Err(_) => ReadyCheck::NotReady {
@@ -100,11 +120,10 @@ pub async fn check_readiness(expected_component: crate::SchemaComponentKind) -> 
     }
 }
 
-/// Readiness revalidates the mounted release identity, exact receipt, and fresh
-/// catalog manifest read-only before checking the ordinary maintenance gate.
+/// Readiness checks database connectivity, application privileges and the maintenance gate.
 pub async fn inspect_readiness(
     pool: &PgPool,
-    expected_component: crate::SchemaComponentKind,
+    expected_component: crate::ReleaseComponentKind,
 ) -> ReadyCheck {
     if sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(pool)
@@ -116,24 +135,9 @@ pub async fn inspect_readiness(
             gate_mode: None,
         };
     }
-    let identity = match crate::SchemaRuntimeIdentity::load_from_env() {
-        Ok(identity) => identity,
-        Err(_) => {
-            return ReadyCheck::NotReady {
-                reason: REASON_SCHEMA_REVISION_MISMATCH,
-                gate_mode: None,
-            };
-        }
-    };
-    if identity.component_kind != expected_component {
+    if crate::verify_application_role(pool).await.is_err() {
         return ReadyCheck::NotReady {
-            reason: REASON_SCHEMA_REVISION_MISMATCH,
-            gate_mode: None,
-        };
-    }
-    if let Err(error) = crate::verify_runtime_schema(pool, &identity).await {
-        return ReadyCheck::NotReady {
-            reason: readiness_reason_after_ping(&error),
+            reason: REASON_DATABASE_ROLE_INVALID,
             gate_mode: None,
         };
     }
@@ -161,22 +165,17 @@ pub async fn inspect_readiness(
             gate_mode: Some(LIVE_READY_GATE_MODE.to_string()),
         };
     }
-    if let Some(reason) = embedding_config_not_ready_reason() {
+    if matches!(
+        expected_component,
+        crate::ReleaseComponentKind::Api | crate::ReleaseComponentKind::Worker
+    ) && let Some(reason) = embedding_config_not_ready_reason()
+    {
         return ReadyCheck::NotReady {
             reason,
             gate_mode: Some(LIVE_READY_GATE_MODE.to_string()),
         };
     }
     check
-}
-
-fn readiness_reason_after_ping(error: &crate::SchemaError) -> &'static str {
-    match error {
-        crate::SchemaError::Sql(_) => REASON_POSTGRES_UNAVAILABLE,
-        crate::SchemaError::ReleaseIdentity(_) | crate::SchemaError::RevisionMismatch { .. } => {
-            REASON_SCHEMA_REVISION_MISMATCH
-        }
-    }
 }
 
 pub fn inspect_gate_mode(mode: impl Into<String>) -> ReadyCheck {
@@ -203,6 +202,23 @@ pub fn gate_mode_not_ready_reason(mode: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tender_readiness_does_not_require_disabled_embedding() {
+        assert_eq!(embedding_readiness_for_capability(false, "", ""), None);
+        assert_eq!(
+            embedding_readiness_for_capability(true, "", ""),
+            Some(REASON_EMBEDDING_UNCONFIGURED)
+        );
+        assert_eq!(
+            embedding_readiness_for_capability(true, "https://embedding.invalid", "embedding"),
+            None
+        );
+        assert_eq!(
+            embedding_readiness_for_capability(true, "not-a-url", "embedding"),
+            Some(REASON_EMBEDDING_UNCONFIGURED)
+        );
+    }
 
     #[test]
     fn embedding_config_requires_url_and_model() {
@@ -234,30 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn post_ping_schema_failure_mapping_distinguishes_transport_from_identity() {
-        let transport = crate::SchemaError::Sql(sqlx::Error::PoolTimedOut);
-        assert_eq!(
-            readiness_reason_after_ping(&transport),
-            REASON_POSTGRES_UNAVAILABLE
-        );
-        let semantic = crate::SchemaError::RevisionMismatch { reason: "fixture" };
-        assert_eq!(
-            readiness_reason_after_ping(&semantic),
-            REASON_SCHEMA_REVISION_MISMATCH
-        );
-    }
-
-    #[test]
-    fn readiness_failure_exposes_only_stable_schema_reason() {
+    fn readiness_failure_exposes_only_stable_reason() {
         let body = ready_body(
             "api",
             &ReadyCheck::NotReady {
-                reason: REASON_SCHEMA_REVISION_MISMATCH,
+                reason: REASON_DATABASE_ROLE_INVALID,
                 gate_mode: None,
             },
         );
         let json = serde_json::to_value(body).unwrap();
-        assert_eq!(json["reason"], REASON_SCHEMA_REVISION_MISMATCH);
-        assert!(json.get("release_descriptor_sha256").is_none());
+        assert_eq!(json["reason"], REASON_DATABASE_ROLE_INVALID);
     }
 }

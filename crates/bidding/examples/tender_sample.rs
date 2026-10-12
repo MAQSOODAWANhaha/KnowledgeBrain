@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use bidding::{
     agent_error::AgentError,
     analysis::{self as ta, agent as extraction},
-    authoring_runtime::AuthoringRuntimeContractV1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -244,15 +243,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    if args.len() != 5 {
-        return Err(
-            "usage: tender_sample extract <input-directory> <explicit-limits.json> <run-directory>"
-                .into(),
-        );
+    if args.len() != 4 {
+        return Err("usage: tender_sample extract <input-directory> <run-directory>".into());
     }
     let mode = &args[1];
     let input_dir = PathBuf::from(&args[2]);
-    let root = PathBuf::from(&args[4]);
+    let root = PathBuf::from(&args[3]);
     fs::create_dir_all(&root)?;
     let lock_path = root.join("running.lock");
     OpenOptions::new()
@@ -261,13 +257,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(&lock_path)?;
     let _lock = Lock(lock_path);
     let input: ta::FrozenInput = read(input_dir.join("frozen-input.json"))?;
-    let limits: Value = read(&args[3])?;
-    let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()?;
+    let config = extraction::Config::from_environment_for(&input)?;
     if mode != "extract" {
         return Err("retired reviewer seed entry: use extract for the formal Discover/Organize/Check runtime".into());
     }
-    let contract =
-        json!({"mode":mode,"input_sha256":ta::digest(&input)?,"provider":provider,"limits":limits});
+    let contract = json!({"mode":mode,"input_sha256":ta::digest(&input)?,"config":config});
     let contract_path = root.join("run-contract.json");
     if contract_path.exists() {
         let previous: Value = read(&contract_path)?;
@@ -298,11 +292,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     match mode.as_str() {
         "extract" => {
-            let config = extraction::Config::with_provider_for(
-                provider,
-                serde_json::from_value(limits["extraction"].clone())?,
-                Some(&input),
-            )?;
             save(root.join("runtime.json"), &config)?;
             let result = extraction::run(
                 &input,

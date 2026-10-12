@@ -7,7 +7,7 @@ HTTP (`/api/v1`) validates, persists, and enqueues only. Parse / chunk / vector 
 ## Deploy
 
 Deployment definitions live in [`deploy/`](deploy/README.md). A fresh installation uses the
-`migrate` bootstrap job followed by the runtime profile. The old launch verifier/intended-state system、compatibility migration and bidding V1 schema are absent; the migrator writes one minimal schema release receipt and every runtime performs read-only compiled-digest/catalog-manifest verification before readiness.
+`migrate` bootstrap job followed by the runtime profile. The bootstrap creates the application tables; deployment namespaces, schema version receipts and runtime catalog hash verification are not required.
 
 ```bash
 cp deploy/.env.example deploy/.env
@@ -15,7 +15,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile run
 ```
 
 The bootstrap applies `shared_platform_baseline`, `knowledge_base_baseline`, and
-`bidding_v2_baseline` to an empty database in one transaction. API, worker, and retention only connect and verify at startup; they never execute DDL.
+`bidding_v2_baseline` to an empty database in one transaction. API, worker, and retention check connectivity and application account privileges at startup; they never execute DDL.
 Use `./deploy/deploy.sh up` for an ordinary restart.
 
 ## Local rust (infra only)

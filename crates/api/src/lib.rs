@@ -11,11 +11,11 @@ pub struct AppState {
     pub bootstrap_key: String,
 }
 
-pub fn router() -> Router {
-    router_with(AppState {
-        jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".into()),
+pub fn router() -> Result<Router, String> {
+    Ok(router_with(AppState {
+        jwt_secret: platform::required_secret("JWT_SECRET")?,
         bootstrap_key: std::env::var("KNOWLEDGEBRAIN_BOOTSTRAP_KEY").unwrap_or_default(),
-    })
+    }))
 }
 
 pub fn router_with(state: AppState) -> Router {

@@ -153,7 +153,7 @@ impl<J: Journal> PackHost<'_, J> {
         .await
         .map_err(|error| {
             if matches!(error.code.as_str(), "AGENT_TURN_BUDGET_EXCEEDED" | "DISCOVER_READ_CAPACITY_EXCEEDED") {
-                ReadPageFailure::Business("Optional dependency directory cannot fit the ordinary request budget. No page was queued or confirmed; you may submit the complete corrected proposal directly without this optional read.".into())
+                ReadPageFailure::Business("Optional dependency directory cannot fit the current pack request budget. No page was queued or confirmed; you may submit the complete corrected proposal directly without this optional read.".into())
             } else {
                 ReadPageFailure::Host(error)
             }
@@ -335,13 +335,54 @@ impl<J: Journal> PackHost<'_, J> {
                         if required_support {
                             ReadPageFailure::Capacity("The minimum required UTF-8 source page cannot fit the complete worker request. This worker has stopped; its audit and confirmed reads are preserved.".into())
                         } else {
-                            ReadPageFailure::Business("Optional source page cannot fit the ordinary request budget. No page was queued or confirmed; you may submit the complete corrected proposal directly without this optional read.".into())
+                            ReadPageFailure::Business("Optional source page cannot fit the current pack request budget. No page was queued or confirmed; you may submit the complete corrected proposal directly without this optional read.".into())
                         }
                     })?
                 }
                 Err(error) => return Err(ReadPageFailure::Host(error)),
             }
         }
+    }
+
+    fn split_for_capacity(&mut self, id: &str, limit: usize) -> Result<(), AgentError> {
+        // Work on a clone: an indivisible source or invalid budget leaves every
+        // old claim, completed read, and reservation untouched.
+        if limit
+            <= self.config.provider.output_token_reserve as usize
+                + self.config.limits.token_safety_margin
+        {
+            return Err(error(
+                "DISCOVER_READ_CAPACITY_EXCEEDED",
+                "Reduced context cannot contain request reserves; no retry.",
+            ));
+        }
+        let mut candidate = self.state.clone();
+        let children = candidate
+            .outline_run
+            .reading_packs
+            .as_mut()
+            .ok_or_else(|| invalid("reading plan missing"))?
+            .split_rejected_pack(self.input, id)
+            .map_err(|_| {
+                error(
+                    "DISCOVER_READ_CAPACITY_EXCEEDED",
+                    "Rejected pack cannot be split without losing original evidence; no retry.",
+                )
+            })?;
+        for child in children {
+            candidate.outline_run.discover_workers.insert(
+                child,
+                Worker {
+                    reduced_context_tokens: Some(limit),
+                    ..Worker::default()
+                },
+            );
+        }
+        // Parent workers retain all delivered evidence, history and rejected
+        // physical requests. Children claim no inherited credit and reread their
+        // exact originals; successful unrelated packs are never replanned.
+        *self.state = candidate;
+        Ok(())
     }
 
     async fn prepare(&mut self, id: &str) -> Result<Request, AgentError> {
@@ -431,6 +472,12 @@ impl<J: Journal> PackHost<'_, J> {
                     {
                         *code = "DISCOVER_READ_CAPACITY_EXCEEDED".into();
                     }
+                    candidate
+                        .outline_run
+                        .discover_workers
+                        .get_mut(id)
+                        .unwrap()
+                        .correction_active = false;
                     *self.state = candidate;
                     if persist {
                         self.save().await?;
@@ -581,8 +628,15 @@ impl<J: Journal> PackHost<'_, J> {
             self.config.provider.output_token_reserve as usize,
         )?;
         let correction = worker_correction_window(worker);
-        let exceeds_budget =
-            count.total_context_tokens > self.config.limits.request_context_limit(correction);
+        let context_limit = self.config.limits.request_context_limit(correction);
+        let context_limit = if correction {
+            context_limit
+        } else {
+            worker
+                .reduced_context_tokens
+                .map_or(context_limit, |limit| context_limit.min(limit))
+        };
+        let exceeds_budget = count.total_context_tokens > context_limit;
         let mut read_frames = worker.related_read_frames.clone();
         for frame in &mut read_frames {
             frame.sealed_sha256 =
@@ -788,6 +842,13 @@ impl<J: Journal> Host for PackHost<'_, J> {
                         let history = worker.history.clone();
                         let history_revision_start = history.len();
                         let retired_read_calls = worker.retired_read_calls.clone();
+                        // Repair/reopen rotates evidence claims, not the
+                        // provider capacity already learned within this run.
+                        let reduced_context_tokens = (request.scope.run == identity["run"])
+                            .then_some(worker.reduced_context_tokens)
+                            .flatten();
+                        let correction_active =
+                            request.scope.run == identity["run"] && worker.correction_active;
                         let registry = worker.registry.clone();
                         let retry = worker.retry.clone();
                         *worker = Worker {
@@ -798,6 +859,8 @@ impl<J: Journal> Host for PackHost<'_, J> {
                             history,
                             history_revision_start,
                             retired_read_calls,
+                            reduced_context_tokens,
+                            correction_active,
                             registry,
                             ..Default::default()
                         };
@@ -826,6 +889,11 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 match self.prepare(&id).await {
                     Ok(request) => return Ok(Some(request)),
                     Err(error) if error.code == "DISCOVER_READ_CAPACITY_EXCEEDED" => {
+                        if let Some(limit) = self.worker(&id)?.reduced_context_tokens
+                            && self.split_for_capacity(&id, limit).is_ok()
+                        {
+                            self.save().await?;
+                        }
                         local_capacity_failure = true;
                         continue;
                     }
@@ -1091,6 +1159,11 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 },
             });
         }
+        worker.correction_active = match &worker.pending {
+            Some(Pending::Failed { code, .. }) if code == "BUSINESS_REJECTED" => true,
+            Some(Pending::Committed { .. } | Pending::Failed { .. }) => false,
+            _ => worker.correction_active,
+        };
         self.state.turn = self
             .state
             .turn
@@ -1106,6 +1179,12 @@ impl<J: Journal> Host for PackHost<'_, J> {
         self.save().await
     }
     async fn failed(&mut self, request: &Request, error: &AgentError) -> Result<(), AgentError> {
+        if !matches!(&self.worker(&request.scope.pack)?.pending, Some(Pending::Sending { request: saved }) if saved == request)
+        {
+            return Err(invalid(
+                "failure does not match the reserved physical request",
+            ));
+        }
         if let Some(usage) = error.usage.as_deref() {
             self.state.journal.note_usage(&ChatTurn {
                 usage: Some(usage.clone()),
@@ -1131,6 +1210,37 @@ impl<J: Journal> Host for PackHost<'_, J> {
                 request: request.clone(),
                 code: error.code.clone(),
             });
+            worker.correction_active = false;
+        }
+        if error.code == "AGENT_PROVIDER_CONTEXT_EXCEEDED" {
+            let replans = self
+                .state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .ok_or_else(|| invalid("reading plan missing"))?
+                .context_replans;
+            if replans < 3 {
+                let current = self
+                    .worker(&request.scope.pack)?
+                    .reduced_context_tokens
+                    .unwrap_or(self.config.limits.max_context_tokens);
+                // Measured rejected size can be lower than the configured
+                // window. Always shrink below both, never resend the same wire.
+                let measured = request
+                    .input_reserve
+                    .saturating_add(request.output_reserve)
+                    .min(usize::MAX as u64) as usize;
+                let limit = current.min(measured).saturating_mul(3) / 4;
+                if self.split_for_capacity(&request.scope.pack, limit).is_ok() {
+                    self.state
+                        .outline_run
+                        .reading_packs
+                        .as_mut()
+                        .unwrap()
+                        .context_replans += 1;
+                }
+            }
         }
         self.save().await
     }
@@ -1157,55 +1267,9 @@ impl<J: Journal> Host for PackHost<'_, J> {
             .is_some_and(crate::outline::discover::DiscoverWork::complete)
     }
 }
-// Derive correction state only from host receipts in the current claim.
-// A successful optional read uses the ordinary window; its capacity rejection
-// leaves the unresolved proposal available for a direct corrected submit.
+// Only the host's committed business outcome can start pack correction.
 fn worker_correction_window(worker: &Worker) -> bool {
-    let mut unresolved = false;
-    let mut read_window = None;
-    let history = &worker.history[worker.history_revision_start.min(worker.history.len())..];
-    for (index, message) in history.iter().enumerate() {
-        if message["role"] != "assistant" {
-            continue;
-        }
-        let Some(calls) = message["tool_calls"]
-            .as_array()
-            .filter(|calls| calls.len() == 1)
-        else {
-            continue;
-        };
-        let call = &calls[0];
-        let Some(receipt) = history
-            .get(index + 1)
-            .filter(|r| r["role"] == "tool" && r["tool_call_id"] == call["id"])
-        else {
-            continue;
-        };
-        let Some(result) = receipt["content"]
-            .as_str()
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        else {
-            continue;
-        };
-        match call["function"]["name"].as_str() {
-            Some("submit_pack") => {
-                unresolved = result["ok"] == false;
-                read_window = None;
-            }
-            Some("read_evidence") => {
-                read_window = if result["ok"] == true {
-                    Some(
-                        result["result"]["status"] == "read_pending_delivery"
-                            && result["result"]["required_support"] == true,
-                    )
-                } else {
-                    None
-                };
-            }
-            _ => (),
-        }
-    }
-    unresolved && read_window.unwrap_or(true)
+    worker.correction_active
 }
 
 // Only complete single-submit failures appended by commit are replaceable.

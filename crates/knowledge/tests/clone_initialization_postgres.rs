@@ -383,14 +383,6 @@ async fn keep_copies_ocr_artifact_mapping_and_object_ownership() {
 
     let worker_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .after_connect(|connection, _| {
-            Box::pin(async move {
-                sqlx::query("SET ROLE kb_runtime_worker")
-                    .execute(connection)
-                    .await?;
-                Ok(())
-            })
-        })
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .unwrap();

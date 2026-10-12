@@ -974,6 +974,11 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
         );
         assert!(config.limits.max_context_tokens < full_total);
     }
+    if narrow_window {
+        // Keep the original projection/capacity regressions at their measured
+        // window; the functional lifecycle uses the production default of 2C.
+        config.limits.max_correction_context_tokens = Some(config.limits.max_context_tokens);
+    }
     state.config_sha256 = digest(&config).unwrap();
     let journal = S1Journal(std::sync::Mutex::new(state.clone()));
     let mut continuation_calls = 0;
@@ -1008,10 +1013,14 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
             break;
         };
         assert_eq!(request.scope.pack, target.id);
-        assert!(
-            request.input_reserve + request.output_reserve
-                <= config.limits.max_context_tokens as u64
-        );
+        let context_limit = if !narrow_window
+            && host.state.outline_run.discover_workers[&target.id].correction_active
+        {
+            config.limits.max_context_tokens * 2
+        } else {
+            config.limits.max_context_tokens
+        };
+        assert!(request.input_reserve + request.output_reserve <= context_limit as u64);
         let wire: Value = serde_json::from_slice(&request.body).unwrap();
         if !unique_observations {
             let observation = "Synthetic offline lifecycle response.";
@@ -1196,6 +1205,7 @@ async fn s1_worker_observation_lifecycle(unique_observations: bool, narrow_windo
                 matches!(&worker.pending,Some(Pending::Failed {code,..}) if code=="BUSINESS_REJECTED")
             );
         }
+        assert_eq!(worker.correction_active, !finished);
         let saved = journal.load().await.unwrap().unwrap();
         assert_eq!(json!(saved), json!(host.state));
         state = saved;

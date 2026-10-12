@@ -718,15 +718,10 @@ def run_probe(args):
         pg_port = docker("port", pg, "5432/tcp").rsplit(":", 1)[1]
         redis_port = docker("port", redis, "6379/tcp").rsplit(":", 1)[1]
         ds_origin = "http://127.0.0.1:" + docker("port", ds, "80/tcp").rsplit(":", 1)[1]
-        sql('''CREATE ROLE kb_app_owner NOLOGIN;
-CREATE ROLE kb_migrator LOGIN NOINHERIT;
-CREATE ROLE kb_runtime_api LOGIN INHERIT;
-CREATE ROLE kb_runtime_worker LOGIN INHERIT;
-CREATE ROLE kb_runtime_retention LOGIN INHERIT;
-GRANT kb_app_owner TO kb_migrator;
+        sql('''CREATE ROLE kb_application LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
 CREATE EXTENSION pgcrypto;
 CREATE EXTENSION vector;
-ALTER SCHEMA public OWNER TO kb_app_owner;
+ALTER SCHEMA public OWNER TO kb_application;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 ''' + f'REVOKE TEMPORARY,CREATE ON DATABASE "{database}" FROM PUBLIC;')
 
@@ -747,9 +742,9 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
                 del env[name]
         cargo = Path(args.cargo).resolve()
         env.update(RUSTC=str(cargo.with_name("rustc")), RUSTDOC=str(cargo.with_name("rustdoc")),
-            DATABASE_URL=f"postgresql://kb_runtime_api@127.0.0.1:{pg_port}/{database}",
-            KNOWLEDGEBRAIN_TEST_DATABASE_URL=f"postgresql://postgres@127.0.0.1:{pg_port}/{database}",
-            REDIS_URL=f"redis://127.0.0.1:{redis_port}", KB_DEPLOYMENT_NAMESPACE_ID=str(uuid.uuid4()),
+            DATABASE_URL=f"postgresql://kb_application@127.0.0.1:{pg_port}/{database}",
+            KNOWLEDGEBRAIN_TEST_DATABASE_URL=f"postgresql://kb_application@127.0.0.1:{pg_port}/{database}",
+            REDIS_URL=f"redis://127.0.0.1:{redis_port}",
             OBJECT_DIR=str(root / "objects"), KB_DOCX_NATIVE_BIND=bind, KB_DOCX_NATIVE_RUN_DIR=str(root),
             KB_DOCX_NATIVE_PYTHON=sys.executable, KB_DOCX_NATIVE_DRIVER=str(Path(__file__).resolve()),
             KB_ONLYOFFICE_SERVER_ORIGIN=ds_origin, KB_ONLYOFFICE_API_ORIGIN="http://" + bind,
@@ -766,7 +761,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
             if not target.is_absolute():
                 target = repo / target
             env["KB_DOCX_NATIVE_WORKER_BIN"] = str((target / "debug/worker").resolve())
-            env["KB_DOCX_NATIVE_WORKER_URL"] = f"postgresql://kb_runtime_worker@127.0.0.1:{pg_port}/{database}"
+            env["KB_DOCX_NATIVE_WORKER_URL"] = f"postgresql://kb_application@127.0.0.1:{pg_port}/{database}"
         with (root / "native-test.log").open("w") as log:
             # New process group lets timeout cleanup also stop the browser driver.
             process = subprocess.Popen([str(cargo), "test", "--locked", "--offline", "-p", "api",

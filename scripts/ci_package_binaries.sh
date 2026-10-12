@@ -10,12 +10,11 @@ cd "$root"
 : "${CI_WORKER_BIN:?}"
 : "${CI_TENDER_PREPARE_BIN:?}"
 : "${CI_MIGRATOR_BIN:?}"
-: "${CI_SCHEMA_VERIFIER_BIN:?}"
 : "${CI_CONTENT_POSTGRES_TESTS:?}"
 : "${CI_TENDER_TEST:?}"
 : "${CI_KNOWLEDGE_WORKFLOW_TESTS:?}"
-: "${CI_CATALOG_TEST:?}"
 : "${CI_OXANA_TEST:?}"
+: "${CI_FRESH_TEST:?}"
 : "${CI_FROZEN_TEST_BIN:?}"
 : "${CI_DOCREADER_TEST_BIN:?}"
 out=$root/$CI_BIN_DIR
@@ -36,7 +35,6 @@ copy_bin "$CI_API_BIN"
 copy_bin "$CI_WORKER_BIN"
 copy_bin "$CI_TENDER_PREPARE_BIN"
 copy_bin "$CI_MIGRATOR_BIN"
-copy_bin "$CI_SCHEMA_VERIFIER_BIN"
 
 copy_tests() {
   local package=$1
@@ -86,7 +84,7 @@ read -r -a content_tests <<< "$CI_CONTENT_POSTGRES_TESTS"
 copy_tests bidding default "${content_tests[@]}" "$CI_TENDER_TEST"
 read -r -a knowledge_tests <<< "$CI_KNOWLEDGE_WORKFLOW_TESTS"
 copy_tests knowledge default "${knowledge_tests[@]}"
-copy_tests platform default "$CI_CATALOG_TEST" "$CI_OXANA_TEST"
+copy_tests platform default "$CI_OXANA_TEST" "$CI_FRESH_TEST"
 copy_tests bidding features "$CI_FROZEN_TEST_BIN" "$CI_DOCREADER_TEST_BIN"
 
 {
