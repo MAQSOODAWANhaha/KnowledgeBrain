@@ -150,3 +150,7 @@ Rust run/outbox/API/鉴权/事务围栏、流量切换、旧实现移除、部�
 
 本机构建依然只用临时Dockerfile的BuildKit CA secret mount解决受控代理信任，不关闭TLS，
 证书不持久保存；提交Dockerfile的默认生产入口不变。本核验不代表已部署或已切流。
+
+运行代码51d7ec3的[GitHub Python专项CI](https://github.com/MAQSOODAWANhaha/KnowledgeBrain/actions/runs/38512688636)已通过：
+**454 passed in 83.88s**，wheel成功。专项CI只跑unit/workflow/acceptance，与本地全套684项口径不同。
+后续仅文档/证据提交的远端状态请实时核对，不将本地通过视为该head全部CI完成。
