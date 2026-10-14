@@ -36,8 +36,8 @@
 | `requirement_id` | string，当前要求清单内义务身份 | 验证决议、计划项引用同一身份；内容修正产生新domain_revision |
 | `evidence` | Evidence[]，range_id+原文quote | 不更名为另一种引用；quote必须能在规范范围重放 |
 | `requirement_ref` | artifact_ref+requirement_id | 响应项引用已有不可变要求，完整约束只在内存校验 |
-| `requirements_ref`（后阶段包内） | ArtifactRef，原抽取包的不可变要求/处置产物 | 与阶段根的要求索引引用按所在schema区分；不复制要求正文 |
-| `requirement_ids`, `disposition_range_ids` | string[]，后阶段包在requirements_ref中的选择 | 分别选择完整要求和完整逐范围处置；验证汇总核对完整覆盖 |
+| `requirement_refs` | RequirementRef[]，artifact_ref+requirement_id | 后阶段从一个或多个原抽取产物选择完整要求；与响应项requirement_ref同一schema |
+| `disposition_refs` | DispositionRef[]，artifact_ref+range_id | 后阶段完整逐范围处置引用；汇总核对完整覆盖，不复制处置正文 |
 | `conditions`, `exceptions` | string[]，要求的适用条件/例外语义 | 与来源范围关系scope_binding不同，不机械合并 |
 | `scope_binding` | 来源条件到具体range_id集合的关系 | 明确bound/unresolved；祖先正文不自动成为条件 |
 | `scope_bindings` | `ScopeBindingRef[]`，每包完整条件的来源范围、字符区间及`scope_binding` | 无text；条件已在body中时仍传递明确目标，正文与supporting区间并集只发送一次 |
@@ -77,3 +77,6 @@ PackPlan为当前领域修订的总计划（引用多个PackDescriptor）；Pack
 ResponsePackDescriptor，仅保存完整义务选择及预算。对应verify/plan结果中的pack_plan_ref
 指向后阶段计划，图原pack_plan_ref仍指extract计划，不扩大checkpoint字段数。
 具体未完成验收项见[当前交接](handoff.md)。
+
+继续实施时去掉WIP子包的requirements_ref/requirement_ids/disposition_range_ids组合，统一上表
+引用schema；requirements_ref固定指阶段根的完整要求索引。内部合同未发布，不增加旧格式迁移。
