@@ -37,6 +37,11 @@ epoch 围栏保护所有产物提交。checkpointer 写入需受同一个 run �
 先原子落盘后登记（允许无引用孤儿文件，不允许回执引用不存在文件）。提交成功 checkpoint
 失败时节点恢复原回执。确认摘要覆盖冻结来源版本、要求版本与验证结果；计划附带该摘要。
 
+实现选择：官方 AsyncPostgresSaver 的 cursor 边界使用同一 PostgreSQL 连接的短事务，
+先 SELECT run FOR UPDATE 校验 fence，再执行 checkpoint SQL 并提交。持锁覆盖校验与写入，
+没有先检查后写入的时间窗口；heartbeat/取消仅等这次短事务，不等模型请求。setup 使用
+无执行租约的官方 saver，仅在显式 init 运行。该适配器随锁定版本作集成测试。
+
 ## 未来生产接入（本次未实现）
 
 Rust 最终拥有业务 API、鉴权、业务版本、人工确认、提交事务；Python 拥有解析、OCR/VLM、

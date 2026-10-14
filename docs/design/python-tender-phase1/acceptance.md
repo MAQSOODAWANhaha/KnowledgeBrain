@@ -1,6 +1,22 @@
 # 验收标准与证据分层
 
-状态：尚未执行本 PR 验收。结果必须写命令、环境、提交、实际输出，不将计划写成结果。
+状态：基础设施骨架已验证，领域实现进行中。结果必须写命令、环境、提交、实际输出，不将计划写成结果。
+
+## 已执行：骨架（2026-10-14）
+
+Python 3.11.16，PostgreSQL `127.0.0.1:15432` 隔离数据库 `tender_phase1_test`，
+Redis `127.0.0.1:16379/1`；不使用原业务表。
+
+- `.venv311/bin/python -m pytest tests/acceptance/test_skeleton.py -q -x`：**4 passed in 5.89s**。
+  使用真实 Dramatiq 子进程和 Redis：SIGKILL 后重新投递恢复同 thread；人工暂停后强杀并重启确认；
+  并发重复命令、取消心跳、Redis 投递失败、业务回执已提交而图无 checkpoint 时重放。
+- `.venv311/bin/python -m pytest tests/unit/test_artifacts.py tests/workflow/test_store.py -q`：
+  **12 passed in 1.11s**（持久模块测试使用同真实 PG 上的独立临时 schema）。
+  含 claim token、发布回执与执行回执区分、租约围栏、摘要确认/改版、uncertain 与基础设施失败上限。
+
+这些测试的 SkeletonNodes 仅证明执行可靠性，不含招标语义，不能计为阶段 1–6 领域完成。
+依赖锁定：LangGraph 1.2.15、Postgres checkpointer 3.1.3、Dramatiq 1.18.0、
+psycopg 3.3.6、OpenAI 2.54.0、httpx 0.28.1。
 
 ## A. 真实基础设施骨架（先于领域实现）
 
