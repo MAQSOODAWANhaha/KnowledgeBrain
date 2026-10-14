@@ -382,3 +382,72 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
     await store.confirm(run["run_id"], 1, reviewed["checklist_digest"], "scope-confirm-r2", domain_revision=2)
     ready = await execute(store, settings, run)
     assert ready["status"] == "response-plan-ready"
+
+
+async def test_complete_verify_and_response_inputs_repartition_in_actual_workflow(runtime):
+    from collections import Counter
+    from docreader.llm import RequestBudget
+    from docreader.tender.checks.verify import verify_payload
+    from docreader.tender.evidence import EvidenceRepository
+
+    store, artifacts, settings, _ = runtime
+    path = settings.artifact_root.parent / "complete-input.docx"
+    document = Document()
+    document.add_heading("Supplier obligations", level=1)
+    for suffix in "abcdefgh":
+        document.add_heading("Delivery package " + suffix, level=1)
+        document.add_paragraph("The supplier must provide a signed delivery commitment for package " + suffix + ".")
+    document.save(path)
+    registered = register_manifest({"documents": [{"document_id": "budget-fixture", "document_version": "one",
+                                                  "role": "main", "path": str(path)}]}, artifacts)
+    run = await store.submit(artifacts.put_json(registered), "complete-input-budget")
+    calls = []
+
+    class CompleteInputModel(FixtureModel):
+        def request_budget(self):
+            return RequestBudget(context_tokens=32768)
+
+        async def call(self, task, payload, images=()):
+            self.request_budget().require(task, payload, images)
+            calls.append((task, payload))
+            result = await super().call(task, payload, images)
+            if task == "extract":
+                for requirement in result["requirements"]:
+                    requirement["applicability_basis"] = "The unconditional supplier instruction applies to this response. " * 60
+                for disposition in result["dispositions"]:
+                    disposition["reason"] += " The complete cited source supports this disposition." * 12
+            return result
+
+    async def execute_current():
+        command = (await store.get_run(run["run_id"]))["commands"][-1]
+        await execute_command(run["run_id"], command["command_id"], 1, settings,
+                              lambda s, a, lease: TenderNodes(s, a, lease, CompleteInputModel(s, lease)))
+        return await store.get_run(run["run_id"])
+
+    row = await execute_current()
+    checked = output(artifacts, row, "verify")
+    assert row["status"] == "waiting-confirmation", checked["issues"]
+    original = output(artifacts, row, "pack-plan")
+    assert len(original["packs"]) == 1
+    extracted_index = output(artifacts, row, "extract")
+    extraction = artifacts.read_json(extracted_index["packs"][0]["artifact_ref"])
+    source_pack = EvidenceRepository(artifacts).load_pack(original["packs"][0])
+    assert RequestBudget(32768).measure("verify", verify_payload(source_pack, extraction))["fits"] is False
+    replanned = artifacts.read_json(checked["pack_plan_ref"])
+    assert replanned["task"] == "verify" and len(replanned["packs"]) > 1
+    verification_calls = [payload for task, payload in calls if task == "verify"]
+    assert Counter(d["range_id"] for payload in verification_calls for d in payload["dispositions"]) == Counter(
+        d["range_id"] for d in extraction["dispositions"])
+    assert Counter(r["requirement_id"] for payload in verification_calls for r in payload["requirements"]) == Counter(
+        r["requirement_id"] for r in extraction["requirements"])
+    assert all(RequestBudget(32768).fits("verify", payload) for payload in verification_calls)
+    await store.confirm(run["run_id"], 1, row["checklist_digest"], "budget-confirm")
+    ready = await execute_current()
+    assert ready["status"] == "response-plan-ready", output(artifacts, ready, "plan")
+    plan = output(artifacts, ready, "plan")
+    assert len(plan["packs"]) > 1
+    assert len(plan_items(artifacts, plan)) == len(extraction["requirements"]) == 8
+    assert artifacts.read_json(plan["pack_plan_ref"])["task"] == "plan"
+    before = len(calls)
+    await execute_current()
+    assert len(calls) == before

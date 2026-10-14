@@ -5,7 +5,7 @@ import json
 import pytest
 
 from docreader.llm.budget import RequestBudget
-from docreader.llm.request import ImageInput, ModelSemanticError, build_request
+from docreader.llm.request import ImageInput, ModelBudgetError, ModelConfigurationError, ModelSemanticError, build_request
 
 
 PROMPTS = {"extract": 'Return JSON matching schema {"requirements":[],"dispositions":[]}.',
@@ -47,7 +47,7 @@ def test_complete_required_support_is_never_truncated_to_make_a_package_fit():
     measured = b.measure("extract", payload)
     assert measured["fits"] is False and measured["support_tokens"] > 18000
     assert b.fits("extract", payload) is False
-    with pytest.raises(ModelSemanticError, match="context"):
+    with pytest.raises(ModelBudgetError, match="context"):
         b.require("extract", payload)
     assert b.measure("extract", {"body": payload["body"], "supporting": []})["fits"] is True
 
@@ -97,6 +97,24 @@ def test_actual_verify_and_plan_payloads_are_rechecked():
     assert b.fits("extract", payload)
     assert not b.fits("verify", {**payload, "requirements": [{"quote": "x" * 18000}]})
     assert not b.fits("plan", {"requirements": [{"details": "x" * 18000}]})
+
+
+def test_input_allowances_do_not_expand_the_provider_total_context():
+    payload = {"text": "x" * 140000}
+    ordinary = budget(300000)
+    correction = budget(300000, correction=True)
+    assert ordinary.measure("verify", payload)["fits"] is False
+    measured = correction.require("verify", payload)
+    assert measured["input_budget_tokens"] == 131072
+    assert measured["correction_input_budget_tokens"] == 262144
+    assert measured["effective_input_budget_tokens"] == 262144
+    assert budget(131072, correction=True).measure("verify", payload)["fits"] is False
+    assert budget(131072).effective_input_budget_tokens == 110592
+    assert not issubclass(ModelBudgetError, ModelSemanticError)
+    request = correction.request("verify", payload)
+    assert "max_tokens" not in request and "max_completion_tokens" not in request
+    with pytest.raises(ModelConfigurationError, match="total context"):
+        budget(None, correction=True)
 
 
 def test_default_domain_prompts_are_actual_schema_text_and_snapshot_is_immutable(monkeypatch):

@@ -201,7 +201,8 @@ class TenderNodes:
                     pack = await asyncio.to_thread(self.repo.load_pack, item["artifact_ref"])
                     return await function(pack)
 
-                ref = await self._save(stage, produce, scope=item["pack_id"],
+                scope = (f"{index['plan_digest']}:{item['pack_id']}" if index.get("task") == "verify" else item["pack_id"])
+                ref = await self._save(stage, produce, scope=scope,
                                        inputs={"source": item["artifact_ref"], "upstream": (upstream or {}).get(item["pack_id"])},
                                        model=True)
                 return {"pack_id": item["pack_id"], "artifact_ref": ref}
@@ -227,20 +228,33 @@ class TenderNodes:
 
     async def verify(self, state):
         async def produce():
+            from docreader.tender.evidence.downstream import plan_downstream, select_extraction
+
             index = await self._read(state["pack_plan_ref"])
             extraction_index = await self._read(state["requirements_ref"])
             # Index once, not one full source scan per request.
             extractions = {
                 item["pack_id"]: await self._read(item["artifact_ref"]) for item in extraction_index["packs"]
             }
+            by_ref = {item["artifact_ref"]["sha256"]: extractions[item["pack_id"]] for item in extraction_index["packs"]}
+            async def replan():
+                return await asyncio.to_thread(plan_downstream, index, state["requirements_ref"],
+                                               self.artifacts, self._request_budget(), task="verify")
+            plan_ref = await self._save("verify-plan", replan, is_ref=True, inputs={
+                "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": state["requirements_ref"],
+                "request_budget": self._request_budget().spec(),
+            })
+            verification_index = await self._read(plan_ref)
             async def check(pack):
-                return await verify_pack(pack, extractions[pack["pack_id"]], self)
+                extraction = by_ref[pack["requirements_ref"]["sha256"]]
+                return await verify_pack(pack, select_extraction(pack, extraction), self)
 
-            results = await self._packs(index, "verify-pack", check,
-                                        {item["pack_id"]: item["artifact_ref"] for item in extraction_index["packs"]})
+            results = await self._packs(verification_index, "verify-pack", check)
             verifications = [await self._read(item["artifact_ref"]) for item in results]
-            summary = verify_all(index, list(extractions.values()), verifications)
+            verification_packs = [await self._read(item["artifact_ref"]) for item in verification_index["packs"]]
+            summary = verify_all(index, list(extractions.values()), verifications, verification_packs=verification_packs)
             summary["pack_results"] = results
+            summary["pack_plan_ref"] = plan_ref
             summary["requirements_ref"] = state["requirements_ref"]
             return summary
 
@@ -276,39 +290,63 @@ class TenderNodes:
     async def plan(self, state):
         async def produce():
             from docreader.tender.checks import apply_applicability_decisions
+            from docreader.tender.evidence.downstream import plan_downstream
+            from docreader.tender.schema import issue
 
             checked = await self._read(state["verification_ref"])
+            index = await self._read(state["pack_plan_ref"])
+            async def replan():
+                return await asyncio.to_thread(plan_downstream, index, checked["requirements_ref"], self.artifacts,
+                                               self._request_budget(), task="plan", verification_ref=state["verification_ref"])
+            plan_ref = await self._save("response-pack-plan", replan, is_ref=True, inputs={
+                "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": checked["requirements_ref"],
+                "verification_ref": state["verification_ref"], "request_budget": self._request_budget().spec(),
+            })
+            response_index = await self._read(plan_ref)
             extraction_index = await self._read(checked["requirements_ref"])
+            extractions = {entry["artifact_ref"]["sha256"]: await self._read(entry["artifact_ref"])
+                           for entry in extraction_index["packs"]}
 
             async def group(entry):
                 async with self.semaphore:
-                    extraction = await self._read(entry["artifact_ref"])
+                    descriptor = await self._read(entry["artifact_ref"])
+                    extraction = extractions[descriptor["requirements_ref"]["sha256"]]
+                    selected = set(descriptor["requirement_ids"])
                     requirements = [item for item in apply_applicability_decisions(
                         extraction["requirements"], checked["applicability_decisions"],
-                    ) if item["applicable"]]
-                    if not requirements:
-                        return None
+                    ) if item["applicable"] and item["requirement_id"] in selected]
                     references = {item["requirement_id"]: {
-                        "artifact_ref": entry["artifact_ref"], "requirement_id": item["requirement_id"],
+                        "artifact_ref": descriptor["requirements_ref"], "requirement_id": item["requirement_id"],
                     } for item in requirements}
                     async def build():
+                        if descriptor["planning_details"]["budget"]["fits"] is not True:
+                            return {"items": [], "issues": descriptor["issues"], "blocking": True}
                         return await build_plan(requirements, self, requirement_refs=references)
-                    ref = await self._save("plan-pack", build, scope=entry["pack_id"],
-                                           inputs={"requirements_ref": entry["artifact_ref"],
+                    ref = await self._save("plan-pack", build, scope=f"{response_index['plan_digest']}:{entry['pack_id']}",
+                                           inputs={"pack_plan_ref": entry["artifact_ref"],
                                                    "verification_ref": state["verification_ref"],
                                                    "checklist_digest": state["checklist_digest"]},
                                            model=True)
                     return {"pack_id": entry["pack_id"], "artifact_ref": ref, "result": await self._read(ref)}
 
-            results = await asyncio.gather(*(group(entry) for entry in extraction_index["packs"]), return_exceptions=True)
+            results = await asyncio.gather(*(group(entry) for entry in response_index["packs"]), return_exceptions=True)
             _raise_failures(results)
             results = [result for result in results if result is not None]
+            from collections import Counter
+            expected = Counter(item["requirement_id"] for extraction in extractions.values()
+                               for item in apply_applicability_decisions(extraction["requirements"], checked["applicability_decisions"])
+                               if item["applicable"])
+            actual = Counter(item["requirement_id"] for result in results for item in result["result"]["items"])
+            issues = list(response_index["issues"])
+            if expected != actual:
+                issues.append(issue("response_plan_coverage_mismatch", "Response items must cover the current applicable requirements exactly once."))
             return {"packs": [{"pack_id": result["pack_id"], "artifact_ref": result["artifact_ref"]} for result in results],
-                    "blocking": any(result["result"]["blocking"] for result in results),
+                    "pack_plan_ref": plan_ref, "issues": issues,
+                    "blocking": bool(issues) or any(result["result"]["blocking"] for result in results),
                     "checklist_digest": state["checklist_digest"],
                     "counts": {"packs": len(results),
                                "items": sum(len(result["result"]["items"]) for result in results),
-                               "issues": sum(len(result["result"]["issues"]) for result in results)}}
+                               "issues": len(issues) + sum(len(result["result"]["issues"]) for result in results)}}
 
         ref = await self._save("plan", produce, inputs={"verification_ref": state["verification_ref"],
                                                               "checklist_digest": state["checklist_digest"]}, model=True)

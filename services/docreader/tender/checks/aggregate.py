@@ -153,7 +153,7 @@ def _conflicts(requirements: list[dict], sources: dict) -> list[dict]:
 
 
 def verify_all(index: dict, extractions: list[dict], verifications: list[dict],
-               requirements_ref: dict | None = None) -> dict:
+               requirements_ref: dict | None = None, *, verification_packs: list[dict] | None = None) -> dict:
     issues = copy.deepcopy(index.get("issues", []))
     requirements = []
     sources = {}
@@ -178,8 +178,18 @@ def verify_all(index: dict, extractions: list[dict], verifications: list[dict],
     frozen_pack_ids = [entry["pack_id"] for entry in index["packs"]]
     if Counter(extraction_ids) != Counter(frozen_pack_ids):
         issues.append(issue("extraction_pack_count_mismatch", "Not every frozen pack has an extraction result."))
-    if Counter(extraction_ids) != Counter(verification_ids):
-        issues.append(issue("verification_pack_mismatch", "Every extraction needs exactly one independent verification."))
+    expected_verifications = (extraction_ids if verification_packs is None
+                              else [pack["pack_id"] for pack in verification_packs])
+    if Counter(expected_verifications) != Counter(verification_ids):
+        issues.append(issue("verification_pack_mismatch", "Every verification plan pack needs exactly one independent result."))
+    if verification_packs is not None:
+        for pack in verification_packs:
+            issues.extend(copy.deepcopy(pack["issues"]))
+        if (Counter(item["range_id"] for pack in verification_packs for item in pack["body"]) != Counter(body_ids)
+                or Counter(range_id for pack in verification_packs for range_id in pack["disposition_range_ids"]) != Counter(body_ids)):
+            issues.append(issue("verification_coverage_mismatch", "Verification selectors must audit every original source disposition exactly once."))
+        if Counter(r for pack in verification_packs for r in pack["requirement_ids"]) != Counter(r["requirement_id"] for r in requirements):
+            issues.append(issue("verification_requirement_mismatch", "Verification selectors must preserve every complete original requirement exactly once."))
     if any(count != 1 for count in Counter(extraction_ids).values()):
         issues.append(issue("duplicate_extraction_pack", "A frozen pack was counted more than once."))
     if len(body_ids) != index["range_count"] or len(set(body_ids)) != len(body_ids):

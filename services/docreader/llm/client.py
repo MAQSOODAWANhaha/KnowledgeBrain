@@ -70,10 +70,10 @@ class OpenAIModel:
             "concurrency": self._concurrency,
         }
 
-    def request_budget(self, *, images: bool = False) -> RequestBudget:
+    def request_budget(self, *, images: bool = False, correction: bool = False) -> RequestBudget:
         endpoint = self.config.for_images() if images else self.config.chat
         return RequestBudget(context_tokens=endpoint.context_tokens, model=endpoint.model,
-                             prompts=self._prompt_snapshot())
+                             prompts=self._prompt_snapshot(), correction=correction)
 
     def _client(self, endpoint: ModelEndpoint) -> AsyncOpenAI:
         if endpoint not in self._clients:
@@ -96,9 +96,9 @@ class OpenAIModel:
     async def __aexit__(self, *args):
         await self.close()
 
-    async def call(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
+    async def call(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = (), *, correction: bool = False) -> dict:
         endpoint = self.config.for_images() if images else self.config.chat
-        budget = self.request_budget(images=bool(images))
+        budget = self.request_budget(images=bool(images), correction=correction)
         request = budget.request(task, payload, images)
         context = budget.require_request(request)
         digest = request_digest(endpoint.base_url, request)

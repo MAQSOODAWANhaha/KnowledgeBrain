@@ -72,7 +72,8 @@ class StructuralPlanner:
         self.probe_count += 1
         pack["planning_details"]["budget"] = measurement
         if measurement.get("input_tokens", 0) > 0 and measurement.get("context_tokens"):
-            available = max(1, measurement["context_tokens"] - measurement.get("output_reserve", 0) - measurement.get("safety", 0))
+            available = max(1, measurement.get("effective_input_budget_tokens",
+                            measurement["context_tokens"] - measurement.get("output_reserve", 0) - measurement.get("safety", 0)))
             self.capacity_hint = max(1, sum(self.weight(entry) for entry in body) * available // measurement["input_tokens"])
         return pack
 

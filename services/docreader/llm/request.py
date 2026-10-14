@@ -16,6 +16,10 @@ class ModelSemanticError(ValueError):
     """A domain node must expose this result or perform its bounded repair."""
 
 
+class ModelBudgetError(ValueError):
+    """An unsent request exceeds admission limits; it is not a model response."""
+
+
 class ModelInfrastructureError(ConnectionError):
     """The single queue retry policy may retry this failure."""
 

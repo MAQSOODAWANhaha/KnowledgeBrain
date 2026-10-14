@@ -31,6 +31,13 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class RequestLimits(Contract):
+    context_tokens: PositiveInt | None
+    input_budget_tokens: PositiveInt = 131072
+    correction_input_budget_tokens: PositiveInt = 262144
+    correction: StrictBool = False
+
+
 class ArtifactRef(Contract):
     sha256: Digest
     relative_path: StrictStr = Field(pattern=r"^[0-9a-f]{2}/[0-9a-f]{64}$")
@@ -388,6 +395,22 @@ class PackDescriptor(DocumentIdentity):
     issues: list[dict[str, Any]]
     compacted_blank_ranges: list[Identity]
     planning_details: PlanningDetails
+    requirements_ref: ArtifactRef | None = None
+    requirement_ids: list[Identity] = Field(default_factory=list)
+    disposition_range_ids: list[Identity] = Field(default_factory=list)
+
+
+class ResponsePackDescriptor(DocumentIdentity):
+    schema_version: PositiveInt
+    pack_id: Identity
+    task: Literal["plan"]
+    input_digest: Digest
+    budget_digest: Digest
+    plan_digest: Digest
+    requirements_ref: ArtifactRef
+    requirement_ids: list[Identity]
+    planning_details: PlanningDetails
+    issues: list[dict[str, Any]]
 
 
 class PackRef(Contract):
@@ -447,6 +470,8 @@ class PackPlan(Contract):
     scope_decisions: list[ScopeDecision]
     stats: PlanningStats
     run_identity: RunIdentity | None = None
+    requirements_ref: ArtifactRef | None = None
+    verification_ref: ArtifactRef | None = None
 
 
 def issue(code: str, detail: str, range_id: str | None = None, **context) -> dict:

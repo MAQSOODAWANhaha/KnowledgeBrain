@@ -5,7 +5,7 @@ from copy import deepcopy
 
 from pydantic import ValidationError
 
-from docreader.llm import ModelSemanticError
+from docreader.llm import ModelBudgetError, ModelSemanticError
 from docreader.tender.evidence.view import host_reviewed_ranges, source_view
 from docreader.tender.schema import Extraction, Model, enforce_issue_policy, issue, source_ranges
 
@@ -87,6 +87,10 @@ async def extract_pack(pack: dict, model: Model) -> dict:
         else:
             response = Extraction.model_validate(await model.call("extract", extract_payload(pack)))
         result = response.model_dump(exclude_none=True)
+    except ModelBudgetError:
+        result = {"requirements": [], "dispositions": [], "issues": [
+            issue("extraction_budget_exceeded", "Complete extraction input exceeds admission limits.")
+        ]}
     except (ModelSemanticError, ValidationError) as exc:
         # Do not expose a raw model response (or SDK error text) in diagnostics.
         result = {"requirements": [], "dispositions": [], "issues": [

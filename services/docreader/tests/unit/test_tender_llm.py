@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from docreader.llm import (
-    ImageInput, ModelConfig, ModelConfigurationError, ModelInfrastructureError,
+    ImageInput, ModelBudgetError, ModelConfig, ModelConfigurationError, ModelInfrastructureError,
     ModelSemanticError, OpenAIModel, UncertainModelResponse,
 )
 from docreader.llm.budget import RequestBudget
@@ -104,7 +104,7 @@ def test_context_and_total_usage_are_independent_and_images_do_not_count_base64(
     estimate = budget.require("extract", {"source": "中文"}, images=[ImageInput(b"fixture", "image/png")])
     assert estimate["image_tokens"] == 16384
     assert estimate["input_tokens"] == estimate["text_tokens"] + estimate["framing_tokens"] + estimate["image_tokens"]
-    with pytest.raises(ModelSemanticError, match="split"):
+    with pytest.raises(ModelBudgetError, match="context"):
         budget.require("extract", {"source": "x" * 65536})
     ledger = UsageLedger()
     ledger.record("succeeded", {"prompt_tokens": 100000, "completion_tokens": 1000, "total_tokens": 101000})
@@ -496,7 +496,7 @@ async def test_complete_request_budget_failure_prevents_audit_and_network():
     calls = []
     client, audit = model(lambda request: calls.append(request))
     async with client:
-        with pytest.raises(ModelSemanticError, match="context"):
+        with pytest.raises(ModelBudgetError, match="context"):
             await client.call("extract", {"body": [{"text": "tiny"}],
                                           "supporting": [{"text": "required" * 3000}]})
     assert calls == [] and audit.events == []

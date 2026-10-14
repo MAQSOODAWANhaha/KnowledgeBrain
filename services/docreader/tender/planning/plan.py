@@ -4,7 +4,7 @@ import re
 
 from pydantic import ValidationError
 
-from docreader.llm import ModelSemanticError
+from docreader.llm import ModelBudgetError, ModelSemanticError
 from docreader.tender.planning.constraints import check_plan_constraints, constraint_binding
 from docreader.tender.schema import Model, Plan, issue
 
@@ -40,6 +40,13 @@ def _item_issues(item: dict, requirement: dict, binding: dict) -> list[dict]:
     return issues
 
 
+def plan_payload(requirements: list[dict]) -> dict:
+    applicable = [requirement for requirement in requirements if requirement["applicable"]]
+    return {"requirements": applicable, "constraint_bindings": {
+        requirement["requirement_id"]: {"constraint_digest": constraint_binding(requirement)["constraint_digest"]}
+        for requirement in applicable}}
+
+
 async def build_plan(requirements: list[dict], model: Model, requirement_refs: dict | None = None) -> dict:
     applicable = {requirement["requirement_id"]: requirement for requirement in requirements if requirement["applicable"]}
     issues = []
@@ -49,10 +56,9 @@ async def build_plan(requirements: list[dict], model: Model, requirement_refs: d
         return {"items": [], "issues": issues, "blocking": bool(issues)}
     bindings = {requirement_id: constraint_binding(requirement) for requirement_id, requirement in applicable.items()}
     try:
-        plan = Plan.model_validate(await model.call("plan", {
-            "requirements": list(applicable.values()),
-            "constraint_bindings": {key: {"constraint_digest": binding["constraint_digest"]} for key, binding in bindings.items()},
-        })).model_dump()
+        plan = Plan.model_validate(await model.call("plan", plan_payload(list(applicable.values())))).model_dump()
+    except ModelBudgetError:
+        return {"items": [], "issues": [*issues, issue("plan_budget_exceeded", "Complete indivisible response-plan input exceeds admission limits.")], "blocking": True}
     except (ModelSemanticError, ValidationError) as exc:
         return {"items": [], "issues": [*issues, issue("plan_semantic_failure", f"Plan contract rejected ({type(exc).__name__}).")], "blocking": True}
     seen = set()

@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import ValidationError
 
-from docreader.llm import ModelSemanticError
+from docreader.llm import ModelBudgetError, ModelSemanticError
 from docreader.tender.evidence.view import host_reviewed_ranges, source_view
 from docreader.tender.schema import Model, Verification, enforce_issue_policy, issue
 
@@ -103,6 +103,12 @@ def check_requirement(requirement: dict, sources: dict, body_ids: set[str]) -> l
     return findings
 
 
+def verify_payload(pack: dict, extraction: dict) -> dict:
+    host_reviewed = host_reviewed_ranges(pack)
+    return {**source_view(pack), "requirements": extraction["requirements"],
+            "dispositions": [item for item in extraction["dispositions"] if item["range_id"] not in host_reviewed]}
+
+
 async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
     sources = {source["range_id"]: source for source in [*pack["supporting"], *pack["body"]]}
     body_ids = {source["range_id"] for source in pack["body"]}
@@ -114,9 +120,9 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
     for requirement in extraction["requirements"]:
         findings.extend(check_requirement(requirement, sources, body_ids))
     try:
-        payload = {**source_view(pack), "requirements": extraction["requirements"],
-                   "dispositions": [item for item in extraction["dispositions"]
-                                    if item["range_id"] not in host_reviewed]}
+        payload = verify_payload(pack, extraction)
+        if pack.get("planning_details", {}).get("budget", {}).get("fits") is False:
+            raise ModelBudgetError("indivisible verification input exceeds budget")
         if model_source_ids:
             response = await model.call("verify", payload)
         else:
@@ -124,6 +130,9 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
         review = Verification.model_validate(response).model_dump(exclude_none=True)
         findings.extend(enforce_issue_policy(finding) for finding in review["findings"])
         reviewed = review["reviewed_range_ids"]
+    except ModelBudgetError:
+        reviewed = []
+        findings.append(issue("verification_budget_exceeded", "Complete indivisible verification input exceeds admission limits; no semantic result was produced."))
     except (ModelSemanticError, ValidationError) as exc:
         reviewed = []
         findings.append(issue("verification_semantic_failure", f"Independent review contract rejected ({type(exc).__name__})."))

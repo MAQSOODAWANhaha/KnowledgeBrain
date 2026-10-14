@@ -5,8 +5,8 @@ import json
 from types import MappingProxyType
 from typing import Mapping, Sequence, get_args
 
-from docreader.llm.request import ImageInput, ModelConfigurationError, ModelSemanticError, build_request
-from docreader.tender.schema import Task
+from docreader.llm.request import ImageInput, ModelBudgetError, ModelConfigurationError, build_request
+from docreader.tender.schema import RequestLimits, Task
 
 
 class RequestBudget:
@@ -26,16 +26,26 @@ class RequestBudget:
     FRAMING_TOKENS = 32  # 16 + 8 per message for our two-message body.
 
     def __init__(self, context_tokens: int | None = 131072, model: str = "gpt-6-luna",
-                 prompts: Mapping[str, str] | None = None, output_reserve: int = 16384):
+                 prompts: Mapping[str, str] | None = None, output_reserve: int = 16384,
+                 *, correction: bool = False):
         if context_tokens is not None and (type(context_tokens) is not int or context_tokens <= 0):
             raise ModelConfigurationError("request context capacity must be a positive integer")
         if type(output_reserve) is not int or output_reserve < 0:
             raise ModelConfigurationError("request output reserve must be a nonnegative integer")
+        if type(correction) is not bool or (correction and context_tokens is None):
+            raise ModelConfigurationError("correction input allowance requires a configured provider total context")
         if prompts is None:
             from docreader.tender.prompts import get_prompt
             prompts = {task: get_prompt(task) for task in get_args(Task)}
         self.prompts = MappingProxyType(dict(prompts))
         self.context_tokens, self.model, self.output_reserve = context_tokens, model, output_reserve
+        self.limits = RequestLimits(context_tokens=context_tokens, correction=correction)
+
+    @property
+    def effective_input_budget_tokens(self) -> int:
+        limit = (self.limits.correction_input_budget_tokens if self.limits.correction
+                 else self.limits.input_budget_tokens)
+        return min(limit, self.context_tokens - self.output_reserve - self.safety) if self.context_tokens is not None else limit
 
     @property
     def safety(self) -> int:
@@ -43,7 +53,7 @@ class RequestBudget:
 
     def spec(self) -> dict:
         return {"method": self.METHOD, "builder": self.BUILDER, "model": self.model,
-                "context_tokens": self.context_tokens, "output_reserve": self.output_reserve,
+                **self.limits.model_dump(), "output_reserve": self.output_reserve,
                 "safety": self.safety, "image_tokens_each": self.IMAGE_TOKENS,
                 "framing_tokens": self.FRAMING_TOKENS,
                 "prompts": {task: hashlib.sha256(prompt.encode()).hexdigest()
@@ -99,8 +109,10 @@ class RequestBudget:
                 "overhead_tokens": text_tokens - body_tokens - support_tokens,
                 "framing_tokens": self.FRAMING_TOKENS, "image_tokens": image_tokens,
                 "image_count": image_count, "output_reserve": self.output_reserve,
-                "safety": self.safety, "context_tokens": self.context_tokens, "total_context_tokens": total,
-                "fits": total <= self.context_tokens if self.context_tokens is not None else None,
+                "safety": self.safety, **self.limits.model_dump(), "total_context_tokens": total,
+                "effective_input_budget_tokens": self.effective_input_budget_tokens,
+                "fits": (input_tokens <= self.effective_input_budget_tokens if self.context_tokens is not None
+                         or input_tokens > self.effective_input_budget_tokens else None),
                 "method": self.METHOD}
 
     def fits(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> bool:
@@ -112,7 +124,7 @@ class RequestBudget:
     def require_request(self, request: dict) -> dict:
         measured = self.measure_request(request)
         if measured["fits"] is False:
-            raise ModelSemanticError("complete request and reserves do not fit the configured model context; split the source package")
+            raise ModelBudgetError("complete request exceeds the input budget or provider total context after reserves")
         # An independent VLM may have no configured capacity. Preserve that
         # existing deployment meaning, without reporting a proven fit.
         return measured
