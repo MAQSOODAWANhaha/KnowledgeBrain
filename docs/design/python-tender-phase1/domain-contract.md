@@ -79,7 +79,8 @@ range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来�
   同时使用 raw grid 补齐 row unit 中省略的空单元格。全空行只压缩发送视图，范围身份仍在
   body（empty=true、non_requirement_reason=empty_table_row）及 compacted_blank_ranges；
   抽取对其登记有依据的非要求处置。部分空行保留完整列位置，合并关系只读原网格。
-- 分包保留同节及祖先节的导语/条件与表格表头来源；supporting 复用源 range_id，正文身份
+- 分包保留同节及祖先节的导语/条件与表格表头来源；supporting 保留原 range_id 或绑定
+  parent_range_id 的派生引用身份，正文身份
   在所有包之间互斥。导语范围必须有来源，字符偏移基于 native unit；不得虚构 Word 段落坐标。
 - 表格原生 unit.text 可能为空；其发送文字明确标记 text_basis=grid_row/spreadsheet_row，
   start/end 相对该行发送文字，row_start/row_end 与 locator/raw_ref 定位原网格。
@@ -92,6 +93,13 @@ range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来�
   结构明确的章节前导/明确本章范围可以按章节继承；局部条件、跨段续句、替代关系或缺少
   可靠章节关系等不确定情况保留来源片段并产生阻断问题，不能自动推断已解决。
   必要上下文超出发送预算时保留来源并返回阻断问题，不能静默裁剪。
+- 无法找到完整条件句的范围不作为长篇 supporting 重发。pack.pending_scope_context 仅含
+  range_id/parent_range_id/document_id/unit_id/start/end、原 locator/physical_locator/physical_path、
+  section_id/heading_path 与 scope_binding（状态 unresolved、候选 applies_to_range_ids）、
+  reason=incomplete_condition_sentence；不含 text/cells/图像 payload。完整原文仍在 body/raw。
+  extract/verify 透传 pending 元数据作为待补读问题，不能将它当已读原文或新正文覆盖。
+  condition_scope_unresolved 与宿主 scope_context_pending 均阻断；模型低阻断或空 findings
+  不能解除它们。此修正不实现自动范围审议，也不要求改动原件或伪造来源新版本。
 - Excel 的 display_incomplete_reason（如公式无缓存或格式不能准确还原）必须升级为可见问题；
   PDF 内嵌附件登记独立 carrier 与未提取问题。原件存储损坏是技术失败，不伪装成文档问题。
 
