@@ -15,7 +15,7 @@ def infrastructure_retry(retries, exception):
 @dramatiq.actor(broker=broker, queue_name="tender", max_retries=4,
                 retry_when=infrastructure_retry, min_backoff=1000, max_backoff=30000,
                 time_limit=float("inf"))
-async def tender_command(run_id: str, command_id: str, version: int):
+async def tender_command(run_id: str, command_id: str, source_version: int):
     from docreader.workflow.nodes import TenderNodes
 
-    await execute_command(run_id, command_id, version, Settings.from_env(), TenderNodes)
+    await execute_command(run_id, command_id, source_version, Settings.from_env(), TenderNodes)

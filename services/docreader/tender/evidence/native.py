@@ -12,6 +12,20 @@ from docreader.parser.parser import Parser, detect_effective_file_type
 from docreader.parser.source_contract import attach_source_contract
 
 
+def canonical_image_keys(value) -> None:
+    """Adapt the native image string ID once; original-file refs stay ArtifactRef."""
+    if isinstance(value, dict):
+        if isinstance(value.get("original_ref"), str):
+            if "image_key" in value:
+                raise ValueError("image identity supplies two field names")
+            value["image_key"] = value.pop("original_ref")
+        for child in value.values():
+            canonical_image_keys(child)
+    elif isinstance(value, list):
+        for child in value:
+            canonical_image_keys(child)
+
+
 def _supplement_pdf_images(document, content: bytes) -> None:
     """Retain actual image occurrences filtered out by ingest heuristics."""
     import pypdfium2 as pdfium
@@ -143,3 +157,51 @@ def parse_native(file_name: str, content: bytes):
     if "source_contract" not in document.metadata:
         document.metadata["source_contract"] = json.dumps({"units": [], "page_manifest": []})
     return document
+
+
+def compact_native_snapshot(raw: dict) -> None:
+    """Remove reconstructible display copies; original native grid values remain."""
+    tables, grid_values = {}, {}
+    for unit in raw["units"]:
+        locator = unit["locator"]
+        if unit.get("grid"):
+            unit["text"] = ""  # Grid text is rendered from the one canonical grid.
+            if locator.get("locator_kind") == "spreadsheet":
+                region = locator["region"]
+                for cell in unit["grid"]["cells"]:
+                    coordinate = (locator["sheet_ordinal"], region["start_row"] + cell["row"], region["start_column"] + cell["column"])
+                    tables[coordinate] = {"unit_id": unit["unit_id"], "row": cell["row"], "column": cell["column"]}
+                    grid_values[coordinate] = cell["text"]
+        if locator.get("locator_kind") == "spreadsheet" and unit["kind"] == "table_row":
+            unit["text"] = ""  # Per-cell formula/type/display metadata is retained below.
+    spreadsheet_cells = {}
+    for unit in raw["units"]:
+        locator = unit["locator"]
+        if locator.get("locator_kind") == "spreadsheet":
+            cell_refs = []
+            for cell in locator.pop("cells", []):
+                coordinate = (locator["sheet_ordinal"], cell["row"], cell["column"])
+                key = f"sheet:{coordinate[0]}:cell:{coordinate[1]}:{coordinate[2]}"
+                cell_refs.append(key)
+                if coordinate in tables:
+                    inherited = [field for field in ("text", "raw_value", "display_text", "cached_value")
+                                 if field in cell and cell[field] == grid_values[coordinate]]
+                    for field in inherited:
+                        cell.pop(field)
+                    cell["grid_value_fields"] = inherited
+                    cell["grid_cell_ref"] = tables[coordinate]
+                spreadsheet_cells.setdefault(key, cell)
+            locator["cell_refs"] = cell_refs
+        # The grid definition already owns every cell of table locators.
+        if unit.get("grid") and locator.get("locator_kind") != "spreadsheet":
+            locator.pop("cells", None)
+        physical = unit.get("physical_locator")
+        if isinstance(physical, dict):
+            physical.pop("cells", None)
+    for identity in raw["source_contract"].get("units", []):
+        identity.pop("header_cells", None)  # Canonical unit retains native header coordinates.
+        identity.pop("rendered_spans", None)  # Refers to omitted rendered content.
+        if isinstance(identity.get("physical_locator"), dict):
+            identity["physical_locator"].pop("cells", None)
+    if spreadsheet_cells:
+        raw["spreadsheet_cells"] = spreadsheet_cells

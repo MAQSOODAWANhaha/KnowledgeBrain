@@ -9,8 +9,9 @@ Return exactly one primary response item per supplied requirement:
 ```
 {"items": [{"requirement_id": "exact input requirement id", "target_kind": "body",
  "target": "第3章/3.2 服务期限承诺",
- "action": "State the 30天 service deadline and explain the delivery milestones.",
- "material_needs": ["Project delivery schedule approved by the delivery owner"]}]}
+ "action": "承诺投标人在30天内交付，并说明交付里程碑。",
+ "material_needs": ["Project delivery schedule approved by the delivery owner"],
+ "constraint_digest": "copy the supplied 64-character digest exactly"}]}
 ```
 
 `target_kind` is `body`, `table_field`, `attachment`, or `manual_action`.
@@ -27,3 +28,18 @@ numbers and units in the action or target. `material_needs` is a nonempty list n
 documents, evidence, data or human inputs. If no external material is necessary, explicitly say
 why, e.g. “无需外部材料：由投标负责人根据已确认工期作承诺”. Do not state that missing inputs
 are already available. Do not add, drop, duplicate or plan for an inapplicable requirement.
+
+The input's `constraint_bindings` maps every requirement ID to `constraint_digest`.
+Copy the digest exactly into its item. Do not return a constraint snapshot or source copies.
+The digest binds the verified subject, obligation text, original
+evidence, conditions, exceptions, number/unit pairs, comparison relations, scoring, veto
+risk, cross-references and applicability. The host computes the full binding for validation
+and adds the original requirement's durable reference; do not invent that reference.
+
+A correct copied digest never excuses contradictory plan prose. The action must repeat
+the requirement's subject, conditions and exceptions literally and without negation; add the
+specific writing/field/attachment/manual response around them. Retain each exact unit and
+comparison relation in action/target: 30工作日, 30自然日 and 30天 are different; 至少 is not 至多;
+大于 is not 大于等于. Do not alter who is obligated or which lot/condition the duty applies to.
+When the same quantity is used in the action, it cannot contradict the binding or target.
+These conservative checks do not replace human semantic review of the proposed response.

@@ -52,6 +52,7 @@ class FixtureModel:
                       "findings": []}
         elif task == "plan":
             result = {"items": [{"requirement_id": requirement["requirement_id"],
+                                 **payload["constraint_bindings"][requirement["requirement_id"]],
                                  "target_kind": "body", "target": "Section Delivery / compliance response",
                                  "action": "Write a specific commitment and responsible person for: " + requirement["text"],
                                  "material_needs": ["Supplier's signed delivery or maintenance commitment for this obligation."]}

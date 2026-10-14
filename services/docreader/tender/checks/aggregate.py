@@ -1,11 +1,13 @@
 """Small cross-pack/version rules over extraction metadata, without rescanning files."""
 
 import copy
+import hashlib
+import json
 import re
 from collections import Counter, defaultdict
 
 from docreader.tender.checks.verify import NUMBER, numeric_values
-from docreader.tender.requirements.schema import issue
+from docreader.tender.schema import ApplicabilityDecision, enforce_issue_policy, issue
 
 
 def _targets(replaces):
@@ -16,8 +18,9 @@ def _targets(replaces):
     return []
 
 
-def _apply_amendments(documents: list[dict], requirements: list[dict], sources: dict) -> list[dict]:
+def _apply_amendments(documents: list[dict], requirements: list[dict], sources: dict) -> tuple[list[dict], dict]:
     findings = []
+    overrides = {}
     by_document = {str(document["document_id"]): document for document in documents}
     edges = {
         document["document_id"]: {target["document_id"] for target in _targets(document.get("replaces"))
@@ -94,9 +97,38 @@ def _apply_amendments(documents: list[dict], requirements: list[dict], sources: 
             if any(e["range_id"] != range_id for e in body_evidence):
                 findings.append(issue("amendment_partial_requirement", "The modified requirement also spans unaffected body ranges; split it before replacing it.", range_id, requirement_id=requirement["requirement_id"]))
                 continue
-            requirement["applicable"] = False
-            requirement["applicability_basis"] = f"Explicit amendment {replacement_document} replaces {sources[range_id]['document_id']}:{range_id}."
-    return findings
+            overrides[requirement["requirement_id"]] = ApplicabilityDecision.model_validate({
+                "requirement_id": requirement["requirement_id"],
+                "applicable": False,
+                "applicability_basis": f"Explicit amendment {replacement_document} replaces {sources[range_id]['document_id']}:{range_id}.",
+                "amendment_document_id": replacement_document,
+                "source_document_id": sources[range_id]["document_id"],
+                "source_range_id": range_id,
+                "evidence": [evidence for evidence in requirement["evidence"] if evidence["range_id"] == range_id],
+            }).model_dump(mode="json", exclude_none=True)
+    return findings, overrides
+
+
+def apply_applicability_decisions(requirements: list[dict], decisions: dict) -> list[dict]:
+    """Read original requirements with verified applicability, without copying evidence."""
+    result = []
+    for requirement in requirements:
+        decision = decisions.get(requirement["requirement_id"])
+        if decision:
+            decision = ApplicabilityDecision.model_validate(decision).model_dump(mode="json", exclude_none=True)
+            if decision["requirement_id"] != requirement["requirement_id"]:
+                raise ValueError("applicability_decision_identity_mismatch")
+        result.append({**requirement, **{field: decision[field] for field in ("applicable", "applicability_basis")}}
+                      if decision else requirement)
+    return result
+
+
+def _requirements_digest(requirements: list[dict]) -> str:
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    for fragment in encoder.iterencode(requirements):
+        digest.update(fragment.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _conflicts(requirements: list[dict], sources: dict) -> list[dict]:
@@ -120,7 +152,8 @@ def _conflicts(requirements: list[dict], sources: dict) -> list[dict]:
     return findings
 
 
-def verify_all(index: dict, extractions: list[dict], verifications: list[dict]) -> dict:
+def verify_all(index: dict, extractions: list[dict], verifications: list[dict],
+               requirements_ref: dict | None = None) -> dict:
     issues = copy.deepcopy(index.get("issues", []))
     requirements = []
     sources = {}
@@ -128,7 +161,7 @@ def verify_all(index: dict, extractions: list[dict], verifications: list[dict]) 
     extraction_ids = []
     for extraction in extractions:
         extraction_ids.append(extraction["pack_id"])
-        requirements.extend(copy.deepcopy(extraction["requirements"]))
+        requirements.extend(extraction["requirements"])
         issues.extend(copy.deepcopy(extraction.get("issues", [])))
         body_ids.extend(disposition["range_id"] for disposition in extraction["dispositions"])
         for range_id, metadata in extraction.get("source_ranges", {}).items():
@@ -154,14 +187,20 @@ def verify_all(index: dict, extractions: list[dict], verifications: list[dict]) 
     requirement_counts = Counter(requirement["requirement_id"] for requirement in requirements)
     if any(count != 1 for count in requirement_counts.values()):
         issues.append(issue("duplicate_requirement_id", "Requirement identity collides across packs."))
-    issues.extend(_apply_amendments(index.get("documents", []), requirements, sources))
-    issues.extend(_conflicts(requirements, sources))
+    amendment_issues, overrides = _apply_amendments(index.get("documents", []), requirements, sources)
+    issues.extend(amendment_issues)
+    effective_requirements = apply_applicability_decisions(requirements, overrides)
+    issues.extend(_conflicts(effective_requirements, sources))
+    # Also enforce at the durable aggregate boundary, including resumed artifacts.
+    issues = [enforce_issue_policy(finding) for finding in issues]
     return {
-        "requirements": requirements, "issues": issues,
+        "issues": issues, "applicability_decisions": overrides,
+        "requirements_digest": _requirements_digest(requirements),
+        "requirements_ref": requirements_ref,
         "blocking": any(item.get("blocking", True) for item in issues),
         "counts": {
             "packs": len(extractions), "verified_packs": len(verifications), "ranges": len(set(body_ids)),
-            "requirements": len(requirements), "applicable_requirements": sum(requirement["applicable"] for requirement in requirements),
+            "requirements": len(requirements), "applicable_requirements": sum(requirement["applicable"] for requirement in effective_requirements),
             "blocking_issues": sum(bool(item.get("blocking", True)) for item in issues),
         },
     }

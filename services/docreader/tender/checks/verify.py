@@ -3,12 +3,13 @@
 import re
 import unicodedata
 from collections import Counter
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 
 from pydantic import ValidationError
 
 from docreader.llm import ModelSemanticError
-from docreader.tender.requirements.schema import Model, Verification, issue
+from docreader.tender.schema import Model, Verification, enforce_issue_policy, issue
 
 NUMBER = re.compile(r"(?<![\d.])[-+]?\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])")
 UNIT = re.compile(r"^(?:万元|亿元|元|工作日|小时|分钟|天|日|周|月|年|分|%|‰|千米|厘米|毫米|平方米|立方米|米|吨|公斤|千克|个|件|套|份|人|kg\b|cm\b|mm\b|m[23²³]?\b)", re.I)
@@ -105,14 +106,18 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
     sources = {source["range_id"]: source for source in [*pack["supporting"], *pack["body"]]}
     body_ids = {source["range_id"] for source in pack["body"]}
     findings = []
+    if pack.get("pending_scope_context"):
+        findings.append(issue("scope_context_pending", "Scope context has only pending locator metadata; do not claim it was independently reviewed or resolved."))
     for requirement in extraction["requirements"]:
         findings.extend(check_requirement(requirement, sources, body_ids))
     try:
         review = Verification.model_validate(await model.call("verify", {
             "pack_id": pack["pack_id"], "body": pack["body"], "supporting": pack["supporting"],
+            "pending_scope_context": deepcopy(pack.get("pending_scope_context", [])),
+            "scope_bindings": deepcopy(pack.get("scope_bindings", [])),
             "requirements": extraction["requirements"], "dispositions": extraction["dispositions"],
         })).model_dump(exclude_none=True)
-        findings.extend(review["findings"])
+        findings.extend(enforce_issue_policy(finding) for finding in review["findings"])
         reviewed = review["reviewed_range_ids"]
     except (ModelSemanticError, ValidationError) as exc:
         reviewed = []
@@ -126,4 +131,7 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
     for finding in findings:
         if finding.get("range_id") and finding["range_id"] not in sources:
             finding["blocking"] = True
-    return {"pack_id": pack["pack_id"], "reviewed_range_ids": reviewed, "findings": findings}
+    return {
+        "pack_id": pack["pack_id"], "reviewed_range_ids": reviewed, "findings": findings,
+        **({"pending_scope_context": deepcopy(pack["pending_scope_context"])} if "pending_scope_context" in pack else {}),
+    }

@@ -127,13 +127,13 @@ async def test_old_executor_cannot_write_postgres_checkpoint(setup):
     store, settings, run = setup
     cmd = await command_for(store, run)
     lease = await store.acquire(run["run_id"], cmd["command_id"], 1)
-    config = {"configurable": {"thread_id": f"{run['run_id']}:1"}}
+    config = {"configurable": {"thread_id": f"{run['run_id']}:1:1"}}
     async with await psycopg.AsyncConnection.connect(
         settings.dsn, autocommit=True, row_factory=dict_row,
     ) as conn:
         old = FencedPostgresSaver(conn, store, lease)
         graph = build_graph(SkeletonNodes(store, ArtifactStore(settings.artifact_root), lease), old)
-        await graph.ainvoke({"run_id": run["run_id"], "version": 1}, config, durability="sync")
+        await graph.ainvoke({"run_id": run["run_id"], "source_version": 1, "domain_revision": 1}, config, durability="sync")
         checkpoint = await old.aget_tuple(config)
         await store.release(lease, "retry")
         replacement = await store.acquire(run["run_id"], cmd["command_id"], 1)
@@ -164,7 +164,7 @@ async def test_real_graph_checkpoint_failure_after_business_commit(setup, monkey
 
     async def lose_checkpoint(self, config, checkpoint, metadata, versions):
         nonlocal faulted
-        if checkpoint["channel_values"].get("registered") and not faulted:
+        if checkpoint["channel_values"].get("registered_ref") and not faulted:
             faulted = True
             raise psycopg.OperationalError("injected checkpoint connection failure")
         return await original(self, config, checkpoint, metadata, versions)

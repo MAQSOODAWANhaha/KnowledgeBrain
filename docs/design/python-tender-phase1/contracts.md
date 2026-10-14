@@ -10,7 +10,7 @@ CLI `python -m docreader.integrations.cli`，显式 PostgreSQL DSN、Redis URL�
 | 命令 | 输入 | 结果及约束 |
 | --- | --- | --- |
 | `init` | 运行环境 | 仅初始化 Python 专用业务表与官方 checkpoint 表 |
-| `submit` | manifest JSON，幂等 request key | 复制原文件到不可变文件存储；事务创建 run/version/start 命令；返回 run_id |
+| `submit` | manifest JSON，幂等 request key | 复制原文件到不可变文件存储；事务创建 run/source_version/start 命令；返回 run_id |
 | `status` | run_id | 当前版本/状态、摘要、产物引用、问题与用量；不输出秘密 |
 | `confirm` | run_id/source_version/domain_revision/checklist_digest/idempotency_key | 只接受当前等待确认且清单一致的确认，事务创建 resume 命令；重复同确认幂等，过期拒绝 |
 | `cancel` | run_id | 直接写意图并作废未执行命令；心跳/节点边界观察 |
@@ -18,13 +18,13 @@ CLI `python -m docreader.integrations.cli`，显式 PostgreSQL DSN、Redis URL�
 | `correct` | run_id/source_version/expected_revision/base_requirements_digest、完整纠错要求清单、reason、request key | 同来源产生新领域修订；重新独立验证与确认；不伪造来源改版 |
 | `dispatch` | 可选单轮 | token 领取待投命令、投 Redis、确认发布、对失联命令补投 |
 
-manifest 含 documents（document_id、role=main/attachment/clarification/amendment、version、
+manifest 含 documents（document_id、role=main/attachment/clarification/amendment、document_version、
 path、可选 replaces/修改范围）及 expected_document_ids。登记问题持久返回，不能静默跳过。
 文件路径仅本地独立验收使用；运行时只认冻结文件引用与内容摘要。
 
 ## 命令、租约和回执
 
-队列 payload 仅 `run_id, command_id, version`，不携带正文/密钥/模型响应。
+队列 payload 仅 `run_id, command_id, source_version`，不携带正文/密钥/模型响应。
 命令状态 pending → claimed(token, deadline) → published → running → completed；
 claim 过期可重领；publish 失败恢复 pending。仅未执行超时，或执行租约失效且命令仍可执行时补投；有效 run 租约期间不补投。completed/paused(blocked/waiting)/failed/cancelled 均持久记录处置，取消或终态失败不重新执行。
 确认领取时同时核对 token，旧 dispatcher 不能确认新领取。
@@ -59,7 +59,7 @@ epoch 围栏保护所有产物提交。checkpointer 写入需受同一个 run �
 不再授权新修订；新修订必须重新独立验证并人工确认后生成计划。旧 worker 与旧确认均拒绝。
 原来源改版仍用 `revise`，并重置领域修订为 1；完全相同 manifest 不构成来源改版。
 
-来源冻结前另以共享来源回执固定实际解析/分包配置；部分文档恢复不得混用新配置。
+来源冻结前另以共享来源回执固定实际解析配置；分包预算在领域修订计划中固定；部分文档恢复不得混用新配置。
 已固定配置的恢复在读取 checkpoint/重放终态回执之前核对，不依赖节点恰好重跑。
 首次模型调用前按当前修订持久固定非秘密执行配置（规范 endpoint、model、单请求容量、
 实际提示内容 SHA256）。恢复必须匹配；不存密钥，不因 key 轮换产生新修订。环境或提示
@@ -86,6 +86,7 @@ Rust 最终拥有业务 API、鉴权、业务版本、人工确认、提交事�
 同一来源内的 literal OCR 只读取图片像素，不把出现位置当作模型语义输入；按图片内容 SHA256
 和固定模型/提示配置复用回执。每个图片出现的文档/页/锚点仍独立保留，不能去重删除来源。
 同 worker 内相同图片请求加小范围异步互斥，跨重启使用围栏回执，不另建通用缓存服务。
-这将真实 PDF 的 98 个图片位置保留为 98 个来源，但仅需 2 份不同像素内容的初次 OCR 请求。
+这保留真实 PDF 的98个图片位置并允许相同像素复用。后续视觉审议判定两份图片为装饰，
+显式来源绑定审议保留全部位置，本原件实际无需OCR；未知图片不适用此结论。
 
 最终分包规则以 [结构优先分包评估](packing-review.md) 为准；废止固定6000/12000字符驱动请求边界。

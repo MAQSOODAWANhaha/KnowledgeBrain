@@ -16,7 +16,7 @@ async def dispatch_once(store, send, *, redeliver_seconds=60):
     published = 0
     for cmd in commands:
         try:
-            await asyncio.to_thread(send, cmd["run_id"], cmd["command_id"], cmd["version"])
+            await asyncio.to_thread(send, cmd["run_id"], cmd["command_id"], cmd["source_version"])
         except Exception as error:
             # Do not log arbitrary broker URLs/passwords contained in exception text.
             retryable = isinstance(error, (ConnectionClosed, RedisConnectionError, RedisTimeoutError,

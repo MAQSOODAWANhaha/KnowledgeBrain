@@ -11,6 +11,20 @@ exceptions and cite them where relevant. Never extract a requirement based only 
 context. Every body range must receive exactly one disposition. Do not omit an empty field in
 a partially filled row, invent a merged cell value, or equate a blank field with “not applicable”.
 
+Respect `scope_bindings[].scope_binding.applies_to_range_ids` and supporting range bindings;
+`scope_bindings` supplies complete condition intervals and explicit targets, without copying
+text already present in body/supporting. Resolve its interval against those supplied ranges,
+and cite the actual body/supporting range IDs. Reviewed targets are binding scope decisions,
+not permission to infer broader applicability. Do not count metadata as extra body coverage.
+A condition applying to one section
+must not silently apply to another body range in the same pack. `pending_scope_context` contains
+only unresolved source locators, offsets and scope metadata, never the missing condition text.
+Its candidate scope is not an established applicability rule. Do not guess its contents, cite
+it as a quoted source, invent a resolution or add its IDs to body dispositions. Preserve the
+uncertainty in any affected obligation. The host keeps these pending issues blocking even when
+your issues list is empty or you propose `blocking:false`. Do not echo or rewrite this metadata
+in your output; the host preserves the original frozen values separately.
+
 Output:
 ```
 {

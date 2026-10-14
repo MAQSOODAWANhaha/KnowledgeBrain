@@ -2,7 +2,9 @@
 
 import base64
 import binascii
+import json
 from dataclasses import dataclass, field
+from typing import Sequence
 
 
 class ModelConfigurationError(ValueError):
@@ -47,3 +49,21 @@ def image_data_url(image: str | ImageInput) -> str:
     if not decoded:
         raise ModelSemanticError("empty inline image")
     return image
+
+
+def build_request(model: str, prompt: str, payload: dict,
+                  images: Sequence[str | ImageInput] = ()) -> dict:
+    """The same complete API body is used for packing probes and sending.
+
+    Schema instructions are part of the actual prompt, not an invented API
+    schema field. Admission reserves never become provider output limits.
+    """
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        raise ModelSemanticError("model payload is not JSON serializable") from None
+    content = [{"type": "text", "text": serialized}]
+    content.extend({"type": "image_url", "image_url": {"url": image_data_url(image)}} for image in images)
+    return {"model": model,
+            "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}],
+            "response_format": {"type": "json_object"}}

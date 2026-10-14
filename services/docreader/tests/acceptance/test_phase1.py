@@ -12,6 +12,9 @@ from PIL import Image, ImageDraw
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 import pytest
+import psycopg
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import InvalidConfirmation, Store
@@ -58,7 +61,7 @@ def mixed_manifest(root):
     stream.set_data(b"BT /F1 11 Tf 40 740 Td (The supplier must provide a written quality assurance statement.) Tj ET")
     page[NameObject("/Contents")] = writer._add_object(stream)
     writer.write(root / "quality.pdf")
-    return {"documents": [{"document_id": document_id, "role": role, "version": "one", "path": str(root / name)}
+    return {"documents": [{"document_id": document_id, "role": role, "document_version": "one", "path": str(root / name)}
                           for document_id, role, name in [("main", "main", "main.docx"),
                                                          ("annex", "attachment", "annex.xlsx"),
                                                          ("quality", "attachment", "quality.pdf"),
@@ -71,26 +74,38 @@ async def runtime(tmp_path):
     dsn = os.environ.get("TENDER_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("set TENDER_TEST_DATABASE_URL for real PostgreSQL acceptance")
-    settings = Settings(dsn, os.environ.get("TENDER_TEST_REDIS_URL", "redis://127.0.0.1:16379/1"), tmp_path / "artifacts")
-    store, artifacts = Store(dsn), ArtifactStore(settings.artifact_root)
+    schema = "phase1_test_" + uuid4().hex
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    isolated_dsn = make_conninfo(dsn, options=f"-c search_path={schema}")
+    settings = Settings(isolated_dsn, os.environ.get("TENDER_TEST_REDIS_URL", "redis://127.0.0.1:16379/1"), tmp_path / "artifacts")
+    store, artifacts = Store(isolated_dsn), ArtifactStore(settings.artifact_root)
     await store.setup()
-    await initialize_checkpoints(dsn)
+    await initialize_checkpoints(isolated_dsn)
     registered = await asyncio.to_thread(register_manifest, mixed_manifest(tmp_path), artifacts)
     run = await store.submit(artifacts.put_json(registered), uuid4().hex)
-    return store, artifacts, settings, run
+    try:
+        yield store, artifacts, settings, run
+    finally:
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 async def execute(store, settings, run, **model_options):
     cmd = (await store.get_run(run["run_id"]))["commands"][-1]
     def factory(s, a, lease):
         return TenderNodes(s, a, lease, FixtureModel(s, lease, **model_options))
-    await execute_command(run["run_id"], cmd["command_id"], cmd["version"], settings, factory)
+    await execute_command(run["run_id"], cmd["command_id"], cmd["source_version"], settings, factory)
     return await store.get_run(run["run_id"])
 
 
 def output(artifacts, run, stage):
     return artifacts.read_json(next(item["artifact_ref"] for item in run["artifacts"]
                                     if item["stage"] == stage and not item["scope"]))
+
+
+def plan_items(artifacts, plan):
+    return [item for entry in plan["packs"] for item in artifacts.read_json(entry["artifact_ref"])["items"]]
 
 
 async def test_mixed_formats_confirm_to_concrete_response_plan(runtime):
@@ -101,7 +116,7 @@ async def test_mixed_formats_confirm_to_concrete_response_plan(runtime):
     frozen = output(artifacts, row, "freeze")
     assert frozen["stats"]["document_count"] == 4
     assert frozen["stats"]["image_count"] == 2  # Excel embedded + standalone; no text PDF render.
-    assert frozen["range_count"] == checked["counts"]["ranges"]
+    assert output(artifacts, row, "pack-plan")["range_count"] == checked["counts"]["ranges"]
     assert checked["counts"]["requirements"] >= 5
     assert all(row["usage"][i]["metadata"]["test_double"] for i in range(len(row["usage"])))
     assert all(request["usage"] is None for request in row["usage"])  # Never fabricate paid usage.
@@ -109,8 +124,11 @@ async def test_mixed_formats_confirm_to_concrete_response_plan(runtime):
     completed = await execute(store, settings, run)
     assert completed["status"] == "response-plan-ready"
     plan = output(artifacts, completed, "plan")
-    assert len(plan["items"]) == checked["counts"]["applicable_requirements"]
-    assert all(item["action"] and item["material_needs"] for item in plan["items"])
+    items = plan_items(artifacts, plan)
+    assert len(items) == checked["counts"]["applicable_requirements"]
+    assert all(item["action"] and item["material_needs"] and item["requirement_ref"] for item in items)
+    assert "requirements" not in checked and "requirement_packs" not in checked
+    assert all("constraint_snapshot" not in item for item in items)
     assert plan["checklist_digest"] == completed["checklist_digest"]
 
 
@@ -131,7 +149,7 @@ async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sou
             assert item["epoch"] == saved[key]["epoch"]
             assert item["artifact_ref"] == saved[key]["artifact_ref"]
     successful_initial = [r for r in failed["usage"] if r["status"] == "succeeded"]
-    assert len([r for r in recovered["usage"] if r["kind"] == "ocr"]) == 2
+    assert len([r for r in recovered["usage"] if r["task"] == "ocr"]) == 1  # Same PNG at two distinct source positions.
     assert successful_initial
 
 
@@ -140,14 +158,195 @@ async def test_semantic_failure_is_unresolved_not_global_success_and_revision_in
     row = await execute(store, settings, run, malformed_document="annex")
     assert row["status"] == "blocked"
     checked = output(artifacts, row, "verify")
-    assert checked["requirements"]  # independent successful documents retained
+    assert checked["counts"]["requirements"] > 0  # independent successful documents retained
     assert checked["counts"]["blocking_issues"] > 0
     with pytest.raises(InvalidConfirmation):
         await store.confirm(run["run_id"], 1, row["checklist_digest"], "cannot-force")
-    revised = await store.revise(run["run_id"], row["manifest_ref"], "reviewed-source-version")
-    assert revised["current_version"] == 2
+    # A source revision represents actual supplied content/metadata changes, never a retry shortcut.
+    manifest = artifacts.read_json(row["manifest_ref"])
+    manifest["documents"][0]["document_version"] = "two"
+    revised = await store.revise(run["run_id"], artifacts.put_json(manifest), "reviewed-source-version")
+    assert revised["source_version"] == 2
     recovered = await execute(store, settings, run)
     assert recovered["status"] == "waiting-confirmation"
     assert recovered["checklist_digest"] != row["checklist_digest"]
     with pytest.raises(InvalidConfirmation):
         await store.confirm(run["run_id"], 1, row["checklist_digest"], "expired-version")
+
+
+async def test_same_source_correction_revalidates_and_invalidates_previous_confirmation_and_plan(runtime):
+    store, artifacts, settings, run = runtime
+    first = await execute(store, settings, run)
+    await store.confirm(run["run_id"], 1, first["checklist_digest"], "confirm-r1", domain_revision=1)
+    ready = await execute(store, settings, run)
+    assert ready["status"] == "response-plan-ready"
+    original_source = next(a["artifact_ref"] for a in ready["artifacts"] if a["stage"] == "freeze")
+    original_extract = next(a["artifact_ref"] for a in ready["artifacts"] if a["stage"] == "extract")
+    corrected = artifacts.read_json(original_extract)
+    first_pack = corrected["packs"][0]
+    pack = artifacts.read_json(first_pack["artifact_ref"])
+    pack["requirements"][0]["veto_risk"] = True  # manual classification, deterministic fixture only
+    first_pack["artifact_ref"] = artifacts.put_json(pack)
+    corrected_ref = artifacts.put_json(corrected)
+    revision = await store.correct(run["run_id"], 1, 1, original_extract["sha256"], corrected_ref,
+                                   "correct-r2", "Correct the veto classification for independent re-review")
+    replay = await store.correct(run["run_id"], 1, 1, original_extract["sha256"], corrected_ref,
+                                 "correct-r2", "Correct the veto classification for independent re-review")
+    assert replay["submitted_domain_revision"] == revision["submitted_domain_revision"] == 2
+    row = await store.get_run(run["run_id"])
+    assert row["source_version"] == 1
+    assert row["domain_revision"] == 2
+    assert row["manifest_ref"] == first["manifest_ref"]
+    assert row["checklist_digest"] is None
+    assert not any(a["stage"] in {"verify", "confirm", "plan"} for a in row["artifacts"])
+    with pytest.raises(InvalidConfirmation):
+        await store.confirm(run["run_id"], 1, first["checklist_digest"], "confirm-r1", domain_revision=1)
+    second = await execute(store, settings, run)
+    assert second["status"] == "waiting-confirmation"
+    assert second["checklist_digest"] != first["checklist_digest"]
+    assert next(a["artifact_ref"] for a in second["artifacts"] if a["stage"] == "freeze") == original_source
+    reviewed = output(artifacts, second, "verify")
+    reviewed_index = artifacts.read_json(reviewed["requirements_ref"])
+    assert artifacts.read_json(reviewed_index["packs"][0]["artifact_ref"])["requirements"][0]["veto_risk"]
+    assert all(r["task"] != "extract" for r in second["usage"] if r["domain_revision"] == 2)
+    assert any(r["task"] == "verify" for r in second["usage"] if r["domain_revision"] == 2)
+    with pytest.raises(InvalidConfirmation):
+        await store.confirm(run["run_id"], 1, first["checklist_digest"], "wrong-digest-r2", domain_revision=2)
+    await store.confirm(run["run_id"], 1, second["checklist_digest"], "confirm-r2", domain_revision=2)
+    final = await execute(store, settings, run)
+    assert final["status"] == "response-plan-ready"
+    assert output(artifacts, final, "plan")["checklist_digest"] == second["checklist_digest"]
+
+
+async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(runtime, monkeypatch):
+    from docreader.integrations.store import Conflict
+
+    store, artifacts, settings, run = runtime
+    async def execute_with_spec(label):
+        cmd = (await store.get_run(run["run_id"]))["commands"][-1]
+        class ConfiguredFixture(FixtureModel):
+            def execution_spec(self):
+                return {"test_configuration": label}
+        def factory(s, a, lease):
+            return TenderNodes(s, a, lease, ConfiguredFixture(s, lease))
+        await execute_command(run["run_id"], cmd["command_id"], cmd["source_version"], settings, factory)
+
+    await execute_with_spec("original")
+    paused = await store.get_run(run["run_id"])
+    await store.confirm(run["run_id"], 1, paused["checklist_digest"], "confirm-before-receipt-fault")
+    original_release = Store.release
+    failed_once = False
+    async def fail_receipt_after_checkpoint(self, lease, status, **kwargs):
+        nonlocal failed_once
+        if status == "response-plan-ready" and not failed_once:
+            failed_once = True
+            raise psycopg.OperationalError("injected receipt failure after complete checkpoint")
+        return await original_release(self, lease, status, **kwargs)
+    monkeypatch.setattr(Store, "release", fail_receipt_after_checkpoint)
+    with pytest.raises(psycopg.OperationalError):
+        await execute_with_spec("original")
+    pending = await store.get_run(run["run_id"])
+    assert pending["status"] == "pending"
+    assert plan_items(artifacts, output(artifacts, pending, "plan"))
+    with pytest.raises(Conflict):
+        await execute_with_spec("changed")
+    failed = await store.get_run(run["run_id"])
+    assert failed["status"] == "failed"
+    assert len(failed["usage"]) == len(pending["usage"])
+
+
+async def test_partial_recovery_refuses_changed_native_parser_configuration(runtime, monkeypatch):
+    from docreader.integrations.store import Conflict
+    from docreader.parser import pdf_parser
+
+    store, _, settings, run = runtime
+    with pytest.raises(ModelInfrastructureError):
+        await execute(store, settings, run, fail_document="annex")
+    before = await store.get_run(run["run_id"])
+    monkeypatch.setattr(pdf_parser, "SCAN_MIN_CHARS_PER_PAGE", pdf_parser.SCAN_MIN_CHARS_PER_PAGE + 1)
+    with pytest.raises(Conflict):
+        await execute(store, settings, run)
+    after = await store.get_run(run["run_id"])
+    assert after["status"] == "failed"
+    assert len(after["usage"]) == len(before["usage"])
+    assert after["artifacts"] == before["artifacts"]
+
+
+
+async def test_repeated_image_pixels_share_ocr_without_losing_occurrence_coordinates(runtime):
+    store, artifacts, settings, _ = runtime
+    root = settings.artifact_root.parent
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["The supplier must provide image-backed supporting material."])
+    for anchor in ("B2", "E5"):
+        sheet.add_image(SheetImage(str(root / "schedule.png")), anchor)
+    workbook.save(root / "repeated-images.xlsx")
+    registered = register_manifest({"documents": [{"document_id": "repeated", "document_version": "one", "role": "main",
+                                                  "path": str(root / "repeated-images.xlsx")}]}, artifacts)
+    run = await store.submit(artifacts.put_json(registered), "same-pixels-distinct-occurrences")
+    row = await execute(store, settings, run)
+    assert row["status"] == "waiting-confirmation"
+    frozen = output(artifacts, row, "freeze")
+    raw = artifacts.read_json(frozen["documents"][0]["raw_ref"])
+    assert frozen["stats"]["image_count"] == len(raw["ocr"]) == 2
+    assert len(raw["image_anchors"]) == 2
+    assert {item["from"]["column"] for item in raw["image_anchors"].values()} == {2, 5}
+    assert len([request for request in row["usage"] if request["task"] == "ocr"]) == 1
+    assert len([receipt for receipt in row["artifacts"] if receipt["stage"] == "ocr"]) == 1
+    assert all(result["status"] == "complete" for result in raw["ocr"].values())
+
+
+async def test_evidence_backed_scope_review_creates_revision_replans_and_revalidates(runtime):
+    from docreader.integrations.cli import _scope_review_ref
+    from docreader.integrations.store import Conflict
+    from docreader.tender.evidence import EvidenceRepository
+
+    store, artifacts, settings, _ = runtime
+    path = settings.artifact_root.parent / "scope-form.docx"
+    document = Document()
+    document.add_heading("Response field instructions", level=1)
+    condition = "This form applies only to the local response field."
+    document.add_paragraph(condition)
+    document.add_paragraph("The supplier must provide a signed delivery commitment.")
+    document.save(path)
+    registered = register_manifest({"documents": [{"document_id": "scope-form", "document_version": "one",
+                                                  "role": "main", "path": str(path)}]}, artifacts)
+    run = await store.submit(artifacts.put_json(registered), "scope-form")
+    blocked = await execute(store, settings, run)
+    assert blocked["status"] == "blocked"
+    first_plan = output(artifacts, blocked, "pack-plan")
+    frozen = next(item["artifact_ref"] for item in blocked["artifacts"] if item["stage"] == "freeze")
+    problem = next(item for item in first_plan["issues"] if item["code"] == "condition_scope_unresolved")
+    repo = EvidenceRepository(artifacts)
+    source = repo.source_index(first_plan["documents"][0]["source_index_ref"])
+    source_range = next(entry for entry in source.ranges if condition in entry["text"])
+    submitted = {"scope_decisions": [{
+        "range_id": problem["range_id"], "decision": "local_only", "target_range_ids": [],
+        "rationale": "Human review confirms this condition describes only the named local response field; "
+                     "it does not limit the following supplier commitment or the entire section.",
+        "evidence": [{"range_id": source_range["range_id"], "quote": condition}],
+    }]}
+    review_ref = _scope_review_ref(artifacts, blocked, 1, 1, first_plan["plan_digest"], submitted)
+    second = await store.review_scope(run["run_id"], 1, 1, first_plan["plan_digest"], review_ref,
+                                     "scope-reviewed-r2", "Review the form field boundary")
+    replay = await store.review_scope(run["run_id"], 1, 1, first_plan["plan_digest"], review_ref,
+                                     "scope-reviewed-r2", "Review the form field boundary")
+    assert second["submitted_domain_revision"] == replay["submitted_domain_revision"] == 2
+    with pytest.raises(Conflict):
+        await store.review_scope(run["run_id"], 1, 1, first_plan["plan_digest"], review_ref,
+                                 "expired-scope-baseline", "Old plan cannot revise a newer domain revision")
+    reviewed = await execute(store, settings, run)  # A fresh executor/checkpoint thread.
+    assert reviewed["source_version"] == 1 and reviewed["domain_revision"] == 2
+    assert reviewed["status"] == "waiting-confirmation", output(artifacts, reviewed, "verify")["issues"]
+    assert next(item["artifact_ref"] for item in reviewed["artifacts"] if item["stage"] == "freeze") == frozen
+    updated_plan = output(artifacts, reviewed, "pack-plan")
+    assert updated_plan["plan_digest"] != first_plan["plan_digest"]
+    assert updated_plan["documents"][0]["raw_ref"] == first_plan["documents"][0]["raw_ref"]
+    assert not any(item["code"] == "condition_scope_unresolved" for item in updated_plan["issues"])
+    assert any(item["task"] == "extract" and item["domain_revision"] == 2 for item in reviewed["usage"])
+    with pytest.raises(InvalidConfirmation):
+        await store.confirm(run["run_id"], 1, blocked["checklist_digest"], "old-scope-confirm", domain_revision=1)
+    await store.confirm(run["run_id"], 1, reviewed["checklist_digest"], "scope-confirm-r2", domain_revision=2)
+    ready = await execute(store, settings, run)
+    assert ready["status"] == "response-plan-ready"

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from docreader.integrations.artifacts import ArtifactStore
+from docreader.tender.evidence.native import canonical_image_keys
 
 
 def issue(code: str, document_id: str = "", detail: str = "", **extra: Any) -> dict:
@@ -24,7 +26,7 @@ def register_manifest(manifest: dict, artifacts: ArtifactStore) -> dict:
         record = {
             "document_id": document_id,
             "role": entry.get("role", "main"),
-            "version": str(entry.get("version", "")),
+            "document_version": str(entry.get("document_version", "")),
             "replaces": entry.get("replaces"),
             "modification_scope": entry.get("modification_scope", entry.get("scope")),
             "ordinal": ordinal,
@@ -35,7 +37,7 @@ def register_manifest(manifest: dict, artifacts: ArtifactStore) -> dict:
         seen_ids.add(document_id)
         if record["role"] not in {"main", "attachment", "clarification", "amendment"}:
             record["issues"].append(issue("invalid_document_role", document_id))
-        if not record["version"]:
+        if not record["document_version"]:
             record["issues"].append(issue("missing_document_version", document_id))
         path = Path(entry.get("path", ""))
         record["file_name"] = entry.get("file_name") or entry.get("filename") or path.name or document_id
@@ -70,5 +72,20 @@ def register_manifest(manifest: dict, artifacts: ArtifactStore) -> dict:
             issues.append(issue("missing_expected_document", str(expected)))
     if not documents:
         issues.append(issue("empty_document_set"))
+    reviews = manifest.get("image_dispositions", [])
+    if not isinstance(reviews, list) or any(
+        not isinstance(review, dict) or not isinstance(review.get("reviewed_positions"), list)
+        or not review["reviewed_positions"]
+        or any(not isinstance(position, dict) for position in review["reviewed_positions"])
+        for review in reviews
+    ):
+        issues.append(issue("invalid_image_dispositions"))
+        reviews = []
+    reviews = deepcopy(reviews)
+    try:
+        canonical_image_keys(reviews)
+    except ValueError:
+        issues.append(issue("invalid_image_dispositions"))
+        reviews = []
     return {"schema_version": 1, "documents": documents,
-            "issues": _unique(issues)}
+            "issues": _unique(issues), **({"image_dispositions": reviews} if reviews else {})}

@@ -12,9 +12,9 @@ from docreader.workflow.graph import build_graph
 from docreader.workflow.persistence import FencedPostgresSaver
 
 
-async def execute_command(run_id, command_id, version, settings, node_factory):
+async def execute_command(run_id, command_id, source_version, settings, node_factory):
     store = Store(settings.dsn)
-    lease = await store.acquire(run_id, command_id, version, lease_seconds=settings.lease_seconds)
+    lease = await store.acquire(run_id, command_id, source_version, lease_seconds=settings.lease_seconds)
     if lease is None:
         return  # A completed, obsolete, or concurrently owned delivery is harmless.
     nodes = None
@@ -27,8 +27,10 @@ async def execute_command(run_id, command_id, version, settings, node_factory):
         ) as conn:
             saver = FencedPostgresSaver(conn, store, lease)
             nodes = node_factory(store, artifacts, lease)
+            if hasattr(nodes, "prepare"):
+                await nodes.prepare()
             graph = build_graph(nodes, saver)
-            config = {"configurable": {"thread_id": f"{run_id}:{version}"}}
+            config = {"configurable": {"thread_id": f"{run_id}:{source_version}:{lease.domain_revision}"}}
             previous = await graph.aget_state(config)
             cmd = await store.get_command(command_id)
             if cmd["kind"] == "resume" and any(task.interrupts for task in previous.tasks):
@@ -36,7 +38,8 @@ async def execute_command(run_id, command_id, version, settings, node_factory):
             elif previous.values:
                 value = None
             else:
-                value = {"run_id": run_id, "version": version, "status": "running"}
+                value = {"run_id": run_id, "source_version": source_version,
+                         "domain_revision": lease.domain_revision, "status": "running"}
             # sync durability ensures interrupt and node states finish saving before receipt.
             await graph.ainvoke(value, config, durability="sync")
             final = await graph.aget_state(config)

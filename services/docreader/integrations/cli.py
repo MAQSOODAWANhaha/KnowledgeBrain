@@ -27,8 +27,25 @@ def parse_args():
         command.add_argument("run_id")
     command = commands.add_parser("confirm")
     command.add_argument("run_id")
-    command.add_argument("--version", required=True, type=int)
+    command.add_argument("--source-version", required=True, type=int)
+    command.add_argument("--domain-revision", required=True, type=int)
     command.add_argument("--digest", required=True)
+    command.add_argument("--request-key", required=True)
+    command = commands.add_parser("correct")
+    command.add_argument("run_id")
+    command.add_argument("requirements", type=Path, help="JSON containing the complete inline packs extraction list")
+    command.add_argument("--source-version", required=True, type=int)
+    command.add_argument("--expected-revision", required=True, type=int)
+    command.add_argument("--base-requirements-digest", required=True)
+    command.add_argument("--reason", required=True)
+    command.add_argument("--request-key", required=True)
+    command = commands.add_parser("review-scope")
+    command.add_argument("run_id")
+    command.add_argument("decisions", type=Path, help="JSON with evidence-backed scope_decisions")
+    command.add_argument("--source-version", required=True, type=int)
+    command.add_argument("--expected-revision", required=True, type=int)
+    command.add_argument("--base-plan-digest", required=True)
+    command.add_argument("--reason", required=True)
     command.add_argument("--request-key", required=True)
     commands.add_parser("dispatch")
     return parser.parse_args()
@@ -56,7 +73,8 @@ async def run(args):
             row = await store.submit(ref, args.request_key)
         else:
             row = await store.revise(args.run_id, ref, args.request_key)
-        return {"run_id": row["run_id"], "version": row["current_version"],
+        return {"run_id": row["run_id"], "source_version": row.get("submitted_source_version", row["source_version"]),
+                "domain_revision": row.get("submitted_domain_revision", row["domain_revision"]),
                 "status": row["status"], "issues": registered.get("issues", [])}
     if args.command == "status":
         row = await store.get_run(args.run_id)
@@ -70,14 +88,110 @@ async def run(args):
         row = await store.cancel(args.run_id)
         return {"run_id": row["run_id"], "status": row["status"]}
     if args.command == "confirm":
-        row = await store.confirm(args.run_id, args.version, args.digest, args.request_key)
+        row = await store.confirm(
+            args.run_id, args.source_version, args.digest, args.request_key, domain_revision=args.domain_revision,
+        )
         return {"command_id": row["command_id"], "status": row["status"]}
+    if args.command == "correct":
+        corrected = json.loads(args.requirements.read_text())
+        row = await store.get_run(args.run_id)
+        ref = await asyncio.to_thread(
+            _correction_ref, artifacts, row, args.source_version, args.expected_revision,
+            args.base_requirements_digest, corrected,
+        )
+        result = await store.correct(
+            args.run_id, args.source_version, args.expected_revision, args.base_requirements_digest,
+            ref, args.request_key, args.reason,
+        )
+        return {"run_id": args.run_id, "source_version": result["submitted_source_version"],
+                "domain_revision": result["submitted_domain_revision"], "status": result["status"]}
     if args.command == "dispatch":
         from docreader.jobs.dispatcher import dispatch_once
         from docreader.jobs.tasks import tender_command
 
         count = await dispatch_once(store, tender_command.send, redeliver_seconds=settings.redeliver_seconds)
         return {"published": count}
+    if args.command == "review-scope":
+        row = await store.get_run(args.run_id)
+        ref = await asyncio.to_thread(
+            _scope_review_ref, artifacts, row, args.source_version, args.expected_revision,
+            args.base_plan_digest, json.loads(args.decisions.read_text()),
+        )
+        result = await store.review_scope(
+            args.run_id, args.source_version, args.expected_revision, args.base_plan_digest,
+            ref, args.request_key, args.reason,
+        )
+        return {"run_id": args.run_id, "source_version": result["submitted_source_version"],
+                "domain_revision": result["submitted_domain_revision"], "status": result["status"]}
+
+
+def _correction_ref(artifacts, run, source_version, revision, base_digest, corrected):
+    """Rebuild only requirements; all evidence identities come from frozen files."""
+    from docreader.tender.requirements import validate_correction
+    from docreader.tender.evidence import EvidenceRepository
+
+    if not isinstance(corrected, dict) or set(corrected) != {"packs"} or not isinstance(corrected["packs"], list):
+        raise ValueError("correction must contain a complete packs list")
+    # Include immutable history so a lost CLI response can replay its request key.
+    receipts = [*run["artifacts"], *run["history"]["artifacts"]]
+    base = next((item for item in receipts if item["source_version"] == source_version and item["domain_revision"] == revision
+                 and item["stage"] == "extract" and not item["scope"]), None)
+    frozen = next((item for item in receipts if item["source_version"] == source_version and item["domain_revision"] == revision
+                   and item["stage"] == "pack-plan" and not item["scope"]), None)
+    if not base or not frozen or base["artifact_ref"]["sha256"] != base_digest:
+        raise ValueError("correction baseline does not identify frozen extracted requirements")
+    index = artifacts.read_json(base["artifact_ref"])
+    source_index = artifacts.read_json(frozen["artifact_ref"])
+    expected = {item["pack_id"] for item in index["packs"]}
+    sources = {item["pack_id"]: item["artifact_ref"] for item in source_index["packs"]}
+    by_id = {}
+    for item in corrected["packs"]:
+        if not isinstance(item, dict) or not isinstance(item.get("pack_id"), str) or item["pack_id"] in by_id:
+            raise ValueError("correction pack identities must be unique")
+        by_id[item["pack_id"]] = item
+    if set(by_id) != expected or expected != set(sources):
+        raise ValueError("correction must cover exactly every frozen extraction pack")
+    output = []
+    repository = EvidenceRepository(artifacts)
+    # Baseline order makes request replay content addressing independent of JSON list order.
+    for entry in index["packs"]:
+        pack_id = entry["pack_id"]
+        pack = repository.load_pack(sources[pack_id])
+        result = validate_correction(pack, {key: value for key, value in by_id[pack_id].items() if key != "pack_id"})
+        output.append({"pack_id": pack_id, "artifact_ref": artifacts.put_json(result)})
+    return artifacts.put_json({"packs": output, "counts": {"packs": len(output)}})
+
+
+def _scope_review_ref(artifacts, run, source_version, domain_revision, base_plan_digest, submitted):
+    """Validate only the requested scope cases, retaining prior immutable decisions."""
+    from docreader.tender.evidence import EvidenceRepository
+    from docreader.tender.evidence.scope import validate_scope_decisions
+
+    if not isinstance(submitted, dict) or set(submitted) != {"scope_decisions"}:
+        raise ValueError("review must contain scope_decisions")
+    receipts = [*run["artifacts"], *run["history"]["artifacts"]]
+    frozen = next((item for item in receipts if item["source_version"] == source_version
+                   and item["domain_revision"] == 0 and item["stage"] == "freeze" and not item["scope"]), None)
+    plan = next((item for item in receipts if item["source_version"] == source_version
+                 and item["domain_revision"] == domain_revision and item["stage"] == "pack-plan" and not item["scope"]), None)
+    if not frozen or not plan or plan["metadata"].get("plan_digest") != base_plan_digest:
+        raise ValueError("scope review baseline does not identify this immutable plan")
+    revision = next((item for item in [run["revision"], *run["history"]["revisions"]]
+                     if item["source_version"] == source_version and item["domain_revision"] == domain_revision), None)
+    if not revision:
+        raise ValueError("scope review revision is absent")
+    validated = validate_scope_decisions(
+        artifacts.read_json(frozen["artifact_ref"]), artifacts.read_json(plan["artifact_ref"]),
+        submitted["scope_decisions"], EvidenceRepository(artifacts),
+    )
+    existing = (artifacts.read_json(revision["scope_decisions_ref"])["scope_decisions"]
+                if revision["scope_decisions_ref"] else [])
+    decisions = {item["range_id"]: item for item in existing}
+    for item in validated["scope_decisions"]:
+        if item["range_id"] in decisions and decisions[item["range_id"]] != item:
+            raise ValueError("scope review cannot silently replace a prior decision")
+        decisions[item["range_id"]] = item
+    return artifacts.put_json({"schema_version": 1, "scope_decisions": [decisions[key] for key in sorted(decisions)]})
 
 
 def _json(value):

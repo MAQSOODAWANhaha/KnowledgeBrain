@@ -2,30 +2,14 @@
 from __future__ import annotations
 
 import hashlib
-import re
-from bisect import bisect_left
 from collections import defaultdict
 
-_CONDITION = re.compile(r"适用|适用于|除非|仅限|如果|如属|条件|联合体|except|unless|applicab|provided that", re.I)
+from docreader.tender.evidence.context import condition_context, pending_scope_metadata, section_ancestors
 
 
-def _id(document_id: str, version: str, unit_id: str, suffix: str) -> str:
-    identity = f"{document_id}\0{version}\0{unit_id}\0{suffix}"
+def _id(document_id: str, document_version: str, unit_id: str, suffix: str) -> str:
+    identity = f"{document_id}\0{document_version}\0{unit_id}\0{suffix}"
     return "range-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
-
-
-def _pieces(text: str, maximum: int):
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + maximum)
-        if end < len(text):
-            boundary = text.rfind("\n", start + maximum // 2, end)
-            if boundary > start:
-                end = boundary + 1
-        yield start, end, text[start:end]
-        start = end
-    if not text:
-        yield 0, 0, ""
 
 
 def _row_text(cells: list[dict], column_count: int) -> str:
@@ -33,7 +17,7 @@ def _row_text(cells: list[dict], column_count: int) -> str:
     return " | ".join(values.get(column, "") for column in range(column_count))
 
 
-def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
+def source_ranges(document: dict, raw: dict) -> list[dict]:
     """Rows cover table grids once; duplicated XLSX table/row carriers stay raw."""
     identities = {entry["unit_id"]: entry for entry in raw["source_contract"].get("units", [])}
     ranges = []
@@ -41,6 +25,19 @@ def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
     tables_by_row = defaultdict(list)
     table_rows = {}
     merged_rows = {}
+    grid_values = {(unit["unit_id"], cell["row"], cell["column"]): cell["text"]
+                   for unit in raw["units"] if unit.get("grid") for cell in unit["grid"]["cells"]}
+
+    def located_cells(locator):
+        if "cell_refs" not in locator:
+            return locator.get("cells", [])
+        result = []
+        for key in locator["cell_refs"]:
+            cell = raw["spreadsheet_cells"][key]
+            ref = cell.get("grid_cell_ref")
+            text = grid_values[(ref["unit_id"], ref["row"], ref["column"])] if ref and "text" in cell.get("grid_value_fields", []) else cell.get("text", "")
+            result.append({**cell, "text": text})
+        return result
     for unit in raw["units"]:
         if unit.get("grid"):
             rows = defaultdict(list)
@@ -49,7 +46,7 @@ def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
                 rows[cell["row"]].append(cell)
                 if cell["text"].strip():
                     covered.update(range(cell["row"] + 1, cell["row"] + cell["row_span"]))
-            table_rows[unit["key"]], merged_rows[unit["key"]] = rows, covered
+            table_rows[unit["unit_id"]], merged_rows[unit["unit_id"]] = rows, covered
         loc = unit["locator"]
         if loc["locator_kind"] == "spreadsheet":
             sheet = loc["sheet_ordinal"]
@@ -59,22 +56,43 @@ def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
                     tables_by_row[(sheet, row)].append(unit)
 
     def append(unit, text, suffix="text", **extra):
-        identity = identities.get(unit["key"], {})
-        for start, end, part in _pieces(text, maximum):
-            record = {
-                "range_id": _id(document["document_id"], document["version"], unit["key"],
-                                f"{document['original_ref']['sha256']}:{suffix}:{start}:{end}"),
-                "document_id": document["document_id"], "document_version": document["version"],
-                "unit_id": unit["key"], "kind": unit["kind"], "text": part,
-                "start": start, "end": end, "locator": unit["locator"],
+        identity = identities.get(unit["unit_id"], {})
+        record = {
+                "range_id": _id(document["document_id"], document["document_version"], unit["unit_id"],
+                                f"{document['original_ref']['sha256']}:{suffix}:0:{len(text)}"),
+                "document_id": document["document_id"], "document_version": document["document_version"],
+                "unit_id": unit["unit_id"], "kind": unit["kind"], "text": text,
+                "start": 0, "end": len(text), "locator": unit["locator"],
                 "physical_locator": identity.get("physical_locator") or unit.get("physical_locator"),
                 "physical_path": unit.get("physical_path"),
                 "section_id": identity.get("section_id"), "heading_path": identity.get("heading_path", ""),
+                "parent_section_id": identity.get("parent_section_id"),
+                "text_boundaries": {"start": True, "end": True},
                 **extra,
             }
-            if len(text) > maximum:
-                record.pop("cells", None)  # full cells remain in raw; fragments retain row/column identity.
-            ranges.append(record)
+        record["source_range_id"] = record["range_id"]
+        paths = (unit.get("physical_path") or "").split(";")
+        paragraphs = text.split("\n")
+        if (unit["kind"] == "section" and paths
+                and all(path.startswith("/word/document.xml/body/*[") for path in paths)
+                and len(paths) == len(paragraphs)):
+            offset, breaks = 0, []
+            for paragraph in paragraphs[:-1]:
+                offset += len(paragraph)
+                breaks.append(offset)
+                offset += 1
+            record["paragraph_breaks"] = breaks
+        if "cells" in record:
+            offset, intervals = 0, []
+            by_column = {cell["column"]: cell for cell in record["cells"]}
+            width = max(by_column, default=-1) + 1
+            for column in range(width):
+                value = by_column.get(column, {}).get("text", "")
+                if column in by_column:
+                    intervals.append({**by_column[column], "start": offset, "end": offset + len(value)})
+                offset += len(value) + 3
+            record["cell_intervals"] = intervals
+        ranges.append(record)
 
     # Preserve the full rectangular row width (including partially blank fields).
     emitted_sheet_rows = set()
@@ -94,29 +112,31 @@ def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
                 # A worksheet can have several tables side-by-side. Use all row cells
                 # plus each table's full extent, not only the first matching table.
                 tables = tables_by_row[(sheet, row)]
-                raw_cells = {cell["column"] - 1: {"column": cell["column"] - 1, "text": cell["text"],
+                raw_cells = {cell["column"] - 1: {"column": cell["column"] - 1, "text": cell.get("text", ""),
                                                 "row_span": 1, "col_span": 1}
-                             for cell in loc.get("cells", [])}
+                             for cell in located_cells(loc)}
                 width = max(raw_cells, default=0) + 1
                 for table in tables:
                     region = table["locator"]["region"]
                     width = max(width, region["end_column"])
-                    for cell in table_rows[table["key"]][row - region["start_row"]]:
+                    for cell in table_rows[table["unit_id"]][row - region["start_row"]]:
                         column = cell["column"] + region["start_column"] - 1
                         raw_cells[column] = {**cell, "column": column}
                 cells = list(raw_cells.values())
                 text = _row_text(cells, width)
-                empty = not any(cell["text"].strip() or cell.get("row_span", 1) > 1 for cell in cells)
+                merged_cover = any(row - item["locator"]["region"]["start_row"] in merged_rows[item["unit_id"]]
+                                   for item in tables)
+                empty = not merged_cover and not any(cell["text"].strip() or cell.get("row_span", 1) > 1 for cell in cells)
                 table = tables[0] if tables else None
                 header_rows = {cell["row"] for cell in table.get("header_cells", [])} if table else set()
-                header_tables = [item["key"] for item in tables
+                header_tables = [item["unit_id"] for item in tables
                                  if row - item["locator"]["region"]["start_row"] in
                                  {cell["row"] for cell in item.get("header_cells", [])}]
-                leading_tables = [item["key"] for item in tables if row == item["locator"]["region"]["start_row"]]
+                leading_tables = [item["unit_id"] for item in tables if row == item["locator"]["region"]["start_row"]]
                 append(unit, "" if empty else text, text_basis="spreadsheet_row", cells=cells,
                        row_start=row, row_end=row + 1, empty=empty,
-                       table_id=table["key"] if table else f"sheet:{sheet}",
-                       table_ids=[item["key"] for item in tables],
+                       table_id=table["unit_id"] if table else f"sheet:{sheet}",
+                       table_ids=[item["unit_id"] for item in tables],
                        header_table_ids=header_tables, leading_table_ids=leading_tables,
                        header=bool(table and row - table["locator"]["region"]["start_row"] in header_rows),
                        leading_row=bool(table and row == table["locator"]["region"]["start_row"]),
@@ -124,20 +144,23 @@ def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
                 continue
         if grid:
             header_rows = {cell["row"] for cell in unit.get("header_cells", [])}
-            by_row = table_rows[unit["key"]]
+            by_row = table_rows[unit["unit_id"]]
             for row in range(grid["row_count"]):
                 cells = by_row[row]
                 # A vertically merged nonempty cell semantically covers each spanned row.
-                merged_cover = row in merged_rows[unit["key"]]
+                merged_cover = row in merged_rows[unit["unit_id"]]
                 empty = not merged_cover and not any(cell["text"].strip() for cell in cells)
                 append(unit, "" if empty else _row_text(cells, grid["column_count"]), suffix=f"row:{row}",
                        text_basis="grid_row", row_start=row, row_end=row + 1, cells=cells,
-                       table_id=unit["key"], header=row in header_rows, leading_row=row == 0,
+                       table_id=unit["unit_id"], header=row in header_rows, leading_row=row == 0,
                        empty=empty, non_requirement_reason="empty_table_row" if empty else None)
         elif unit["kind"] == "image_region":
-            ocr = raw.get("ocr", {}).get(unit["key"], {})
-            append(unit, ocr.get("text", ""), text_basis="literal_ocr", image_ref=raw["images"].get(unit["locator"]["original_ref"]),
-                   ocr_status=ocr.get("status", "unresolved"), image_anchor=raw.get("image_anchors", {}).get(unit["key"]))
+            ocr = raw.get("ocr", {}).get(unit["unit_id"], {})
+            disposition = ocr.get("disposition")
+            append(unit, ocr.get("text", ""), text_basis="literal_ocr", image_ref=raw["images"].get(unit["locator"]["image_key"]),
+                   ocr_status=ocr.get("status", "unresolved"), image_anchor=raw.get("image_anchors", {}).get(unit["unit_id"]),
+                   **({"empty": True, "non_requirement_reason": "reviewed_decorative_image", "image_disposition": disposition}
+                      if disposition else {}))
         else:
             append(unit, unit.get("text", ""))
 
@@ -150,80 +173,114 @@ def source_ranges(document: dict, raw: dict, maximum: int = 6000) -> list[dict]:
                 if (sheet, row) in emitted_sheet_rows:
                     continue
                 emitted_sheet_rows.add((sheet, row))
-                cells = table_rows[table["key"]][row - region["start_row"]]
-                merged_cover = row - region["start_row"] in merged_rows[table["key"]]
+                cells = table_rows[table["unit_id"]][row - region["start_row"]]
+                merged_cover = row - region["start_row"] in merged_rows[table["unit_id"]]
                 empty = not merged_cover and not any(cell["text"].strip() for cell in cells)
                 append(table, "" if empty else _row_text(cells, table["grid"]["column_count"]), suffix=f"row:{row}",
                        text_basis="grid_row", row_start=row, row_end=row + 1, empty=empty,
-                       cells=cells, table_id=table["key"], non_requirement_reason="empty_table_row" if empty else None)
+                       cells=cells, table_id=table["unit_id"], non_requirement_reason="empty_table_row" if empty else None)
     for page in raw["source_contract"].get("page_manifest", []):
         if page["classification"] == "blank" and not page["unit_ids"]:
             page_number = page["page_ordinal"]
-            append({"key": f"blank:page:{page_number}", "kind": "blank_page",
+            append({"unit_id": f"blank:page:{page_number}", "kind": "blank_page",
                     "locator": {"locator_kind": "page", "page_ordinal": page_number}}, "",
                    empty=True, non_requirement_reason="blank_page")
     return ranges
 
 
-def make_packs(document: dict, ranges: list[dict], maximum: int = 12000) -> list[dict]:
-    """Merge small sections and split large ones without duplicating body coverage."""
-    introductions, headers = {}, defaultdict(list)
-    conditions, condition_positions = defaultdict(list), defaultdict(list)
-    position = {entry["range_id"]: index for index, entry in enumerate(ranges)}
-    for entry in ranges:
-        path = entry.get("heading_path", "")
-        if entry["kind"] == "section" and entry["text"]:
-            introductions.setdefault(path, entry)
-        if _CONDITION.search(entry["text"]):
-            conditions[path].append(entry)
-            condition_positions[path].append(position[entry["range_id"]])
-        table_headers = set(entry.get("header_table_ids", []) + entry.get("leading_table_ids", []))
-        if entry.get("table_id") and (entry.get("header") or entry.get("leading_row")):
-            table_headers.add(entry["table_id"])
-        for table_id in table_headers:
-            headers[table_id].append(entry)
-    groups, current, size = [], [], 0
-    for entry in ranges:
-        cost = len(entry["text"]) + 200
-        if current and size + cost > maximum:
-            groups.append(current)
-            current, size = [], 0
-        current.append(entry)
-        size += cost
-    if current:
-        groups.append(current)
-    packs = []
-    for ordinal, body in enumerate(groups):
-        body_ids = {entry["range_id"] for entry in body}
-        context = {}
+class SupportingIndex:
+    """Index structural dependencies once; a candidate only visits its own ranges."""
+    def __init__(self, ranges: list[dict], scope_decisions=()):
+        self.introductions, self.conditions, self.issues, self.sections = condition_context(ranges, scope_decisions)
+        self.position = {entry["range_id"]: index for index, entry in enumerate(ranges)}
+        self.pending_by_parent = defaultdict(list)
+        self.reviewed_targets = defaultdict(list)
+        for conditions in self.conditions.values():
+            for _, candidate in conditions:
+                if candidate["scope_binding"].get("kind") == "reviewed_targets":
+                    for target in candidate["scope_binding"]["reviewed_target_range_ids"]:
+                        self.reviewed_targets[target].append(candidate)
+                elif not candidate["scope_binding"]["complete_sentence"]:
+                    self.pending_by_parent[candidate["parent_range_id"]].append(candidate)
+        self.headers, self.merged = defaultdict(list), defaultdict(list)
+        for entry in ranges:
+            tables = set(entry.get("header_table_ids", []) + entry.get("leading_table_ids", []))
+            if entry.get("table_id") and (entry.get("header") or entry.get("leading_row")):
+                tables.add(entry["table_id"])
+            for table in tables:
+                self.headers[table].append(entry)
+            for cell in entry.get("cell_intervals", []):
+                if cell.get("row_span", 1) > 1 and cell.get("text", "").strip():
+                    self.merged[entry.get("table_id")].append((entry, cell))
+        self._ancestors = {entry["range_id"]: section_ancestors(entry, self.sections) for entry in ranges}
+
+    @staticmethod
+    def _uncovered(candidate: dict, occupied: list[dict]) -> list[dict]:
+        from docreader.tender.evidence.references import fragment
+        source = candidate.get("source_range_id", candidate.get("parent_range_id", candidate["range_id"]))
+        cursor = candidate["start"]
+        missing = []
+        for entry in sorted((entry for entry in occupied if entry["source_range_id"] == source), key=lambda entry: entry["start"]):
+            if entry["start"] >= candidate["end"]:
+                break
+            if entry["start"] > cursor:
+                missing.append((cursor, entry["start"]))
+            cursor = max(cursor, entry["end"])
+        if cursor < candidate["end"]:
+            missing.append((cursor, candidate["end"]))
+        return [candidate if (start, end) == (candidate["start"], candidate["end"]) else fragment(candidate, start, end)
+                for start, end in missing]
+
+    def select(self, body: list[dict]) -> tuple[list, list, list, list]:
+        context, pending, problems = {}, {}, {}
+
+        def bind(candidate, entry):
+            incomplete = not candidate["scope_binding"]["complete_sentence"] and candidate["scope_binding"].get("kind") != "reviewed_targets"
+            target = pending if incomplete else context
+            key = candidate["range_id"]
+            if key not in target:
+                value = pending_scope_metadata(candidate) if incomplete else {**candidate, "reason": "condition"}
+                target[key] = {**value, "scope_binding": {**candidate["scope_binding"], "applies_to_range_ids": []}}
+            targets = target[key]["scope_binding"]["applies_to_range_ids"]
+            if entry["range_id"] not in targets:
+                targets.append(entry["range_id"])
+
         for entry in body:
-            heading = entry.get("heading_path", "")
-            paths = [heading]
-            while " > " in heading:
-                heading = heading.rsplit(" > ", 1)[0]
-                paths.append(heading)
-            for path in paths:
-                introduction = introductions.get(path)
-                if introduction and position[introduction["range_id"]] < position[entry["range_id"]]:
-                    context[introduction["range_id"]] = {**introduction, "reason": "introduction"}
-                condition_index = bisect_left(condition_positions[path], position[entry["range_id"]]) - 1
-                if condition_index >= 0:
-                    candidate = conditions[path][condition_index]
-                    context[candidate["range_id"]] = {**candidate, "reason": "condition"}
+            original = entry["source_range_id"]
+            for problem in self.issues[original]:
+                problems[problem["range_id"]] = problem
+            for candidate in self.pending_by_parent[original]:
+                bind(candidate, entry)
+            for candidate in self.reviewed_targets[original]:
+                bind(candidate, entry)
+            for section_id in self._ancestors[original]:
+                introduction = self.introductions.get(section_id)
+                if introduction and self.position[introduction["parent_range_id"]] <= self.position[original]:
+                    context.setdefault(introduction["range_id"], {**introduction, "reason": "introduction"})
+                for position, candidate in self.conditions[section_id]:
+                    if candidate["scope_binding"].get("kind") == "reviewed_targets":
+                        continue  # Explicit decisions bind only their canonical target IDs.
+                    if position > self.position[original]:
+                        break
+                    if position == self.position[original] and candidate["end"] > entry["start"]:
+                        continue
+                    table_scope = candidate["scope_binding"]["table_ids"]
+                    if table_scope and not set(table_scope).intersection(entry.get("table_ids") or [entry.get("table_id")]):
+                        continue
+                    bind(candidate, entry)
             for table_id in entry.get("table_ids") or [entry.get("table_id")]:
-                for candidate in headers.get(table_id, []):
-                    context[candidate["range_id"]] = {**candidate, "reason": "header"}
-        context = {key: value for key, value in context.items() if key not in body_ids}
-        pack_id = "pack-" + hashlib.sha256(
-            (f"{document['document_id']}\0{document['version']}\0{ordinal}\0" +
-             ",".join(entry["range_id"] for entry in body)).encode()).hexdigest()[:24]
-        issues = []
-        if sum(len(item["text"]) + 200 for item in body + list(context.values())) > maximum * 2:
-            issues.append({"code": "supporting_context_exceeds_pack_budget", "blocking": True,
-                           "document_id": document["document_id"], "pack_id": pack_id,
-                           "detail": "Required source context retained; reduce body grouping or review source scope."})
-        packs.append({"pack_id": pack_id, "document_id": document["document_id"],
-                      "document_version": document["version"], "body": body,
-                      "supporting": list(context.values()), "issues": issues,
-                      "compacted_blank_ranges": [entry["range_id"] for entry in body if entry.get("empty")]})
-    return packs
+                for candidate in self.headers[table_id]:
+                    context.setdefault(candidate["range_id"], {**candidate, "reason": "header"})
+                for candidate, cell in self.merged[table_id]:
+                    row = entry.get("row_start", -1)
+                    if candidate["row_start"] < row < candidate["row_start"] + cell["row_span"]:
+                        context.setdefault(candidate["range_id"], {**candidate, "reason": "merged_row"})
+        # The union of body and support still supplies every required source
+        # character, once per request. Keep bound conditions before generic
+        # introductions/headers so their target metadata remains available.
+        selected = []
+        for value in sorted(context.values(), key=lambda item: item.get("reason") != "condition"):
+            selected.extend(self._uncovered(value, [*body, *selected]))
+        bindings = [{key: value[key] for key in ("range_id", "source_range_id", "start", "end", "scope_binding")}
+                    for value in context.values() if value.get("reason") == "condition"]
+        return selected, list(pending.values()), list(problems.values()), bindings

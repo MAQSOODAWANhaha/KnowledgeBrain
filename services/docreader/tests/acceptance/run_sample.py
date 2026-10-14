@@ -49,11 +49,11 @@ async def sample(root, evidence):
     report = {
         "evidence_kind": "synthetic documents + real native parsers/PostgreSQL + deterministic test model",
         "external_model_requests": 0, "paid_model_usage": None,
-        "run_id": run["run_id"], "status": completed["status"], "version": completed["current_version"],
+        "run_id": run["run_id"], "status": completed["status"], "source_version": completed["source_version"],
         "checklist_digest": completed["checklist_digest"],
         "source_stats": results["freeze"]["stats"], "verification_counts": results["verify"]["counts"],
-        "request_counts": {task: sum(request["kind"] == task for request in completed["usage"])
-                           for task in {request["kind"] for request in completed["usage"]}},
+        "request_counts": {task: sum(request["task"] == task for request in completed["usage"])
+                           for task in {request["task"] for request in completed["usage"]}},
         "stage_receipts": completed["artifacts"], "commands": completed["commands"],
         "remaining": ["real original documents + real model semantic acceptance", "future Rust integration"],
     }

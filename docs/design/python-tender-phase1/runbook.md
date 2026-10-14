@@ -19,6 +19,8 @@ uv run --frozen python -m docreader.integrations.cli init
 从既有安全环境注入 `KNOWLEDGEBRAIN_CHAT_BASE_URL/API_KEY/MODEL/MAX_CONTEXT_TOKENS`；
 VLM 延续原配置继承规则，独立 endpoint 必须显式配置自己的 key 与 model。
 不把秘密写入 manifest、git 或命令输出。CHAT 上下文容量必须为实际服务支持值。
+本轮私有真实 PDF 验收使用父任务已明确的 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=131072`；
+它是单请求窗口，不能替代累计实际 usage，也不允许纠错自行翻倍。
 
 分别启动两个进程：
 
@@ -39,8 +41,8 @@ manifest 示例（路径相对 manifest 文件；首次提交会复制原件）�
 ```json
 {
   "documents": [
-    {"document_id": "main", "role": "main", "version": "v1", "path": "tender.docx"},
-    {"document_id": "price-form", "role": "attachment", "version": "v1", "path": "price.xlsx"}
+    {"document_id": "main", "role": "main", "document_version": "v1", "path": "tender.docx"},
+    {"document_id": "price-form", "role": "attachment", "document_version": "v1", "path": "price.xlsx"}
   ],
   "expected_document_ids": ["main", "price-form"]
 }
@@ -49,7 +51,7 @@ manifest 示例（路径相对 manifest 文件；首次提交会复制原件）�
 ```sh
 uv run --frozen python -m docreader.integrations.cli submit manifest.json --request-key submission-001
 uv run --frozen python -m docreader.integrations.cli status <run_id>
-uv run --frozen python -m docreader.integrations.cli confirm <run_id> --version 1 --domain-revision 1 --digest <checklist_digest> --request-key confirm-001
+uv run --frozen python -m docreader.integrations.cli confirm <run_id> --source-version 1 --domain-revision 1 --digest <checklist_digest> --request-key confirm-001
 uv run --frozen python -m docreader.integrations.cli cancel <run_id>
 uv run --frozen python -m docreader.integrations.cli revise <run_id> revised-manifest.json --request-key revision-002
 ```
@@ -62,9 +64,9 @@ resume 命令，完成后 status=`response-plan-ready`，实际计划在 `result
 
 ## 同来源业务纠错
 
-`source_version` 在 CLI/旧字段中仍名 `version`；`domain_revision` 独立递增。当前结果只包含
+`source_version`、单文件`document_version`和`domain_revision`分别按[字段字典](field-dictionary.md)命名，无旧字段别名。当前结果只包含
 本来源的共享冻结数据及当前修订，历史要求/确认/计划保留审计但不授权当前修订。
-从 `results.extract` 的每个 pack ref 读取并整理完整纠错 JSON：
+从 `results.extract` 的每个 pack artifact_ref 读取并整理完整纠错 JSON：
 
 ```json
 {"packs": [{"pack_id": "<existing-pack-id>", "requirements": [], "dispositions": [], "issues": []}]}
@@ -75,10 +77,24 @@ resume 命令，完成后 status=`response-plan-ready`，实际计划在 `result
 不提交 source_ranges、覆盖计数等宿主生成字段。未解决问题可保存后重新验证，但不得放行。
 
 ```sh
-uv run --frozen python -m docreader.integrations.cli correct <run_id> corrected-requirements.json --version 1 --expected-revision 1 --base-requirements-digest <extract-artifact-sha256> --reason '补漏或纠正的实际依据' --request-key correction-002
+uv run --frozen python -m docreader.integrations.cli correct <run_id> corrected-requirements.json --source-version 1 --expected-revision 1 --base-requirements-digest <extract-artifact-sha256> --reason '补漏或纠正的实际依据' --request-key correction-002
 uv run --frozen python -m docreader.integrations.cli status <run_id>
-uv run --frozen python -m docreader.integrations.cli confirm <run_id> --version 1 --domain-revision 2 --digest <new-checklist-digest> --request-key confirm-002
+uv run --frozen python -m docreader.integrations.cli confirm <run_id> --source-version 1 --domain-revision 2 --digest <new-checklist-digest> --request-key confirm-002
 ```
+
+作用域问题使用有限的独立入口，不编辑原文件或删除问题。`status`中的`results.pack-plan`
+给出当前`plan_digest`、具体未决`range_id`及来源引用。提交JSON顶层只有`scope_decisions`：
+每项包含`range_id`、`decision`（`bind`或`local_only`）、精确原文`evidence`（range_id/quote）、
+具体`rationale`和`target_range_ids`。bind目标必须为同文档完整规范范围；local_only目标为空，
+理由须说明局部边界和依据。其他未审问题继续阻断。
+
+```sh
+uv run --frozen python -m docreader.integrations.cli review-scope <run_id> scope-decisions.json --source-version 1 --expected-revision 2 --base-plan-digest <current-plan-digest> --reason '确认具体条件适用范围的依据' --request-key scope-003
+```
+
+该命令将新增领域修订，复用规范来源、重建分包支持、重新抽取和验证；已有作用域决议保留，
+旧确认失效。来源/预算变更不得复用旧分包回执。无证据、错误目标、泛称“误报”、过期基线拒绝。
+新表结构尚未发布，验收使用新的独立数据库/schema；不对旧未发布checkpoint建立迁移兼容。
 
 correct 拒绝过期基线和 cancelled run，已冻结来源保持不变。旧确认立即失效；新修订通过
 独立验证后再次等待确认。相同 request key/相同内容幂等；不能以 unchanged manifest

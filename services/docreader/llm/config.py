@@ -63,7 +63,7 @@ class ModelEndpoint:
     base_url: str
     api_key: str = field(repr=False)
     model: str
-    max_context_tokens: int | None
+    context_tokens: int | None
 
     @property
     def sdk_base_url(self) -> str:
@@ -123,4 +123,4 @@ def _vision(values: Mapping[str, str], chat: ModelEndpoint, supports_images: boo
     if uses_chat_model and not supports_images:
         raise ModelConfigurationError("OCR inheritance requires confirmed Chat image support or an independent VLM model")
     return ModelEndpoint(effective_url, key or chat.api_key, effective_model,
-                         chat.max_context_tokens if uses_chat_model else None)
+                         chat.context_tokens if uses_chat_model else None)

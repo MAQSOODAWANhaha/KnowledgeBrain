@@ -1,6 +1,7 @@
 """Real PostgreSQL contracts. Each test owns an isolated disposable schema."""
 
 import asyncio
+from dataclasses import asdict
 import os
 from uuid import uuid4
 
@@ -55,6 +56,32 @@ async def test_submission_replay_and_conflicting_idempotency_key(store):
     assert len((await store.get_run(one["run_id"]))["commands"]) == 1
     with pytest.raises(Conflict):
         await store.submit(store.test_artifacts.put_json({"documents": ["different"]}), "same")
+    changed = store.test_artifacts.put_json({"documents": ["new-source"]})
+    await store.revise(one["run_id"], changed, "new-source")
+    replay = await store.submit(ref, "same")
+    assert replay["source_version"] == 2  # Current state remains distinct from the original submission acknowledgement.
+    assert replay["submitted_source_version"] == replay["submitted_domain_revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_source_identity_is_consistent_in_sql_lease_commands_and_audit(store):
+    run, command = await submitted(store)
+    lease = await store.acquire(run["run_id"], command["command_id"], source_version=1)
+    assert asdict(lease) == {"run_id": run["run_id"], "source_version": 1, "domain_revision": 1,
+                            "epoch": 1, "command_id": command["command_id"]}
+    await store.begin_request(lease, "identity-audit", "fixture", "extract")
+    row = await store.get_run(run["run_id"])
+    for identity in (row, row["revision"], row["commands"][0], row["usage"][0]):
+        assert identity["source_version"] == identity["domain_revision"] == 1
+        assert not {"version", "current_version", "current_domain_revision"} & identity.keys()
+    assert row["usage"][0]["task"] == "extract" and "kind" not in row["usage"][0]
+    async with store.transaction() as conn:
+        legacy = await (await conn.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name LIKE 'tender_%' "
+            "AND column_name IN ('version', 'current_version', 'current_domain_revision')",
+        )).fetchall()
+    assert not legacy
 
 
 @pytest.mark.asyncio
@@ -186,12 +213,12 @@ async def test_confirm_binds_digest_is_idempotent_and_source_revision_invalidate
         await store.confirm(run_id, 1, "obsolete-checklist", "bad-confirm")
     first = await store.confirm(run_id, 1, "checklist", "confirm")
     assert first == await store.confirm(run_id, 1, "checklist", "confirm")
-    assert first["payload"] == {"version": 1, "checklist_digest": "checklist"}
+    assert first["payload"] == {"source_version": 1, "domain_revision": 1, "checklist_digest": "checklist"}
     second_ref = store.test_artifacts.put_json({"documents": ["revision"]})
     revised = await store.revise(run_id, second_ref, "revision-key")
-    assert revised["current_version"] == 2
+    assert revised["source_version"] == 2
     assert revised["checklist_digest"] is None
-    assert (await store.revise(run_id, second_ref, "revision-key"))["current_version"] == 2
+    assert (await store.revise(run_id, second_ref, "revision-key"))["source_version"] == 2
     with pytest.raises(InvalidConfirmation):
         await store.confirm(run_id, 1, "checklist", "confirm")
     assert await store.acquire(run_id, first["command_id"], 1) is None
@@ -203,7 +230,7 @@ async def test_confirm_binds_digest_is_idempotent_and_source_revision_invalidate
 async def test_cancel_is_immediate_and_sent_model_request_remains_uncertain(store):
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
-    await store.begin_request(lease, "request", "model", "chat")
+    await store.begin_request(lease, "request", "model", "extract")
     await store.finish_request("request", "sent")
     await store.cancel(run["run_id"])
     with pytest.raises(Cancelled):
@@ -213,16 +240,17 @@ async def test_cancel_is_immediate_and_sent_model_request_remains_uncertain(stor
     status = await store.get_run(run["run_id"])
     assert status["status"] == "cancelled"
     assert status["usage"][0]["status"] == "uncertain"
-    assert status["commands"][0]["receipt"] is None
+    assert status["commands"][0]["receipt"] == {"status": "cancelled", "reason": "cancel_requested"}
+    assert status["commands"][0]["completed_at"] is not None
 
 
 @pytest.mark.asyncio
 async def test_model_usage_and_recovery_preserve_actual_and_uncertain_records(store):
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
-    await store.begin_request(lease, "sent", "model", "chat", {"api_key": "must-not-persist", "input_tokens": 4})
+    await store.begin_request(lease, "sent", "model", "extract", {"api_key": "must-not-persist", "input_tokens": 4})
     await store.finish_request("sent", "sent")
-    await store.begin_request(lease, "prepared", "model", "chat")
+    await store.begin_request(lease, "prepared", "model", "extract")
     await expire(store, run["run_id"])
     replacement = await store.acquire(run["run_id"], command["command_id"], 1)
     records = {row["request_id"]: row for row in (await store.get_run(run["run_id"]))["usage"]}
@@ -231,7 +259,7 @@ async def test_model_usage_and_recovery_preserve_actual_and_uncertain_records(st
     assert records["sent"]["metadata"] == {"input_tokens": 4}
     with pytest.raises(StaleExecution):
         await store.finish_request("sent", "sent")
-    await store.begin_request(replacement, "new", "model", "chat")
+    await store.begin_request(replacement, "new", "model", "extract")
     await store.finish_request("new", "sent")
     await store.finish_request("new", "succeeded", usage={"input_tokens": 4, "output_tokens": 2})
     latest = (await store.get_run(run["run_id"]))["usage"][-1]
@@ -250,3 +278,47 @@ async def test_infrastructure_failures_have_bounded_retry_and_terminal_receipt(s
     assert result["execution_count"] == 4
     assert result["receipt"]["status"] == "failed"
     assert await store.acquire(run["run_id"], command["command_id"], 1) is None
+
+
+@pytest.mark.asyncio
+async def test_received_model_response_is_a_single_immutable_file_reference(store):
+    run, command = await submitted(store)
+    lease = await store.acquire(run["run_id"], command["command_id"], 1)
+    response = {"choices": [{"message": {"content": "synthetic response"}}]}
+    ref = store.test_artifacts.put_json(response)
+    different = store.test_artifacts.put_json({"choices": []})
+    await store.begin_request(lease, "response", "model", "extract")
+    await store.finish_request("response", "sent")
+    await store.finish_request("response", "succeeded", usage={"input_tokens": 4}, response_ref=ref)
+    await store.finish_request("response", "succeeded", response_ref=ref)
+    await store.finish_request("response", "succeeded")
+    with pytest.raises(Conflict, match="immutable response"):
+        await store.finish_request("response", "succeeded", response_ref=different)
+    row = (await store.get_run(run["run_id"]))["usage"][0]
+    assert row["response_ref"] == ref
+    assert row["usage"] == {"input_tokens": 4}
+    assert store.test_artifacts.read_json(row["response_ref"]) == response
+    assert "choices" not in row  # PostgreSQL holds the reference, not a response copy.
+
+
+@pytest.mark.asyncio
+async def test_uncertain_response_can_be_recovered_but_never_replaced(store):
+    run, command = await submitted(store)
+    lease = await store.acquire(run["run_id"], command["command_id"], 1)
+    ref = store.test_artifacts.put_json({"result": "synthetic response after transport ambiguity"})
+    await store.begin_request(lease, "uncertain-response", "model", "extract")
+    await store.finish_request("uncertain-response", "sent")
+    await store.finish_request("uncertain-response", "uncertain", error={"type": "response_lost"})
+    await store.finish_request("uncertain-response", "succeeded", response_ref=ref)
+    row = (await store.get_run(run["run_id"]))["usage"][0]
+    assert row["status"] == "succeeded" and row["response_ref"] == ref
+    # An already terminal result can acquire a previously missing audit pointer.
+    await store.begin_request(lease, "late-audit", "model", "verify")
+    await store.finish_request("late-audit", "sent")
+    await store.finish_request("late-audit", "failed")
+    await store.finish_request("late-audit", "failed", response_ref=ref)
+    with pytest.raises(Conflict):
+        await store.finish_request("late-audit", "succeeded", response_ref=ref)
+    records = {item["request_id"]: item for item in (await store.get_run(run["run_id"]))["usage"]}
+    assert records["late-audit"]["status"] == "failed"
+    assert records["late-audit"]["response_ref"] == ref
