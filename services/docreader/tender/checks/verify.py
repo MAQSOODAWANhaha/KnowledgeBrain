@@ -113,17 +113,26 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
     sources = {source["range_id"]: source for source in [*pack["supporting"], *pack["body"]]}
     body_ids = {source["range_id"] for source in pack["body"]}
     host_reviewed = host_reviewed_ranges(pack)
-    model_source_ids = sources.keys() - host_reviewed
+    payload = verify_payload(pack, extraction)
+    model_source_ids = ({source["range_id"] for source in [*payload["body"], *payload["supporting"],
+                                                         *payload.get("source_aliases", [])]}
+                        | {range_id for table in payload.get("blank_table_templates", [])
+                           for row in table["rows"] for range_id in row["range_ids"]})
     findings = []
     if pack.get("pending_scope_context"):
         findings.append(issue("scope_context_pending", "Scope context has only pending locator metadata; do not claim it was independently reviewed or resolved."))
     for requirement in extraction["requirements"]:
         findings.extend(check_requirement(requirement, sources, body_ids))
     try:
-        payload = verify_payload(pack, extraction)
         if pack.get("planning_details", {}).get("budget", {}).get("fits") is False:
             raise ModelBudgetError("indivisible verification input exceeds budget")
-        if model_source_ids:
+        from docreader.tender.evidence.downstream import DEPENDENCY_ISSUES
+
+        dependency_issues = [item for item in pack.get("issues", []) if item["code"] in DEPENDENCY_ISSUES]
+        if dependency_issues:
+            response = {"reviewed_range_ids": [], "findings": []}
+            findings.extend(dependency_issues)
+        elif model_source_ids:
             response = await model.call("verify", payload)
         else:
             response = {"reviewed_range_ids": [], "findings": []}
@@ -137,13 +146,13 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
         reviewed = []
         findings.append(issue("verification_semantic_failure", f"Independent review contract rejected ({type(exc).__name__})."))
     reviewed_counts = Counter(reviewed)
-    for range_id in sources:
-        if range_id not in host_reviewed and reviewed_counts[range_id] != 1:
+    for range_id in model_source_ids:
+        if reviewed_counts[range_id] != 1:
             findings.append(issue("source_not_independently_reviewed", "Independent review must read each body and supporting range exactly once.", range_id))
     for range_id in reviewed_counts.keys() - model_source_ids:
         findings.append(issue("unknown_review_range", "Independent review refers to a range outside the supplied source view.", range_id))
     for finding in findings:
-        if finding.get("range_id") and finding["range_id"] not in sources:
+        if finding.get("range_id") and finding["range_id"] not in sources.keys() | model_source_ids:
             finding["blocking"] = True
     return {
         "pack_id": pack["pack_id"], "reviewed_range_ids": reviewed, "findings": findings,

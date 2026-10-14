@@ -186,9 +186,9 @@ def verify_all(index: dict, extractions: list[dict], verifications: list[dict],
         for pack in verification_packs:
             issues.extend(copy.deepcopy(pack["issues"]))
         if (Counter(item["range_id"] for pack in verification_packs for item in pack["body"]) != Counter(body_ids)
-                or Counter(range_id for pack in verification_packs for range_id in pack["disposition_range_ids"]) != Counter(body_ids)):
+                or Counter(ref["range_id"] for pack in verification_packs for ref in pack["disposition_refs"]) != Counter(body_ids)):
             issues.append(issue("verification_coverage_mismatch", "Verification selectors must audit every original source disposition exactly once."))
-        if Counter(r for pack in verification_packs for r in pack["requirement_ids"]) != Counter(r["requirement_id"] for r in requirements):
+        if Counter(ref["requirement_id"] for pack in verification_packs for ref in pack["requirement_refs"]) != Counter(r["requirement_id"] for r in requirements):
             issues.append(issue("verification_requirement_mismatch", "Verification selectors must preserve every complete original requirement exactly once."))
     if any(count != 1 for count in Counter(extraction_ids).values()):
         issues.append(issue("duplicate_extraction_pack", "A frozen pack was counted more than once."))

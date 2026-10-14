@@ -155,6 +155,29 @@ def source_view(pack: dict) -> dict:
     body_ids = {source["range_id"] for source in pack["body"]}
     supporting = [source for source in pack["supporting"]
                   if source["range_id"] not in host | body_ids]
+    # Replanning can put a previously cited excerpt beside its full body range.
+    # Keep the cited identity as a text-free alias of the exact supplied union.
+    from docreader.tender.evidence.packing import SupportingIndex
+
+    selected, aliases = [], []
+    for source in supporting:
+        if "source_range_id" not in source or any("source_range_id" not in item for item in body):
+            selected.append(source)
+            continue
+        pieces = SupportingIndex._uncovered(source, [*body, *selected])
+        selected.extend(pieces)
+        if len(pieces) == 1 and pieces[0]["range_id"] == source["range_id"]:
+            continue
+        segments = []
+        for item in sorted([*body, *selected], key=lambda item: item.get("start", 0)):
+            if item.get("source_range_id") != source["source_range_id"]:
+                continue
+            start, end = max(item["start"], source["start"]), min(item["end"], source["end"])
+            if start < end or (source["start"] == source["end"] and start == end):
+                segments.append({"range_id": item["range_id"], "start": start, "end": end})
+        if segments:
+            aliases.append({"range_id": source["range_id"], "segments": segments})
+    supporting = selected
     pending = pack.get("pending_scope_context", [])
     sections = {}
     for source in [*pack["body"], *pack["supporting"], *pending,
@@ -172,6 +195,8 @@ def source_view(pack: dict) -> dict:
         result["sections"] = list(sections.values())
     if templates:
         result["blank_table_templates"] = _templates(templates)
+    if aliases:
+        result["source_aliases"] = aliases
     for source in pending:
         result["pending_scope_context"].append({
             **_fields(source, ("range_id", "source_range_id", "parent_range_id", "start", "end", "reason", "section_id")),

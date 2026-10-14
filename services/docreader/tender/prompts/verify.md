@@ -20,6 +20,11 @@ Blank does not imply no obligation or not applicable. If its meaning is uncertai
 that uncertainty. Include a template row ID in `reviewed_range_ids` only after this review.
 Previously reviewed decorations and proven blank pages are excluded and handled by the host.
 
+`source_aliases` preserves a previously cited range ID whose text is already supplied.
+Each alias lists `segments` pointing to supplied range IDs and exact canonical Unicode
+start/end offsets. Read that union as the alias source; do not invent text. Include each
+alias ID and each supplied segment range ID in `reviewed_range_ids` exactly once.
+
 Respect `scope_bindings[].scope_binding.applies_to_range_ids` and supporting bindings.
 Read each complete condition interval in the body/supporting union and check its explicit
 targets without widening them. These text-free bindings are not additional reviewed ranges.

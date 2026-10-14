@@ -110,6 +110,10 @@ domain_revision增加也不能自动开启双倍。未知tokenizer的UTF8上界�
 `source_aliases`把旧ID映射到本请求已发送的精确字符区间，不重写要求或再发送相同正文。
 验证逐个核查别名及其实际片段，别名无text。响应计划的显式来源范围引用附带必要的
 `source_context`（共享SourceView及完整条件）；纯要求身份依赖直接携带完整关联义务。
+显式来源引用的依赖关联按同一canonical来源的实际字符区间相交判断，不能只比较旧support、
+完整范围或fragment的不同ID；仅相邻但不相交的片段不因此绑定。
+范围引用同样检查其所依赖的义务是否已失效；不能用原文引用绕过适用性决议。某引用同时
+匹配要求和来源身份时按歧义阻断。仅作为共享support的条件不是另一义务的body归属。
 
 HTTP压缩/解码失败发生在发送以后，不能因为不是合法模型JSON就证明服务未执行。
 `httpx.DecodingError`必须保留已收到的部分审计及未知usage，标为`uncertain`并禁止同digest

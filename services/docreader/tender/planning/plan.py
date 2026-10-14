@@ -40,14 +40,15 @@ def _item_issues(item: dict, requirement: dict, binding: dict) -> list[dict]:
     return issues
 
 
-def plan_payload(requirements: list[dict]) -> dict:
+def plan_payload(requirements: list[dict], source_context: dict | None = None) -> dict:
     applicable = [requirement for requirement in requirements if requirement["applicable"]]
-    return {"requirements": applicable, "constraint_bindings": {
+    return {"requirements": applicable, **({"source_context": source_context} if source_context else {}), "constraint_bindings": {
         requirement["requirement_id"]: {"constraint_digest": constraint_binding(requirement)["constraint_digest"]}
         for requirement in applicable}}
 
 
-async def build_plan(requirements: list[dict], model: Model, requirement_refs: dict | None = None) -> dict:
+async def build_plan(requirements: list[dict], model: Model, requirement_refs: dict | None = None,
+                     source_context: dict | None = None) -> dict:
     applicable = {requirement["requirement_id"]: requirement for requirement in requirements if requirement["applicable"]}
     issues = []
     if len(applicable) != sum(requirement["applicable"] for requirement in requirements):
@@ -56,7 +57,7 @@ async def build_plan(requirements: list[dict], model: Model, requirement_refs: d
         return {"items": [], "issues": issues, "blocking": bool(issues)}
     bindings = {requirement_id: constraint_binding(requirement) for requirement_id, requirement in applicable.items()}
     try:
-        plan = Plan.model_validate(await model.call("plan", plan_payload(list(applicable.values())))).model_dump()
+        plan = Plan.model_validate(await model.call("plan", plan_payload(list(applicable.values()), source_context))).model_dump()
     except ModelBudgetError:
         return {"items": [], "issues": [*issues, issue("plan_budget_exceeded", "Complete indivisible response-plan input exceeds admission limits.")], "blocking": True}
     except (ModelSemanticError, ValidationError) as exc:

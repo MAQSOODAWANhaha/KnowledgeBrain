@@ -228,7 +228,7 @@ class TenderNodes:
 
     async def verify(self, state):
         async def produce():
-            from docreader.tender.evidence.downstream import plan_downstream, select_extraction
+            from docreader.tender.evidence.downstream import PLANNER_VERSION, plan_downstream, select_extraction
 
             index = await self._read(state["pack_plan_ref"])
             extraction_index = await self._read(state["requirements_ref"])
@@ -243,16 +243,20 @@ class TenderNodes:
             plan_ref = await self._save("verify-plan", replan, is_ref=True, inputs={
                 "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": state["requirements_ref"],
                 "request_budget": self._request_budget().spec(),
+                "planner_version": PLANNER_VERSION,
             })
             verification_index = await self._read(plan_ref)
             async def check(pack):
-                extraction = by_ref[pack["requirements_ref"]["sha256"]]
-                return await verify_pack(pack, select_extraction(pack, extraction), self)
+                return await verify_pack(pack, select_extraction(pack, by_ref), self)
 
             results = await self._packs(verification_index, "verify-pack", check)
             verifications = [await self._read(item["artifact_ref"]) for item in results]
             verification_packs = [await self._read(item["artifact_ref"]) for item in verification_index["packs"]]
             summary = verify_all(index, list(extractions.values()), verifications, verification_packs=verification_packs)
+            summary["issues"] = list({json.dumps(item, sort_keys=True): item
+                                      for item in [*summary["issues"], *verification_index["issues"]]}.values())
+            summary["counts"]["blocking_issues"] = sum(item.get("blocking", True) for item in summary["issues"])
+            summary["blocking"] = bool(summary["counts"]["blocking_issues"])
             summary["pack_results"] = results
             summary["pack_plan_ref"] = plan_ref
             summary["requirements_ref"] = state["requirements_ref"]
@@ -290,7 +294,8 @@ class TenderNodes:
     async def plan(self, state):
         async def produce():
             from docreader.tender.checks import apply_applicability_decisions
-            from docreader.tender.evidence.downstream import plan_downstream
+            from docreader.tender.evidence.downstream import DEPENDENCY_ISSUES, PLANNER_VERSION, plan_downstream, select_extraction
+            from docreader.tender.evidence.view import source_view
             from docreader.tender.schema import issue
 
             checked = await self._read(state["verification_ref"])
@@ -301,6 +306,7 @@ class TenderNodes:
             plan_ref = await self._save("response-pack-plan", replan, is_ref=True, inputs={
                 "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": checked["requirements_ref"],
                 "verification_ref": state["verification_ref"], "request_budget": self._request_budget().spec(),
+                "planner_version": PLANNER_VERSION,
             })
             response_index = await self._read(plan_ref)
             extraction_index = await self._read(checked["requirements_ref"])
@@ -309,19 +315,18 @@ class TenderNodes:
 
             async def group(entry):
                 async with self.semaphore:
-                    descriptor = await self._read(entry["artifact_ref"])
-                    extraction = extractions[descriptor["requirements_ref"]["sha256"]]
-                    selected = set(descriptor["requirement_ids"])
+                    descriptor = await asyncio.to_thread(self.repo.load_pack, entry["artifact_ref"])
+                    extraction = select_extraction(descriptor, extractions)
                     requirements = [item for item in apply_applicability_decisions(
                         extraction["requirements"], checked["applicability_decisions"],
-                    ) if item["applicable"] and item["requirement_id"] in selected]
-                    references = {item["requirement_id"]: {
-                        "artifact_ref": descriptor["requirements_ref"], "requirement_id": item["requirement_id"],
-                    } for item in requirements}
+                    ) if item["applicable"]]
+                    references = {item["requirement_id"]: item for item in descriptor["requirement_refs"]}
                     async def build():
-                        if descriptor["planning_details"]["budget"]["fits"] is not True:
+                        if (descriptor["planning_details"]["budget"]["fits"] is not True
+                                or any(item["code"] in DEPENDENCY_ISSUES for item in descriptor["issues"])):
                             return {"items": [], "issues": descriptor["issues"], "blocking": True}
-                        return await build_plan(requirements, self, requirement_refs=references)
+                        return await build_plan(requirements, self, requirement_refs=references,
+                                                source_context=source_view(descriptor) if descriptor["supporting"] else None)
                     ref = await self._save("plan-pack", build, scope=f"{response_index['plan_digest']}:{entry['pack_id']}",
                                            inputs={"pack_plan_ref": entry["artifact_ref"],
                                                    "verification_ref": state["verification_ref"],

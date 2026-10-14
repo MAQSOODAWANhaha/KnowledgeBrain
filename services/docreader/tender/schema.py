@@ -129,6 +129,11 @@ class RequirementRef(Contract):
     requirement_id: Identity
 
 
+class DispositionRef(Contract):
+    artifact_ref: ArtifactRef
+    range_id: Identity
+
+
 class ApplicabilityDecision(Contract):
     requirement_id: Identity
     applicable: StrictBool
@@ -355,6 +360,17 @@ class PendingScopeView(Contract):
     scope_binding: ScopeBinding
 
 
+class SourceSegment(Contract):
+    range_id: Identity
+    start: NonnegativeInt
+    end: NonnegativeInt
+
+
+class SourceAlias(Contract):
+    range_id: Identity
+    segments: list[SourceSegment] = Field(min_length=1)
+
+
 class SourceView(Contract):
     """A necessary sending projection; physical evidence remains canonical."""
     pack_id: Identity
@@ -366,6 +382,7 @@ class SourceView(Contract):
     blank_table_templates: list[BlankTableTemplate] = Field(default_factory=list)
     pending_scope_context: list[PendingScopeView] = Field(default_factory=list)
     scope_bindings: list[ScopeBindingRef] = Field(default_factory=list)
+    source_aliases: list[SourceAlias] = Field(default_factory=list)
 
 
 class PlanningDetails(Contract):
@@ -395,22 +412,12 @@ class PackDescriptor(DocumentIdentity):
     issues: list[dict[str, Any]]
     compacted_blank_ranges: list[Identity]
     planning_details: PlanningDetails
-    requirements_ref: ArtifactRef | None = None
-    requirement_ids: list[Identity] = Field(default_factory=list)
-    disposition_range_ids: list[Identity] = Field(default_factory=list)
+    requirement_refs: list[RequirementRef] = Field(default_factory=list)
+    disposition_refs: list[DispositionRef] = Field(default_factory=list)
 
 
-class ResponsePackDescriptor(DocumentIdentity):
-    schema_version: PositiveInt
-    pack_id: Identity
+class ResponsePackDescriptor(PackDescriptor):
     task: Literal["plan"]
-    input_digest: Digest
-    budget_digest: Digest
-    plan_digest: Digest
-    requirements_ref: ArtifactRef
-    requirement_ids: list[Identity]
-    planning_details: PlanningDetails
-    issues: list[dict[str, Any]]
 
 
 class PackRef(Contract):

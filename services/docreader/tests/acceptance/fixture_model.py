@@ -70,7 +70,7 @@ class FixtureModel:
             template_ids = [range_id for template in payload.get("blank_table_templates", [])
                             for rows in template["rows"] for range_id in rows["range_ids"]]
             result = {"reviewed_range_ids": list(dict.fromkeys(
-                [s["range_id"] for s in [*payload["body"], *payload["supporting"]]] + template_ids)),
+                [s["range_id"] for s in [*payload["body"], *payload["supporting"], *payload.get("source_aliases", [])]] + template_ids)),
                       "findings": []}
         elif task == "plan":
             result = {"items": [{"requirement_id": requirement["requirement_id"],
