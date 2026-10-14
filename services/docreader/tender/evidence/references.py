@@ -82,10 +82,12 @@ class SourceIndex:
         if "cell_intervals" in base:
             # Coordinates/merge spans and offsets preserve blank-field semantics
             # without duplicating the row's text in every cell.
+            blank_template = base.get("empty") and base.get("non_requirement_reason") == "empty_table_row"
             value["cells"] = [{**{key: item for key, item in cell.items() if key not in {"text", "start", "end"}},
-                               "start": max(start, cell["start"]), "end": min(end, cell["end"])}
+                               "start": 0 if blank_template else max(start, cell["start"]),
+                               "end": 0 if blank_template else min(end, cell["end"])}
                               for cell in base["cell_intervals"]
-                              if (cell["start"] < end and start < cell["end"])
+                              if blank_template or (cell["start"] < end and start < cell["end"])
                               or (cell["start"] == cell["end"] and start <= cell["start"] <= end)]
         return value
 

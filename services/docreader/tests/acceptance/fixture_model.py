@@ -1,7 +1,18 @@
 """Deterministic contract double. It never sends documents or reports paid usage."""
+import hashlib
+import json
 from uuid import uuid4
 
 from docreader.llm import ModelInfrastructureError
+
+
+def fixture_request_digest(task, payload, images=()):
+    image_hashes = [hashlib.sha256(image.data if hasattr(image, "data") else image.encode()).hexdigest()
+                    for image in images]
+    request = {"model": "deterministic-contract-fixture", "task": task,
+               "payload": payload, "image_hashes": image_hashes}
+    return hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
 
 
 class FixtureModel:
@@ -15,13 +26,14 @@ class FixtureModel:
         request_id = uuid4().hex
         if self.store:
             await self.store.begin_request(self.lease, request_id, "deterministic-contract-fixture", task,
-                                           {"test_double": True, "external_request": False})
+                                           {"test_double": True, "external_request": False,
+                                            "request_digest": fixture_request_digest(task, payload, images)})
             await self.store.finish_request(request_id, "sent")
-        documents = {source["document_id"] for source in payload.get("body", [])}
+        documents = {payload["document_id"]} if payload.get("document_id") else set()
         if task == "extract" and self.fail_document in documents:
             if self.store:
-                await self.store.finish_request(request_id, "uncertain", error={"type": "injected_transport_failure"})
-            raise ModelInfrastructureError("injected transport failure")
+                await self.store.finish_request(request_id, "failed", error={"type": "injected_confirmed_service_rejection"})
+            raise ModelInfrastructureError("injected confirmed service rejection")
         if task == "extract" and self.malformed_document in documents:
             result = {"not_an_extraction": True}
         elif task == "ocr":
@@ -46,9 +58,19 @@ class FixtureModel:
                                      "status": "requirements" if required else "non_requirement",
                                      "reason": "Literal must instruction." if required else "Source is a descriptive heading or empty field without an obligation.",
                                      "requirement_ids": [requirement_id] if required else []})
+            for template in payload.get("blank_table_templates", []):
+                for rows in template["rows"]:
+                    dispositions.extend({
+                        "range_id": range_id, "status": "non_requirement",
+                        "reason": "Repeated empty entry slots; the supplied template preserves columns, row coordinates and merged fields.",
+                        "requirement_ids": [],
+                    } for range_id in rows["range_ids"])
             result = {"requirements": requirements, "dispositions": dispositions, "issues": []}
         elif task == "verify":
-            result = {"reviewed_range_ids": list(dict.fromkeys(s["range_id"] for s in [*payload["body"], *payload["supporting"]])),
+            template_ids = [range_id for template in payload.get("blank_table_templates", [])
+                            for rows in template["rows"] for range_id in rows["range_ids"]]
+            result = {"reviewed_range_ids": list(dict.fromkeys(
+                [s["range_id"] for s in [*payload["body"], *payload["supporting"]]] + template_ids)),
                       "findings": []}
         elif task == "plan":
             result = {"items": [{"requirement_id": requirement["requirement_id"],

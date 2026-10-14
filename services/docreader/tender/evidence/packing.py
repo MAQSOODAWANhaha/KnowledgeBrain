@@ -17,6 +17,12 @@ def _row_text(cells: list[dict], column_count: int) -> str:
     return " | ".join(values.get(column, "") for column in range(column_count))
 
 
+def _empty_row(cells: list[dict], merged_cover: bool, image_unit_ids=()) -> bool:
+    return not merged_cover and not image_unit_ids and not any(
+        cell["text"].strip() or cell.get("formula") or cell.get("row_span", 1) > 1
+        or cell.get("col_span", 1) > 1 for cell in cells)
+
+
 def source_ranges(document: dict, raw: dict) -> list[dict]:
     """Rows cover table grids once; duplicated XLSX table/row carriers stay raw."""
     identities = {entry["unit_id"]: entry for entry in raw["source_contract"].get("units", [])}
@@ -25,6 +31,18 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
     tables_by_row = defaultdict(list)
     table_rows = {}
     merged_rows = {}
+    row_images = defaultdict(list)
+    table_images = defaultdict(list)
+    for unit in raw["units"]:
+        parent = unit["locator"].get("compound_parent") or {}
+        if unit["kind"] == "image_region" and parent.get("parent_kind") == "table_cell":
+            table_images[(parent["section_ordinal"], parent["table_ordinal"], parent["row_ordinal"])].append(unit["unit_id"])
+    for unit_id, anchor in raw.get("image_anchors", {}).items():
+        if "from" in anchor:
+            start = anchor["from"]["row"]
+            end = anchor.get("to", anchor["from"])["row"]
+            for row in range(start, end + 1):
+                row_images[(anchor["sheet_ordinal"], row)].append(unit_id)
     grid_values = {(unit["unit_id"], cell["row"], cell["column"]): cell["text"]
                    for unit in raw["units"] if unit.get("grid") for cell in unit["grid"]["cells"]}
 
@@ -44,7 +62,7 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
             covered = set()
             for cell in unit["grid"]["cells"]:
                 rows[cell["row"]].append(cell)
-                if cell["text"].strip():
+                if cell["row_span"] > 1:
                     covered.update(range(cell["row"] + 1, cell["row"] + cell["row_span"]))
             table_rows[unit["unit_id"]], merged_rows[unit["unit_id"]] = rows, covered
         loc = unit["locator"]
@@ -54,6 +72,24 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
                 spreadsheet_tables[sheet].append(unit)
                 for row in range(loc["region"]["start_row"], loc["region"]["end_row"] + 1):
                     tables_by_row[(sheet, row)].append(unit)
+
+    def sheet_cells(row, tables, native_cells=()):
+        # Formula/display metadata lives in spreadsheet_cells, while the grid
+        # owns text and merge spans. Overlay both without discarding either.
+        cells = {cell["column"] - 1: {
+            "row": row, "column": cell["column"] - 1, "text": cell.get("text", ""),
+            "row_span": 1, "col_span": 1,
+            **{key: cell[key] for key in ("formula", "formula_references", "display_complete",
+                                         "display_incomplete_reason") if cell.get(key) is not None},
+        } for cell in native_cells}
+        width = max(cells, default=0) + 1
+        for table in tables:
+            region = table["locator"]["region"]
+            width = max(width, region["end_column"])
+            for cell in table_rows[table["unit_id"]][row - region["start_row"]]:
+                column = cell["column"] + region["start_column"] - 1
+                cells[column] = {**cells.get(column, {}), **cell, "row": row, "column": column}
+        return list(cells.values()), width
 
     def append(unit, text, suffix="text", **extra):
         identity = identities.get(unit["unit_id"], {})
@@ -112,21 +148,12 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
                 # A worksheet can have several tables side-by-side. Use all row cells
                 # plus each table's full extent, not only the first matching table.
                 tables = tables_by_row[(sheet, row)]
-                raw_cells = {cell["column"] - 1: {"column": cell["column"] - 1, "text": cell.get("text", ""),
-                                                "row_span": 1, "col_span": 1}
-                             for cell in located_cells(loc)}
-                width = max(raw_cells, default=0) + 1
-                for table in tables:
-                    region = table["locator"]["region"]
-                    width = max(width, region["end_column"])
-                    for cell in table_rows[table["unit_id"]][row - region["start_row"]]:
-                        column = cell["column"] + region["start_column"] - 1
-                        raw_cells[column] = {**cell, "column": column}
-                cells = list(raw_cells.values())
+                cells, width = sheet_cells(row, tables, located_cells(loc))
                 text = _row_text(cells, width)
                 merged_cover = any(row - item["locator"]["region"]["start_row"] in merged_rows[item["unit_id"]]
                                    for item in tables)
-                empty = not merged_cover and not any(cell["text"].strip() or cell.get("row_span", 1) > 1 for cell in cells)
+                image_unit_ids = row_images[(sheet, row)]
+                empty = _empty_row(cells, merged_cover, image_unit_ids)
                 table = tables[0] if tables else None
                 header_rows = {cell["row"] for cell in table.get("header_cells", [])} if table else set()
                 header_tables = [item["unit_id"] for item in tables
@@ -134,7 +161,8 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
                                  {cell["row"] for cell in item.get("header_cells", [])}]
                 leading_tables = [item["unit_id"] for item in tables if row == item["locator"]["region"]["start_row"]]
                 append(unit, "" if empty else text, text_basis="spreadsheet_row", cells=cells,
-                       row_start=row, row_end=row + 1, empty=empty,
+                       row_start=row, row_end=row + 1, empty=empty, column_count=width,
+                       **({"image_unit_ids": image_unit_ids} if image_unit_ids else {}),
                        table_id=table["unit_id"] if table else f"sheet:{sheet}",
                        table_ids=[item["unit_id"] for item in tables],
                        header_table_ids=header_tables, leading_table_ids=leading_tables,
@@ -147,11 +175,14 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
             by_row = table_rows[unit["unit_id"]]
             for row in range(grid["row_count"]):
                 cells = by_row[row]
-                # A vertically merged nonempty cell semantically covers each spanned row.
+                # Both filled and blank merged fields cover their original rows.
                 merged_cover = row in merged_rows[unit["unit_id"]]
-                empty = not merged_cover and not any(cell["text"].strip() for cell in cells)
+                image_unit_ids = table_images[(loc.get("section_ordinal"), loc.get("table_ordinal"), row)]
+                empty = _empty_row(cells, merged_cover, image_unit_ids)
                 append(unit, "" if empty else _row_text(cells, grid["column_count"]), suffix=f"row:{row}",
                        text_basis="grid_row", row_start=row, row_end=row + 1, cells=cells,
+                       column_count=grid["column_count"],
+                       **({"image_unit_ids": image_unit_ids} if image_unit_ids else {}),
                        table_id=unit["unit_id"], header=row in header_rows, leading_row=row == 0,
                        empty=empty, non_requirement_reason="empty_table_row" if empty else None)
         elif unit["kind"] == "image_region":
@@ -173,12 +204,18 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
                 if (sheet, row) in emitted_sheet_rows:
                     continue
                 emitted_sheet_rows.add((sheet, row))
-                cells = table_rows[table["unit_id"]][row - region["start_row"]]
-                merged_cover = row - region["start_row"] in merged_rows[table["unit_id"]]
-                empty = not merged_cover and not any(cell["text"].strip() for cell in cells)
-                append(table, "" if empty else _row_text(cells, table["grid"]["column_count"]), suffix=f"row:{row}",
+                row_tables = tables_by_row[(sheet, row)]
+                cells, width = sheet_cells(row, row_tables)
+                merged_cover = any(row - item["locator"]["region"]["start_row"] in merged_rows[item["unit_id"]]
+                                   for item in row_tables)
+                image_unit_ids = row_images[(sheet, row)]
+                empty = _empty_row(cells, merged_cover, image_unit_ids)
+                append(table, "" if empty else _row_text(cells, width), suffix=f"row:{row}",
                        text_basis="grid_row", row_start=row, row_end=row + 1, empty=empty,
-                       cells=cells, table_id=table["unit_id"], non_requirement_reason="empty_table_row" if empty else None)
+                       cells=cells, column_count=width, table_id=table["unit_id"],
+                       table_ids=[item["unit_id"] for item in row_tables],
+                       **({"image_unit_ids": image_unit_ids} if image_unit_ids else {}),
+                       non_requirement_reason="empty_table_row" if empty else None)
     for page in raw["source_contract"].get("page_manifest", []):
         if page["classification"] == "blank" and not page["unit_ids"]:
             page_number = page["page_ordinal"]
@@ -210,7 +247,7 @@ class SupportingIndex:
             for table in tables:
                 self.headers[table].append(entry)
             for cell in entry.get("cell_intervals", []):
-                if cell.get("row_span", 1) > 1 and cell.get("text", "").strip():
+                if cell.get("row_span", 1) > 1:
                     self.merged[entry.get("table_id")].append((entry, cell))
         self._ancestors = {entry["range_id"]: section_ancestors(entry, self.sections) for entry in ranges}
 
@@ -218,6 +255,8 @@ class SupportingIndex:
     def _uncovered(candidate: dict, occupied: list[dict]) -> list[dict]:
         from docreader.tender.evidence.references import fragment
         source = candidate.get("source_range_id", candidate.get("parent_range_id", candidate["range_id"]))
+        if candidate["start"] == candidate["end"]:
+            return [] if any(entry["source_range_id"] == source for entry in occupied) else [candidate]
         cursor = candidate["start"]
         missing = []
         for entry in sorted((entry for entry in occupied if entry["source_range_id"] == source), key=lambda entry: entry["start"]):

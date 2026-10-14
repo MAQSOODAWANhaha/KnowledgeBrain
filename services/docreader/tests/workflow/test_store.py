@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import asdict
+import hashlib
 import os
 from uuid import uuid4
 
@@ -40,6 +41,10 @@ async def submitted(store):
     return run, command
 
 
+def request_metadata(identity, **fields):
+    return {"request_digest": hashlib.sha256(identity.encode()).hexdigest(), **fields}
+
+
 async def expire(store, run_id):
     async with store.transaction() as conn:
         await conn.execute(
@@ -69,7 +74,7 @@ async def test_source_identity_is_consistent_in_sql_lease_commands_and_audit(sto
     lease = await store.acquire(run["run_id"], command["command_id"], source_version=1)
     assert asdict(lease) == {"run_id": run["run_id"], "source_version": 1, "domain_revision": 1,
                             "epoch": 1, "command_id": command["command_id"]}
-    await store.begin_request(lease, "identity-audit", "fixture", "extract")
+    await store.begin_request(lease, "identity-audit", "fixture", "extract", request_metadata("identity-audit"))
     row = await store.get_run(run["run_id"])
     for identity in (row, row["revision"], row["commands"][0], row["usage"][0]):
         assert identity["source_version"] == identity["domain_revision"] == 1
@@ -230,7 +235,7 @@ async def test_confirm_binds_digest_is_idempotent_and_source_revision_invalidate
 async def test_cancel_is_immediate_and_sent_model_request_remains_uncertain(store):
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
-    await store.begin_request(lease, "request", "model", "extract")
+    await store.begin_request(lease, "request", "model", "extract", request_metadata("request"))
     await store.finish_request("request", "sent")
     await store.cancel(run["run_id"])
     with pytest.raises(Cancelled):
@@ -248,18 +253,18 @@ async def test_cancel_is_immediate_and_sent_model_request_remains_uncertain(stor
 async def test_model_usage_and_recovery_preserve_actual_and_uncertain_records(store):
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
-    await store.begin_request(lease, "sent", "model", "extract", {"api_key": "must-not-persist", "input_tokens": 4})
+    await store.begin_request(lease, "sent", "model", "extract", request_metadata("sent", api_key="must-not-persist", input_tokens=4))
     await store.finish_request("sent", "sent")
-    await store.begin_request(lease, "prepared", "model", "extract")
+    await store.begin_request(lease, "prepared", "model", "extract", request_metadata("prepared"))
     await expire(store, run["run_id"])
     replacement = await store.acquire(run["run_id"], command["command_id"], 1)
     records = {row["request_id"]: row for row in (await store.get_run(run["run_id"]))["usage"]}
     assert records["sent"]["status"] == "uncertain"
     assert records["prepared"]["status"] == "failed"
-    assert records["sent"]["metadata"] == {"input_tokens": 4}
+    assert records["sent"]["metadata"] == request_metadata("sent", input_tokens=4)
     with pytest.raises(StaleExecution):
         await store.finish_request("sent", "sent")
-    await store.begin_request(replacement, "new", "model", "extract")
+    await store.begin_request(replacement, "new", "model", "extract", request_metadata("new"))
     await store.finish_request("new", "sent")
     await store.finish_request("new", "succeeded", usage={"input_tokens": 4, "output_tokens": 2})
     latest = (await store.get_run(run["run_id"]))["usage"][-1]
@@ -287,7 +292,7 @@ async def test_received_model_response_is_a_single_immutable_file_reference(stor
     response = {"choices": [{"message": {"content": "synthetic response"}}]}
     ref = store.test_artifacts.put_json(response)
     different = store.test_artifacts.put_json({"choices": []})
-    await store.begin_request(lease, "response", "model", "extract")
+    await store.begin_request(lease, "response", "model", "extract", request_metadata("response"))
     await store.finish_request("response", "sent")
     await store.finish_request("response", "succeeded", usage={"input_tokens": 4}, response_ref=ref)
     await store.finish_request("response", "succeeded", response_ref=ref)
@@ -306,14 +311,14 @@ async def test_uncertain_response_can_be_recovered_but_never_replaced(store):
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
     ref = store.test_artifacts.put_json({"result": "synthetic response after transport ambiguity"})
-    await store.begin_request(lease, "uncertain-response", "model", "extract")
+    await store.begin_request(lease, "uncertain-response", "model", "extract", request_metadata("uncertain-response"))
     await store.finish_request("uncertain-response", "sent")
     await store.finish_request("uncertain-response", "uncertain", error={"type": "response_lost"})
     await store.finish_request("uncertain-response", "succeeded", response_ref=ref)
     row = (await store.get_run(run["run_id"]))["usage"][0]
     assert row["status"] == "succeeded" and row["response_ref"] == ref
     # An already terminal result can acquire a previously missing audit pointer.
-    await store.begin_request(lease, "late-audit", "model", "verify")
+    await store.begin_request(lease, "late-audit", "model", "verify", request_metadata("late-audit"))
     await store.finish_request("late-audit", "sent")
     await store.finish_request("late-audit", "failed")
     await store.finish_request("late-audit", "failed", response_ref=ref)

@@ -19,14 +19,14 @@ from psycopg.conninfo import make_conninfo
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import InvalidConfirmation, Store
 from docreader.jobs.settings import Settings
-from docreader.llm import ModelInfrastructureError
+from docreader.llm import ModelInfrastructureError, UncertainModelResponse
 from docreader.tender.evidence import register_manifest
 from docreader.workflow.nodes import TenderNodes
 from docreader.workflow.persistence import initialize_checkpoints
 from docreader.workflow.runner import execute_command
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fixture_model import FixtureModel
+from fixture_model import FixtureModel, fixture_request_digest
 
 pytestmark = pytest.mark.integration
 
@@ -151,6 +151,38 @@ async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sou
     successful_initial = [r for r in failed["usage"] if r["status"] == "succeeded"]
     assert len([r for r in recovered["usage"] if r["task"] == "ocr"]) == 1  # Same PNG at two distinct source positions.
     assert successful_initial
+
+
+async def test_uncertain_sibling_prevents_queue_replay_even_when_refusal_is_first(runtime):
+    store, _, settings, run = runtime
+
+    class MixedFailureModel(FixtureModel):
+        async def call(self, task, payload, images=()):
+            if task == "extract" and payload.get("document_id") == "annex":
+                request_id = uuid4().hex
+                await self.store.begin_request(self.lease, request_id, "deterministic-contract-fixture", task, {
+                    "request_digest": fixture_request_digest(task, payload, images),
+                    "test_double": True, "external_request": False,
+                })
+                await self.store.finish_request(request_id, "sent")
+                await self.store.finish_request(request_id, "uncertain", error={"type": "injected_partial_stream_loss"})
+                raise UncertainModelResponse("injected partial stream loss")
+            return await super().call(task, payload, images)
+
+    cmd = (await store.get_run(run["run_id"]))["commands"][-1]
+    def factory(s, a, lease):
+        return TenderNodes(s, a, lease, MixedFailureModel(s, lease, fail_document="main"))
+    with pytest.raises(UncertainModelResponse):
+        await execute_command(run["run_id"], cmd["command_id"], 1, settings, factory)
+    row = await store.get_run(run["run_id"])
+    assert row["status"] == "failed"
+    assert row["commands"][-1]["status"] == "completed"
+    assert row["commands"][-1]["receipt"]["status"] == "failed"
+    assert any(request["status"] == "uncertain" for request in row["usage"])
+    assert any(item["stage"] == "extract-pack" for item in row["artifacts"])
+    previous_requests = len(row["usage"])
+    await execute_command(run["run_id"], cmd["command_id"], 1, settings, factory)
+    assert len((await store.get_run(run["run_id"]))["usage"]) == previous_requests
 
 
 async def test_semantic_failure_is_unresolved_not_global_success_and_revision_invalidates(runtime):

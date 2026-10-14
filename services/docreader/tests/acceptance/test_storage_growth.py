@@ -68,7 +68,7 @@ class AuditedFixtureModel(FixtureModel):
             "body_support_overlap": len(body_ids & support_ids), "image_count": len(images),
             # These are fixture diagnostics, not reported provider token usage.
             "body_utf8_bytes": len(encoded(body)), "supporting_utf8_bytes": len(encoded(supporting)),
-            "payload_sha256": hashlib.sha256(encoded(payload)).hexdigest(),
+            "request_digest": hashlib.sha256(encoded(self.budget.request(task, payload, images))).hexdigest(),
             "request_budget": self.budget.require(task, payload, images),
         }
         await self.audit_store.begin_request(

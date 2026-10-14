@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -17,6 +18,10 @@ class ModelSemanticError(ValueError):
 
 class ModelInfrastructureError(ConnectionError):
     """The single queue retry policy may retry this failure."""
+
+
+class UncertainModelResponse(RuntimeError):
+    """Execution/billing may have occurred; never automatically replay payment."""
 
 
 @dataclass(frozen=True)
@@ -66,4 +71,14 @@ def build_request(model: str, prompt: str, payload: dict,
     content.extend({"type": "image_url", "image_url": {"url": image_data_url(image)}} for image in images)
     return {"model": model,
             "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}],
-            "response_format": {"type": "json_object"}}
+            "response_format": {"type": "json_object"},
+            "stream": True, "stream_options": {"include_usage": True}}
+
+
+def request_digest(endpoint_url: str, request: dict) -> str:
+    """Hash the normalized endpoint and complete body, never credentials/headers."""
+    from docreader.llm.config import completions_url
+
+    encoded = json.dumps({"endpoint": completions_url(endpoint_url), "body": request},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

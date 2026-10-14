@@ -10,18 +10,18 @@ from docreader.tender.schema import Task
 
 
 class RequestBudget:
-    """Conservative admission for the exact JSON request, not billed usage.
+    """Conservative admission for decoded message content, not billed usage.
 
     No tokenizer is assumed for an unverified model name (including gpt-6-luna).
     UTF8 bytes conservatively estimate text tokens for every configured model.
     Actual image data is excluded from text estimation and charged a documented
     16384-token estimate per image. Body/support are marginal contributions of
-    those fields to the serialized request; locators, schema and other context
-    remain in overhead. All three add up to the complete serialized text body.
+    those fields to decoded message text; locators, schema and other context
+    remain in overhead. HTTP JSON escaping is measured separately as wire bytes.
     """
 
-    METHOD = "utf8_bytes_canonical_request_v1"
-    BUILDER = "chat_json_object_v1"
+    METHOD = "utf8_bytes_decoded_messages_v2"
+    BUILDER = "chat_json_object_stream_v2"
     IMAGE_TOKENS = 16384
     FRAMING_TOKENS = 32  # 16 + 8 per message for our two-message body.
 
@@ -62,35 +62,39 @@ class RequestBudget:
         return self.measure_request(self.request(task, payload, images))
 
     def measure_request(self, request: dict) -> dict:
-        """Measure a body from request(), retaining all actual non-image fields."""
+        """Count actual decoded text/schema/tools, without HTTP JSON escaping."""
         image_count = 0
-        messages = []
+        text_tokens = 0
         for message in request["messages"]:
             content = message["content"]
+            if isinstance(content, str):
+                text_tokens += len(content.encode("utf-8"))
             if isinstance(content, list):
-                parts = []
                 for part in content:
                     if part.get("type") == "image_url":
                         image_count += 1
-                        part = {**part, "image_url": {**part["image_url"], "url": ""}}
-                    parts.append(part)
-                content = parts
-            messages.append({**message, "content": content})
-        text_tokens = _json_bytes({**request, "messages": messages})
+                    elif part.get("type") == "text":
+                        text_tokens += len(part["text"].encode("utf-8"))
+            for field in ("tool_calls", "function_call"):
+                if field in message:
+                    text_tokens += _json_bytes(message[field])
+        for field in ("tools", "functions"):
+            if field in request:
+                text_tokens += _json_bytes(request[field])
+        if "json_schema" in request.get("response_format", {}):
+            text_tokens += _json_bytes(request["response_format"]["json_schema"])
         payload = json.loads(request["messages"][1]["content"][0]["text"])
-        # Payload JSON is itself inside a JSON text string: account for both
-        # layers of escaping, rather than counting only the underlying prose.
+        # This JSON is the message content itself, with only its own escaping.
         def contribution(field):
             if not isinstance(payload, dict) or field not in payload:
                 return 0
-            serialized = json.dumps(payload[field], ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-            return max(0, _json_bytes(serialized) - _json_bytes("[]"))
+            return max(0, _json_bytes(payload[field]) - _json_bytes([]))
 
         body_tokens, support_tokens = contribution("body"), contribution("supporting")
         image_tokens = image_count * self.IMAGE_TOKENS
         input_tokens = text_tokens + self.FRAMING_TOKENS + image_tokens
         total = input_tokens + self.output_reserve + self.safety
-        return {"input_tokens": input_tokens, "text_tokens": text_tokens,
+        return {"input_tokens": input_tokens, "text_tokens": text_tokens, "wire_bytes": _json_bytes(request),
                 "body_tokens": body_tokens, "support_tokens": support_tokens,
                 "overhead_tokens": text_tokens - body_tokens - support_tokens,
                 "framing_tokens": self.FRAMING_TOKENS, "image_tokens": image_tokens,

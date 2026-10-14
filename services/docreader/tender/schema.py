@@ -263,6 +263,104 @@ class ScopeBindingRef(Contract):
         return self
 
 
+class SectionView(Contract):
+    section_id: Identity
+    parent_section_id: Identity | None = None
+    heading_path: StrictStr
+
+
+class BlankRowInterval(Contract):
+    row_start: NonnegativeInt
+    row_end: PositiveInt
+    range_ids: list[Identity] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def exact_rows(self):
+        if self.row_end - self.row_start != len(self.range_ids) or len(set(self.range_ids)) != len(self.range_ids):
+            raise ValueError("template interval must retain exactly one identity for each original row")
+        return self
+
+
+class MergeView(Contract):
+    row: NonnegativeInt
+    column: NonnegativeInt
+    row_span: PositiveInt
+    col_span: PositiveInt
+
+
+class BlankTableTemplate(Contract):
+    table_id: Identity
+    column_count: PositiveInt
+    section_id: Identity | None = None
+    rows: list[BlankRowInterval] = Field(min_length=1)
+    merges: list[MergeView] = Field(default_factory=list)
+    table_ids: list[Identity] = Field(default_factory=list)
+
+
+class SourceCellView(Contract):
+    column: NonnegativeInt
+    start: NonnegativeInt
+    end: NonnegativeInt
+    row: NonnegativeInt | None = None
+    row_span: PositiveInt | None = None
+    col_span: PositiveInt | None = None
+    formula: StrictStr | None = None
+    formula_references: list[StrictStr] = Field(default_factory=list)
+    display_complete: StrictBool | None = None
+    display_incomplete_reason: StrictStr | None = None
+    image_anchor: dict[str, Any] | None = None
+
+
+class SourceRangeView(Contract):
+    range_id: Identity
+    text: StrictStr
+    kind: Identity | None = None
+    unit_id: Identity | None = None
+    source_range_id: Identity | None = None
+    start: NonnegativeInt | None = None
+    end: NonnegativeInt | None = None
+    section_id: Identity | None = None
+    table_id: Identity | None = None
+    table_ids: list[Identity] = Field(default_factory=list)
+    row_start: NonnegativeInt | None = None
+    row_end: PositiveInt | None = None
+    column_count: PositiveInt | None = None
+    cells: list[SourceCellView] = Field(default_factory=list)
+    header: StrictBool | None = None
+    leading_row: StrictBool | None = None
+    text_boundaries: TextBoundaries | None = None
+    reason: Identity | None = None
+    ocr_status: OCRStatus | None = None
+    image_unit_ids: list[Identity] = Field(default_factory=list)
+    image_anchor: dict[str, Any] | None = None
+    compound_parent: dict[str, Any] | None = None
+    scope_binding: ScopeBinding | None = None
+
+
+class PendingScopeView(Contract):
+    range_id: Identity
+    source_range_id: Identity | None = None
+    parent_range_id: Identity | None = None
+    start: NonnegativeInt | None = None
+    end: NonnegativeInt | None = None
+    reason: Identity | None = None
+    section_id: Identity | None = None
+    scope_binding: ScopeBinding
+
+
+class SourceView(Contract):
+    """A necessary sending projection; physical evidence remains canonical."""
+    pack_id: Identity
+    document_id: Identity | None = None
+    document_version: Identity | None = None
+    body: list[SourceRangeView]
+    supporting: list[SourceRangeView]
+    sections: list[SectionView] = Field(default_factory=list)
+    blank_table_templates: list[BlankTableTemplate] = Field(default_factory=list)
+    pending_scope_context: list[PendingScopeView] = Field(default_factory=list)
+    scope_bindings: list[ScopeBindingRef] = Field(default_factory=list)
+
+
 class PlanningDetails(Contract):
     planner_version: Identity
     boundary_reason: Identity

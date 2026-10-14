@@ -9,7 +9,7 @@ import pytest
 
 from docreader.llm import (
     ImageInput, ModelConfig, ModelConfigurationError, ModelInfrastructureError,
-    ModelSemanticError, OpenAIModel,
+    ModelSemanticError, OpenAIModel, UncertainModelResponse,
 )
 from docreader.llm.budget import RequestBudget
 from docreader.llm.config import completions_url
@@ -132,6 +132,7 @@ class Audit:
     async def begin_request(self, lease, request_id, model, kind, metadata=None):
         self.events.append({"request_id": request_id, "status": "prepared", "model": model,
                             "kind": kind, "metadata": metadata})
+        return self.events[-1]
 
     async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None):
         if status == "sent" and self.fail_sent:
@@ -140,14 +141,20 @@ class Audit:
                             "response_ref": response_ref})
 
 
+def sse_response(envelopes):
+    body = "".join("data: " + json.dumps(envelope) + "\n\n" for envelope in envelopes)
+    return httpx.Response(200, content=body + "data: [DONE]\n\n",
+                          headers={"content-type": "text/event-stream"})
+
+
 def response(content='{"result":"ok"}', *, finish_reason="stop", refusal=None, usage=True):
-    body = {"id": "mock-request", "object": "chat.completion", "created": 0, "model": "gpt-4o",
-            "choices": [{"index": 0, "finish_reason": finish_reason,
-                         "message": {"role": "assistant", "content": content, "refusal": refusal}}]}
+    envelopes = [{"choices": [{"index": 0, "finish_reason": None,
+                              "delta": {"content": content, "refusal": refusal}}]},
+                 {"choices": [{"index": 0, "finish_reason": finish_reason, "delta": {}}]}]
     if usage:
-        body["usage"] = {"prompt_tokens": 13, "completion_tokens": 7, "total_tokens": 20,
-                         "prompt_tokens_details": {"cached_tokens": 3}}
-    return httpx.Response(200, json=body)
+        envelopes.append({"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": 7,
+                           "total_tokens": 20, "prompt_tokens_details": {"cached_tokens": 3}}})
+    return sse_response(envelopes)
 
 
 def model(handler, audit=None, values=None, **kwargs):
@@ -167,6 +174,8 @@ async def test_request_audits_before_send_no_output_caps_and_real_usage_only():
         assert [event["status"] for event in audit.events] == ["prepared", "sent"]
         body = json.loads(request.content)
         assert "max_tokens" not in body and "max_completion_tokens" not in body
+        assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
+        assert audit.events[0]["metadata"]["wire_bytes"] == len(request.content)
         assert request.url == "https://chat.invalid/v1/chat/completions"
         seen.append(body)
         return response()
@@ -195,9 +204,9 @@ async def test_audit_failure_before_send_does_not_call_provider():
 @pytest.mark.parametrize("status,exception,recorded", [
     (400, ModelSemanticError, "failed"), (401, ModelConfigurationError, "failed"),
     (403, ModelConfigurationError, "failed"), (404, ModelConfigurationError, "failed"),
-    (408, ModelInfrastructureError, "uncertain"), (409, ModelInfrastructureError, "failed"),
-    (429, ModelInfrastructureError, "failed"), (500, ModelInfrastructureError, "uncertain"),
-    (503, ModelInfrastructureError, "uncertain"),
+    (408, ModelInfrastructureError, "failed"), (409, ModelInfrastructureError, "failed"),
+    (429, ModelInfrastructureError, "failed"), (500, ModelInfrastructureError, "failed"),
+    (503, ModelInfrastructureError, "failed"),
 ])
 async def test_http_errors_are_classified_without_sdk_retry_or_provider_body(status, exception, recorded):
     calls = []
@@ -227,7 +236,7 @@ async def test_response_loss_is_uncertain_and_not_zero_usage():
 
     client, audit = model(handler)
     async with client:
-        with pytest.raises(ModelInfrastructureError, match="billing are uncertain"):
+        with pytest.raises(UncertainModelResponse, match="billing are uncertain"):
             await client.call("extract", {})
     assert len(calls) == 1
     assert audit.events[-1]["status"] == "uncertain"
@@ -268,7 +277,7 @@ async def test_missing_provider_usage_is_explicitly_missing():
                                       {"choices": [{"message": "bad"}]},
                                       {"choices": [{"message": {"content": {"a": 1}}}]}])
 async def test_malformed_provider_envelope_is_audited_as_semantic_failure(envelope):
-    client, audit = model(lambda _: httpx.Response(200, json=envelope))
+    client, audit = model(lambda _: sse_response([envelope]))
     async with client:
         with pytest.raises(ModelSemanticError):
             await client.call("extract", {})
@@ -521,9 +530,9 @@ class CountedArtifacts(ArtifactStore):
                                            ("not valid JSON private source quote", "failed")])
 async def test_full_response_is_saved_once_and_audit_retains_only_reference(tmp_path, content, status):
     artifacts = CountedArtifacts(tmp_path)
-    raw = response(content).json()
-    raw["provider_extra"] = {"trace": "received-envelope-field"}
-    client, audit = model(lambda _: httpx.Response(200, json=raw), artifacts=artifacts)
+    raw = response(content).text
+    client, audit = model(lambda _: httpx.Response(200, text=raw, headers={"content-type": "text/event-stream"}),
+                          artifacts=artifacts)
     async with client:
         if status == "succeeded":
             await client.call("extract", {})
@@ -532,7 +541,7 @@ async def test_full_response_is_saved_once_and_audit_retains_only_reference(tmp_
                 await client.call("extract", {})
     terminal = audit.events[-1]
     assert terminal["status"] == status and artifacts.writes == 1
-    assert artifacts.read_json(terminal["response_ref"]) == raw
+    assert artifacts.read_json(terminal["response_ref"])["raw_body"] == raw
     assert terminal["usage"]["total_tokens"] == 20
     assert "private source quote" not in json.dumps(audit.events)
 
@@ -541,12 +550,12 @@ async def test_full_response_is_saved_once_and_audit_retains_only_reference(tmp_
                                  {"choices": [{"message": "bad"}]}])
 async def test_invalid_envelope_also_has_one_response_artifact(tmp_path, raw):
     artifacts = CountedArtifacts(tmp_path)
-    client, audit = model(lambda _: httpx.Response(200, json=raw), artifacts=artifacts)
+    client, audit = model(lambda _: sse_response([raw]), artifacts=artifacts)
     async with client:
         with pytest.raises(ModelSemanticError):
             await client.call("extract", {})
     assert artifacts.writes == 1
-    assert artifacts.read_json(audit.events[-1]["response_ref"]) == raw
+    assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == sse_response([raw]).text
 
 
 async def test_received_http_error_is_saved_and_credentials_are_redacted(tmp_path):
@@ -559,7 +568,7 @@ async def test_received_http_error_is_saved_and_credentials_are_redacted(tmp_pat
             await client.call("extract", {})
     saved = artifacts.read_json(audit.events[-1]["response_ref"])
     assert artifacts.writes == 1
-    assert saved == {"error": {"message": "credential [REDACTED] rejected"}}
+    assert saved["body"] == {"error": {"message": "credential [REDACTED] rejected"}}
 
 
 async def test_non_json_response_preserves_body_without_headers_or_credentials(tmp_path):
@@ -570,10 +579,10 @@ async def test_non_json_response_preserves_body_without_headers_or_credentials(t
         with pytest.raises(ModelSemanticError):
             await client.call("extract", {})
     assert artifacts.writes == 1
-    assert artifacts.read_json(audit.events[-1]["response_ref"]) == {"unparsed_body": "invalid [REDACTED] body"}
+    assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == "invalid [REDACTED] body"
 
 
-async def test_no_response_means_no_response_artifact(tmp_path):
+async def test_no_response_records_empty_partial_response_once(tmp_path):
     artifacts = CountedArtifacts(tmp_path)
 
     def handler(request):
@@ -581,11 +590,11 @@ async def test_no_response_means_no_response_artifact(tmp_path):
 
     client, audit = model(handler, artifacts=artifacts)
     async with client:
-        with pytest.raises(ModelInfrastructureError):
+        with pytest.raises(UncertainModelResponse):
             await client.call("extract", {})
-    assert artifacts.writes == 0
+    assert artifacts.writes == 1
     assert audit.events[-1]["status"] == "uncertain"
-    assert audit.events[-1]["response_ref"] is None
+    assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == ""
 
 
 async def test_response_artifact_write_failure_is_not_a_semantic_model_failure(tmp_path):
@@ -604,9 +613,11 @@ async def test_response_artifact_write_failure_is_not_a_semantic_model_failure(t
 async def test_reported_usage_survives_invalid_completion_or_http_error(tmp_path, status):
     artifacts = CountedArtifacts(tmp_path)
     raw = {"choices": "invalid", "usage": {"prompt_tokens": 5, "total_tokens": 5}}
-    client, audit = model(lambda _: httpx.Response(status, json=raw), artifacts=artifacts)
+    client, audit = model(lambda _: sse_response([raw]) if status == 200 else httpx.Response(status, json=raw),
+                          artifacts=artifacts)
     async with client:
         with pytest.raises(ModelSemanticError if status == 200 else ModelInfrastructureError):
             await client.call("extract", {})
     assert audit.events[-1]["usage"] == {"prompt_tokens": 5, "total_tokens": 5}
-    assert artifacts.read_json(audit.events[-1]["response_ref"]) == raw
+    saved = artifacts.read_json(audit.events[-1]["response_ref"])
+    assert saved["raw_body"] == sse_response([raw]).text if status == 200 else saved["body"] == raw

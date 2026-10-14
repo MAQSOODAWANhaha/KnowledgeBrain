@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
-from docreader.tender.evidence.planner import make_packs
+from docreader.tender.evidence.planner import StructuralPlanner, make_packs
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex
 from docreader.tender.requirements.extract import extract_payload
 
@@ -127,6 +127,35 @@ def test_multilevel_headers_vertical_merge_and_row_coverage_survive_budget_split
     assert "header" in supported
 
 
+def test_blank_merged_fields_and_template_coordinates_survive_materialization():
+    from docreader.tender.evidence.packing import SupportingIndex
+    from docreader.tender.evidence.references import selector
+    cells = [{"row": 0, "column": column, "text": f"Field {column}", "row_span": 1, "col_span": 1}
+             for column in range(3)]
+    cells += [{"row": 1, "column": 0, "text": "", "row_span": 2, "col_span": 2}]
+    cells += [{"row": row, "column": column, "text": "", "row_span": 1, "col_span": 1}
+              for row, columns in ((1, [2]), (2, [2]), (3, range(3))) for column in columns]
+    index = source([{"grid": {"row_count": 4, "column_count": 3, "cells": cells}}])
+    snapshot = deepcopy(index.raw)
+    header, merged, covered, blank = index.ranges
+    assert [entry["empty"] for entry in index.ranges] == [False, False, False, True]
+    assert [entry["row_start"] for entry in index.ranges] == [0, 1, 2, 3]
+    assert all(entry["column_count"] == 3 for entry in index.ranges)
+    rendered = index.materialize(selector(blank))
+    assert rendered["text"] == ""
+    assert [cell["column"] for cell in rendered["cells"]] == [0, 1, 2]
+    assert all(cell["start"] == cell["end"] == 0 for cell in rendered["cells"])
+    support, _, _, _ = SupportingIndex(index.ranges).select([covered])
+    assert {entry["range_id"] for entry in support} == {header["range_id"], merged["range_id"]}
+    assert index.raw == snapshot
+    zero_text = source([{"grid": {"row_count": 2, "column_count": 1, "cells": [
+        {"row": 0, "column": 0, "text": "", "row_span": 2, "col_span": 1}]}}])
+    anchor, covered = zero_text.ranges
+    assert anchor["text"] == covered["text"] == "" and not anchor["empty"] and not covered["empty"]
+    support, _, _, _ = SupportingIndex(zero_text.ranges).select([covered])
+    assert [entry["range_id"] for entry in support] == [anchor["range_id"]]
+
+
 def test_minimum_body_and_required_header_overflow_is_explicit_and_bounded():
     native = grid(rows=3, header_size=1000)
     index = source([{"grid": native, "headers": [{"row": 0, "column": 0}, {"row": 1, "column": 0}]}])
@@ -160,6 +189,31 @@ def test_long_single_document_preparation_reuses_weight_hint_at_2x_and_4x():
         observations.append((admission.source_characters, admission.measurements))
     assert observations[2][0] < observations[0][0] * 5
     assert observations[2][1] < observations[0][1] * 5
+
+
+def test_conservative_hint_expands_complete_chapters_with_bounded_actual_probes():
+    index = source([{"text": f"Required proof {number}.", "section": f"section-{number}"}
+                    for number in range(80)])
+    admission = MeteredBudget(capacity=1000000)
+    planner = StructuralPlanner(index, admission)
+    planner.capacity_hint = planner.weight(index.ranges[0])
+    packs = planner.plan()
+    assert len(packs) == 1
+    assert len(packs[0]["planning_details"]["section_ids"]) == 80
+    assert packs[0]["planning_details"]["boundary_reason"] == "complete_adjacent_sections"
+    assert planner.probe_count < 12
+    assert admission.measure("extract", extract_payload(materialize(index, packs[0])))["fits"]
+    assert_coverage(index, packs)
+
+
+def test_split_chapter_tail_is_not_filled_with_the_next_chapter():
+    index = source([{"text": "Obligation with detail. " * 100, "section": "giant"} for _ in range(8)]
+                   + [{"text": "Next chapter proof.", "section": "next"}])
+    packs, _ = make_packs(index, budget(8000))
+    assert len(packs) > 2
+    assert all(len(pack["planning_details"]["section_ids"]) == 1 for pack in packs)
+    assert packs[-1]["planning_details"]["section_ids"] == ["next"]
+    assert_coverage(index, packs)
 
 
 def test_persistent_pack_is_only_refs_and_parallel_repository_loads_raw_once(tmp_path, monkeypatch):

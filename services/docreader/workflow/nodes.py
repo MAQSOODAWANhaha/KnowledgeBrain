@@ -5,12 +5,23 @@ import json
 import time
 
 from langgraph.types import interrupt
+import psycopg
 
 from docreader.integrations.store import InvalidConfirmation
 from docreader.tender.checks import verify_all, verify_pack
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
 from docreader.tender.planning import build_plan
 from docreader.tender.requirements import extract_pack
+
+
+def _raise_failures(results):
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if failures:
+        # Successful siblings have already committed. A non-retryable failure
+        # (especially uncertain provider execution) must not be hidden by an
+        # earlier infrastructure failure and trigger another paid attempt.
+        retryable = (psycopg.OperationalError, psycopg.InterfaceError, ConnectionError, TimeoutError)
+        raise next((failure for failure in failures if not isinstance(failure, retryable)), failures[0])
 
 
 class TenderNodes:
@@ -149,9 +160,7 @@ class TenderNodes:
 
             results = await asyncio.gather(*(document(source) for source in registered["documents"]),
                                            return_exceptions=True)
-            errors = [result for result in results if isinstance(result, BaseException)]
-            if errors:
-                raise errors[0]
+            _raise_failures(results)
             merged = {"schema_version": 2, "documents": [], "issues": list(registered["issues"]),
                       "native_range_count": 0, "stats": {}}
             for result in results:
@@ -199,9 +208,7 @@ class TenderNodes:
 
         # Infrastructure failure of one pack never rolls back independent successful receipts.
         results = await asyncio.gather(*(worker(item) for item in index["packs"]), return_exceptions=True)
-        failures = [result for result in results if isinstance(result, BaseException)]
-        if failures:
-            raise failures[0]
+        _raise_failures(results)
         return results
 
     async def extract(self, state):
@@ -294,9 +301,7 @@ class TenderNodes:
                     return {"pack_id": entry["pack_id"], "artifact_ref": ref, "result": await self._read(ref)}
 
             results = await asyncio.gather(*(group(entry) for entry in extraction_index["packs"]), return_exceptions=True)
-            errors = [result for result in results if isinstance(result, BaseException)]
-            if errors:
-                raise errors[0]
+            _raise_failures(results)
             results = [result for result in results if result is not None]
             return {"packs": [{"pack_id": result["pack_id"], "artifact_ref": result["artifact_ref"]} for result in results],
                     "blocking": any(result["result"]["blocking"] for result in results),

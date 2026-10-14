@@ -19,6 +19,7 @@ import warnings
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
+from docreader.tender.evidence.view import host_reviewed_ranges, source_view
 from docreader.tender.prompts import get_prompt
 from docreader.tender.requirements.extract import extract_payload
 
@@ -173,15 +174,14 @@ async def prepare(args):
         if payload['body']:
             extract_estimates.append(token_interval('extract', payload))
             extract_payload_bytes.append(len(encoded(payload).encode('utf-8')))
-        verify_estimates.append(token_interval('verify', {
-            'pack_id': pack['pack_id'], 'body': pack['body'], 'supporting': pack['supporting'],
-            'pending_scope_context': pack.get('pending_scope_context', []),
-            'scope_bindings': pack.get('scope_bindings', []),
-            'requirements': [], 'dispositions': [],
-        }))
+        verify_payload = {**source_view(pack), 'requirements': [], 'dispositions': []}
+        verify_estimates.append(token_interval('verify', verify_payload))
         pack_measurements.append({
             'ordinal': len(pack_measurements) + 1, 'pack_id': pack['pack_id'],
             'body_ranges': len(pack['body']), 'sent_body_ranges': len(payload['body']),
+            'template_ranges': sum(len(row['range_ids']) for template in payload.get('blank_table_templates', [])
+                                   for row in template['rows']),
+            'host_reviewed_ranges': len(host_reviewed_ranges(pack)),
             'support_ranges': len(pack['supporting']),
             'body_support_duplicate_ids': len({r['range_id'] for r in payload['body']} &
                                              {r['range_id'] for r in pack['supporting']}),
@@ -189,6 +189,7 @@ async def prepare(args):
             'section_count': len(pack['planning_details']['section_ids']),
             'recorded_probe_matches_actual_request': measured == pack['planning_details']['budget'],
             'extract_request': measured,
+            'verify_source_only_request': budget.measure('verify', verify_payload),
         })
     image_count = index['stats']['image_count']
     unique_images = len({ref['sha256'] for ref in raw['images'].values()})
@@ -265,7 +266,7 @@ async def prepare(args):
             'unknown_input': ['Generated requirements and dispositions in verify requests.', 'Confirmed requirements in plan requests.',
                               'Image tokens and OCR response text in later extraction/verification requests.'],
             'output_tokens': 'unknown',
-            'method': 'Planning low=ceil(source+prompt characters/6); high=complete request UTF8 byte estimate plus framing (not billed tokens). '
+            'method': 'Planning low=ceil(source+prompt characters/6); high=decoded message UTF8 byte estimate plus framing (not HTTP bytes or billed tokens). '
                       'The total upper value is an input-capacity envelope, not expected usage. No tokenizer or paid usage was measured.',
         },
     }

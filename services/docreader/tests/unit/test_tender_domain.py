@@ -73,8 +73,9 @@ async def test_complete_extraction_and_separate_full_source_review():
     assert not checked["findings"]
     assert not aggregate["blocking"]
     assert [call[0] for call in model.calls] == ["extract", "verify"]
-    assert model.calls[1][1]["body"] == frozen["body"]
-    assert model.calls[1][1]["supporting"] == frozen["supporting"]
+    assert model.calls[1][1]["body"] == extract_payload(frozen)["body"]
+    assert model.calls[1][1]["supporting"] == extract_payload(frozen)["supporting"]
+    assert model.calls[1][1]["body"][0]["text"] == frozen["body"][0]["text"]
     assert "text" not in extracted["source_ranges"]["r1"]
 
 
@@ -110,24 +111,49 @@ async def test_missing_and_duplicate_dispositions_become_unresolved():
 
 @pytest.mark.asyncio
 async def test_blank_row_compression_retains_disposition_and_partial_empty_cells():
-    blank = source("blank", "", empty=True, non_requirement_reason="empty_table_row", cells=["", ""])
+    blank = source("blank", "", empty=True, non_requirement_reason="empty_table_row", cells=["", ""],
+                   table_id="table-1", row_start=1, row_end=2, column_count=2)
     partial = source("r1", "投标人必须在30天内交付。", cells=["", "30天"])
     frozen = pack([blank, partial])
-    model = FixedModel(extract=extraction_response())
+    response = extraction_response()
+    response["dispositions"].append({"range_id": "blank", "status": "non_requirement",
+        "reason": "Reviewed template fields inherit the stated delivery obligation; no additional row text.",
+        "requirement_ids": []})
+    model = FixedModel(extract=response, verify={"reviewed_range_ids": ["blank", "r1"], "findings": []})
     result = await extract_pack(frozen, model)
-    assert result["dispositions"][0] == {"range_id": "blank", "status": "non_requirement", "reason": "empty_table_row", "requirement_ids": []}
+    checked = await verify_pack(frozen, result, model)
+    assert result["dispositions"][0] == response["dispositions"][1]
     assert len(model.calls[0][1]["body"]) == 1
-    assert model.calls[0][1]["body"][0]["cells"] == ["", "30天"]
-    assert not result["issues"]
+    assert model.calls[0][1]["body"][0]["cells"][0] == {"column": 0, "start": 0, "end": 0}
+    assert model.calls[0][1]["blank_table_templates"] == [{"table_id": "table-1", "column_count": 2,
+        "rows": [{"row_start": 1, "row_end": 2, "range_ids": ["blank"]}]}]
+    assert model.calls[1][1]["blank_table_templates"] == model.calls[0][1]["blank_table_templates"]
+    assert not result["issues"] and not checked["findings"]
 
 
 @pytest.mark.asyncio
-async def test_empty_pack_rows_need_no_model_extraction():
-    frozen = pack([source("blank", "", empty=True, non_requirement_reason="empty_table_row")])
-    model = FixedModel()
+async def test_empty_template_rows_require_model_disposition_and_independent_review():
+    frozen = pack([source("blank", "", empty=True, non_requirement_reason="empty_table_row",
+                          table_id="table-1", row_start=1, row_end=2, column_count=2)])
+    model = FixedModel(extract=extraction_response([], []), verify={"reviewed_range_ids": [], "findings": []})
     result = await extract_pack(frozen, model)
-    assert not model.calls and not result["issues"]
-    assert result["dispositions"][0]["reason"] == "empty_table_row"
+    checked = await verify_pack(frozen, result, model)
+    assert len(model.calls) == 2
+    assert result["dispositions"][0]["status"] == "unresolved"
+    assert "range_disposition_incomplete" in codes(result)
+    assert "source_not_independently_reviewed" in codes(checked, "findings")
+    assert checked["reviewed_range_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_empty_template_label_alone_is_not_a_grounded_nonrequirement_reason():
+    frozen = pack([source("blank", "", empty=True, non_requirement_reason="empty_table_row",
+                          table_id="table-1", row_start=1, row_end=2, column_count=2)])
+    model = FixedModel(extract=extraction_response([], [
+        {"range_id": "blank", "status": "non_requirement", "reason": "empty_table_row", "requirement_ids": []}]))
+    result = await extract_pack(frozen, model)
+    assert result["dispositions"][0]["status"] == "unresolved"
+    assert "invalid_disposition" in codes(result)
 
 
 @pytest.mark.asyncio
@@ -515,8 +541,8 @@ async def test_pending_scope_metadata_reaches_both_calls_without_becoming_read_e
     checked = await verify_pack(frozen, extracted, model)
     assert len(model.calls) == 2  # metadata forwarding never adds a model call
     for _, payload in model.calls:
-        assert payload["pending_scope_context"] == frozen["pending_scope_context"]
-        assert not {"text", "cells", "images"} & payload["pending_scope_context"][0].keys()
+        assert payload["pending_scope_context"][0]["scope_binding"] == frozen["pending_scope_context"][0]["scope_binding"]
+        assert not {"text", "cells", "images", "locator", "physical_path", "unit_id", "document_version"} & payload["pending_scope_context"][0].keys()
         assert payload["supporting"] == []
     assert extracted["pending_scope_context"] == checked["pending_scope_context"] == frozen["pending_scope_context"]
     assert extracted["pending_scope_context"] is not frozen["pending_scope_context"]
@@ -587,11 +613,17 @@ async def test_reviewed_image_disposition_is_deterministic_and_request_probe_mat
                    non_requirement_reason="reviewed_decorative_image",
                    image_disposition={"status": "reviewed", "classification": "decorative", "sha256": "a" * 64})
     frozen = pack([image, source()])
-    model = FixedModel(extract=extraction_response())
+    model = FixedModel(extract=extraction_response(), verify={"reviewed_range_ids": ["r1"], "findings": []})
     result = await extract_pack(frozen, model)
+    checked = await verify_pack(frozen, result, model)
     assert model.calls[0][1] == extract_payload(frozen)
     assert result["dispositions"][0]["status"] == "non_requirement"
     assert result["dispositions"][0]["reason"] == "reviewed_decorative_image"
+    assert checked["host_reviewed_range_ids"] == ["image"]
+    assert checked["reviewed_range_ids"] == ["r1"]
+    assert not checked["findings"]
+    assert model.calls[1][1]["body"] == model.calls[0][1]["body"]
+    assert [item["range_id"] for item in model.calls[1][1]["dispositions"]] == ["r1"]
     image["image_disposition"]["status"] = "unreviewed"
     assert extract_payload(frozen)["body"][0]["range_id"] == "image"
 

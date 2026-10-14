@@ -1,0 +1,88 @@
+{
+  "source_sha256": "4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc",
+  "frozen_plan_sha256": "de96f6cd429c426258b0359b24d10386ae11ed5ec3ddf096bcd1bcfbcd800d01",
+  "basis": "Previously measured full extract requests from the frozen 13-pack plan, before sending-view compression. Estimates are conservative UTF8 bytes, not provider token usage. Each expansion adds the entire immediately following native chapter.",
+  "context_tokens": 131072,
+  "output_reserve": 16384,
+  "safety": 4096,
+  "sections": 262,
+  "expandable_pack_ordinals": [
+    4,
+    6,
+    7,
+    9
+  ],
+  "prefix_growth": [
+    {
+      "pack": 1,
+      "current_sections": 3,
+      "next_section_native_ranges": 59,
+      "expanded_input_tokens": 125127,
+      "expanded_fits": false
+    },
+    {
+      "pack": 2,
+      "current_sections": 9,
+      "next_section_native_ranges": 12,
+      "expanded_input_tokens": 121441,
+      "expanded_fits": false
+    },
+    {
+      "pack": 3,
+      "current_sections": 46,
+      "next_section_native_ranges": 3,
+      "expanded_input_tokens": 110810,
+      "expanded_fits": false
+    },
+    {
+      "pack": 4,
+      "current_sections": 62,
+      "next_section_native_ranges": 3,
+      "expanded_input_tokens": 109549,
+      "expanded_fits": true
+    },
+    {
+      "pack": 5,
+      "current_sections": 28,
+      "next_section_native_ranges": 74,
+      "expanded_input_tokens": 153659,
+      "expanded_fits": false
+    },
+    {
+      "pack": 6,
+      "current_sections": 1,
+      "next_section_native_ranges": 1,
+      "expanded_input_tokens": 103480,
+      "expanded_fits": true
+    },
+    {
+      "pack": 7,
+      "current_sections": 66,
+      "next_section_native_ranges": 3,
+      "expanded_input_tokens": 105669,
+      "expanded_fits": true
+    },
+    {
+      "pack": 8,
+      "current_sections": 12,
+      "next_section_native_ranges": 89,
+      "expanded_input_tokens": 133830,
+      "expanded_fits": false
+    },
+    {
+      "pack": 9,
+      "current_sections": 1,
+      "next_section_native_ranges": 3,
+      "expanded_input_tokens": 66057,
+      "expanded_fits": true
+    },
+    {
+      "pack": 10,
+      "current_sections": 32,
+      "next_section_native_ranges": 102,
+      "expanded_input_tokens": 219565,
+      "expanded_fits": false
+    }
+  ],
+  "excluded_boundary": "The split giant-chapter tail cannot merge with the next chapter even when the combined request fits."
+}

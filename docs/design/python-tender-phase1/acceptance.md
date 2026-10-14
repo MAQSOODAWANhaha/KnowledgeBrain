@@ -98,16 +98,16 @@ CA secret mount，并传入受控 build proxy/add-host；未关闭 TLS，证书�
 D 类当前未完成：父任务已明确提供 Library 原件 BiddingFile(1).pdf（106 页、755602 字节），
 本任务已 materialize 并复核 SHA256 `4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc`。
 原件只保存在私有验收目录，不提交 GitHub。此前“缺原件”的判断已被此证据取代。
-已确认普通单请求窗口 C=131072；仍需真实解析/分包预检及付费前范围确认，未发外部请求。
+已确认普通单请求窗口 C=131072；已完成真实解析、4包最终发送视图预检；付费范围仍需确认，未发外部请求。
 标注集与真实模型输出尚待完成，不把解析成功或 mock/CI 当作 D 类通过。
 
-## 本轮追加评审验收（先记录目标）
+## 本轮追加评审验收
 
-- [ ] 同来源 v1 下产生 r1/r2 要求；同修订重放复用回执；冻结原件保持不变。
-- [ ] r1 确认失效；r2 重新独立验证和确认；旧确认不能授权 r2 计划。
-- [ ] 恢复固定模型/提示摘要；漂移拒绝且不发模型请求。
-- [ ] 实际 FencedPostgresSaver：旧 epoch 暂停，租约到期，新执行者接手，旧 aput/aput_writes 均拒绝，最新 checkpoint 不受污染。
-- [ ] 原 PDF 原生解析、来源覆盖、分包大小与上下文/表头检查；报告阻断项和预计模型请求范围。
+- [x] 同来源 v1 下产生 r1/r2 要求；同修订重放复用回执；冻结原件保持不变。
+- [x] r1 确认失效；r2 重新独立验证和确认；旧确认不能授权 r2 计划。
+- [x] 恢复固定模型/提示摘要；漂移拒绝且不发模型请求。
+- [x] 实际 FencedPostgresSaver：旧 epoch 暂停，租约到期，新执行者接手，旧 aput/aput_writes 均拒绝，最新 checkpoint 不受污染。
+- [x] 原 PDF 原生解析、来源覆盖、分包大小与上下文/表头检查；报告阻断项和预计模型请求范围。
 
 ## E. 最终生产集成（本 PR 不完成）
 
@@ -120,3 +120,22 @@ Rust run/outbox/API/鉴权/事务围栏、流量切换、旧实现移除、部�
   为可追溯阻断项，需要来源修订/补充，不能靠人工确认强制清空。
 - 文本意义的任意冲突/遗漏仍依赖独立模型和真实语义验收；数字规则不是通用语义证明。
 - 上下文预检用明确标记的保守估算；独立 VLM 容量未知时不挪用 CHAT 容量。
+
+## 最终请求视图/流式统一验收（2026-10-14）
+
+- 完整 `.venv311/bin/pytest tests -q --tb=short`，真实PG/Redis环境：**684 passed, 15 skipped in 142.69s**。
+  skip仍为原有可选测试，新服务测试均执行。Ruff同范围通过，`git diff --check`通过。
+- 定向phase1/存储增长/共享schema先跑 **46 passed in 48.05s**；全套包含此后追加的严格SourceView用例。
+- 新增原始SSE首数据/相邻数据180秒idle、持续1360秒、gzip/心跳/thinking/tool活动、截断、断流、
+  usage缺失/正常结束、完成响应回执复用、PG并发send围栏以及uncertain+429兄弟包防自动重付费。
+- wheel成功；48个运行模块/提示逐字节核对，旧requirements/schema不存在。新版镜像验收追加在下节，
+  上文aba9d5d对应的旧镜像事实仅作历史。
+- 真实106页原件重新解析：796范围、4包；正文/网格/图片ref及范围原文前后相同。
+  抽取wire字节减少60.6%，独立验证source-only 0超限；完整验证还需真实要求/处置后重新准入。
+  详见[逐包请求成本](request-review.md)和[当前结构预检](evidence/real-pdf-structure-preflight.json)。
+- 2倍/4倍增长的新事实：[storage-growth.json](evidence/storage-growth.json)；前版保留为
+  [storage-growth-before-wire.json](evidence/storage-growth-before-wire.json)。只测确定性实际PG/文件层，
+  不将模拟模型响应大小/耗时解释为付费模型性能。
+- 全程真实模型调用0次、真实usage未知；13范围审议未决、人工ground truth与真实LLM验收未完成。
+  目前无重分/重试假设下为4抽取+4验证+0..4计划，8..12次仅作待确认预估。
+- Rust/Cargo diff为空；独立Python已验收，Rust生产集成仍未实施，未切流/合并/部署。

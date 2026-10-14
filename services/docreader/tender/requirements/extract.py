@@ -6,6 +6,7 @@ from copy import deepcopy
 from pydantic import ValidationError
 
 from docreader.llm import ModelSemanticError
+from docreader.tender.evidence.view import host_reviewed_ranges, source_view
 from docreader.tender.schema import Extraction, Model, enforce_issue_policy, issue, source_ranges
 
 
@@ -16,34 +17,14 @@ def _unresolved(source: dict, reason: str) -> dict:
     }
 
 
-def _blank_ranges(pack: dict) -> set[str]:
-    return {
-        source["range_id"] for source in pack["body"]
-        if source.get("empty") is True and (
-            source.get("non_requirement_reason") in {"empty_table_row", "blank_page"}
-            or (source.get("non_requirement_reason") == "reviewed_decorative_image"
-                and source.get("image_disposition", {}).get("status") == "reviewed"
-                and source.get("image_disposition", {}).get("classification") == "decorative")
-        )
-        and not source["text"].strip()
-    }
-
-
 def extract_payload(pack: dict) -> dict:
     """The exact sending view, also used to probe the complete request budget."""
-    blank = _blank_ranges(pack)
-    return {
-        "pack_id": pack["pack_id"],
-        "body": [source for source in pack["body"] if source["range_id"] not in blank],
-        "supporting": pack["supporting"],
-        "pending_scope_context": deepcopy(pack.get("pending_scope_context", [])),
-        "scope_bindings": deepcopy(pack.get("scope_bindings", [])),
-    }
+    return source_view(pack)
 
 
 def _normalize_extraction(pack: dict, result: dict) -> dict:
     body = {source["range_id"]: source for source in pack["body"]}
-    blank = _blank_ranges(pack)
+    blank = host_reviewed_ranges(pack)
     issues = [*pack.get("issues", []), *result.get("issues", [])]
     if pack.get("pending_scope_context"):
         issues.append(issue("scope_context_pending", "Source scope context is unresolved; locator metadata is not reviewed source text."))
@@ -80,6 +61,10 @@ def _normalize_extraction(pack: dict, result: dict) -> dict:
                 invalid |= bool(referenced) or bool(supported)
                 if disposition["status"] == "non_requirement":
                     invalid |= disposition["reason"].strip().lower() in {"no requirement", "not a requirement", "none", "非要求", "无要求", "无"}
+                    if source.get("non_requirement_reason") == "empty_table_row":
+                        invalid |= disposition["reason"].strip().lower() in {
+                            "empty_table_row", "blank row", "empty row", "blank template", "空白行", "空行", "空白模板",
+                        }
             if invalid:
                 disposition = _unresolved(source, "Disposition does not agree with evidence-backed requirements.")
                 issues.append(issue("invalid_disposition", disposition["reason"], range_id))
@@ -95,7 +80,7 @@ def _normalize_extraction(pack: dict, result: dict) -> dict:
 
 
 async def extract_pack(pack: dict, model: Model) -> dict:
-    blank = _blank_ranges(pack)
+    blank = host_reviewed_ranges(pack)
     try:
         if all(source["range_id"] in blank for source in pack["body"]):
             response = Extraction(requirements=[], dispositions=[])

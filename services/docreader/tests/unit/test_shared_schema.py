@@ -12,7 +12,7 @@ from docreader.tender.schema import (
     DocumentIdentity, Evidence, Extraction, ModelRequestStatus, OCRStatus,
     PackDescriptor, PackPlan, Plan, RangeSelector, Requirement, RequirementRef,
     RunIdentity, RunStatus, ScopeDecision, ScopeStatus, SourceRangeIdentity,
-    SourceReceiptIdentity, Task, Verification,
+    SourceReceiptIdentity, SourceView, Task, Verification,
 )
 
 
@@ -86,6 +86,25 @@ def test_sources_extraction_verification_and_plan_share_json_identities(tmp_path
     assert response_plan.items[0].requirement_id == reference.requirement_id == restored.requirements[0].requirement_id
     assert RequirementRef.model_validate_json(reference.model_dump_json()) == reference
     assert artifacts.read_json(identity_ref) == original_identity
+
+
+def test_source_view_roundtrip_preserves_blank_row_identity_and_rejects_storage_aliases():
+    payload = {"pack_id": "p", "document_id": "d", "document_version": "rev-A",
+               "body": [{"range_id": "r", "text": "Field", "section_id": "s"}], "supporting": [],
+               "sections": [{"section_id": "s", "heading_path": "Application form"}],
+               "blank_table_templates": [{"table_id": "t", "column_count": 2,
+                                          "rows": [{"row_start": 1, "row_end": 3, "range_ids": ["b1", "b2"]}]}]}
+    parsed = SourceView.model_validate(payload)
+    assert SourceView.model_validate_json(parsed.model_dump_json()) == parsed
+    with pytest.raises(ValidationError):
+        SourceView.model_validate({**payload, "version": "rev-A"})
+    payload["body"][0]["physical_locator"] = {"page": 1}
+    with pytest.raises(ValidationError):
+        SourceView.model_validate(payload)
+    payload["body"][0].pop("physical_locator")
+    payload["blank_table_templates"][0]["rows"][0]["range_ids"] = ["b1", "b1"]
+    with pytest.raises(ValidationError):
+        SourceView.model_validate(payload)
 
 
 @pytest.mark.parametrize("model,payload", [(PackDescriptor, descriptor()), (PackPlan, aggregate_plan())])

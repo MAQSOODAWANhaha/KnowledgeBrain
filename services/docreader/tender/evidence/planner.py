@@ -88,22 +88,39 @@ class StructuralPlanner:
         self.packs.append(pack)
 
     def partition(self, groups: list[list[dict]], reason: str, fallback):
-        """Success returns immediately; hints never grant fit credit to candidates."""
+        """Probe complete prefixes; hints propose boundaries but never grant fit."""
         offset = 0
         prefix = [0]
         for group in groups:
             prefix.append(prefix[-1] + sum(self.weight(entry) for entry in group))
         while offset < len(groups):
+            upper = len(groups) - offset + 1
             count = (max(1, bisect_right(prefix, prefix[offset] + self.capacity_hint, lo=offset + 1) - offset - 1)
                      if self.capacity_hint else len(groups) - offset)
             while True:
                 body = [entry for group in groups[offset:offset + count] for entry in group]
                 pack = self.candidate(body, reason)
                 if self.admitted(pack):
+                    # A conservative hint may stop before another complete group
+                    # that fits. Grow exponentially, then narrow the failed gap;
+                    # never rebuild/probe every remaining suffix or assume fit
+                    # is monotone. Only a measured success can replace the pack.
+                    step, narrowing = 1, False
+                    while count + 1 < upper:
+                        trial_count = ((count + upper) // 2 if narrowing
+                                       else min(count + step, upper - 1))
+                        trial = self.candidate([entry for group in groups[offset:offset + trial_count]
+                                                for entry in group], reason)
+                        if self.admitted(trial):
+                            count, pack = trial_count, trial
+                            step *= 2
+                        else:
+                            upper, narrowing = trial_count, True
                     self.packs.append(pack)
                     offset += count
                     break
                 if count > 1:
+                    upper = count
                     # A failed complete envelope changes the boundary. Half is
                     # only a proposal; every resulting envelope is checked.
                     hint = self.capacity_hint

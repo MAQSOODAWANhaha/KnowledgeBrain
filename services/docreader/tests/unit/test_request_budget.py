@@ -17,14 +17,16 @@ def budget(context_tokens=131072, **kwargs):
     return RequestBudget(context_tokens=context_tokens, model="gpt-6-luna", prompts=PROMPTS, **kwargs)
 
 
-def test_full_canonical_request_and_reserves_decide_admission():
+def test_decoded_content_and_reserves_decide_admission_wire_bytes_are_separate():
     payload = {"pack_id": "p1", "body": [{"text": '中文 "quoted" \\ path'}],
                "supporting": [{"text": "条件适用", "locator": {"page": 2}}],
                "pending_scope_context": []}
     request = build_request("gpt-6-luna", PROMPTS["extract"], payload)
     measured = budget().measure("extract", payload)
-    exact_bytes = len(json.dumps(request, ensure_ascii=False, sort_keys=True,
+    wire_bytes = len(json.dumps(request, ensure_ascii=False, sort_keys=True,
                                 separators=(",", ":"), allow_nan=False).encode())
+    exact_bytes = len(PROMPTS["extract"].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
+    assert measured["wire_bytes"] == wire_bytes > exact_bytes
     assert measured["text_tokens"] == exact_bytes
     assert measured["input_tokens"] == exact_bytes + 32
     assert measured["body_tokens"] > 0 and measured["support_tokens"] > 0
@@ -73,7 +75,9 @@ def test_images_have_reserves_but_base64_is_not_text_and_data_like_text_still_co
     b = budget()
     first = b.measure("ocr", {"text": "image"}, images=[small])
     second = b.measure("ocr", {"text": "image"}, images=[large])
-    assert first == second
+    assert first["wire_bytes"] < second["wire_bytes"]
+    assert {key: value for key, value in first.items() if key != "wire_bytes"} == {
+        key: value for key, value in second.items() if key != "wire_bytes"}
     assert first["image_tokens"] == 16384 and first["image_count"] == 1
     assert b.measure("ocr", {"text": "data:image/png;base64," + "a" * 10000})["text_tokens"] > 10000
     assert b.measure("ocr", {}, images=[small, small])["image_tokens"] == 32768
@@ -114,3 +118,18 @@ def test_default_domain_prompts_are_actual_schema_text_and_snapshot_is_immutable
 def test_non_json_payload_has_no_content_in_error(value):
     with pytest.raises(ModelSemanticError, match="JSON serializable"):
         budget().measure("extract", value)
+
+
+def test_actual_tool_and_json_schema_fields_count_separately_from_http_escaping():
+    b = budget()
+    request = b.request("extract", {"body": [{"text": 'quoted "中文"\\line\n'}]})
+    before = b.measure_request(request)
+    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+    schema = {"name": "answer", "schema": {"type": "object", "properties": {"answer": {"type": "string"}}}}
+    request.update(tools=tools, response_format={"type": "json_schema", "json_schema": schema})
+    measured = b.measure_request(request)
+    actual_schema_bytes = sum(len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+                              for value in (tools, schema))
+    assert measured["text_tokens"] == before["text_tokens"] + actual_schema_bytes
+    assert measured["wire_bytes"] > measured["text_tokens"]
+    assert measured["method"] == "utf8_bytes_decoded_messages_v2"

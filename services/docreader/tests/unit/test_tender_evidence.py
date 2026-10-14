@@ -254,6 +254,67 @@ async def test_formula_display_incomplete_is_not_silent_success(tmp_path, artifa
     assert any(problem['code'] == 'spreadsheet_display_incomplete' and problem['detail'] == 'formula_cached_value_missing'
                for problem in index['issues'])
     assert index['documents'][0]['status'] == 'partial'
+    rows = [entry for pack in EvidenceRepository(artifacts).iter_packs(frozen) for entry in pack['body']
+            if entry.get('text_basis') == 'spreadsheet_row']
+    formula = next(cell for row in rows for cell in row['cells'] if cell.get('formula'))
+    assert formula['formula'] == '=SUM(B2:B3)'
+    assert formula['formula_references'] == ['B2:B3']
+    assert formula['display_complete'] is False
+    assert formula['display_incomplete_reason'] == 'formula_cached_value_missing'
+
+
+async def test_blank_spreadsheet_row_with_actual_image_anchor_is_not_compacted(tmp_path, artifacts):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(['Field', 'Response'])
+    sheet.append([None, None])
+    sheet.append([None, None])
+    sheet.append(['Final', 'Value'])
+    sheet.add_image(ExcelImage(io.BytesIO(png())), 'B2')
+    frozen = await freeze_sources(registration(tmp_path, artifacts, [('anchored.xlsx', save_office(workbook))]), artifacts)
+    packs = list(EvidenceRepository(artifacts).iter_packs(frozen))
+    rows = {entry['row_start']: entry for pack in packs for entry in pack['body'] if 'row_start' in entry}
+    assert rows[2]['empty'] is False and rows[3]['empty'] is True
+    assert rows[2]['image_unit_ids'] == ['sheet:0:image:0']
+    image = next(entry for pack in packs for entry in pack['body'] if entry['kind'] == 'image_region')
+    assert image['unit_id'] == rows[2]['image_unit_ids'][0]
+    assert image['ocr_status'] == 'unresolved'
+
+
+async def test_blank_docx_table_row_with_image_parent_is_not_compacted(tmp_path, artifacts):
+    document = Document()
+    table = document.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = 'Proof'
+    table.cell(1, 1).paragraphs[0].add_run().add_picture(io.BytesIO(png()))
+    frozen = await freeze_sources(registration(tmp_path, artifacts, [('proof.docx', save_office(document))]), artifacts)
+    packs = list(EvidenceRepository(artifacts).iter_packs(frozen))
+    rows = {entry['row_start']: entry for pack in packs for entry in pack['body'] if 'row_start' in entry}
+    assert rows[1]['empty'] is False and rows[2]['empty'] is True
+    image = next(entry for pack in packs for entry in pack['body'] if entry['kind'] == 'image_region')
+    assert rows[1]['image_unit_ids'] == [image['unit_id']]
+    assert image['locator']['compound_parent']['row_ordinal'] == 1
+    assert image['ocr_status'] == 'unresolved'
+
+
+def test_formula_with_blank_display_is_retained_from_canonical_spreadsheet_cells():
+    from copy import deepcopy
+    from docreader.tender.evidence.references import SourceIndex, selector
+    locator = {'locator_kind': 'spreadsheet', 'sheet_ordinal': 0,
+               'region': {'start_row': 2, 'end_row': 2, 'start_column': 1, 'end_column': 2},
+               'cell_refs': ['sheet:0:cell:2:2']}
+    raw = {'units': [{'unit_id': 'row:2', 'kind': 'table_row', 'locator': locator}],
+           'source_contract': {'units': []},
+           'spreadsheet_cells': {'sheet:0:cell:2:2': {'row': 2, 'column': 2, 'text': '',
+                                 'formula': '=IF(A2="","",A2)', 'formula_references': ['A2'],
+                                 'display_complete': True}}}
+    snapshot = deepcopy(raw)
+    index = SourceIndex({'document_id': 'book', 'document_version': '1', 'original_ref': {'sha256': '1' * 64}}, raw)
+    row = index.materialize(selector(index.ranges[0]))
+    assert row['empty'] is False and row['text'] == ' | '
+    assert row['column_count'] == 2
+    assert row['cells'][0]['formula'] == '=IF(A2="","",A2)'
+    assert row['cells'][0]['column'] == 1
+    assert raw == snapshot
 
 
 async def test_embedded_pdf_attachment_is_explicitly_unresolved(tmp_path, artifacts):

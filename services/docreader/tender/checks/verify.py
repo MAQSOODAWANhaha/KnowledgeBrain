@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pydantic import ValidationError
 
 from docreader.llm import ModelSemanticError
+from docreader.tender.evidence.view import host_reviewed_ranges, source_view
 from docreader.tender.schema import Model, Verification, enforce_issue_policy, issue
 
 NUMBER = re.compile(r"(?<![\d.])[-+]?\d+(?:,\d{3})*(?:\.\d+)?(?![\d.])")
@@ -105,18 +106,22 @@ def check_requirement(requirement: dict, sources: dict, body_ids: set[str]) -> l
 async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
     sources = {source["range_id"]: source for source in [*pack["supporting"], *pack["body"]]}
     body_ids = {source["range_id"] for source in pack["body"]}
+    host_reviewed = host_reviewed_ranges(pack)
+    model_source_ids = sources.keys() - host_reviewed
     findings = []
     if pack.get("pending_scope_context"):
         findings.append(issue("scope_context_pending", "Scope context has only pending locator metadata; do not claim it was independently reviewed or resolved."))
     for requirement in extraction["requirements"]:
         findings.extend(check_requirement(requirement, sources, body_ids))
     try:
-        review = Verification.model_validate(await model.call("verify", {
-            "pack_id": pack["pack_id"], "body": pack["body"], "supporting": pack["supporting"],
-            "pending_scope_context": deepcopy(pack.get("pending_scope_context", [])),
-            "scope_bindings": deepcopy(pack.get("scope_bindings", [])),
-            "requirements": extraction["requirements"], "dispositions": extraction["dispositions"],
-        })).model_dump(exclude_none=True)
+        payload = {**source_view(pack), "requirements": extraction["requirements"],
+                   "dispositions": [item for item in extraction["dispositions"]
+                                    if item["range_id"] not in host_reviewed]}
+        if model_source_ids:
+            response = await model.call("verify", payload)
+        else:
+            response = {"reviewed_range_ids": [], "findings": []}
+        review = Verification.model_validate(response).model_dump(exclude_none=True)
         findings.extend(enforce_issue_policy(finding) for finding in review["findings"])
         reviewed = review["reviewed_range_ids"]
     except (ModelSemanticError, ValidationError) as exc:
@@ -124,14 +129,15 @@ async def verify_pack(pack: dict, extraction: dict, model: Model) -> dict:
         findings.append(issue("verification_semantic_failure", f"Independent review contract rejected ({type(exc).__name__})."))
     reviewed_counts = Counter(reviewed)
     for range_id in sources:
-        if reviewed_counts[range_id] != 1:
+        if range_id not in host_reviewed and reviewed_counts[range_id] != 1:
             findings.append(issue("source_not_independently_reviewed", "Independent review must read each body and supporting range exactly once.", range_id))
-    for range_id in reviewed_counts.keys() - sources.keys():
-        findings.append(issue("unknown_review_range", "Independent review refers to a range outside the pack.", range_id))
+    for range_id in reviewed_counts.keys() - model_source_ids:
+        findings.append(issue("unknown_review_range", "Independent review refers to a range outside the supplied source view.", range_id))
     for finding in findings:
         if finding.get("range_id") and finding["range_id"] not in sources:
             finding["blocking"] = True
     return {
         "pack_id": pack["pack_id"], "reviewed_range_ids": reviewed, "findings": findings,
+        **({"host_reviewed_range_ids": sorted(host_reviewed)} if host_reviewed else {}),
         **({"pending_scope_context": deepcopy(pack["pending_scope_context"])} if "pending_scope_context" in pack else {}),
     }

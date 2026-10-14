@@ -12,20 +12,22 @@ from typing import Mapping, Sequence, get_args
 from uuid import uuid4
 
 import httpx
-from openai import APIConnectionError, APIResponseValidationError, APIStatusError, AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
 from docreader.llm.budget import RequestBudget
 from docreader.llm.config import ModelConfig, ModelEndpoint, completions_url
 from docreader.llm.request import (
     ImageInput, ModelConfigurationError, ModelInfrastructureError, ModelSemanticError,
+    UncertainModelResponse, request_digest,
 )
 from docreader.llm.usage import UsageLedger, reported_usage
+from docreader.llm.streaming import ActiveResponseStream, IdleDeadline, StreamResponse, invalid_json_constant
 from docreader.tender.schema import ArtifactRef, ModelRequestStatus, Task
 
 
 class OpenAIModel:
     def __init__(self, config: ModelConfig, store, lease, prompts: Mapping[str, str] | None = None,
-                 concurrency: int = 4, timeout_seconds: float = 120,
+                 concurrency: int = 4, timeout_seconds: float = 180,
                  *, artifacts=None, transport: httpx.AsyncBaseTransport | None = None):
         if type(concurrency) is not int or concurrency < 1 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ModelConfigurationError("model concurrency and timeout must be positive")
@@ -64,6 +66,7 @@ class OpenAIModel:
             "budget": {"chat": self.request_budget().spec(),
                        "vlm": self.request_budget(images=True).spec() if self.config.vision is not None else None},
             "timeout_seconds": self._timeout,
+            "timeout_policy": "raw_response_idle_v1",
             "concurrency": self._concurrency,
         }
 
@@ -76,8 +79,8 @@ class OpenAIModel:
         if endpoint not in self._clients:
             self._clients[endpoint] = AsyncOpenAI(
                 api_key=endpoint.api_key, base_url=endpoint.sdk_base_url, max_retries=0,
-                timeout=self._timeout,
-                http_client=httpx.AsyncClient(timeout=self._timeout, transport=self._transport,
+                timeout=httpx.Timeout(self._timeout, read=None),
+                http_client=httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, read=None), transport=self._transport,
                                               follow_redirects=False),
             )
         return self._clients[endpoint]
@@ -98,88 +101,124 @@ class OpenAIModel:
         budget = self.request_budget(images=bool(images))
         request = budget.request(task, payload, images)
         context = budget.require_request(request)
-        serialized = request["messages"][1]["content"][0]["text"]
+        digest = request_digest(endpoint.base_url, request)
 
         async with self._semaphore:
-            # This is deliberately durable on every call, including direct use
-            # outside graph nodes. A mismatch must fail before any request audit
-            # is marked sent or provider credentials/document content leave here.
             await self.store.pin_execution_spec(self.lease, self.execution_spec())
             request_id = uuid4().hex
-            await self.store.begin_request(self.lease, request_id, endpoint.model, task, metadata={
-                **context, "payload_sha256": hashlib.sha256(serialized.encode()).hexdigest(),
+            row = await self.store.begin_request(self.lease, request_id, endpoint.model, task, metadata={
+                **context, "request_digest": digest,
             })
-            # Persistence failure here prevents the external call entirely.
+            if row["status"] == "succeeded":
+                return await self._cached_response(row, digest)
+            # Durable send fencing and digest replay protection happen before HTTP.
             await self.store.finish_request(request_id, "sent")
             started = time.monotonic()
+            stream = StreamResponse()
+            deadline = IdleDeadline(self._timeout)
+            raw_response = None
             try:
-                raw_response = await self._client(endpoint).chat.completions.with_raw_response.create(**request)
+                manager = self._client(endpoint).chat.completions.with_streaming_response.create(**request)
+                raw_response = await deadline.wait(manager.__aenter__)
+                response = raw_response.http_response
+                response.stream = ActiveResponseStream(response.stream, deadline, stream.counts)
+                iterator = raw_response.iter_bytes().__aiter__()
+                while not stream.done:
+                    try:
+                        chunk = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    if chunk:
+                        # Before SSE decoding: comments, incomplete events, thinking,
+                        # and tool arguments all keep the response alive.
+                        stream.feed(chunk)
+                if response.headers.get("content-type", "").split(";", 1)[0].strip() != "text/event-stream":
+                    stream.failure = "invalid_stream_content_type"
+                    raise ModelSemanticError("model endpoint did not return an SSE response")
+                result = stream.result()
             except asyncio.CancelledError:
-                await asyncio.shield(self._finish(request_id, "uncertain", None, "cancelled_after_send", started))
+                await asyncio.shield(self._finish_stream(request_id, "uncertain", stream, digest,
+                                                         "cancelled_after_send", started))
                 raise
-            except (APIConnectionError, httpx.TransportError, TimeoutError):
-                await self._finish(request_id, "uncertain", None, "transport_response_unknown", started)
-                raise ModelInfrastructureError("model transport failed after send; provider execution and billing are uncertain") from None
             except APIStatusError as error:
+                # A received HTTP rejection is distinct from a lost response.
                 status = error.status_code
-                retryable = status in {408, 409, 425, 429} or status >= 500
-                uncertain = status == 408 or status >= 500
-                response_ref, usage = await self._received_response(error.response)
-                await self._finish(request_id, "uncertain" if uncertain else "failed", usage,
-                                   f"http_{status}", started, response_ref)
-                if retryable:
+                response_ref, usage = await self._received_rejection(error.response, digest)
+                await self._finish(request_id, "failed", usage, f"http_{status}", started, response_ref)
+                if status in {408, 409, 425, 429} or status >= 500:
                     raise ModelInfrastructureError(f"model endpoint returned HTTP {status}") from None
                 if status in {401, 403, 404} or 300 <= status < 400:
                     raise ModelConfigurationError(f"model endpoint rejected its configuration (HTTP {status})") from None
                 raise ModelSemanticError(f"model endpoint rejected the request (HTTP {status})") from None
-
-            # Save the received envelope once before interpreting model content.
-            # Parse failures retain the original response and any real usage;
-            # transport loss has no response reference. Artifact failures remain
-            # technical failures, not falsely classified as document/model JSON.
-            response_ref, usage = await self._received_response(raw_response.http_response)
-            try:
-                response = raw_response.parse()
-            except (APIResponseValidationError, json.JSONDecodeError):
-                await self._finish(request_id, "failed", usage, "invalid_response_envelope", started, response_ref)
-                raise ModelSemanticError("model endpoint returned an invalid response envelope") from None
-            try:
-                if not response.choices:
-                    raise ModelSemanticError("model response has no choice")
-                choice = response.choices[0]
-                if choice.message.refusal or choice.finish_reason not in {"stop", None}:
-                    raise ModelSemanticError("model refused or did not finish its JSON response")
-                result = json.loads(choice.message.content or "", parse_constant=_invalid_json_constant)
-                if not isinstance(result, dict):
-                    raise ModelSemanticError("model JSON response must be an object")
-            except (ValueError, AttributeError, TypeError):
-                await self._finish(request_id, "failed", usage, "invalid_json_response", started, response_ref)
-                raise ModelSemanticError("model response is not a complete JSON object") from None
-            await self._finish(request_id, "succeeded", usage, None, started, response_ref)
+            except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
+                cause = error.__cause__ if isinstance(error, APIConnectionError) else error
+                if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                    await self._finish_stream(request_id, "failed", stream, digest, "connection_before_send", started)
+                    raise ModelInfrastructureError("model connection failed before send") from None
+                if isinstance(cause, (TimeoutError, httpx.ReadTimeout)):
+                    failure = "between_data_idle_timeout" if stream.counts["raw_received_chunks"] else "first_data_idle_timeout"
+                else:
+                    failure = "transport_response_unknown"
+                await self._finish_stream(request_id, "uncertain", stream, digest, failure, started)
+                raise UncertainModelResponse("model response was lost after send; provider execution and billing are uncertain") from None
+            except UncertainModelResponse:
+                await self._finish_stream(request_id, "uncertain", stream, digest, "stream_missing_done", started)
+                raise
+            except (ModelSemanticError, httpx.DecodingError) as error:
+                if isinstance(error, httpx.DecodingError):
+                    stream.failure = "invalid_stream_encoding"
+                await self._finish_stream(request_id, "failed", stream, digest,
+                                          stream.failure or "invalid_json_response", started)
+                raise ModelSemanticError("model endpoint returned an invalid or incomplete JSON stream") from None
+            finally:
+                if raw_response is not None:
+                    await raw_response.close()
+            await self._finish_stream(request_id, "succeeded", stream, digest, None, started)
             return result
 
-    async def _received_response(self, response: httpx.Response) -> tuple[dict | None, dict | None]:
+    async def _cached_response(self, row: dict, digest: str) -> dict:
+        # ArtifactStore verifies size, path and SHA256 before decoding. A missing
+        # or corrupt cache must never become permission to pay for another call.
         try:
-            envelope = response.json(parse_constant=_invalid_json_constant)
-        except ValueError:
-            envelope = {"unparsed_body": response.text}
-        usage = reported_usage(envelope.get("usage")) if isinstance(envelope, dict) else None
+            if self.artifacts is None:
+                raise ValueError
+            reference = ArtifactRef.model_validate(row["response_ref"]).model_dump(mode="json")
+            envelope = await asyncio.to_thread(self.artifacts.read_json, reference)
+            if (envelope["protocol"] != StreamResponse.PROTOCOL or envelope["request_digest"] != digest
+                    or envelope["outcome"] != "completed"):
+                raise ValueError
+            stream = StreamResponse()
+            stream.feed(envelope["raw_body"].encode("utf-8"))
+            return stream.result()
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, UncertainModelResponse):
+            raise ModelSemanticError("cached model response cannot be verified; provider was not called") from None
+
+    async def _save_response(self, envelope: dict) -> dict | None:
         if self.artifacts is None:
-            return None, usage
+            return None
         secrets = tuple(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
                         if endpoint is not None and endpoint.api_key)
-        envelope = _redact_response(envelope, secrets)
-        reference = await asyncio.to_thread(self.artifacts.put_json, envelope)
-        return ArtifactRef.model_validate(reference).model_dump(mode="json"), usage
+        reference = await asyncio.to_thread(self.artifacts.put_json, _redact_response(envelope, secrets))
+        return ArtifactRef.model_validate(reference).model_dump(mode="json")
+
+    async def _finish_stream(self, request_id, status, stream, digest, error_type, started):
+        response_ref = await self._save_response(stream.audit(digest, error_type or "completed"))
+        await self._finish(request_id, status, stream.usage, error_type, started, response_ref)
+
+    async def _received_rejection(self, response: httpx.Response, digest: str) -> tuple[dict | None, dict | None]:
+        try:
+            body = response.json(parse_constant=invalid_json_constant)
+        except ValueError:
+            body = {"unparsed_body": response.text}
+        usage = reported_usage(body.get("usage")) if isinstance(body, dict) else None
+        envelope = {"protocol": "http.rejection.v1", "request_digest": digest, "status_code": response.status_code,
+                    "body": body, "usage": usage, "usage_status": "reported" if usage is not None else "unknown"}
+        return await self._save_response(envelope), usage
 
     async def _finish(self, request_id, status: ModelRequestStatus, usage, error_type, started, response_ref=None):
         error = {"type": error_type, "elapsed_seconds": round(time.monotonic() - started, 6)} if error_type else None
         await self.store.finish_request(request_id, status, usage=usage, error=error, response_ref=response_ref)
         self.usage.record(status, usage)
-
-
-def _invalid_json_constant(value):
-    raise ModelSemanticError("model JSON contains a non-finite number")
 
 
 def _redact_response(value, secrets):
@@ -193,5 +232,7 @@ def _redact_response(value, secrets):
         return [_redact_response(item, secrets) for item in value]
     if isinstance(value, str):
         for secret in secrets:
-            value = value.replace(secret, "[REDACTED]")
+            for representation in (secret, json.dumps(secret, ensure_ascii=False)[1:-1],
+                                   json.dumps(secret, ensure_ascii=True)[1:-1]):
+                value = value.replace(representation, "[REDACTED]")
     return value

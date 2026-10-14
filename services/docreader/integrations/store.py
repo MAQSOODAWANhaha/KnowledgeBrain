@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import re
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -37,6 +38,14 @@ class StaleExecution(StoreError):
 
 class Cancelled(StaleExecution):
     pass
+
+
+class RequestReplayBlocked(StoreError):
+    """The provider may already have executed this immutable logical request."""
+
+    def __init__(self, request_id: str, status: str):
+        self.request_id, self.status = request_id, status
+        super().__init__("logical model request requires explicit reconciliation before replay")
 
 
 @dataclass(frozen=True)
@@ -157,6 +166,9 @@ CREATE TABLE IF NOT EXISTS tender_model_requests (
     finished_at timestamptz,
     FOREIGN KEY (run_id, source_version, domain_revision) REFERENCES tender_revisions(run_id, source_version, domain_revision)
 );
+CREATE INDEX IF NOT EXISTS tender_model_requests_replay_idx
+    ON tender_model_requests(run_id, source_version, domain_revision, task, (metadata->>'request_digest'))
+    WHERE status IN ('sent', 'uncertain', 'succeeded');
 """
 
 
@@ -751,14 +763,40 @@ class Store:
 
     async def begin_request(
         self, lease: Lease, request_id: str, model: str, task: Task, metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
+        digest = (metadata or {}).get("request_digest")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("model audit requires a lowercase SHA-256 request_digest")
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
-            await conn.execute(
-                "INSERT INTO tender_model_requests(request_id, run_id, source_version, domain_revision, epoch, model, task, metadata) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                (request_id, lease.run_id, lease.source_version, lease.domain_revision, lease.epoch, model, task, Jsonb(_safe_metadata(metadata or {}))),
+            prior = await self._matching_model_requests(
+                conn, lease.run_id, lease.source_version, lease.domain_revision, task, digest,
             )
+            for row in prior:
+                if row["status"] in {"sent", "uncertain"} or row["response_ref"] is None:
+                    raise RequestReplayBlocked(row["request_id"], row["status"])
+            if prior:
+                # The completed provider response can reconstruct the domain result
+                # after a worker died between model audit and artifact/checkpoint.
+                # No new audit row is created and the caller must not contact the provider.
+                return prior[0]
+            return await (await conn.execute(
+                "INSERT INTO tender_model_requests(request_id, run_id, source_version, domain_revision, epoch, model, task, metadata) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (request_id, lease.run_id, lease.source_version, lease.domain_revision, lease.epoch, model, task, Jsonb(_safe_metadata(metadata or {}))),
+            )).fetchone()
+
+    async def _matching_model_requests(
+        self, conn: AsyncConnection, run_id: str, source_version: int, domain_revision: int, task: Task, digest: str,
+    ) -> list[dict[str, Any]]:
+        # Caller holds the run lock, shared by begin, send, cancel and lease takeover.
+        # Prepared requests have not been sent; explicit failures may be retried.
+        return await (await conn.execute(
+            "SELECT * FROM tender_model_requests WHERE run_id = %s AND source_version = %s AND domain_revision = %s "
+            "AND task = %s AND metadata->>'request_digest' = %s AND status IN ('sent', 'uncertain', 'succeeded') "
+            "ORDER BY created_at, request_id FOR UPDATE",
+            (run_id, source_version, domain_revision, task, digest),
+        )).fetchall()
 
     async def finish_request(
         self, request_id: str, status: str, usage: dict[str, Any] | None = None, error: Any = None,
@@ -786,6 +824,15 @@ class Store:
             )).fetchone()
             if not row:
                 raise StoreError("model request not registered")
+            if status == "sent":
+                if row["status"] != "prepared":
+                    raise RequestReplayBlocked(row["request_id"], row["status"])
+                prior = await self._matching_model_requests(
+                    conn, row["run_id"], row["source_version"], row["domain_revision"], row["task"],
+                    row["metadata"]["request_digest"],
+                )
+                if prior:
+                    raise RequestReplayBlocked(prior[0]["request_id"], prior[0]["status"])
             if response_ref is not None and row["response_ref"] is not None and row["response_ref"] != response_ref:
                 raise Conflict("model request already identifies a different immutable response")
             if row["status"] in {"succeeded", "failed"}:
@@ -799,8 +846,6 @@ class Store:
                         (Jsonb(response_ref), request_id),
                     )
                 return
-            if row["status"] == "uncertain" and status == "sent":
-                raise Conflict("an uncertain request cannot be sent again with the same request_id")
             await conn.execute(
                 "UPDATE tender_model_requests SET status = %s, usage = COALESCE(%s, usage), error = %s, "
                 "response_ref = COALESCE(%s, response_ref), "

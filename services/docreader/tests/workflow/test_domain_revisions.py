@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 
 from docreader.integrations.store import Conflict, InvalidConfirmation, StaleExecution
 from docreader.workflow.persistence import FencedPostgresSaver, initialize_checkpoints
-from test_store import expire, store as store, submitted
+from test_store import expire, request_metadata, store as store, submitted
 
 pytestmark = pytest.mark.asyncio
 
@@ -31,7 +31,7 @@ async def extracted(store):
 async def test_domain_correction_preserves_sources_and_invalidates_worker_and_pending_command(store):
     run, command, old, frozen, requirements, corrected = await extracted(store)
     await store.commit_artifact(old, "verify", store.test_artifacts.put_json({"blocking": False}))
-    await store.begin_request(old, "old-model", "model-a", "verify")
+    await store.begin_request(old, "old-model", "model-a", "verify", request_metadata("old-model"))
     await store.finish_request("old-model", "sent")
     revision = await store.correct(run["run_id"], 1, 1, requirements["sha256"], corrected, "correction", "restore condition")
     assert revision["source_version"] == 1
@@ -58,7 +58,7 @@ async def test_domain_correction_preserves_sources_and_invalidates_worker_and_pe
     assert revision_row["corrected_requirements_ref"] == corrected
     assert revision_row["upstream_digest"] == requirements["sha256"]
     assert revision_row["execution_spec"] is None
-    await store.begin_request(new, "new-model", "model-b", "verify")
+    await store.begin_request(new, "new-model", "model-b", "verify", request_metadata("new-model"))
     assert (await store.get_run(run["run_id"]))["usage"][0]["domain_revision"] == 2
 
 
@@ -117,7 +117,7 @@ async def test_scope_review_preserves_sources_invalidates_confirmation_and_fence
     await store.release(old, "waiting-confirmation", checklist_digest="approved-before-review")
     approved = await store.confirm(run["run_id"], 1, "approved-before-review", "approve", domain_revision=1)
     active = await store.acquire(run["run_id"], approved["command_id"], 1)
-    await store.begin_request(active, "scope-old-request", "fixture", "plan")
+    await store.begin_request(active, "scope-old-request", "fixture", "plan", request_metadata("scope-old-request"))
     await store.finish_request("scope-old-request", "sent")
     reviewed = await store.review_scope(run["run_id"], 1, 1, "current-plan", decisions,
                                         "scope-review", "Resolve the validated local-only condition")
