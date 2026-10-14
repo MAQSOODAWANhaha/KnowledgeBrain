@@ -1,0 +1,31 @@
+# Explicit standalone acceptance roles. Never included by the existing default Compose files.
+# Provide TENDER_DATABASE_URL / TENDER_REDIS_URL and model config in the invoking environment.
+services:
+  python-tender-worker:
+    restart: unless-stopped
+    image: knowledgebrain-docreader:python-tender-phase1
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.docreader
+    command: ["uv", "run", "--frozen", "--no-dev", "dramatiq", "docreader.jobs.tasks", "--processes", "1", "--threads", "4"]
+    environment: &tender-environment
+      TENDER_DATABASE_URL: ${TENDER_DATABASE_URL:?set an independent Python workflow database}
+      TENDER_REDIS_URL: ${TENDER_REDIS_URL:?set the Redis URL reachable from this container}
+      TENDER_ARTIFACT_ROOT: /artifacts
+      KNOWLEDGEBRAIN_CHAT_BASE_URL: ${KNOWLEDGEBRAIN_CHAT_BASE_URL:-}
+      KNOWLEDGEBRAIN_CHAT_API_KEY: ${KNOWLEDGEBRAIN_CHAT_API_KEY:-}
+      KNOWLEDGEBRAIN_CHAT_MODEL: ${KNOWLEDGEBRAIN_CHAT_MODEL:-}
+      KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS: ${KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS:-}
+      KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES: ${KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES:-}
+      KNOWLEDGEBRAIN_VLM_BASE_URL: ${KNOWLEDGEBRAIN_VLM_BASE_URL:-}
+      KNOWLEDGEBRAIN_VLM_API_KEY: ${KNOWLEDGEBRAIN_VLM_API_KEY:-}
+      KNOWLEDGEBRAIN_VLM_MODEL: ${KNOWLEDGEBRAIN_VLM_MODEL:-}
+    volumes: ["python-tender-artifacts:/artifacts"]
+  python-tender-dispatcher:
+    restart: unless-stopped
+    image: knowledgebrain-docreader:python-tender-phase1
+    command: ["uv", "run", "--frozen", "--no-dev", "python", "-m", "docreader.jobs.dispatcher"]
+    environment: *tender-environment
+    volumes: ["python-tender-artifacts:/artifacts"]
+volumes:
+  python-tender-artifacts:

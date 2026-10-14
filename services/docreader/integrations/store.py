@@ -278,14 +278,47 @@ class Store:
             )
             return result.rowcount == 1
 
-    async def publish_failed(self, command_id: str, claim_token: str, error: Any = None) -> bool:
+    async def publish_failed(
+        self, command_id: str, claim_token: str, error: Any = None, *,
+        retryable: bool = True, max_infrastructure_failures: int = 4,
+    ) -> bool:
+        if max_infrastructure_failures < 1:
+            raise ValueError("max_infrastructure_failures must be positive")
         async with self.transaction() as conn:
-            result = await conn.execute(
-                "UPDATE tender_commands SET status = 'pending', claim_token = NULL, claim_until = NULL, "
-                "last_error = %s WHERE command_id = %s AND claim_token = %s AND status = 'claimed'",
-                (Jsonb(_safe_metadata(error)), command_id, claim_token),
+            identity = await (await conn.execute(
+                "SELECT run_id FROM tender_commands WHERE command_id = %s", (command_id,),
+            )).fetchone()
+            if identity is None:
+                return False
+            # acquire/cancel/revise also lock run before command. A stale publisher
+            # must neither consume the new claim's budget nor overwrite its state.
+            run = await self._run(conn, identity["run_id"], lock=True)
+            command = await (await conn.execute(
+                "SELECT * FROM tender_commands WHERE command_id = %s FOR UPDATE", (command_id,),
+            )).fetchone()
+            if command["status"] != "claimed" or command["claim_token"] != claim_token:
+                return False
+            failures = command["infrastructure_failures"] + int(retryable)
+            terminal = not retryable or failures >= max_infrastructure_failures
+            receipt = None
+            if terminal:
+                receipt = {
+                    "status": "failed", "phase": "publish",
+                    "metadata": {"reason": "infrastructure_retries_exhausted" if retryable else "publish_rejected"},
+                }
+            await conn.execute(
+                "UPDATE tender_commands SET status = %s, claim_token = NULL, claim_until = NULL, "
+                "last_error = %s, infrastructure_failures = %s, receipt = %s, "
+                "completed_at = CASE WHEN %s THEN clock_timestamp() ELSE NULL END WHERE command_id = %s",
+                ("completed" if terminal else "pending", Jsonb(_safe_metadata(error)), failures,
+                 Jsonb(receipt) if receipt is not None else None, terminal, command_id),
             )
-            return result.rowcount == 1
+            if terminal:
+                await conn.execute(
+                    "UPDATE tender_runs SET status = 'failed', updated_at = clock_timestamp() WHERE run_id = %s",
+                    (run["run_id"],),
+                )
+            return True
 
     async def acquire(
         self, run_id: str, command_id: str, version: int, lease_seconds: float = 30,

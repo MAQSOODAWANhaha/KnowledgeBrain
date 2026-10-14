@@ -64,6 +64,11 @@ async def test_publish_failure_token_fencing_and_unexecuted_redelivery(store):
     assert await store.publish_failed(command["command_id"], first["claim_token"], "RedisUnavailable")
     second = (await store.claim_commands())[0]
     assert first["claim_token"] != second["claim_token"]
+    assert not await store.publish_failed(command["command_id"], first["claim_token"], retryable=False)
+    unchanged = await store.get_command(command["command_id"])
+    assert unchanged["claim_token"] == second["claim_token"]
+    assert unchanged["infrastructure_failures"] == 1
+    assert unchanged["status"] == "claimed"
     assert not await store.mark_published(command["command_id"], first["claim_token"])
     assert await store.mark_published(command["command_id"], second["claim_token"])
     assert await store.mark_published(command["command_id"], second["claim_token"])
@@ -74,6 +79,61 @@ async def test_publish_failure_token_fencing_and_unexecuted_redelivery(store):
     assert third["delivery_count"] == 3
     assert third["receipt"] is None
     assert not await store.mark_published(command["command_id"], second["claim_token"])
+
+
+@pytest.mark.asyncio
+async def test_publish_infrastructure_failures_stop_after_four_attempts(store):
+    run, command = await submitted(store)
+    for attempt in range(1, 5):
+        claimed = (await store.claim_commands())[0]
+        assert await store.publish_failed(
+            command["command_id"], claimed["claim_token"], {"type": "RedisConnectionError"}, retryable=True,
+        )
+        current = await store.get_command(command["command_id"])
+        assert current["infrastructure_failures"] == attempt
+        assert current["status"] == ("completed" if attempt == 4 else "pending")
+        assert not await store.publish_failed(command["command_id"], claimed["claim_token"])
+    assert current["receipt"]["status"] == "failed"
+    assert current["receipt"]["phase"] == "publish"
+    assert current["execution_count"] == 0
+    assert current["completed_at"] is not None
+    assert (await store.get_run(run["run_id"]))["status"] == "failed"
+    assert not await store.claim_commands()
+    assert await store.acquire(run["run_id"], command["command_id"], 1) is None
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_publish_error_is_terminal_without_infrastructure_retry(store):
+    run, command = await submitted(store)
+    claimed = (await store.claim_commands())[0]
+    assert await store.publish_failed(
+        command["command_id"], claimed["claim_token"], {"type": "ValueError"}, retryable=False,
+    )
+    current = await store.get_command(command["command_id"])
+    assert current["status"] == "completed"
+    assert current["infrastructure_failures"] == 0
+    assert current["last_error"] == {"type": "ValueError"}
+    assert current["receipt"] == {"status": "failed", "phase": "publish", "metadata": {"reason": "publish_rejected"}}
+    assert (await store.get_run(run["run_id"]))["status"] == "failed"
+    assert not await store.mark_published(command["command_id"], claimed["claim_token"])
+    assert not await store.claim_commands()
+
+
+@pytest.mark.asyncio
+async def test_publish_and_execution_share_infrastructure_failure_budget(store):
+    run, command = await submitted(store)
+    for _ in range(2):
+        claimed = (await store.claim_commands())[0]
+        await store.publish_failed(command["command_id"], claimed["claim_token"], retryable=True)
+    lease = await store.acquire(run["run_id"], command["command_id"], 1)
+    assert (await store.release(lease, "retry"))["status"] == "pending"
+    claimed = (await store.claim_commands())[0]
+    await store.publish_failed(command["command_id"], claimed["claim_token"], retryable=True)
+    current = await store.get_command(command["command_id"])
+    assert current["infrastructure_failures"] == 4
+    assert current["execution_count"] == 1
+    assert (await store.get_run(run["run_id"]))["status"] == "failed"
+    assert not await store.claim_commands()
 
 
 @pytest.mark.asyncio

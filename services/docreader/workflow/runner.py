@@ -17,9 +17,11 @@ async def execute_command(run_id, command_id, version, settings, node_factory):
     lease = await store.acquire(run_id, command_id, version, lease_seconds=settings.lease_seconds)
     if lease is None:
         return  # A completed, obsolete, or concurrently owned delivery is harmless.
-    artifacts = ArtifactStore(settings.artifact_root)
+    nodes = None
 
     async def invoke():
+        nonlocal nodes
+        artifacts = ArtifactStore(settings.artifact_root)
         async with await psycopg.AsyncConnection.connect(
             settings.dsn, autocommit=True, prepare_threshold=0, row_factory=dict_row,
         ) as conn:
@@ -73,3 +75,5 @@ async def execute_command(run_id, command_id, version, settings, node_factory):
         for task in (graph_task, heart_task):
             with suppress(asyncio.CancelledError, Exception):
                 await task
+        if nodes is not None and hasattr(nodes, "close"):
+            await nodes.close()
