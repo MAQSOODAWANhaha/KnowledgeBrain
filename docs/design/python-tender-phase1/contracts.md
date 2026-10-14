@@ -38,7 +38,8 @@ epoch 围栏保护所有产物提交。checkpointer 写入需受同一个 run �
 
 ### 来源版本与领域修订（2026-10-14 评审修正，先于代码）
 
-`version` 字段仅表示 `source_version`：原文件/附件集合改变才增加。新增 `domain_revision`
+内部字段统一为 `source_version`：原文件/附件集合改变才增加。单文件标签使用`document_version`；
+不再保留通用`version`别名，完整定义见[唯一字段字典](field-dictionary.md)。`domain_revision`
 表示同一冻结来源上的要求补漏/纠正，每来源从 1 开始。`correct` 必须带预期当前修订、
 基线要求内容摘要和原因；提交完整分包要求清单（每包身份不变，可增删或更正要求/处置），
 事务建立新修订与 start 命令，不更改 manifest 或冻结文件。重复同 request key 返回同一修订；
@@ -46,7 +47,9 @@ epoch 围栏保护所有产物提交。checkpointer 写入需受同一个 run �
 
 产物身份为 `(run_id, source_version, domain_revision, stage, scope)`；每项另存
 `input_digest`（直接上游文件摘要与操作相关配置摘要）。register/freeze/ocr 等来源产物使用
-领域修订 0，在同来源内共享；抽取/验证/确认/计划使用当前修订。相同身份与输入重放返回原回执；
+领域修订 0，在同来源内共享；分包计划/抽取/验证/确认/响应计划使用当前修订。分包计划由共享
+规范来源加当前scope_decisions生成，绑定task/input_digest/budget_digest/plan_digest。
+相同身份与输入重放返回原回执；
 同身份换输入或不同内容拒绝；合法纠错建立新修订。文件先原子落盘后登记，checkpoint 失败
 可复用已提交回执。不能把旧验证/计划当作新修订有效结果；status 的当前结果只列当前修订
 及共享来源，历史回执保留审计。新 checkpoint thread 包含来源版本与领域修订。
