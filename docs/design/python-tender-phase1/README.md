@@ -1,6 +1,7 @@
 # Python 招标工作流第一期（独立路径）
 
-状态：设计先行，Draft PR；实现与验收事实见 [实施清单](implementation.md)。
+状态：设计先行，Draft PR；独立实现和确定性验收已完成，真实 LLM 语义验收待完成。
+实施与验收事实见 [实施清单](implementation.md)、[证据](acceptance.md)，启动见 [runbook](runbook.md)。
 基线：`e8b681a0997760ec3f567223fe7eb82b622f5ed7`（2026-10-14 拉取 origin/main 核对）。
 
 ## 工程原则与边界

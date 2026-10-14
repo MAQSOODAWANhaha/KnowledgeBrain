@@ -8,6 +8,10 @@ KnowledgeBrain 解析进程。协议 **仅 gRPC**（`services/docreader/proto/do
 
 本进程 **不分块、不 OCR、不写对象存储、不写业务库**。扫描页只出 JPEG；OCR/caption 在 Rust worker。
 
+同一工程新增显式启动的 [Python 招标第一期独立工作流](../../docs/design/python-tender-phase1/README.md)，
+拥有独立的 OCR/要求抽取/验证/确认/响应计划路径。它使用 LangGraph、PostgreSQL、Dramatiq/Redis，
+不改变上述默认 gRPC 进程或现有 Rust 执行链路。入口与验证见 [独立启动手册](../../docs/design/python-tender-phase1/runbook.md)。
+
 ## 引擎
 
 | engine | 类型 |

@@ -1,6 +1,6 @@
 # 验收标准与证据分层
 
-状态：基础设施骨架已验证，领域实现进行中。结果必须写命令、环境、提交、实际输出，不将计划写成结果。
+状态：独立实现与确定性验收已完成；真实 LLM 语义验收未完成。以下区分实际结果和验收标准。
 
 ## 已执行：骨架（2026-10-14）
 
@@ -42,11 +42,42 @@ psycopg 3.3.6、OpenAI 2.54.0、httpx 0.28.1。
 - 响应计划逐要求具体落点和材料需求，空标题/空槽位拒绝。
 - 各阶段耗时、调用/包数、实际 usage、uncertain 请求、问题与产物可读取。
 
+已执行 B 类验证（2026-10-14，Python 3.11.16）：
+
+- 全套 `pytest tests -q`，显式配置真实 PG/Redis：**352 passed, 15 skipped in 69.38s**。
+  原有测试的15个skip因可选数据/依赖条件；新增真实服务测试未跳过。
+- 此后新增实际 graph 的 checkpoint 故障注入：**1 passed in 0.56s**，在 register 业务提交后
+  让官方 saver 写失败；恢复保留同一 artifact/epoch 回执。
+- 新范围 Ruff 检查：`llm tender workflow jobs integrations tests/unit tests/workflow tests/acceptance` 全通过。
+- 领域单测覆盖完整范围处置、数字/单位、非100评分、跨包支持来源、明确/竞争/循环补遗、计划空槽拒绝。
+- 独立审阅修复并回归：dispatcher DB 暂时断连后恢复；发布失败与执行共享4次基础设施上限；
+  编程/配置型发布错误终止；artifact root 初始化失败进入明确 failed 回执。
+
+可复查的**合成实际产物**：
+[运行与阶段耗时/调用数](evidence/sample-run.json)、[响应计划](evidence/sample-plan.json)、
+[独立验证/要求](evidence/sample-verification.json)、[冻结来源索引](evidence/sample-sources.json)。
+run `5bd26329-1208-4d80-8d27-8d2429ce92ee`：4文件/4包/12范围/6要求，零阻断，
+OCR 2、抽取4、验证4、计划4次确定性调用；外部请求0，付费usage=null。
+CLI status 实读24个产物回执和6项计划，状态为 `response-plan-ready`。
+这些文件是本 PR 合成验收证据，不替代或改写 `docs/validation/` 的历史真实验收。
+
 ## C. 分发与包装
 
 - 原有 docreader 测试按改动范围运行，新 tests/unit、tests/workflow、tests/acceptance。
 - 构建 wheel 并验证新包/提示文件完整；镜像新模块 import smoke，默认仍是 gRPC。
 - Python 专用启动说明与可选部署配置完整；现有 Rust 默认运行链路 diff 为空。
+
+已执行 C 类验证：wheel 构建成功并检查新增模块/四份提示；镜像
+`knowledgebrain-docreader:python-tender-phase1` 构建成功，image id
+`sha256:7a15c8eea5cdf38a0000ad52d28ae7020cdcb214df89bd27a95481e77e5247ec`。
+镜像内 Python 3.11.17 import 原 main、新 llm/workflow/jobs/CLI 与四份提示全部通过；
+容器 CLI init 已连接真实 PostgreSQL 成功。默认 CMD 仍是
+`["uv","run","--no-dev","python","main.py"]`。
+
+构建环境说明：本执行环境代理的 DNS/CA 不在容器内，直接 build 遇到连接和证书错误。
+本地验证使用从提交的 Dockerfile 生成的临时副本，仅将 `RUN uv sync` 加入 BuildKit
+CA secret mount，并传入受控 build proxy/add-host；未关闭 TLS，证书不写入镜像。
+提交的生产 Dockerfile/default CMD 未改；`.dockerignore` 明确保留新提示资源。
 
 ## D. 真实 LLM 语义验收（单独记录）
 
@@ -54,7 +85,18 @@ psycopg 3.3.6、OpenAI 2.54.0、httpx 0.28.1。
 付费全流程调用须先报告估计请求范围并由父任务确认。真实输出须人工语义核对遗漏、
 数字、补遗和计划；mock/CI 通过不等于语义验收。不具备输入/访问则明确剩余 blocker。
 
+D 类当前未完成：环境 CHAT/VLM 有 endpoint/model/credential，但缺显式 CHAT 上下文容量；
+检查过的 Library、shared 和 testdata 无真实 PDF/Office/图片原件。未发起外部模型调用。
+需提供真实原件、服务实际容量并在付费前确认调用范围，才能做这一层验收。
+
 ## E. 最终生产集成（本 PR 不完成）
 
 Rust run/outbox/API/鉴权/事务围栏、流量切换、旧实现移除、部署及历史数据迁移均未实施。
 不把独立 Python 验收勾选为最终生产集成。
+
+## 保留的领域限制
+
+- 文档解析的 unsupported/partial、嵌入附件未展开、Excel缓存/显示不完整、OCR不可读均保留
+  为可追溯阻断项，需要来源修订/补充，不能靠人工确认强制清空。
+- 文本意义的任意冲突/遗漏仍依赖独立模型和真实语义验收；数字规则不是通用语义证明。
+- 上下文预检用明确标记的保守估算；独立 VLM 容量未知时不挪用 CHAT 容量。

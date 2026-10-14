@@ -27,6 +27,8 @@ path、可选 replaces/修改范围）及 expected_document_ids。登记问题�
 命令状态 pending → claimed(token, deadline) → published → running → completed；
 claim 过期可重领；publish 失败恢复 pending；publish 后没有 execution receipt 需补投。
 确认领取时同时核对 token，旧 dispatcher 不能确认新领取。
+dispatcher 自身对 PostgreSQL 暂时断连保持进程存活、脱敏记录并退避重试（2 秒至 30 秒）；
+基础设施恢复后继续领取。命令执行失败上限与 dispatcher 等待基础设施恢复不是同一计数。
 
 worker 原子取得 run 执行租约与 epoch；同命令重复不重复生效，繁忙消息可结束由 dispatcher
 补投。执行回执必须在 graph 完成或 interrupt 已持久后才写；进程强杀无回执，重放恢复。

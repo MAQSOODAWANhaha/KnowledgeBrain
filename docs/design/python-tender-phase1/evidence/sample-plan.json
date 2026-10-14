@@ -1,0 +1,64 @@
+{
+  "blocking": false,
+  "checklist_digest": "a5a271ea478c78e7855bb77bf8d700fefe29749e6f752a58d95a1a5f211dfc9e",
+  "counts": {
+    "packs": 4
+  },
+  "issues": [],
+  "items": [
+    {
+      "action": "Write a specific commitment and responsible person for: Delivery obligations\nThe supplier must provide a signed delivery commitment.",
+      "material_needs": [
+        "Supplier's signed delivery or maintenance commitment for this obligation."
+      ],
+      "requirement_id": "req-range-b249e4d8161c12191e4ef66f",
+      "target": "Section Delivery / compliance response",
+      "target_kind": "body"
+    },
+    {
+      "action": "Write a specific commitment and responsible person for: The supplier must name a delivery coordinator. | ",
+      "material_needs": [
+        "Supplier's signed delivery or maintenance commitment for this obligation."
+      ],
+      "requirement_id": "req-range-5d9c23b2af63f7b683dd016a",
+      "target": "Section Delivery / compliance response",
+      "target_kind": "body"
+    },
+    {
+      "action": "Write a specific commitment and responsible person for: The supplier must provide the illustrated maintenance schedule.",
+      "material_needs": [
+        "Supplier's signed delivery or maintenance commitment for this obligation."
+      ],
+      "requirement_id": "req-range-aa481319d0d76324d772708a",
+      "target": "Section Delivery / compliance response",
+      "target_kind": "body"
+    },
+    {
+      "action": "Write a specific commitment and responsible person for: The supplier must provide a service contact. | ",
+      "material_needs": [
+        "Supplier's signed delivery or maintenance commitment for this obligation."
+      ],
+      "requirement_id": "req-range-88d912aee9472645595d201a",
+      "target": "Section Delivery / compliance response",
+      "target_kind": "body"
+    },
+    {
+      "action": "Write a specific commitment and responsible person for: The supplier must provide a written quality assurance statement.",
+      "material_needs": [
+        "Supplier's signed delivery or maintenance commitment for this obligation."
+      ],
+      "requirement_id": "req-range-849f61e1325ea0b214338093",
+      "target": "Section Delivery / compliance response",
+      "target_kind": "body"
+    },
+    {
+      "action": "Write a specific commitment and responsible person for: The supplier must provide the illustrated maintenance schedule.",
+      "material_needs": [
+        "Supplier's signed delivery or maintenance commitment for this obligation."
+      ],
+      "requirement_id": "req-range-c631244abdb71ffce1c590c0",
+      "target": "Section Delivery / compliance response",
+      "target_kind": "body"
+    }
+  ]
+}

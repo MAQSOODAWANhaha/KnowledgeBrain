@@ -2,6 +2,10 @@
 
 本目录保存已经确认的产品与领域定义。领域入口链接各自唯一实施计划；招投标计划在 [design/check-execution-plan.md](design/check-execution-plan.md)，其余见[计划导航](../plans/README.md)。
 
+新增 Python 独立路径的当前实施入口为 [招标第一期](design/python-tender-phase1/README.md)：
+先完成 Python 阶段 1–6 并独立验收，再另行决定 Rust 接入。现有 Rust 生产路径及历史验收仍按原文档理解；
+新路径的状态、合同和证据只由该入口记录，不把独立验收视为生产切换完成。
+
 仓库级产品与界面规范仍保留在标准入口：[`../PRODUCT.md`](../PRODUCT.md) 与 [`../DESIGN.md`](../DESIGN.md)。
 
 ## 权威性规则

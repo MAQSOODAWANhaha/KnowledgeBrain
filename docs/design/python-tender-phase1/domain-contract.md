@@ -3,6 +3,13 @@
 本文先定义各目录共享的最小 JSON 合同，避免并行实现产生第二套状态机。大型 JSON 仅在
 内容寻址文件中持久化，checkpoint 只存文件引用。所有数据版本为本次新版本，不做旧数据迁移。
 
+冻结恢复细化：图节点按文档登记 `freeze-document` 回执、按实际来源图登记 `ocr` 回执，
+之后合并小索引为全局 freeze 回执。部分文档/图片成功后其他范围基础设施失败，重投复用成功
+回执，不重复全量解析/OCR。抽取与验证同样按 pack 独立回执。技术失败允许独立范围先完成，
+全局只在所有必需范围具有成功产物或明确领域未决处置后推进。
+响应计划按已验证要求的原包分组调用并保存 `plan-pack` 回执，再合并为逐要求计划；
+避免把所有来源/要求重发到单个大上下文。全局检查仍覆盖全部适用要求，局部计划失败阻断终点。
+
 ## 证据
 
 `register_manifest(manifest, artifacts)` 返回登记清单（documents/issues）；本地原件在提交时
@@ -54,6 +61,12 @@ target_kind 为 body/table_field/attachment/manual_action；target 是具体位�
 及依据）。表格目标必须标识具体字段，正文目标须有章节定位及写作动作；仅标题/空槽位拒绝。
 所有适用要求恰好覆盖，引用要求不存在或缺项均阻断；终点 `response-plan-ready`。
 
+规则细化：数字以 Decimal 和原文单位反校验；只有来源明确 scoring.total 与 scoring.components
+时检查声明合计，不推定 100。同主体/条件/例外且去数字后同文、数字不同的跨文档要求标记
+潜在冲突待明确，不按日期覆盖。声明修改的补遗/澄清必须具有 replaces.document_id 及
+range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来源。全空 body 行可规则生成
+`non_requirement`（依据 empty_table_row），其他范围必须模型逐一处置。
+
 ## 已识别的设计细化
 
 - 现有 Excel 同时有 sheet/table 网格与 row units：正文覆盖选择唯一 row 范围；raw 保留全网格。
@@ -68,3 +81,10 @@ target_kind 为 body/table_field/attachment/manual_action；target 是具体位�
   抽取对其登记有依据的非要求处置。部分空行保留完整列位置，合并关系只读原网格。
 - 分包保留同节及祖先节的导语/条件与表格表头来源；supporting 复用源 range_id，正文身份
   在所有包之间互斥。导语范围必须有来源，字符偏移基于 native unit；不得虚构 Word 段落坐标。
+- 表格原生 unit.text 可能为空；其发送文字明确标记 text_basis=grid_row/spreadsheet_row，
+  start/end 相对该行发送文字，row_start/row_end 与 locator/raw_ref 定位原网格。
+  OCR 文字另标 text_basis=literal_ocr，永不覆盖图片原件。空白 PDF 页有明确 blank_page 处置。
+- supporting 仅携带已在前文出现的本节/祖先节导语、最近前置条件和所属表头，不将大章节
+  后续全部条件混入所有包。必要上下文超出发送预算时保留来源并返回阻断问题，不能静默裁剪。
+- Excel 的 display_incomplete_reason（如公式无缓存或格式不能准确还原）必须升级为可见问题；
+  PDF 内嵌附件登记独立 carrier 与未提取问题。原件存储损坏是技术失败，不伪装成文档问题。
