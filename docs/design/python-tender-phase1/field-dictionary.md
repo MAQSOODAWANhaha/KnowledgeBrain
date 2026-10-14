@@ -26,6 +26,7 @@
 | `task` | extract/verify/plan/ocr | 请求/计划所服务的具体领域动作 |
 | `input_digest` | sha256，直接上游引用及相关操作配置的摘要 | 相同输入重试幂等；改变输入不得复用旧回执 |
 | `budget_digest` | sha256，实际请求构造与容量规范摘要 | 包含model/C/prompt/reserves；不含秘密、不等于usage |
+| `context_tokens` | positive int或null，配置的单次模型上下文容量 | 配置适配后budget spec、测量和client同名；C只是文档数学符号，不另存C/max_context_tokens别名 |
 | `plan_digest` | sha256，task+input_digest+budget_digest+selectors/决议的规范摘要 | 新预算或作用域绑定生成新计划，规范来源身份不变 |
 | `requirement_id` | string，当前要求清单内义务身份 | 验证决议、计划项引用同一身份；内容修正产生新domain_revision |
 | `evidence` | Evidence[]，range_id+原文quote | 不更名为另一种引用；quote必须能在规范范围重放 |
@@ -52,3 +53,9 @@
 测试包括跨阶段JSON往返、禁止内部旧别名、三类版本区别、稳定unit/range身份、不同预算/决议
 新plan_digest、幂等重试、适用性覆盖真正影响计划，以及scope审议后重启重验和过期拒绝。
 真实13项原件范围问题在有依据决议并重验之前仍未完成；不把schema统一宣称真实模型验收。
+
+PackPlan为当前领域修订的总计划（引用多个PackDescriptor）；PackDescriptor保存单包正文/
+支持selector和planning_details（planner_version、boundary_reason、section_ids、budget）。
+`submitted_source_version`/`submitted_domain_revision`仅表示幂等提交回执所指的历史提交，
+可能不同于run当前身份，不是当前身份的别名。`review-scope`本期仅能绑定同文档规范目标；
+跨文档条件引用保持明确未决，不能凭相邻上传顺序自动合包。补遗适用性是另外的验证决议。
