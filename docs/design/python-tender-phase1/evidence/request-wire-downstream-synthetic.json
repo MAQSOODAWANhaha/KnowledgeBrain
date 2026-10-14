@@ -1,0 +1,3310 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "real_source_synthetic_complete_downstream_sdk_wire_review",
+  "runtime_commit": "433a46475a528f089a4b6942767405c44d375c34",
+  "runtime_dirty": false,
+  "runtime_source_sha256": {
+    "services/docreader/llm/__init__.py": "170f5d1240a5c16d77c86146e778b16714f3756ca02259072e5eafb4eb72cb44",
+    "services/docreader/llm/budget.py": "e53da4d08e69f69536b7144b5968cdeb95fed08428a504c82cedd9b4bacbcdc5",
+    "services/docreader/llm/client.py": "8ee94e04078bdc1680a72811ad661b7bed682f729b4d3b2fe1d0a5e545f25d79",
+    "services/docreader/llm/config.py": "b3d25a6ac1bb7255fb4ea0a3e41c8164e37dd5a96a268519d31a22e3061c7f1f",
+    "services/docreader/llm/request.py": "49222f9529e2eb7ef6325fa8e5b572a0a6eaf13449da47feee89c488d7185961",
+    "services/docreader/llm/streaming.py": "709c7435f2a2d074ab03632816e35b744ab6d9d52499b01e4e12ac3690b74d27",
+    "services/docreader/llm/usage.py": "8604b0a46c64fbae05c2c1c4f3a77a36a24b7c5cd661d6af5802d7ebf0913731",
+    "services/docreader/tender/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "services/docreader/tender/checks/__init__.py": "d22032295810ebf71605abada663a5c0ca18c93c116e1966559a7cef0ffcb91b",
+    "services/docreader/tender/checks/aggregate.py": "980623e4ff71dc2b715be3566790551a8b9f90af1873e7f8270e1c05469f46f8",
+    "services/docreader/tender/checks/verify.py": "4d39d74388bff92f8cb7bdcdea31873d8a152f25d9cac30ad997c5352a7cd4fd",
+    "services/docreader/tender/evidence/__init__.py": "334ba047f42279642a9d3f8d4f149bf38d37806dacba7286515cf09a8bc6225e",
+    "services/docreader/tender/evidence/context.py": "27516dc5a9e8624f5e17ef85cc185aae2bda8558ef42c9a924bd5c5d23466198",
+    "services/docreader/tender/evidence/downstream.py": "03d4a618dba2afc03e180a92899e15b64307430c731094b8835f99c3b0953810",
+    "services/docreader/tender/evidence/freeze.py": "130feaba71b346e8d7b7f5ea998026334561c28a89f40c99901de21022c227c9",
+    "services/docreader/tender/evidence/native.py": "b1db3075eef9974a93cf03c4faff5fc36bc715f24be9a09bb48a3db8d9129f12",
+    "services/docreader/tender/evidence/packing.py": "8ad4dd542e2b1f61f1166b44b5464c820f38394e20dffba29e2e2ad60e1c1ea0",
+    "services/docreader/tender/evidence/planner.py": "08e8a6a881ded2e6dc341723285032baaac813a48dd393d276be8579500ba60f",
+    "services/docreader/tender/evidence/references.py": "df236355e135026fbc18b2d8b155d28ebc7c66324f31230936fbfdac4201c094",
+    "services/docreader/tender/evidence/registration.py": "a007f45d8ab37b7653ceb99d84acd63db1c6390a8061e315ecc7f9edbb12a8cd",
+    "services/docreader/tender/evidence/scope.py": "04c4285684de6c943cbd900246e7db9e13d9097556c2e6830cdf76aecef756c6",
+    "services/docreader/tender/evidence/view.py": "e60a97d98fc5815716dd262846aa776b8e32ad96fc7382c849dc3c4697df467a",
+    "services/docreader/tender/planning/__init__.py": "ca21acfccb6029fe702e3a971412115bb50d2dcaffbc177f3ee20f94f4bc85ba",
+    "services/docreader/tender/planning/constraints.py": "5e51951ad027c3722b94092de9162d09cf61e0bcacc448a62ba1494cd6c77484",
+    "services/docreader/tender/planning/plan.py": "72f26d1eb3709a1b458c804ed3d3e341609746a387ec1afb6c61074ddae70805",
+    "services/docreader/tender/prompts/__init__.py": "a080d8a85ab0ad72dbde93c73f4281bb656029d90d7d8968b908e9e15eef3bce",
+    "services/docreader/tender/prompts/extract.md": "e705f0457dd313f9dc441d3f8679da7f4fcb3325ecf5e80b8700cb181bbaae44",
+    "services/docreader/tender/prompts/ocr.md": "5d23e149fbd17fd781b2bd258aa54439b3a0a19a1810157e89661e2f9ce2a5db",
+    "services/docreader/tender/prompts/plan.md": "04be005c5df6113865099a852378bd0a958beff81e2495c90fc02bc930d92f3f",
+    "services/docreader/tender/prompts/verify.md": "cb69a802da664781217981459745851bbd0c7aef0f8d0e426c477d4b5aa480f4",
+    "services/docreader/tender/requirements/__init__.py": "e220cbc67099a0f0e1e2eb579dfc5d64d0179fead96e165cbbeb6df7e13fd7e6",
+    "services/docreader/tender/requirements/extract.py": "55b06d4e171cd5ec4d9924f17af05b938e7ea7475e53457bbb8223630cfe6641",
+    "services/docreader/tender/schema.py": "f131cf77e48821f7e8db0e804a2956979a2e63a949dcb390a5cc7ac5fca7fe34",
+    "services/docreader/workflow/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "services/docreader/workflow/graph.py": "2eb6d224b8115a77eae926924d0aa0790558554475cbd380d2c500c86e2c4bd0",
+    "services/docreader/workflow/nodes.py": "21850b8a31abe4797a7181356bdc9a1ed672bb069dc859125f4cef1fa69dfc59",
+    "services/docreader/workflow/persistence.py": "f3a861a5411bc67aed339a58a1135bd26d6d0d2181637b6394c1c3d18812958a",
+    "services/docreader/workflow/runner.py": "3246f5b4a95c94b6b0c4ecc18990ec04785b8946dfe02f84a112488bc6e2c286",
+    "services/docreader/workflow/source_spec.py": "59c0ccee092b8d307eb9877353c6ec1a1b9cc821b5d84a1bfc0d7629e0865855",
+    "services/docreader/workflow/state.py": "eb7acbbf9353df1fadf526c01fe3def561842f03ae5df1dd2af13a80484eda86"
+  },
+  "source_sha256": "4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc",
+  "source_bytes": 755602,
+  "budget": {
+    "method": "utf8_bytes_decoded_messages_v2",
+    "builder": "chat_json_object_stream_v2",
+    "model": "gpt-6-luna",
+    "context_tokens": 131072,
+    "input_budget_tokens": 131072,
+    "correction_input_budget_tokens": 262144,
+    "correction": false,
+    "output_reserve": 16384,
+    "safety": 4096,
+    "image_tokens_each": 16384,
+    "framing_tokens": 32,
+    "prompts": {
+      "extract": "e705f0457dd313f9dc441d3f8679da7f4fcb3325ecf5e80b8700cb181bbaae44",
+      "ocr": "5d23e149fbd17fd781b2bd258aa54439b3a0a19a1810157e89661e2f9ce2a5db",
+      "plan": "04be005c5df6113865099a852378bd0a958beff81e2495c90fc02bc930d92f3f",
+      "verify": "cb69a802da664781217981459745851bbd0c7aef0f8d0e426c477d4b5aa480f4"
+    }
+  },
+  "effective_input_budget_tokens": 110592,
+  "model_calls": 0,
+  "network_calls": 0,
+  "provider_usage": null,
+  "semantic_acceptance": false,
+  "capture": "Actual AsyncOpenAI serialization through local MockTransport; offline.invalid; dummy key; no network.",
+  "counting": "UTF8 costs and conservative decoded-input estimate, not provider tokenizer or billed usage.",
+  "synthetic_output": {
+    "requirements": 622,
+    "dispositions": 796,
+    "method": "One explicitly synthetic requirement per nonempty non-host range, full exact source quote, explicit synthetic conditions/exceptions; complete dispositions. One bidirectional requirement dependency and one source-range reference cross original extraction packs; the latter exercises plan source_context.",
+    "schema_and_deterministic_evidence_valid": true,
+    "real_model_output": false,
+    "source_applicability_confirmed": false
+  },
+  "unresolved_source_issues": {
+    "condition_scope_unresolved": 13
+  },
+  "verification_source_coverage": {
+    "body_count_matches_index": true,
+    "unique_body_range_count": 796,
+    "duplicate_body_range_count": 0,
+    "uncovered_native_unit_count": 0,
+    "noncontiguous_native_text_unit_count": 0,
+    "incomplete_table_row_coverage_count": 0,
+    "invalid_supporting_excerpt_count": 0,
+    "invalid_scope_target_count": 0,
+    "invalid_pending_reference_count": 0,
+    "pending_context_with_text_count": 0,
+    "invalid_scope_binding_count": 0,
+    "passed": true
+  },
+  "actual_source_view_text_templates_and_aliases_checked": true,
+  "all_requirements_dispositions_and_cross_pack_dependencies_preserved": true,
+  "original_complete_verify_requests": [
+    {
+      "input_tokens": 297565,
+      "text_tokens": 297533,
+      "wire_bytes": 313192,
+      "body_tokens": 85937,
+      "support_tokens": 0,
+      "overhead_tokens": 211596,
+      "framing_tokens": 32,
+      "image_tokens": 0,
+      "image_count": 0,
+      "output_reserve": 16384,
+      "safety": 4096,
+      "context_tokens": 131072,
+      "input_budget_tokens": 131072,
+      "correction_input_budget_tokens": 262144,
+      "correction": false,
+      "total_context_tokens": 318045,
+      "effective_input_budget_tokens": 110592,
+      "fits": false,
+      "method": "utf8_bytes_decoded_messages_v2"
+    },
+    {
+      "input_tokens": 320147,
+      "text_tokens": 320115,
+      "wire_bytes": 339730,
+      "body_tokens": 74396,
+      "support_tokens": 652,
+      "overhead_tokens": 245067,
+      "framing_tokens": 32,
+      "image_tokens": 0,
+      "image_count": 0,
+      "output_reserve": 16384,
+      "safety": 4096,
+      "context_tokens": 131072,
+      "input_budget_tokens": 131072,
+      "correction_input_budget_tokens": 262144,
+      "correction": false,
+      "total_context_tokens": 340627,
+      "effective_input_budget_tokens": 110592,
+      "fits": false,
+      "method": "utf8_bytes_decoded_messages_v2"
+    },
+    {
+      "input_tokens": 315232,
+      "text_tokens": 315200,
+      "wire_bytes": 334499,
+      "body_tokens": 75162,
+      "support_tokens": 0,
+      "overhead_tokens": 240038,
+      "framing_tokens": 32,
+      "image_tokens": 0,
+      "image_count": 0,
+      "output_reserve": 16384,
+      "safety": 4096,
+      "context_tokens": 131072,
+      "input_budget_tokens": 131072,
+      "correction_input_budget_tokens": 262144,
+      "correction": false,
+      "total_context_tokens": 335712,
+      "effective_input_budget_tokens": 110592,
+      "fits": false,
+      "method": "utf8_bytes_decoded_messages_v2"
+    },
+    {
+      "input_tokens": 142166,
+      "text_tokens": 142134,
+      "wire_bytes": 153145,
+      "body_tokens": 38224,
+      "support_tokens": 446,
+      "overhead_tokens": 103464,
+      "framing_tokens": 32,
+      "image_tokens": 0,
+      "image_count": 0,
+      "output_reserve": 16384,
+      "safety": 4096,
+      "context_tokens": 131072,
+      "input_budget_tokens": 131072,
+      "correction_input_budget_tokens": 262144,
+      "correction": false,
+      "total_context_tokens": 162646,
+      "effective_input_budget_tokens": 110592,
+      "fits": false,
+      "method": "utf8_bytes_decoded_messages_v2"
+    }
+  ],
+  "original_complete_verify_over_capacity": 4,
+  "downstream_plan_digests": {
+    "verify": "e514b5963fc15a9f7aed17b685e9eda2f4b0d146398f5c48dc68272e020f55e6",
+    "plan": "a7dc65946c0d539747681e21bf4b8613247cf2cdb8e5cba165645fb4fefc8ee7"
+  },
+  "aggregate": {
+    "extract": {
+      "requests": 4,
+      "wire_bytes": 402371,
+      "estimated_input_units": 376200,
+      "over_capacity": 0,
+      "requirements": 0,
+      "dispositions": 0,
+      "body_source_utf8_bytes": 159186,
+      "support_source_utf8_bytes": 125,
+      "categories_bytes": {
+        "body_source_text": 160383,
+        "body_metadata_and_structure": 113336,
+        "support_source_text": 125,
+        "support_metadata_and_structure": 973,
+        "scope_reference_metadata": 20503,
+        "shared_section_and_template_structure": 62858,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 0,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 1058,
+        "system_schema_text": 3044,
+        "system_other_instructions": 13792,
+        "http_envelope_and_escaping": 26299
+      },
+      "duplicate_source_characters": 0
+    },
+    "verify": {
+      "requests": 13,
+      "wire_bytes": 1186694,
+      "estimated_input_units": 1117737,
+      "over_capacity": 0,
+      "requirements": 622,
+      "dispositions": 698,
+      "body_source_utf8_bytes": 159186,
+      "support_source_utf8_bytes": 785,
+      "categories_bytes": {
+        "body_source_text": 160383,
+        "body_metadata_and_structure": 113327,
+        "support_source_text": 785,
+        "support_metadata_and_structure": 5451,
+        "scope_reference_metadata": 21299,
+        "shared_section_and_template_structure": 65406,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 556689,
+        "synthetic_dispositions": 145019,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 3865,
+        "system_schema_text": 3653,
+        "system_other_instructions": 41444,
+        "http_envelope_and_escaping": 69373
+      },
+      "duplicate_source_characters": 0
+    },
+    "plan": {
+      "requests": 7,
+      "wire_bytes": 695530,
+      "estimated_input_units": 661336,
+      "over_capacity": 0,
+      "requirements": 622,
+      "dispositions": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 24,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 99,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 68,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 556695,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 78365,
+        "payload_keys_and_other_fields": 577,
+        "system_schema_text": 2513,
+        "system_other_instructions": 22771,
+        "http_envelope_and_escaping": 34418
+      },
+      "duplicate_source_characters": 0
+    }
+  },
+  "requests": [
+    {
+      "ordinal": 1,
+      "task": "extract",
+      "pack_id": "pack-f3d8970711c02ab2792a8fac",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "a3cba8ea1d58e8d23e1e9de26c5234cde6a5f0792a745768a486ac459b049834",
+      "wire_bytes": 116619,
+      "measurement": {
+        "input_tokens": 110413,
+        "text_tokens": 110381,
+        "wire_bytes": 116619,
+        "body_tokens": 85937,
+        "support_tokens": 0,
+        "overhead_tokens": 24444,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130893,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.998381,
+      "categories_bytes": {
+        "body_source_text": 59349,
+        "body_metadata_and_structure": 26588,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 6000,
+        "shared_section_and_template_structure": 13984,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 0,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 251,
+        "system_schema_text": 761,
+        "system_other_instructions": 3448,
+        "http_envelope_and_escaping": 6238
+      },
+      "categories_percent": {
+        "body_source_text": 50.891,
+        "body_metadata_and_structure": 22.799,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 5.145,
+        "shared_section_and_template_structure": 11.991,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 0.0,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.215,
+        "system_schema_text": 0.653,
+        "system_other_instructions": 2.957,
+        "http_envelope_and_escaping": 5.349
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 5867,
+        "column_count": 1088,
+        "end": 10,
+        "kind": 2904,
+        "leading_row": 133,
+        "range_id": 6688,
+        "row_end": 777,
+        "row_start": 903,
+        "section_id": 3878,
+        "source_range_id": 51,
+        "start": 610,
+        "table_id": 1856,
+        "text": 60869
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 60,
+          "unique_values": 52,
+          "repeated_value_bytes": 683
+        },
+        "column_count": {
+          "occurrences": 64,
+          "unique_values": 2,
+          "repeated_value_bytes": 62
+        },
+        "end": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "kind": {
+          "occurrences": 152,
+          "unique_values": 2,
+          "repeated_value_bytes": 1665
+        },
+        "leading_row": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 24
+        },
+        "range_id": {
+          "occurrences": 152,
+          "unique_values": 152,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 64,
+          "unique_values": 16,
+          "repeated_value_bytes": 50
+        },
+        "row_start": {
+          "occurrences": 64,
+          "unique_values": 16,
+          "repeated_value_bytes": 49
+        },
+        "section_id": {
+          "occurrences": 152,
+          "unique_values": 63,
+          "repeated_value_bytes": 1004
+        },
+        "source_range_id": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "table_id": {
+          "occurrences": 64,
+          "unique_values": 7,
+          "repeated_value_bytes": 969
+        },
+        "text": {
+          "occurrences": 152,
+          "unique_values": 136,
+          "repeated_value_bytes": 783
+        }
+      },
+      "body_ranges": 152,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 58976,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 0,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 37384,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 2,
+      "task": "extract",
+      "pack_id": "pack-419abac6819c44316a5a08f0",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "0186cb32c0d06ed314a83d35a69850d8d08f326d01d29d93b5722dc9d8f24b63",
+      "wire_bytes": 117732,
+      "measurement": {
+        "input_tokens": 110272,
+        "text_tokens": 110240,
+        "wire_bytes": 117732,
+        "body_tokens": 74396,
+        "support_tokens": 652,
+        "overhead_tokens": 35192,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130752,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.997106,
+      "categories_bytes": {
+        "body_source_text": 43235,
+        "body_metadata_and_structure": 31161,
+        "support_source_text": 70,
+        "support_metadata_and_structure": 582,
+        "scope_reference_metadata": 3995,
+        "shared_section_and_template_structure": 26737,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 0,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 251,
+        "system_schema_text": 761,
+        "system_other_instructions": 3448,
+        "http_envelope_and_escaping": 7492
+      },
+      "categories_percent": {
+        "body_source_text": 36.723,
+        "body_metadata_and_structure": 26.468,
+        "support_source_text": 0.059,
+        "support_metadata_and_structure": 0.494,
+        "scope_reference_metadata": 3.393,
+        "shared_section_and_template_structure": 22.71,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 0.0,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.213,
+        "system_schema_text": 0.646,
+        "system_other_instructions": 2.929,
+        "http_envelope_and_escaping": 6.364
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 5952,
+        "column_count": 1037,
+        "kind": 3671,
+        "leading_row": 114,
+        "range_id": 8712,
+        "row_end": 749,
+        "row_start": 868,
+        "section_id": 5304,
+        "start": 610,
+        "table_id": 1769,
+        "text": 45215
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 61,
+          "unique_values": 54,
+          "repeated_value_bytes": 585
+        },
+        "column_count": {
+          "occurrences": 61,
+          "unique_values": 3,
+          "repeated_value_bytes": 58
+        },
+        "kind": {
+          "occurrences": 198,
+          "unique_values": 2,
+          "repeated_value_bytes": 2064
+        },
+        "leading_row": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 20
+        },
+        "range_id": {
+          "occurrences": 198,
+          "unique_values": 198,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 51
+        },
+        "row_start": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 49
+        },
+        "section_id": {
+          "occurrences": 198,
+          "unique_values": 115,
+          "repeated_value_bytes": 1074
+        },
+        "start": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "table_id": {
+          "occurrences": 61,
+          "unique_values": 6,
+          "repeated_value_bytes": 935
+        },
+        "text": {
+          "occurrences": 198,
+          "unique_values": 189,
+          "repeated_value_bytes": 888
+        }
+      },
+      "body_ranges": 198,
+      "support_ranges": 3,
+      "body_source_utf8_bytes": 42918,
+      "support_source_utf8_bytes": 70,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 0,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 16669,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 3,
+      "task": "extract",
+      "pack_id": "pack-ee954e3f74c0455f516e50cd",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "bea88e19ac746210c13f0af4f6d94d185d13dbcbb862daf69392a921de5a6dc4",
+      "wire_bytes": 116912,
+      "measurement": {
+        "input_tokens": 109389,
+        "text_tokens": 109357,
+        "wire_bytes": 116912,
+        "body_tokens": 75162,
+        "support_tokens": 0,
+        "overhead_tokens": 34195,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 129869,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.989122,
+      "categories_bytes": {
+        "body_source_text": 45242,
+        "body_metadata_and_structure": 29920,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 10508,
+        "shared_section_and_template_structure": 19200,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 0,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 278,
+        "system_schema_text": 761,
+        "system_other_instructions": 3448,
+        "http_envelope_and_escaping": 7555
+      },
+      "categories_percent": {
+        "body_source_text": 38.697,
+        "body_metadata_and_structure": 25.592,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 8.988,
+        "shared_section_and_template_structure": 16.423,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 0.0,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.238,
+        "system_schema_text": 0.651,
+        "system_other_instructions": 2.949,
+        "http_envelope_and_escaping": 6.462
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 7070,
+        "column_count": 903,
+        "end": 30,
+        "kind": 3274,
+        "leading_row": 323,
+        "range_id": 7788,
+        "row_end": 637,
+        "row_start": 743,
+        "section_id": 4779,
+        "source_range_id": 153,
+        "start": 560,
+        "table_id": 1537,
+        "text": 47012
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 53,
+          "unique_values": 44,
+          "repeated_value_bytes": 1650
+        },
+        "column_count": {
+          "occurrences": 53,
+          "unique_values": 6,
+          "repeated_value_bytes": 48
+        },
+        "end": {
+          "occurrences": 3,
+          "unique_values": 3,
+          "repeated_value_bytes": 0
+        },
+        "kind": {
+          "occurrences": 177,
+          "unique_values": 2,
+          "repeated_value_bytes": 1835
+        },
+        "leading_row": {
+          "occurrences": 17,
+          "unique_values": 1,
+          "repeated_value_bytes": 64
+        },
+        "range_id": {
+          "occurrences": 177,
+          "unique_values": 177,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 53,
+          "unique_values": 9,
+          "repeated_value_bytes": 44
+        },
+        "row_start": {
+          "occurrences": 53,
+          "unique_values": 9,
+          "repeated_value_bytes": 44
+        },
+        "section_id": {
+          "occurrences": 177,
+          "unique_values": 78,
+          "repeated_value_bytes": 1287
+        },
+        "source_range_id": {
+          "occurrences": 3,
+          "unique_values": 3,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 56,
+          "unique_values": 1,
+          "repeated_value_bytes": 55
+        },
+        "table_id": {
+          "occurrences": 53,
+          "unique_values": 17,
+          "repeated_value_bytes": 612
+        },
+        "text": {
+          "occurrences": 177,
+          "unique_values": 160,
+          "repeated_value_bytes": 1168
+        }
+      },
+      "body_ranges": 177,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 44842,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 57,
+      "requirements": 0,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 17484,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 4,
+      "task": "extract",
+      "pack_id": "pack-3625b1a74944ccb14fb63429",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "d891f21ff5fd3699c6e5c47aa0844d9edec6cdeccc8acfd8e6d50b8dfd87a52c",
+      "wire_bytes": 51108,
+      "measurement": {
+        "input_tokens": 46126,
+        "text_tokens": 46094,
+        "wire_bytes": 51108,
+        "body_tokens": 38224,
+        "support_tokens": 446,
+        "overhead_tokens": 7424,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 66606,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.417083,
+      "categories_bytes": {
+        "body_source_text": 12557,
+        "body_metadata_and_structure": 25667,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 391,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 2937,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 0,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 278,
+        "system_schema_text": 761,
+        "system_other_instructions": 3448,
+        "http_envelope_and_escaping": 5014
+      },
+      "categories_percent": {
+        "body_source_text": 24.57,
+        "body_metadata_and_structure": 50.221,
+        "support_source_text": 0.108,
+        "support_metadata_and_structure": 0.765,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 5.747,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 0.0,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.544,
+        "system_schema_text": 1.489,
+        "system_other_instructions": 6.746,
+        "http_envelope_and_escaping": 9.811
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 10328,
+        "column_count": 1094,
+        "kind": 1935,
+        "leading_row": 228,
+        "range_id": 4180,
+        "row_end": 787,
+        "row_start": 913,
+        "section_id": 2565,
+        "start": 640,
+        "table_id": 1858,
+        "text": 13507
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 64,
+          "unique_values": 43,
+          "repeated_value_bytes": 3208
+        },
+        "column_count": {
+          "occurrences": 64,
+          "unique_values": 7,
+          "repeated_value_bytes": 60
+        },
+        "kind": {
+          "occurrences": 95,
+          "unique_values": 2,
+          "repeated_value_bytes": 1152
+        },
+        "leading_row": {
+          "occurrences": 12,
+          "unique_values": 1,
+          "repeated_value_bytes": 44
+        },
+        "range_id": {
+          "occurrences": 95,
+          "unique_values": 95,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 64,
+          "unique_values": 19,
+          "repeated_value_bytes": 54
+        },
+        "row_start": {
+          "occurrences": 64,
+          "unique_values": 19,
+          "repeated_value_bytes": 53
+        },
+        "section_id": {
+          "occurrences": 95,
+          "unique_values": 6,
+          "repeated_value_bytes": 1157
+        },
+        "start": {
+          "occurrences": 64,
+          "unique_values": 1,
+          "repeated_value_bytes": 63
+        },
+        "table_id": {
+          "occurrences": 64,
+          "unique_values": 12,
+          "repeated_value_bytes": 884
+        },
+        "text": {
+          "occurrences": 95,
+          "unique_values": 88,
+          "repeated_value_bytes": 206
+        }
+      },
+      "body_ranges": 95,
+      "support_ranges": 2,
+      "body_source_utf8_bytes": 12450,
+      "support_source_utf8_bytes": 55,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 19,
+      "requirements": 0,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 5255,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 5,
+      "task": "verify",
+      "pack_id": "verify-b9a27bb0b97727625764b30a",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "eefa3473dffb62e64c9dc870f6c50ea6edd9bcf5f7b7934b0e4ae9854325adb4",
+      "wire_bytes": 76047,
+      "measurement": {
+        "input_tokens": 74386,
+        "text_tokens": 74354,
+        "wire_bytes": 76047,
+        "body_tokens": 30348,
+        "support_tokens": 0,
+        "overhead_tokens": 44006,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 94866,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.672616,
+      "categories_bytes": {
+        "body_source_text": 29075,
+        "body_metadata_and_structure": 1273,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 190,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 37355,
+        "synthetic_dispositions": 2703,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 1693
+      },
+      "categories_percent": {
+        "body_source_text": 38.233,
+        "body_metadata_and_structure": 1.674,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.25,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 49.121,
+        "synthetic_dispositions": 3.554,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.38,
+        "system_schema_text": 0.37,
+        "system_other_instructions": 4.192,
+        "http_envelope_and_escaping": 2.226
+      },
+      "body_field_marginal_payload_bytes": {
+        "kind": 221,
+        "range_id": 572,
+        "section_id": 325,
+        "text": 29205
+      },
+      "body_field_repetition": {
+        "kind": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 108
+        },
+        "range_id": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 13,
+          "unique_values": 3,
+          "repeated_value_bytes": 110
+        },
+        "text": {
+          "occurrences": 13,
+          "unique_values": 11,
+          "repeated_value_bytes": 128
+        }
+      },
+      "body_ranges": 13,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 28889,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 13,
+      "dispositions": 13,
+      "exact_requirement_quote_utf8_bytes": 28889,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 25651,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 6,
+      "task": "verify",
+      "pack_id": "verify-1f9f2b14502e5c7cbbca1549",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "df1d114dd3e7eb23bc9ae60af7ee4cf99fbdbf27f77f5542163663626dc3545c",
+      "wire_bytes": 113353,
+      "measurement": {
+        "input_tokens": 106246,
+        "text_tokens": 106214,
+        "wire_bytes": 113353,
+        "body_tokens": 29178,
+        "support_tokens": 217,
+        "overhead_tokens": 76819,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 126726,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.960702,
+      "categories_bytes": {
+        "body_source_text": 13919,
+        "body_metadata_and_structure": 15259,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 193,
+        "scope_reference_metadata": 3294,
+        "shared_section_and_template_structure": 1770,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 54686,
+        "synthetic_dispositions": 13311,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 7139
+      },
+      "categories_percent": {
+        "body_source_text": 12.279,
+        "body_metadata_and_structure": 13.461,
+        "support_source_text": 0.021,
+        "support_metadata_and_structure": 0.17,
+        "scope_reference_metadata": 2.906,
+        "shared_section_and_template_structure": 1.561,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 48.244,
+        "synthetic_dispositions": 11.743,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.255,
+        "system_schema_text": 0.248,
+        "system_other_instructions": 2.812,
+        "http_envelope_and_escaping": 6.298
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 4667,
+        "column_count": 816,
+        "end": 10,
+        "kind": 1328,
+        "leading_row": 95,
+        "range_id": 2816,
+        "row_end": 585,
+        "row_start": 679,
+        "section_id": 1603,
+        "source_range_id": 51,
+        "start": 450,
+        "table_id": 1392,
+        "text": 14559
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 44,
+          "unique_values": 39,
+          "repeated_value_bytes": 485
+        },
+        "column_count": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 47
+        },
+        "end": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "kind": {
+          "occurrences": 64,
+          "unique_values": 2,
+          "repeated_value_bytes": 793
+        },
+        "leading_row": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 16
+        },
+        "range_id": {
+          "occurrences": 64,
+          "unique_values": 64,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 48,
+          "unique_values": 16,
+          "repeated_value_bytes": 34
+        },
+        "row_start": {
+          "occurrences": 48,
+          "unique_values": 16,
+          "repeated_value_bytes": 33
+        },
+        "section_id": {
+          "occurrences": 64,
+          "unique_values": 9,
+          "repeated_value_bytes": 606
+        },
+        "source_range_id": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 45,
+          "unique_values": 1,
+          "repeated_value_bytes": 44
+        },
+        "table_id": {
+          "occurrences": 48,
+          "unique_values": 5,
+          "repeated_value_bytes": 731
+        },
+        "text": {
+          "occurrences": 64,
+          "unique_values": 52,
+          "repeated_value_bytes": 508
+        }
+      },
+      "body_ranges": 64,
+      "support_ranges": 1,
+      "body_source_utf8_bytes": 13870,
+      "support_source_utf8_bytes": 24,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 64,
+      "dispositions": 64,
+      "exact_requirement_quote_utf8_bytes": 13870,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 5290,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 7,
+      "task": "verify",
+      "pack_id": "verify-b84c7f41ec9dd28aeed997a1",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "49352c4b1a49ba2fb96df94d8797a49ca02b91aa808802734263c4f225b4240e",
+      "wire_bytes": 115828,
+      "measurement": {
+        "input_tokens": 109103,
+        "text_tokens": 109071,
+        "wire_bytes": 115828,
+        "body_tokens": 22931,
+        "support_tokens": 860,
+        "overhead_tokens": 85280,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 129583,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.986536,
+      "categories_bytes": {
+        "body_source_text": 13867,
+        "body_metadata_and_structure": 9064,
+        "support_source_text": 85,
+        "support_metadata_and_structure": 775,
+        "scope_reference_metadata": 2741,
+        "shared_section_and_template_structure": 9991,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 55271,
+        "synthetic_dispositions": 13519,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 6757
+      },
+      "categories_percent": {
+        "body_source_text": 11.972,
+        "body_metadata_and_structure": 7.825,
+        "support_source_text": 0.073,
+        "support_metadata_and_structure": 0.669,
+        "scope_reference_metadata": 2.366,
+        "shared_section_and_template_structure": 8.626,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 47.718,
+        "synthetic_dispositions": 11.672,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.25,
+        "system_schema_text": 0.243,
+        "system_other_instructions": 2.752,
+        "http_envelope_and_escaping": 5.834
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 1200,
+        "column_count": 272,
+        "kind": 1185,
+        "leading_row": 38,
+        "range_id": 2860,
+        "row_end": 192,
+        "row_start": 224,
+        "section_id": 1690,
+        "start": 160,
+        "table_id": 464,
+        "text": 14517
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 16,
+          "unique_values": 13,
+          "repeated_value_bytes": 198
+        },
+        "column_count": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 15
+        },
+        "kind": {
+          "occurrences": 65,
+          "unique_values": 2,
+          "repeated_value_bytes": 642
+        },
+        "leading_row": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "range_id": {
+          "occurrences": 65,
+          "unique_values": 65,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 16,
+          "unique_values": 8,
+          "repeated_value_bytes": 8
+        },
+        "row_start": {
+          "occurrences": 16,
+          "unique_values": 8,
+          "repeated_value_bytes": 8
+        },
+        "section_id": {
+          "occurrences": 65,
+          "unique_values": 42,
+          "repeated_value_bytes": 276
+        },
+        "start": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 15
+        },
+        "table_id": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 238
+        },
+        "text": {
+          "occurrences": 65,
+          "unique_values": 64,
+          "repeated_value_bytes": 83
+        }
+      },
+      "body_ranges": 65,
+      "support_ranges": 4,
+      "body_source_utf8_bytes": 13749,
+      "support_source_utf8_bytes": 85,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 65,
+      "dispositions": 65,
+      "exact_requirement_quote_utf8_bytes": 13749,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 5552,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 8,
+      "task": "verify",
+      "pack_id": "verify-94d41873ff0262f0edd9e78b",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "8e4a6e300548186bfc1c49104e6ca36f99c2c0dac09bac0d79690de0afccae0a",
+      "wire_bytes": 116170,
+      "measurement": {
+        "input_tokens": 110067,
+        "text_tokens": 110035,
+        "wire_bytes": 116170,
+        "body_tokens": 22245,
+        "support_tokens": 871,
+        "overhead_tokens": 86919,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130547,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.995253,
+      "categories_bytes": {
+        "body_source_text": 16298,
+        "body_metadata_and_structure": 5947,
+        "support_source_text": 94,
+        "support_metadata_and_structure": 777,
+        "scope_reference_metadata": 2576,
+        "shared_section_and_template_structure": 13484,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 54622,
+        "synthetic_dispositions": 12479,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 6135
+      },
+      "categories_percent": {
+        "body_source_text": 14.029,
+        "body_metadata_and_structure": 5.119,
+        "support_source_text": 0.081,
+        "support_metadata_and_structure": 0.669,
+        "scope_reference_metadata": 2.217,
+        "shared_section_and_template_structure": 11.607,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 47.019,
+        "synthetic_dispositions": 10.742,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.249,
+        "system_schema_text": 0.242,
+        "system_other_instructions": 2.744,
+        "http_envelope_and_escaping": 5.281
+      },
+      "body_field_marginal_payload_bytes": {
+        "kind": 1020,
+        "range_id": 2640,
+        "section_id": 1568,
+        "text": 16898
+      },
+      "body_field_repetition": {
+        "kind": {
+          "occurrences": 60,
+          "unique_values": 1,
+          "repeated_value_bytes": 531
+        },
+        "range_id": {
+          "occurrences": 60,
+          "unique_values": 60,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 60,
+          "unique_values": 53,
+          "repeated_value_bytes": 85
+        },
+        "text": {
+          "occurrences": 60,
+          "unique_values": 57,
+          "repeated_value_bytes": 565
+        }
+      },
+      "body_ranges": 60,
+      "support_ranges": 4,
+      "body_source_utf8_bytes": 16153,
+      "support_source_utf8_bytes": 94,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 60,
+      "dispositions": 60,
+      "exact_requirement_quote_utf8_bytes": 16153,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 6225,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 9,
+      "task": "verify",
+      "pack_id": "verify-b37ca0e1bfe095f6d2569937",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "8c76bfcaed2201ab131baca1f04e929d84967e1d08be56a32c0da832539ff815",
+      "wire_bytes": 90195,
+      "measurement": {
+        "input_tokens": 85246,
+        "text_tokens": 85214,
+        "wire_bytes": 90195,
+        "body_tokens": 16312,
+        "support_tokens": 866,
+        "overhead_tokens": 68036,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 105726,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.770815,
+      "categories_bytes": {
+        "body_source_text": 11513,
+        "body_metadata_and_structure": 4799,
+        "support_source_text": 88,
+        "support_metadata_and_structure": 778,
+        "scope_reference_metadata": 2180,
+        "shared_section_and_template_structure": 10027,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 42088,
+        "synthetic_dispositions": 9983,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 4981
+      },
+      "categories_percent": {
+        "body_source_text": 12.765,
+        "body_metadata_and_structure": 5.321,
+        "support_source_text": 0.098,
+        "support_metadata_and_structure": 0.863,
+        "scope_reference_metadata": 2.417,
+        "shared_section_and_template_structure": 11.117,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 46.663,
+        "synthetic_dispositions": 11.068,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.32,
+        "system_schema_text": 0.312,
+        "system_other_instructions": 3.535,
+        "http_envelope_and_escaping": 5.522
+      },
+      "body_field_marginal_payload_bytes": {
+        "kind": 816,
+        "range_id": 2112,
+        "section_id": 1296,
+        "text": 11993
+      },
+      "body_field_repetition": {
+        "kind": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 423
+        },
+        "range_id": {
+          "occurrences": 48,
+          "unique_values": 48,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 48,
+          "unique_values": 42,
+          "repeated_value_bytes": 78
+        },
+        "text": {
+          "occurrences": 48,
+          "unique_values": 47,
+          "repeated_value_bytes": 64
+        }
+      },
+      "body_ranges": 48,
+      "support_ranges": 4,
+      "body_source_utf8_bytes": 11410,
+      "support_source_utf8_bytes": 88,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 48,
+      "dispositions": 48,
+      "exact_requirement_quote_utf8_bytes": 11410,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 4348,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 10,
+      "task": "verify",
+      "pack_id": "verify-2e1d6d740b39744edfcb3d33",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "aeea5a598c5e1509ed9d41195f33786ad523b2a9df17e849e40849dd29e84fe7",
+      "wire_bytes": 118602,
+      "measurement": {
+        "input_tokens": 110517,
+        "text_tokens": 110485,
+        "wire_bytes": 118602,
+        "body_tokens": 29571,
+        "support_tokens": 217,
+        "overhead_tokens": 80697,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130997,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.999322,
+      "categories_bytes": {
+        "body_source_text": 10568,
+        "body_metadata_and_structure": 19003,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 193,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 2153,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 58979,
+        "synthetic_dispositions": 15807,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 8117
+      },
+      "categories_percent": {
+        "body_source_text": 8.91,
+        "body_metadata_and_structure": 16.022,
+        "support_source_text": 0.02,
+        "support_metadata_and_structure": 0.163,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 1.815,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 49.729,
+        "synthetic_dispositions": 13.328,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.244,
+        "system_schema_text": 0.237,
+        "system_other_instructions": 2.688,
+        "http_envelope_and_escaping": 6.844
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 5952,
+        "column_count": 1037,
+        "kind": 1597,
+        "leading_row": 114,
+        "range_id": 3344,
+        "row_end": 749,
+        "row_start": 868,
+        "section_id": 2052,
+        "start": 610,
+        "table_id": 1769,
+        "text": 11328
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 61,
+          "unique_values": 54,
+          "repeated_value_bytes": 585
+        },
+        "column_count": {
+          "occurrences": 61,
+          "unique_values": 3,
+          "repeated_value_bytes": 58
+        },
+        "kind": {
+          "occurrences": 76,
+          "unique_values": 2,
+          "repeated_value_bytes": 966
+        },
+        "leading_row": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 20
+        },
+        "range_id": {
+          "occurrences": 76,
+          "unique_values": 76,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 51
+        },
+        "row_start": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 49
+        },
+        "section_id": {
+          "occurrences": 76,
+          "unique_values": 9,
+          "repeated_value_bytes": 871
+        },
+        "start": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "table_id": {
+          "occurrences": 61,
+          "unique_values": 6,
+          "repeated_value_bytes": 935
+        },
+        "text": {
+          "occurrences": 76,
+          "unique_values": 73,
+          "repeated_value_bytes": 131
+        }
+      },
+      "body_ranges": 76,
+      "support_ranges": 1,
+      "body_source_utf8_bytes": 10555,
+      "support_source_utf8_bytes": 24,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 76,
+      "dispositions": 76,
+      "exact_requirement_quote_utf8_bytes": 10555,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 4374,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 11,
+      "task": "verify",
+      "pack_id": "verify-d3ccf24e8cce49ef5de084bb",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "89ff310dffc31d4f7e42fb6f41b800b68834c5cd4376518118cfdabba37c59c6",
+      "wire_bytes": 114900,
+      "measurement": {
+        "input_tokens": 108491,
+        "text_tokens": 108459,
+        "wire_bytes": 114900,
+        "body_tokens": 21234,
+        "support_tokens": 674,
+        "overhead_tokens": 86551,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 128971,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.981002,
+      "categories_bytes": {
+        "body_source_text": 14535,
+        "body_metadata_and_structure": 6699,
+        "support_source_text": 89,
+        "support_metadata_and_structure": 585,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 11645,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 57213,
+        "synthetic_dispositions": 13935,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 6441
+      },
+      "categories_percent": {
+        "body_source_text": 12.65,
+        "body_metadata_and_structure": 5.83,
+        "support_source_text": 0.077,
+        "support_metadata_and_structure": 0.509,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 10.135,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 49.794,
+        "synthetic_dispositions": 12.128,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.252,
+        "system_schema_text": 0.245,
+        "system_other_instructions": 2.775,
+        "http_envelope_and_escaping": 5.606
+      },
+      "body_field_marginal_payload_bytes": {
+        "kind": 1139,
+        "range_id": 2948,
+        "section_id": 1809,
+        "text": 15205
+      },
+      "body_field_repetition": {
+        "kind": {
+          "occurrences": 67,
+          "unique_values": 1,
+          "repeated_value_bytes": 594
+        },
+        "range_id": {
+          "occurrences": 67,
+          "unique_values": 67,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 67,
+          "unique_values": 57,
+          "repeated_value_bytes": 130
+        },
+        "text": {
+          "occurrences": 67,
+          "unique_values": 62,
+          "repeated_value_bytes": 350
+        }
+      },
+      "body_ranges": 67,
+      "support_ranges": 3,
+      "body_source_utf8_bytes": 14405,
+      "support_source_utf8_bytes": 89,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 67,
+      "dispositions": 67,
+      "exact_requirement_quote_utf8_bytes": 14405,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 5480,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 12,
+      "task": "verify",
+      "pack_id": "verify-9d903df9cc77fba36c067e1b",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "0de22db2c79aafa4e8f610655f0e49178414fc773954b9967e93366cb57beb97",
+      "wire_bytes": 93364,
+      "measurement": {
+        "input_tokens": 88281,
+        "text_tokens": 88249,
+        "wire_bytes": 93364,
+        "body_tokens": 25388,
+        "support_tokens": 222,
+        "overhead_tokens": 62639,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 108761,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.798258,
+      "categories_bytes": {
+        "body_source_text": 15729,
+        "body_metadata_and_structure": 9659,
+        "support_source_text": 27,
+        "support_metadata_and_structure": 195,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 2594,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 46304,
+        "synthetic_dispositions": 9983,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 5115
+      },
+      "categories_percent": {
+        "body_source_text": 16.847,
+        "body_metadata_and_structure": 10.346,
+        "support_source_text": 0.029,
+        "support_metadata_and_structure": 0.209,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 2.778,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 49.595,
+        "synthetic_dispositions": 10.693,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.31,
+        "system_schema_text": 0.301,
+        "system_other_instructions": 3.415,
+        "http_envelope_and_escaping": 5.479
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2416,
+        "column_count": 459,
+        "kind": 951,
+        "leading_row": 95,
+        "range_id": 2112,
+        "row_end": 324,
+        "row_start": 378,
+        "section_id": 1296,
+        "start": 270,
+        "table_id": 783,
+        "text": 16209
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 27,
+          "unique_values": 27,
+          "repeated_value_bytes": 0
+        },
+        "column_count": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 26
+        },
+        "kind": {
+          "occurrences": 48,
+          "unique_values": 2,
+          "repeated_value_bytes": 544
+        },
+        "leading_row": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 16
+        },
+        "range_id": {
+          "occurrences": 48,
+          "unique_values": 48,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 19
+        },
+        "row_start": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 19
+        },
+        "section_id": {
+          "occurrences": 48,
+          "unique_values": 13,
+          "repeated_value_bytes": 455
+        },
+        "start": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 26
+        },
+        "table_id": {
+          "occurrences": 27,
+          "unique_values": 5,
+          "repeated_value_bytes": 374
+        },
+        "text": {
+          "occurrences": 48,
+          "unique_values": 46,
+          "repeated_value_bytes": 140
+        }
+      },
+      "body_ranges": 48,
+      "support_ranges": 1,
+      "body_source_utf8_bytes": 15642,
+      "support_source_utf8_bytes": 27,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 48,
+      "dispositions": 48,
+      "exact_requirement_quote_utf8_bytes": 15642,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 6099,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 13,
+      "task": "verify",
+      "pack_id": "verify-a1b9a7e16486082e8c2f143a",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "2149c76f3e5cb513ba31cce505015fbf6f65658530b5f233b4e296e545ca83a9",
+      "wire_bytes": 117733,
+      "measurement": {
+        "input_tokens": 110284,
+        "text_tokens": 110252,
+        "wire_bytes": 117733,
+        "body_tokens": 23261,
+        "support_tokens": 222,
+        "overhead_tokens": 86769,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130764,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.997215,
+      "categories_bytes": {
+        "body_source_text": 11963,
+        "body_metadata_and_structure": 11298,
+        "support_source_text": 27,
+        "support_metadata_and_structure": 195,
+        "scope_reference_metadata": 10508,
+        "shared_section_and_template_structure": 5224,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 45723,
+        "synthetic_dispositions": 21529,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 316,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 7481
+      },
+      "categories_percent": {
+        "body_source_text": 10.161,
+        "body_metadata_and_structure": 9.596,
+        "support_source_text": 0.023,
+        "support_metadata_and_structure": 0.166,
+        "scope_reference_metadata": 8.925,
+        "shared_section_and_template_structure": 4.437,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 38.836,
+        "synthetic_dispositions": 18.286,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.268,
+        "system_schema_text": 0.239,
+        "system_other_instructions": 2.708,
+        "http_envelope_and_escaping": 6.354
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 3765,
+        "column_count": 359,
+        "end": 30,
+        "kind": 1006,
+        "leading_row": 190,
+        "range_id": 2332,
+        "row_end": 253,
+        "row_start": 295,
+        "section_id": 1431,
+        "source_range_id": 153,
+        "start": 240,
+        "table_id": 609,
+        "text": 12493
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 21,
+          "unique_values": 14,
+          "repeated_value_bytes": 1385
+        },
+        "column_count": {
+          "occurrences": 21,
+          "unique_values": 5,
+          "repeated_value_bytes": 17
+        },
+        "end": {
+          "occurrences": 3,
+          "unique_values": 3,
+          "repeated_value_bytes": 0
+        },
+        "kind": {
+          "occurrences": 53,
+          "unique_values": 2,
+          "repeated_value_bytes": 559
+        },
+        "leading_row": {
+          "occurrences": 10,
+          "unique_values": 1,
+          "repeated_value_bytes": 36
+        },
+        "range_id": {
+          "occurrences": 53,
+          "unique_values": 53,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 21,
+          "unique_values": 5,
+          "repeated_value_bytes": 16
+        },
+        "row_start": {
+          "occurrences": 21,
+          "unique_values": 5,
+          "repeated_value_bytes": 16
+        },
+        "section_id": {
+          "occurrences": 53,
+          "unique_values": 12,
+          "repeated_value_bytes": 533
+        },
+        "source_range_id": {
+          "occurrences": 3,
+          "unique_values": 3,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 23
+        },
+        "table_id": {
+          "occurrences": 21,
+          "unique_values": 10,
+          "repeated_value_bytes": 187
+        },
+        "text": {
+          "occurrences": 53,
+          "unique_values": 46,
+          "repeated_value_bytes": 514
+        }
+      },
+      "body_ranges": 53,
+      "support_ranges": 1,
+      "body_source_utf8_bytes": 11824,
+      "support_source_utf8_bytes": 27,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 51,
+      "requirements": 53,
+      "dispositions": 104,
+      "exact_requirement_quote_utf8_bytes": 11824,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 4679,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 14,
+      "task": "verify",
+      "pack_id": "verify-c734821b840ad328ca2ab76f",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "e52b6e796f4c330536c2393cb7e07235624df399839bc2e940682d2204155105",
+      "wire_bytes": 77375,
+      "measurement": {
+        "input_tokens": 73260,
+        "text_tokens": 73228,
+        "wire_bytes": 77375,
+        "body_tokens": 17559,
+        "support_tokens": 446,
+        "overhead_tokens": 55223,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 93740,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.662435,
+      "categories_bytes": {
+        "body_source_text": 12398,
+        "body_metadata_and_structure": 5161,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 391,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 5696,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 36603,
+        "synthetic_dispositions": 9139,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 316,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 4147
+      },
+      "categories_percent": {
+        "body_source_text": 16.023,
+        "body_metadata_and_structure": 6.67,
+        "support_source_text": 0.071,
+        "support_metadata_and_structure": 0.505,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 7.362,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 47.306,
+        "synthetic_dispositions": 11.811,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.408,
+        "system_schema_text": 0.363,
+        "system_other_instructions": 4.12,
+        "http_envelope_and_escaping": 5.36
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 889,
+        "column_count": 85,
+        "kind": 671,
+        "leading_row": 38,
+        "range_id": 1672,
+        "row_end": 60,
+        "row_start": 70,
+        "section_id": 1026,
+        "start": 50,
+        "table_id": 145,
+        "text": 12778
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 5,
+          "unique_values": 5,
+          "repeated_value_bytes": 0
+        },
+        "column_count": {
+          "occurrences": 5,
+          "unique_values": 2,
+          "repeated_value_bytes": 3
+        },
+        "kind": {
+          "occurrences": 38,
+          "unique_values": 2,
+          "repeated_value_bytes": 344
+        },
+        "leading_row": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "range_id": {
+          "occurrences": 38,
+          "unique_values": 38,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 5,
+          "unique_values": 3,
+          "repeated_value_bytes": 2
+        },
+        "row_start": {
+          "occurrences": 5,
+          "unique_values": 3,
+          "repeated_value_bytes": 2
+        },
+        "section_id": {
+          "occurrences": 38,
+          "unique_values": 21,
+          "repeated_value_bytes": 221
+        },
+        "start": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "table_id": {
+          "occurrences": 5,
+          "unique_values": 2,
+          "repeated_value_bytes": 51
+        },
+        "text": {
+          "occurrences": 38,
+          "unique_values": 38,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_ranges": 38,
+      "support_ranges": 2,
+      "body_source_utf8_bytes": 12260,
+      "support_source_utf8_bytes": 55,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 6,
+      "requirements": 38,
+      "dispositions": 44,
+      "exact_requirement_quote_utf8_bytes": 12260,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 4787,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 15,
+      "task": "verify",
+      "pack_id": "verify-1ac2165e83ea6adf3f4be962",
+      "boundary_reason": "native_structure_prefix",
+      "wire_sha256": "26f27a929f70d53fee297ab5f2937cf868e4d42abfda8ad9748117214e49f5fd",
+      "wire_bytes": 118935,
+      "measurement": {
+        "input_tokens": 109756,
+        "text_tokens": 109724,
+        "wire_bytes": 118935,
+        "body_tokens": 29279,
+        "support_tokens": 446,
+        "overhead_tokens": 79999,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130236,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.992441,
+      "categories_bytes": {
+        "body_source_text": 6336,
+        "body_metadata_and_structure": 22943,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 391,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 1292,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 56021,
+        "synthetic_dispositions": 18901,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 316,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 9211
+      },
+      "categories_percent": {
+        "body_source_text": 5.327,
+        "body_metadata_and_structure": 19.29,
+        "support_source_text": 0.046,
+        "support_metadata_and_structure": 0.329,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 1.086,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 47.102,
+        "synthetic_dispositions": 15.892,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 0.266,
+        "system_schema_text": 0.236,
+        "system_other_instructions": 2.68,
+        "http_envelope_and_escaping": 7.745
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 9520,
+        "column_count": 1058,
+        "kind": 1636,
+        "leading_row": 190,
+        "range_id": 3432,
+        "row_end": 763,
+        "row_start": 885,
+        "section_id": 2106,
+        "start": 620,
+        "table_id": 1798,
+        "text": 7116
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 62,
+          "unique_values": 41,
+          "repeated_value_bytes": 3208
+        },
+        "column_count": {
+          "occurrences": 62,
+          "unique_values": 6,
+          "repeated_value_bytes": 58
+        },
+        "kind": {
+          "occurrences": 78,
+          "unique_values": 2,
+          "repeated_value_bytes": 989
+        },
+        "leading_row": {
+          "occurrences": 10,
+          "unique_values": 1,
+          "repeated_value_bytes": 36
+        },
+        "range_id": {
+          "occurrences": 78,
+          "unique_values": 78,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 62,
+          "unique_values": 19,
+          "repeated_value_bytes": 52
+        },
+        "row_start": {
+          "occurrences": 62,
+          "unique_values": 19,
+          "repeated_value_bytes": 51
+        },
+        "section_id": {
+          "occurrences": 78,
+          "unique_values": 1,
+          "repeated_value_bytes": 1001
+        },
+        "start": {
+          "occurrences": 62,
+          "unique_values": 1,
+          "repeated_value_bytes": 61
+        },
+        "table_id": {
+          "occurrences": 62,
+          "unique_values": 10,
+          "repeated_value_bytes": 884
+        },
+        "text": {
+          "occurrences": 78,
+          "unique_values": 71,
+          "repeated_value_bytes": 206
+        }
+      },
+      "body_ranges": 78,
+      "support_ranges": 2,
+      "body_source_utf8_bytes": 6299,
+      "support_source_utf8_bytes": 55,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 13,
+      "requirements": 78,
+      "dispositions": 91,
+      "exact_requirement_quote_utf8_bytes": 6299,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 2838,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 16,
+      "task": "verify",
+      "pack_id": "verify-e91efa9283d5ca7f133e92f9",
+      "boundary_reason": "native_structure_prefix",
+      "wire_sha256": "ae89972906a950a81d3c0114a495eb844a9eb0847ab643d3d874df6d6093df5c",
+      "wire_bytes": 8168,
+      "measurement": {
+        "input_tokens": 7671,
+        "text_tokens": 7639,
+        "wire_bytes": 8168,
+        "body_tokens": 973,
+        "support_tokens": 749,
+        "overhead_tokens": 5917,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 28151,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.069363,
+      "categories_bytes": {
+        "body_source_text": 874,
+        "body_metadata_and_structure": 99,
+        "support_source_text": 162,
+        "support_metadata_and_structure": 587,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 442,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 1510,
+        "synthetic_dispositions": 207,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 289,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 529
+      },
+      "categories_percent": {
+        "body_source_text": 10.7,
+        "body_metadata_and_structure": 1.212,
+        "support_source_text": 1.983,
+        "support_metadata_and_structure": 7.187,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 5.411,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 18.487,
+        "synthetic_dispositions": 2.534,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 3.538,
+        "system_schema_text": 3.44,
+        "system_other_instructions": 39.03,
+        "http_envelope_and_escaping": 6.476
+      },
+      "body_field_marginal_payload_bytes": {
+        "kind": 17,
+        "range_id": 44,
+        "section_id": 27,
+        "text": 884
+      },
+      "body_field_repetition": {
+        "kind": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "range_id": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        },
+        "text": {
+          "occurrences": 1,
+          "unique_values": 1,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_ranges": 1,
+      "support_ranges": 3,
+      "body_source_utf8_bytes": 862,
+      "support_source_utf8_bytes": 162,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 1,
+      "dispositions": 1,
+      "exact_requirement_quote_utf8_bytes": 862,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 376,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 17,
+      "task": "verify",
+      "pack_id": "verify-bec241ad3f7f53cfc25adabb",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "0dbc77f21113674b28b326a02d876470469a1bd91782e96e22ac9845e68b4094",
+      "wire_bytes": 26024,
+      "measurement": {
+        "input_tokens": 24429,
+        "text_tokens": 24397,
+        "wire_bytes": 26024,
+        "body_tokens": 5431,
+        "support_tokens": 446,
+        "overhead_tokens": 18520,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 44909,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.220893,
+      "categories_bytes": {
+        "body_source_text": 3308,
+        "body_metadata_and_structure": 2123,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 391,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 898,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 10314,
+        "synthetic_dispositions": 3523,
+        "constraint_bindings": 0,
+        "payload_keys_and_other_fields": 316,
+        "system_schema_text": 281,
+        "system_other_instructions": 3188,
+        "http_envelope_and_escaping": 1627
+      },
+      "categories_percent": {
+        "body_source_text": 12.711,
+        "body_metadata_and_structure": 8.158,
+        "support_source_text": 0.211,
+        "support_metadata_and_structure": 1.502,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 3.451,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 39.633,
+        "synthetic_dispositions": 13.538,
+        "constraint_bindings": 0.0,
+        "payload_keys_and_other_fields": 1.214,
+        "system_schema_text": 1.08,
+        "system_other_instructions": 12.25,
+        "http_envelope_and_escaping": 6.252
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 808,
+        "column_count": 36,
+        "kind": 197,
+        "leading_row": 38,
+        "range_id": 484,
+        "row_end": 24,
+        "row_start": 28,
+        "section_id": 297,
+        "start": 20,
+        "table_id": 60,
+        "text": 3418
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 2,
+          "unique_values": 2,
+          "repeated_value_bytes": 0
+        },
+        "column_count": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 2
+        },
+        "kind": {
+          "occurrences": 11,
+          "unique_values": 2,
+          "repeated_value_bytes": 86
+        },
+        "leading_row": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "range_id": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 1
+        },
+        "row_start": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 1
+        },
+        "section_id": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "start": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 1
+        },
+        "table_id": {
+          "occurrences": 2,
+          "unique_values": 2,
+          "repeated_value_bytes": 0
+        },
+        "text": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_ranges": 11,
+      "support_ranges": 2,
+      "body_source_utf8_bytes": 3268,
+      "support_source_utf8_bytes": 55,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 6,
+      "requirements": 11,
+      "dispositions": 17,
+      "exact_requirement_quote_utf8_bytes": 3268,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 1383,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 18,
+      "task": "plan",
+      "pack_id": "plan-39b6ab73f603764069cc9361",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "dbe08c4fed253b289029bb05e3465a7efbd0e0141a07c7d8a18086ed46f8a5e8",
+      "wire_bytes": 109779,
+      "measurement": {
+        "input_tokens": 105431,
+        "text_tokens": 105399,
+        "wire_bytes": 109779,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 105399,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 125911,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.953333,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 92042,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 9701,
+        "payload_keys_and_other_fields": 44,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 4380
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 83.843,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 8.837,
+        "payload_keys_and_other_fields": 0.04,
+        "system_schema_text": 0.327,
+        "system_other_instructions": 2.963,
+        "http_envelope_and_escaping": 3.99
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 77,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 42759,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 0,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 19,
+      "task": "plan",
+      "pack_id": "plan-6f42d0edd1a1b10824999664",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "a8554c49cced486872348934444877a61982808aa1ae80dc991a82cfba7dc1f5",
+      "wire_bytes": 116374,
+      "measurement": {
+        "input_tokens": 110538,
+        "text_tokens": 110506,
+        "wire_bytes": 116374,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 110506,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 131018,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.999512,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 99,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 68,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 93035,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 13355,
+        "payload_keys_and_other_fields": 313,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 5868
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.021,
+        "support_metadata_and_structure": 0.085,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.058,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 79.945,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 11.476,
+        "payload_keys_and_other_fields": 0.269,
+        "system_schema_text": 0.308,
+        "system_other_instructions": 2.795,
+        "http_envelope_and_escaping": 5.042
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 1,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 24,
+      "source_context_present": true,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 106,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 25190,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 10,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 20,
+      "task": "plan",
+      "pack_id": "plan-e89799c3b2e79f2f07b0f004",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "5687d368091c982fe487c34c32a18db44f0aeacc9fe4c15fe2fdc4e4d223b237",
+      "wire_bytes": 74836,
+      "measurement": {
+        "input_tokens": 71076,
+        "text_tokens": 71044,
+        "wire_bytes": 74836,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 71044,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 91556,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.642687,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 58947,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 8441,
+        "payload_keys_and_other_fields": 44,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 3792
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 78.768,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 11.279,
+        "payload_keys_and_other_fields": 0.059,
+        "system_schema_text": 0.48,
+        "system_other_instructions": 4.347,
+        "http_envelope_and_escaping": 5.067
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 67,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 16122,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 0,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 21,
+      "task": "plan",
+      "pack_id": "plan-fac4e8ed691682f6262579ff",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "b27eeada02c169457fd24f46771f8f3dfaf90897290bc5b72e654340e7d00051",
+      "wire_bytes": 116558,
+      "measurement": {
+        "input_tokens": 110493,
+        "text_tokens": 110461,
+        "wire_bytes": 116558,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 110461,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130973,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.999105,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 92442,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 14363,
+        "payload_keys_and_other_fields": 44,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 6097
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 79.31,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 12.323,
+        "payload_keys_and_other_fields": 0.038,
+        "system_schema_text": 0.308,
+        "system_other_instructions": 2.791,
+        "http_envelope_and_escaping": 5.231
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 114,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 19723,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 0,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 22,
+      "task": "plan",
+      "pack_id": "plan-83d80a3ce53be5747c231284",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "8c030e7f5eeb20c57df26142dc5ad0a1694c8ffbbee3a561106ec4ec78bd2789",
+      "wire_bytes": 116078,
+      "measurement": {
+        "input_tokens": 110306,
+        "text_tokens": 110274,
+        "wire_bytes": 116078,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 110274,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 130786,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.997414,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 93137,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 13481,
+        "payload_keys_and_other_fields": 44,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 5804
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 80.237,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 11.614,
+        "payload_keys_and_other_fields": 0.038,
+        "system_schema_text": 0.309,
+        "system_other_instructions": 2.802,
+        "http_envelope_and_escaping": 5.0
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 107,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 24822,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 0,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 23,
+      "task": "plan",
+      "pack_id": "plan-4551f5bb912412f1c63fcd39",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "0e0f5e821b96840278625a53547baf75d10942683f0160fe2175513d85e5febd",
+      "wire_bytes": 74179,
+      "measurement": {
+        "input_tokens": 70618,
+        "text_tokens": 70586,
+        "wire_bytes": 74179,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 70586,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 91098,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.638545,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 59245,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 7685,
+        "payload_keys_and_other_fields": 44,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 3593
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 79.868,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 10.36,
+        "payload_keys_and_other_fields": 0.059,
+        "system_schema_text": 0.484,
+        "system_other_instructions": 4.385,
+        "http_envelope_and_escaping": 4.844
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 61,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 20141,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 0,
+      "source_duplicate_ratio": 0.0
+    },
+    {
+      "ordinal": 24,
+      "task": "plan",
+      "pack_id": "plan-c329db80bbbaa586bd6d1677",
+      "boundary_reason": "complete_adjacent_sections",
+      "wire_sha256": "0f2ec544eeaa62f7191a20037fc77bf6d18119a0e9054a41a605aa2f4dabb4cf",
+      "wire_bytes": 87726,
+      "measurement": {
+        "input_tokens": 82874,
+        "text_tokens": 82842,
+        "wire_bytes": 87726,
+        "body_tokens": 0,
+        "support_tokens": 0,
+        "overhead_tokens": 82842,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "input_budget_tokens": 131072,
+        "correction_input_budget_tokens": 262144,
+        "correction": false,
+        "total_context_tokens": 103354,
+        "effective_input_budget_tokens": 110592,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "input_capacity_utilization": 0.749367,
+      "categories_bytes": {
+        "body_source_text": 0,
+        "body_metadata_and_structure": 0,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "source_alias_metadata": 0,
+        "synthetic_requirements_with_exact_source_quotes": 67847,
+        "synthetic_dispositions": 0,
+        "constraint_bindings": 11339,
+        "payload_keys_and_other_fields": 44,
+        "system_schema_text": 359,
+        "system_other_instructions": 3253,
+        "http_envelope_and_escaping": 4884
+      },
+      "categories_percent": {
+        "body_source_text": 0.0,
+        "body_metadata_and_structure": 0.0,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "source_alias_metadata": 0.0,
+        "synthetic_requirements_with_exact_source_quotes": 77.34,
+        "synthetic_dispositions": 0.0,
+        "constraint_bindings": 12.925,
+        "payload_keys_and_other_fields": 0.05,
+        "system_schema_text": 0.409,
+        "system_other_instructions": 3.708,
+        "http_envelope_and_escaping": 5.567
+      },
+      "body_field_marginal_payload_bytes": {},
+      "body_field_repetition": {},
+      "body_ranges": 0,
+      "support_ranges": 0,
+      "body_source_utf8_bytes": 0,
+      "support_source_utf8_bytes": 0,
+      "source_context_present": false,
+      "source_aliases": 0,
+      "template_ranges": 0,
+      "requirements": 90,
+      "dispositions": 0,
+      "exact_requirement_quote_utf8_bytes": 10429,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format",
+        "stream",
+        "stream_options"
+      ],
+      "duplicate_source_characters": 0,
+      "source_characters": 0,
+      "source_duplicate_ratio": 0.0
+    }
+  ],
+  "field_necessity_review": {
+    "body": "Exact source text and stable IDs let independent verification inspect every source; retained once in the source view.",
+    "supporting": "Required conditions, headers and cited evidence outside body remain available; overlapping source text uses explicit aliases.",
+    "source_aliases": "Text-free cited identity plus exact intervals preserves provenance when the same source text is already in body.",
+    "scope": "Bindings and unresolved references preserve applicability and remaining uncertainty; pending metadata is not treated as reviewed text.",
+    "templates": "Blank template ranges retain field/merge/row structure and individual identities; they still receive dispositions and verification.",
+    "requirements_dispositions": "Independent review needs the complete proposed output, including evidence, conditions, exceptions and all range dispositions.",
+    "synthetic_evidence_quotes": "This stress fixture intentionally quotes each entire range. These bytes are not a prediction of real output or a recommendation for minimal production quotes.",
+    "constraint_bindings": "Digest binds response planning to each complete immutable requirement without another constraint-text copy.",
+    "prompt_schema": "Task instructions and one strict output schema are present in system content; no duplicated tools/json_schema envelope.",
+    "host_images": "Only the exact source/hash/position-reviewed decorative occurrences are omitted from wire; canonical images and review references remain private."
+  },
+  "real_semantic_acceptance_ready": false,
+  "limitations": [
+    "Synthetic output sizes and semantics are not actual extraction output or predicted billed usage.",
+    "Response planning is an offline capacity probe; no review, confirmation or scope blocker was cleared.",
+    "Actual provider total context and tokenizer remain unconfirmed; configured total context stays 131072.",
+    "Ordinary input budget 131072 and correction allowance 262144 are token limits, not byte limits; this ordinary probe uses no correction allowance.",
+    "Image dispositions are direct agent visual review with source/hash/position binding, not completed human semantic acceptance.",
+    "Thirteen source scope issues, human labels and real model semantic acceptance remain outstanding."
+  ]
+}

@@ -75,10 +75,11 @@ PackPlan为当前领域修订的总计划（引用多个PackDescriptor）；Pack
 可能不同于run当前身份，不是当前身份的别名。`review-scope`本期仅能绑定同文档规范目标；
 跨文档条件引用保持明确未决，不能凭相邻上传顺序自动合包。补遗适用性是另外的验证决议。
 
-本轮WIP另有task=verify/plan阶段PackPlan；verify使用PackDescriptor，plan使用
-ResponsePackDescriptor，仅保存完整义务选择及预算。对应verify/plan结果中的pack_plan_ref
+后阶段使用task=verify/plan阶段PackPlan；verify使用PackDescriptor，plan使用
+继承同一来源/引用合同的ResponsePackDescriptor，仅保存来源、完整义务选择及预算。对应verify/plan结果中的pack_plan_ref
 指向后阶段计划，图原pack_plan_ref仍指extract计划，不扩大checkpoint字段数。
-具体未完成验收项见[当前交接](handoff.md)。
+完整输入、跨extract包依赖、修订/部分成功恢复及不可分预算已通过确定性workflow回归；
+真实语义验收剩余项见[当前交接](handoff.md)。
 
-继续实施时去掉WIP子包的requirements_ref/requirement_ids/disposition_range_ids组合，统一上表
-引用schema；requirements_ref固定指阶段根的完整要求索引。内部合同未发布，不增加旧格式迁移。
+已去掉WIP子包的requirements_ref/requirement_ids/disposition_range_ids组合，统一上表
+RequirementRef/DispositionRef；requirements_ref固定指阶段根的完整要求索引。内部合同未发布，不增加旧格式迁移。

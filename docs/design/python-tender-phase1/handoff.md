@@ -1,80 +1,153 @@
 # Python 招标第一期交接
 
-## 当前收尾保存点（2026-10-14，未完成修复验收）
+## 当前保存点与暂停边界（2026-10-14）
 
-用户在本轮实施过程中明确要求收尾提交，故停止扩展。**以下是WIP checkpoint，不是两项review
-已解决，也不是全流程或真实模型验收通过。** PR继续Draft；真实模型0次，不合并、不部署、不切流。
+当前两项代码review已修复，并完成本轮确定性workflow、恢复、全量Python和真实原件离线
+SDK wire复验。按用户最新要求，提交本交接后暂停，供父任务独立核对；不启动真实模型或新范围。
+[Draft PR #24](https://github.com/MAQSOODAWANhaha/KnowledgeBrain/pull/24)保持Draft，未合并、部署或切流。
 
-- 文档先行合同：`ac77cf0`，已推送。
-- 当前运行代码保存点：`1480efc5c5ff173eeb17645889c00a689de4f61a`，已推送同一分支
-  `feat/python-tender-phase1`。本交接文件所在的后续提交仅同步状态/字段说明。
-- 起点远端：`5aa6b84196837f19404dc3e699a9462aee2071df`；历史运行代码`51d7ec3`。
-- 本轮Rust/Cargo/默认链路无修改；没有真实模型网络请求。额度不可读，已采用分阶段保存。
+- 分支：`feat/python-tender-phase1`；本轮起点fetch核对为`f78462ff956d62893f0909bd897071787f21f5f3`，无遗漏后续远端改动。
+- 最终运行代码：`433a46475a528f089a4b6942767405c44d375c34`，已推送。最终交接为此文件所在提交，精确HEAD另记在PR描述及任务结束报告。
+- 文档先行：`cc6185e`、`1b2ccf7`；解压不确定发送修复：`e64e1a942f948654c27e72e1f00f036377e6d958`；完整下游依赖与回归：`433a464`。
+- main基线仍为`e8b681a0997760ec3f567223fe7eb82b622f5ed7`；Rust源码、Cargo、默认链路无diff。未改生产接入或增加第二状态机。
+- 剩余额度没有可读接口，已阶段性push；真实模型调用0次并继续暂停。没有待审批或不确定执行动作。
 
-### 已保存的实现及有限证据
+## 当前方案与合同
 
-1. 独立`ModelBudgetError`与语义错误分开；预算拒绝在发送前发生，不创建付费请求回执。
-2. 共享`RequestLimits`区分普通输入131072 token、显式纠错最多262144 token，以及provider
-   `context_tokens`总窗口。已核查旧C=131072确实是总窗口；未擅自增加。常规verify、plan或
-   新领域修订均不自动启用纠错。双倍仍受总窗口/输出/安全预留约束，不新增wire max_tokens。
-   真实provider总窗口能力尚无新证据；当前UTF8算法仍为保守估算，非provider实测token。
-3. `tender/evidence/downstream.py`复用现有结构分包的实测前缀选择，新增具体verify/plan
-   阶段计划。验证按完整来源、要求及处置探测，保留条件/支持证据；跨范围义务连接的范围
-   作为完整单元。计划按完整有效义务/约束探测。不可分超限单独阻断。计划只保存selector
-   和要求/处置引用，原文不复制，checkpoint仍只持六个固定阶段引用。
-4. `workflow/nodes.py`已接入阶段计划与plan_digest子包回执；验证汇总允许包数改变并核对
-   来源/处置/要求覆盖；响应计划汇总核对每项适用要求。旧语义/预算测试已相应更新。
-5. **实际workflow回归通过**：一个extract包可容纳，合法抽取输出增加后完整verify超限；
-   自动重分、完整逐范围处置/要求审核、人工确认后plan重分，8项计划完成；终态重放无新增调用。
-   这是确定性模型+真实PostgreSQL测试，不是付费模型语义结果。
+1. 普通输入上限131072 token，显式纠错最多262144 token；两者均受provider总窗口、输出
+   和安全预留约束。当前`context_tokens=131072`是总窗口，未扩大；输出16384、安全4096，
+   有效普通输入110592。常规verify/plan及新领域修订不自动借纠错额度。不新增wire max_tokens。
+   未知tokenizer用标明的UTF8保守估算，不冒充服务真实token或usage。
+2. extract/verify使用共享SourceView；后阶段按当前修订同文档**全部extract包**的完整输入
+   规划。verify加入全部合法requirements/dispositions，plan加入全部有效要求/约束及显式
+   来源引用所需source_context。小章节合并；只有完整请求超限才按原生结构/语义依赖边界
+   重分。同处置、完整义务和明确跨包依赖不可分；仍超限则明确预算阻断，零发送，不裁证据。
+3. 要求、处置统一为`RequirementRef(artifact_ref, requirement_id)`与
+   `DispositionRef(artifact_ref, range_id)`；阶段根`requirements_ref`只指完整索引。
+   原文只在冻结来源保存；阶段计划仅持selector和引用，checkpoint仍是六个固定阶段引用。
+   旧support证据身份与body重合时，`source_aliases`以无text的精确区间保留原ID，不重复原文。
+   显式range依赖按canonical区间相交连接；非重叠片段和仅共享条件不强制绑定。
+4. 来源覆盖、要求/处置、条件/例外、模板、修订身份均核对；未知、跨文档、歧义及已失效
+   义务依赖明确阻断。verify/plan子包回执绑定完整输入、预算、修订和plan_digest；部分成功
+   回执在恢复时复用，修订使旧确认失效。沿用既有LangGraph/PG回执，不增加通用框架。
+5. 所有LLM任务stream=true；180秒连续**无原始数据**才idle超时，无总180秒截止。部分
+   SSE/gzip解压失败记uncertain；审计写盘/提交故障保留sent围栏，同digest恢复不再付费。
+   完整成功响应后的业务提交故障从已校验response_ref继续，缺usage保持unknown/null。
 
-最终有限检查（Python **3.11.16**）：
+字段和语义以[字段字典](field-dictionary.md)、[合同](contracts.md)及[最终请求审查](request-review.md)为准。
 
-```text
-tests/unit/test_request_budget.py
-tests/unit/test_tender_llm.py
-tests/unit/test_shared_schema.py
-tests/unit/test_structural_packing.py
-tests/acceptance/test_phase1.py
-=> 146 passed / 27.17秒，无skip
-Ruff（本轮相关模块/测试）与git diff --check：通过
+## 最新验证事实（只代表433a464）
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| 完整Python3.11.16，真实PostgreSQL/Redis | **716 passed / 15 skipped，176.64秒** |
+| CI另行Python source-captions检查 | **2 passed，0.05秒** |
+| 新增完整下游实际workflow文件 | **12 passed，48.60秒**；已包含在完整套件 |
+| 独立范围/别名/失效/歧义依赖回归 | **10 passed，2.02秒**；已包含在完整套件 |
+| 流式/请求回放相关套件 | **124 passed，6.64秒**；已包含在完整套件，其中新增8项真实PG恢复用例 |
+| Ruff（相关运行模块及unit/workflow/acceptance新增检查）、diff检查 | 通过 |
+| wheel | 构建成功，98个Python/类型/提示文件与当前源码逐字节一致 |
+| 固定SHA实际SDK离线wire | `runtime_dirty=false`；全部完整输入预算、引用/来源覆盖检查通过 |
+| 运行代码远端Python专项CI | **486 passed，172.24秒**，wheel成功；真实PG/Redis，0skip |
+| 运行代码远端通用CI的Python job | **642 passed / 89 skipped，48.30秒**；source-captions另2 passed；该job未配置同等真实服务 |
+
+15个skip均为原有缺失fixture：Excel2、Markdown1、PDF3、PPT6、旧私有招标源合同1、
+旧testdata/bid2。新增PG/Redis、workflow及恢复测试无skip；本轮真实私有PDF另行明确执行了
+下述离线复验。首轮全量为699 passed/5 failed/15 skipped；5个失败均由新增fixture越过
+预期预算或触发重复文档校验造成，修正fixture且完成独立发现的实现缺陷后重跑完整套件，
+最终结果为上表716/15，不把首轮或旧684/146混作最新通过结果。
+
+实际workflow证明：extract能容纳、合法输出加入后verify超限，跨extract包重新规划后全部
+审核；人工确认后plan按其自身完整输入重分。verify及plan的不可分预算分别验证零发送；
+两阶段部分成功后的恢复不重做成功兄弟包；同源修订撤销旧确认而冻结引用不变；条件alias
+完整重建引用且发送原文不重复。范围别名、失效引用和命名空间歧义由独立审查补测。
+
+wheel SHA256：`e79ca5bcd102770fdbb3a503f627ebcbab3ba54d0f179a3cb87a97fb1f98adea`。
+本轮未重建Docker镜像；历史镜像不能称为当前代码镜像。
+[当前Python专项CI](https://github.com/MAQSOODAWANhaha/KnowledgeBrain/actions/runs/38545943835)通过；
+[通用CI](https://github.com/MAQSOODAWANhaha/KnowledgeBrain/actions/runs/38545943820)的Python/web通过，
+Rust及依赖job显示cancelled，未宣称整个CI全绿，也不在此任务扩展运行/修复Rust。
+以上均绑定运行433a464；最终纯文档提交触发的后续流程应另核对，不能混为同一SHA结果。
+
+## 真实原件与最终发送审查
+
+当前Library支持方式重新materialize了`libfile_5be1d1c487b88191aed7fe91a0d6ec1f`，
+`BiddingFile(1).pdf`，755602字节，SHA256：
+`4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc`。
+本轮真实重解析得到106页、520单元、796范围、42表/318行；来源覆盖通过。98图片位置
+绑定两份实际像素，重新作agent直接视觉审阅，`human_review_completed=false`；原件及审议
+记录仅本地私有。13项`condition_scope_unresolved`仍在11个页面，未清零。
+
+最终wire证据绑定运行433a464，实际AsyncOpenAI序列化、本地MockTransport捕获，网络/
+模型调用0。622条明确synthetic要求及796处置用于完整输入压力测试，**不是实际抽取结果**。
+原4个完整verify估算297565/320147/315232/142166，全部超过110592；新结果：
+
+| 阶段 | 请求数 | wire字节 | 最大输入保守估算 |
+| --- | ---: | ---: | ---: |
+| extract | 4 | 402371 | 110413 |
+| verify | 13 | 1186694 | 110517 |
+| plan | 7 | 695530 | 110538 |
+
+全部stream=true、无max_tokens；796处置保留，698交模型审核、98宿主单列。622要求各阶段
+完整覆盖，条件/例外/跨包source_context保留，extract/verify正文均159186原始UTF8字节。
+同请求body/support重复字符0；必要表结构、空模板身份、prompt/schema保留。压力样本
+全文quote不可当最小生产引用建议；24请求也不能当真实执行次数预测。
+
+- [新真实结构证据](evidence/real-pdf-downstream-structure.json)
+- [最终完整下游wire证据](evidence/request-wire-downstream-synthetic.json)，文件SHA256：`256aa3cb9794a75230a6bbe5ca74d119f6f638b594bf4ac0ffc460a20e254482`
+- [字段必要性与局限](request-review.md)；原件正文、完整wire及图片没有提交到GitHub。
+
+## 剩余状态与下一次执行顺序
+
+当前两项代码缺陷和已安排离线验证完成；PR仍Draft，真实语义验收**未完成且仍暂停**。
+后续只有再次收到授权后才执行：
+
+1. fetch核对PR24最新HEAD，读取本交接、AGENTS及可用相关skills，保留任何后来修改。
+2. 新执行器通过当前Library支持的materialize方式取得上述file ID，校验大小和SHA；不能
+   假设本机私有路径在新执行器存在。若不可读，只做可复现合成回归，明确未作真实文件复验。
+3. 对13项scope逐项准备带来源证据的决议并复验，不能按测试需要清零；人工复核图片判定，
+   准备人工标注集及验收标准。零基页10、15、21、64、66、67、68、76、77、84、88存在待办。
+4. 取得实际provider总窗口/能力证据，维持输入预算和输出/安全预留；不得以付费探测猜容量。
+5. 仅在明确恢复真实模型调用的授权后开展真实语义验收。extract前审查最终wire；真实输出
+   形成后，再审查实际verify/plan完整wire、必要重分、依赖与成本，逐阶段准入后才付费发送。
+   13项未决、人工标注和真实模型结果不能由本轮synthetic通过替代。
+6. Rust API/outbox/权限/事务/生产接入及切换另行授权和验收；本任务不继续这些范围。
+
+## 环境、复现与私有产物
+
+仓库AGENTS已读；`/workspace/.agents`为空，仓库无相关`.agents/skills`，不假装已读。
+当前本地私有输入：`/workspace/private-tender-acceptance-current/BiddingFile(1).pdf`。
+私有结构/新图片审议：同目录`downstream-preflight/`；最终完整wire：`downstream-wire/`。
+新环境须通过Library `prepare_materialize`提供的授权方式自行获取，下载地址不写入文档。
+
+本地隔离测试容器`kb-tender-budget-postgres`、`kb-tender-budget-redis`保留，端口15432/16379；
+测试临时schema在结束后清理，无生产库改动。Python路径为`services/docreader/.venv311/bin/python`。
+最终全量日志`/tmp/kb-downstream-full-final.log`，测试产物`/tmp/kb-downstream-full-final/`；
+wheel在`/tmp/kb-downstream-final-wheel/`。复现（从services/docreader执行）：
+
+```bash
+export TENDER_TEST_DATABASE_URL=postgresql://tender_test:tender-test-local-only@127.0.0.1:15432/tender_phase1_test
+export TENDER_TEST_DSN="$TENDER_TEST_DATABASE_URL"
+export TENDER_TEST_REDIS_URL=redis://127.0.0.1:16379/1
+export TENDER_REDIS_URL="$TENDER_TEST_REDIS_URL"
+.venv311/bin/pytest tests -q -rs --tb=short --basetemp=/tmp/kb-downstream-reproduce
+PYTHONPATH=.. .venv311/bin/pytest ../../scripts/tests/test_bidding_source_captions.py -q
+UV_CACHE_DIR=/workspace/.cache/uv UV_TOOL_DIR=/workspace/.uv-tools uv tool run ruff check llm tender workflow tests/acceptance tests/workflow tests/unit/test_downstream_dependencies.py
+UV_CACHE_DIR=/workspace/.cache/uv uv build --wheel --python .venv311/bin/python --out-dir /tmp/kb-downstream-wheel
+.venv311/bin/python tests/acceptance/review_downstream_wire.py \
+  --source '/workspace/private-tender-acceptance-current/BiddingFile(1).pdf' \
+  --runtime /workspace/KnowledgeBrain \
+  --private-root /workspace/private-tender-acceptance-current/downstream-preflight \
+  --output-private /workspace/private-tender-acceptance-current/downstream-wire \
+  --report /tmp/kb-downstream-wire-reproduce.json
 ```
 
-初次检查有3处旧测试仍期待ModelSemanticError，已改为独立预算错误；新增fixture首版只有一
-个原生章节单元，未触发目标超限，改成8个真实章节后达成回归。以上最终146项包含这些修正。
-**本轮未跑完整Python、全workflow/恢复套件、wheel、镜像、实际SDK wire复验；远端CI未等候。**
-历史684/15skip与454专项CI不能用于宣称当前1480efc已全套通过。
+wire脚本读取上述新真实解析产物；新执行器还需先按`tests/acceptance/prepare_real_pdf.py --help`
+重建私有预检与图片来源绑定审议，不能把缺失私有文件当作可复现。保持原件私有属性与权限。
+历史`f78462f`/运行`1480efc`只通过146项且两项review未完；其完整记录在Git历史，不代表当前
+结果。以下5aa6b84/运行51d7ec3的684/15skip、454专项CI和镜像证据也仅保留历史原义。
 
-### 两项未关闭review与下一步
-
-1. [评论6161148698](https://github.com/MAQSOODAWANhaha/KnowledgeBrain/pull/24#issuecomment-6161148698)：
-   完整verify预算死路已有首版代码和正向workflow回归，但**仍未完成验收，不关闭review**。
-   继续审查并补测：不可分阻断不付费；跨范围/跨章节义务、条件/表头、模板、修订失效；
-   部分子包成功后失败及重启回执复用。当前后阶段按原extract包分别规划，尤其需审查跨
-   extract包的cross_references依赖是否完整，不能把包内闭包当作跨包完整性保证。
-   然后跑相关/full Python及真实原件完整输出输入的离线wire复验，再决定是否已可验收。
-2. **部分流DecodingError重付费风险，本轮未修**：`llm/client.py`捕获HTTP DecodingError
-   后记`failed`；`integrations/store.py::_matching_model_requests`只拦sent/uncertain/succeeded。
-   部分流可能已付费，若业务产物提交失败后恢复，同digest可能再次发送。需单独先修合同，
-   再补部分流解码失败+业务提交失败+恢复的真实store回归；不能将其视作明确未执行拒绝。
-
-13项真实作用域审议、人工标注和真实模型语义验收仍未完成。所有真实模型调用继续暂停；
-最终实际wire须审查后才可考虑付费。provider容量未确认不做付费探测。
-
-### 新执行环境和私有原件
-
-环境可用，无待审批操作或不确定推送；新环境最初为干净main，已显式fetch并切换目标分支。
-仓库AGENTS已读；`/workspace/.agents`为空，仓库中未找到相关`.agents/skills`，不假装已读。
-
-- 通过当前Library `prepare_materialize`返回的授权下载方式重新获取原件，保存在
-  `/workspace/private-tender-acceptance-current/BiddingFile(1).pdf`（仅本地私有；不是旧路径）。
-  已核对755602字节和SHA256 `4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc`。
-  **本轮仅下载/校验，未解析或复跑真实PDF预算/wire**；旧图片审议文件与私有预检目录未迁移。
-- Python：`services/docreader/.venv311/bin/python`；uv缓存/安装目录在`/workspace/.cache/uv/`。
-- 本轮启动隔离测试容器`kb-tender-budget-postgres`、`kb-tender-budget-redis`，端口15432/16379，
-  复用下文测试DSN；测试使用临时schema，不影响生产库。容器保留供接手复现。
-
-## 以下为5aa6b84历史交接，保留原义（不代表当前WIP验收结果）
+## 以下为5aa6b84历史交接，保留原义（不代表本轮验收结果）
 
 本文件是当前安全保存点；保持 [Draft PR #24](https://github.com/MAQSOODAWANhaha/KnowledgeBrain/pull/24)，不合并、不部署、不切流，付费模型请求继续暂停。
 环境未提供可读的剩余额度接口，无法监控10%阈值；采用阶段性提交，避免只保留本地修改。
