@@ -1,0 +1,11 @@
+{
+  "evidence_kind": "same_original_before_after_sending_view",
+  "source_sha256": "4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc",
+  "model_calls": 0,
+  "canonical_native_units_equal": true,
+  "canonical_image_references_equal": true,
+  "body_range_identity_equal": true,
+  "body_text_equal_by_range_id": true,
+  "original_ref_equal": true,
+  "body_range_count": 796
+}

@@ -3,6 +3,7 @@
 target
 **/target
 **/.venv
+**/.venv311
 **/__pycache__
 **/*.pyc
 var
@@ -10,3 +11,5 @@ var
 deploy/.env
 *.md
 !deploy/README.md
+!services/docreader/README.md
+!services/docreader/tender/prompts/*.md

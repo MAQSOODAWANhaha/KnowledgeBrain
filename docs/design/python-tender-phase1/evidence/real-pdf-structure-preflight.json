@@ -1,0 +1,347 @@
+{
+  "schema_version": 2,
+  "evidence_kind": "offline_real_pdf_structure_preflight",
+  "source": {
+    "sha256": "4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc",
+    "bytes": 755602
+  },
+  "environment": {
+    "python": "3.11.16",
+    "configured_text_context_tokens": 131072
+  },
+  "execution": {
+    "model_calls": 0,
+    "network_calls": 0,
+    "ocr_executed": false,
+    "reused_frozen_refs_for_reporting": false,
+    "semantic_acceptance": false,
+    "registration_seconds": 0.011115776000224287,
+    "total_preparation_seconds": 5.479532026000015,
+    "native_parse_seconds": 3.9263114120003593,
+    "freeze_seconds": 4.880878176998522,
+    "source_xattr_count_preserved_on_private_artifacts": 2
+  },
+  "counts": {
+    "pages": 106,
+    "page_classifications": {
+      "text": 106
+    },
+    "native_units": 520,
+    "tables": 42,
+    "native_grid_rows": 318,
+    "native_grid_cells": 1352,
+    "image_occurrences": 98,
+    "image_refs": 98,
+    "unique_image_payloads": 2,
+    "reviewed_decorative_occurrences": 98,
+    "ocr_needed_unique_images": 0,
+    "image_occurrences_by_origin": {
+      "supplemented_pdf_image_object": 98
+    },
+    "native_embedded_image_count": 0,
+    "native_vector_figure_count": 0,
+    "body_ranges": 796,
+    "native_ranges": 796,
+    "packs": 4,
+    "compacted_blank_ranges": 174,
+    "supporting_occurrences": 5,
+    "scope_binding_occurrences": 4,
+    "pending_scope_occurrences": 6,
+    "unique_pending_scope_references": 5,
+    "unique_supporting_conditions": 0
+  },
+  "issues": {
+    "by_code": {
+      "condition_scope_unresolved": 13
+    },
+    "blocking_occurrences": 13,
+    "unresolved_scope_count": 13,
+    "unresolved_scope_pages_zero_based": [
+      10,
+      15,
+      21,
+      64,
+      66,
+      67,
+      68,
+      76,
+      77,
+      84,
+      88
+    ]
+  },
+  "coverage": {
+    "body_count_matches_index": true,
+    "unique_body_range_count": 796,
+    "duplicate_body_range_count": 0,
+    "uncovered_native_unit_count": 0,
+    "noncontiguous_native_text_unit_count": 0,
+    "incomplete_table_row_coverage_count": 0,
+    "invalid_supporting_excerpt_count": 0,
+    "invalid_scope_target_count": 0,
+    "invalid_pending_reference_count": 0,
+    "pending_context_with_text_count": 0,
+    "invalid_scope_binding_count": 0,
+    "passed": true
+  },
+  "budget": {
+    "method": "utf8_bytes_decoded_messages_v2",
+    "builder": "chat_json_object_stream_v2",
+    "model": "gpt-6-luna",
+    "context_tokens": 131072,
+    "output_reserve": 16384,
+    "safety": 4096,
+    "image_tokens_each": 16384,
+    "framing_tokens": 32,
+    "prompts": {
+      "extract": "e705f0457dd313f9dc441d3f8679da7f4fcb3325ecf5e80b8700cb181bbaae44",
+      "ocr": "5d23e149fbd17fd781b2bd258aa54439b3a0a19a1810157e89661e2f9ce2a5db",
+      "plan": "eab5eae5c5474709f332d097d284d9889ccc87470e541de76be2f489fe227193",
+      "verify": "287ac3715367e90f62effb453c62bbe960c37249845e55451c8321ebe86f8481"
+    }
+  },
+  "packs": [
+    {
+      "ordinal": 1,
+      "pack_id": "pack-f3d8970711c02ab2792a8fac",
+      "body_ranges": 169,
+      "sent_body_ranges": 152,
+      "template_ranges": 0,
+      "host_reviewed_ranges": 17,
+      "support_ranges": 0,
+      "body_support_duplicate_ids": 0,
+      "boundary_reason": "complete_adjacent_sections",
+      "section_count": 63,
+      "recorded_probe_matches_actual_request": true,
+      "extract_request": {
+        "input_tokens": 110413,
+        "text_tokens": 110381,
+        "wire_bytes": 116619,
+        "body_tokens": 85937,
+        "support_tokens": 0,
+        "overhead_tokens": 24444,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 130893,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "verify_source_only_request": {
+        "input_tokens": 109363,
+        "text_tokens": 109331,
+        "wire_bytes": 115488,
+        "body_tokens": 85937,
+        "support_tokens": 0,
+        "overhead_tokens": 23394,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 129843,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      }
+    },
+    {
+      "ordinal": 2,
+      "pack_id": "pack-419abac6819c44316a5a08f0",
+      "body_ranges": 220,
+      "sent_body_ranges": 198,
+      "template_ranges": 0,
+      "host_reviewed_ranges": 22,
+      "support_ranges": 3,
+      "body_support_duplicate_ids": 0,
+      "boundary_reason": "complete_adjacent_sections",
+      "section_count": 115,
+      "recorded_probe_matches_actual_request": true,
+      "extract_request": {
+        "input_tokens": 110272,
+        "text_tokens": 110240,
+        "wire_bytes": 117732,
+        "body_tokens": 74396,
+        "support_tokens": 652,
+        "overhead_tokens": 35192,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 130752,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "verify_source_only_request": {
+        "input_tokens": 109222,
+        "text_tokens": 109190,
+        "wire_bytes": 116601,
+        "body_tokens": 74396,
+        "support_tokens": 652,
+        "overhead_tokens": 34142,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 129702,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      }
+    },
+    {
+      "ordinal": 3,
+      "pack_id": "pack-ee954e3f74c0455f516e50cd",
+      "body_ranges": 275,
+      "sent_body_ranges": 177,
+      "template_ranges": 57,
+      "host_reviewed_ranges": 41,
+      "support_ranges": 0,
+      "body_support_duplicate_ids": 0,
+      "boundary_reason": "complete_adjacent_sections",
+      "section_count": 78,
+      "recorded_probe_matches_actual_request": true,
+      "extract_request": {
+        "input_tokens": 109389,
+        "text_tokens": 109357,
+        "wire_bytes": 116912,
+        "body_tokens": 75162,
+        "support_tokens": 0,
+        "overhead_tokens": 34195,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 129869,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "verify_source_only_request": {
+        "input_tokens": 108339,
+        "text_tokens": 108307,
+        "wire_bytes": 115781,
+        "body_tokens": 75162,
+        "support_tokens": 0,
+        "overhead_tokens": 33145,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 128819,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      }
+    },
+    {
+      "ordinal": 4,
+      "pack_id": "pack-3625b1a74944ccb14fb63429",
+      "body_ranges": 132,
+      "sent_body_ranges": 95,
+      "template_ranges": 19,
+      "host_reviewed_ranges": 18,
+      "support_ranges": 2,
+      "body_support_duplicate_ids": 0,
+      "boundary_reason": "complete_adjacent_sections",
+      "section_count": 6,
+      "recorded_probe_matches_actual_request": true,
+      "extract_request": {
+        "input_tokens": 46126,
+        "text_tokens": 46094,
+        "wire_bytes": 51108,
+        "body_tokens": 38224,
+        "support_tokens": 446,
+        "overhead_tokens": 7424,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 66606,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      },
+      "verify_source_only_request": {
+        "input_tokens": 45076,
+        "text_tokens": 45044,
+        "wire_bytes": 49977,
+        "body_tokens": 38224,
+        "support_tokens": 446,
+        "overhead_tokens": 6374,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 65556,
+        "fits": true,
+        "method": "utf8_bytes_decoded_messages_v2"
+      }
+    }
+  ],
+  "storage": {
+    "original_bytes": 755602,
+    "canonical_raw_bytes": 1086224,
+    "source_index_bytes": 95910,
+    "pack_plan_bytes": 175468,
+    "unique_image_bytes": 19661,
+    "frozen_index_bytes": 12926,
+    "checkpoint_bytes": null,
+    "model_audit_bytes": 0,
+    "checkpoint_note": "Offline preparation does not execute the graph; real PostgreSQL growth is measured separately."
+  },
+  "largest_pack": {
+    "body_characters": 37384,
+    "supporting_characters": 32,
+    "extract_payload_bytes": 106172,
+    "extract_input_token_interval": {
+      "low": 13931,
+      "high": 110413
+    },
+    "source_only_context_overflow_pack_count": 0
+  },
+  "prospective_model_work": {
+    "assumptions": [
+      "No retries, semantic repair, scope review or repacking calls.",
+      "Plan calls occur only after issues are resolved and confirmation succeeds.",
+      "Literal OCR shares one result per image content SHA and fixed OCR specification; every occurrence remains independently located.",
+      "Reviewed decorative image dispositions are source/hash/occurrence bound; unknown images still require review/OCR. No OCR text has been invented.",
+      "Normal text model context is 131072 tokens; independent VLM capacity is not inferred."
+    ],
+    "requests": {
+      "ocr": 0,
+      "extract": 4,
+      "verify": 4,
+      "plan_min": 0,
+      "plan_max": 4,
+      "total_min": 8,
+      "total_max": 12
+    },
+    "known_extract_and_verify_source_input_token_interval": {
+      "low": 89906,
+      "high": 748200
+    },
+    "total_text_input_capacity_envelope": {
+      "low": 89906,
+      "high": 1572864
+    },
+    "unknown_input": [
+      "Generated requirements and dispositions in verify requests.",
+      "Confirmed requirements in plan requests.",
+      "Image tokens and OCR response text in later extraction/verification requests."
+    ],
+    "output_tokens": "unknown",
+    "method": "Planning low=ceil(source+prompt characters/6); high=decoded message UTF8 byte estimate plus framing (not HTTP bytes or billed tokens). The total upper value is an input-capacity envelope, not expected usage. No tokenizer or paid usage was measured."
+  }
+}

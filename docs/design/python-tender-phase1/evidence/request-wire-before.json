@@ -1,0 +1,5869 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "actual_sdk_wire_review_before",
+  "runtime_commit": "82678ac30742aee212cb608eca8aa708485fe9af",
+  "runtime_dirty": false,
+  "runtime_source_sha256": {
+    "services/docreader/llm/__init__.py": "bc8bd06769c2595e3e338a52b765c1ed3ec7eb308334ada2e41473e885f77036",
+    "services/docreader/llm/budget.py": "8a35a71ce321619f1fcf6f8fce15801ac492c291f66d4525fb66efe2e5996bac",
+    "services/docreader/llm/client.py": "8cb850135972b27596004db5baa9635bb0baf1390038d7933a5ff594489ba805",
+    "services/docreader/llm/config.py": "b3d25a6ac1bb7255fb4ea0a3e41c8164e37dd5a96a268519d31a22e3061c7f1f",
+    "services/docreader/llm/request.py": "7ee7f412a2d5f6ceb3d30ec85ddbc7871044bf34e66fc51ade76049a757d47ee",
+    "services/docreader/llm/usage.py": "8604b0a46c64fbae05c2c1c4f3a77a36a24b7c5cd661d6af5802d7ebf0913731",
+    "services/docreader/tender/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "services/docreader/tender/checks/__init__.py": "d22032295810ebf71605abada663a5c0ca18c93c116e1966559a7cef0ffcb91b",
+    "services/docreader/tender/checks/aggregate.py": "f846bab8b422ce0f365caa6cc0a22e8b0409fd7b1a1d1c8aa87711cfc3b097b8",
+    "services/docreader/tender/checks/verify.py": "c1c5e2af77ac3345dd23e6b80b0ace26a0ee7f07ab2e6d4368eb6b37e31f7090",
+    "services/docreader/tender/evidence/__init__.py": "334ba047f42279642a9d3f8d4f149bf38d37806dacba7286515cf09a8bc6225e",
+    "services/docreader/tender/evidence/context.py": "27516dc5a9e8624f5e17ef85cc185aae2bda8558ef42c9a924bd5c5d23466198",
+    "services/docreader/tender/evidence/freeze.py": "130feaba71b346e8d7b7f5ea998026334561c28a89f40c99901de21022c227c9",
+    "services/docreader/tender/evidence/native.py": "b1db3075eef9974a93cf03c4faff5fc36bc715f24be9a09bb48a3db8d9129f12",
+    "services/docreader/tender/evidence/packing.py": "4dab60031ababf6b5cf0718f450767b18791f68334b6dfaf619b48d851a6a6b6",
+    "services/docreader/tender/evidence/planner.py": "a9d7efb05631cee8fd8b6d8cb5bffd5dd380c3ea69b5bae8df95c646e1cfd322",
+    "services/docreader/tender/evidence/references.py": "893db5f3d21d65fb6eab8adcfffe2f7c061c680cbc473f28d86beb4c4e0151be",
+    "services/docreader/tender/evidence/registration.py": "a007f45d8ab37b7653ceb99d84acd63db1c6390a8061e315ecc7f9edbb12a8cd",
+    "services/docreader/tender/evidence/scope.py": "04c4285684de6c943cbd900246e7db9e13d9097556c2e6830cdf76aecef756c6",
+    "services/docreader/tender/planning/__init__.py": "ca21acfccb6029fe702e3a971412115bb50d2dcaffbc177f3ee20f94f4bc85ba",
+    "services/docreader/tender/planning/constraints.py": "5e51951ad027c3722b94092de9162d09cf61e0bcacc448a62ba1494cd6c77484",
+    "services/docreader/tender/planning/plan.py": "c47335af3906ba4b8f572577afdcbd2f2569aa83cef727bcac8ffc07c3da2b40",
+    "services/docreader/tender/prompts/__init__.py": "a080d8a85ab0ad72dbde93c73f4281bb656029d90d7d8968b908e9e15eef3bce",
+    "services/docreader/tender/prompts/extract.md": "cd3377532cab1ca539da59446398117c84c0a95674237c11b4159f2569258a58",
+    "services/docreader/tender/prompts/ocr.md": "5d23e149fbd17fd781b2bd258aa54439b3a0a19a1810157e89661e2f9ce2a5db",
+    "services/docreader/tender/prompts/plan.md": "eab5eae5c5474709f332d097d284d9889ccc87470e541de76be2f489fe227193",
+    "services/docreader/tender/prompts/verify.md": "74f12fd3b9edd282ae9f895dc82584edf63b4b2abe6a27bc57ccd2c1ba6da13a",
+    "services/docreader/tender/requirements/__init__.py": "e220cbc67099a0f0e1e2eb579dfc5d64d0179fead96e165cbbeb6df7e13fd7e6",
+    "services/docreader/tender/requirements/extract.py": "152521d1bd265ea7d2634d34bd07eb3ae8766cb37ad328cffc904874af42aab8",
+    "services/docreader/tender/schema.py": "3cc9751cfca7ac2fb65cd96c5b2cbbb586439e8b8fae0fcc3ee4acb71818aca4"
+  },
+  "source_sha256": "4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc",
+  "model_calls": 0,
+  "network_calls": 0,
+  "actual_provider_usage": null,
+  "capture": "AsyncOpenAI + local httpx.MockTransport; request.content final bytes; dummy credential and offline.invalid, no network",
+  "counting": "UTF8 byte categories sum exactly to captured HTTP body; model input estimate is explicitly conservative, not provider tokenizer/usage; field marginal costs overlap category totals and must not be added twice.",
+  "aggregate": {
+    "extract": {
+      "request_count": 13,
+      "wire_bytes": 1021405,
+      "body_source_utf8_bytes": 159186,
+      "support_source_utf8_bytes": 750,
+      "decoded_message_text_bytes": 942863,
+      "estimated_input_tokens": 1021821,
+      "categories_bytes": {
+        "body_source_text": 160383,
+        "body_metadata_and_structure": 672657,
+        "support_source_text": 750,
+        "support_metadata_and_structure": 21525,
+        "scope_reference_metadata": 28398,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 1508,
+        "system_schema_text": 9815,
+        "system_other_instructions": 47827,
+        "http_envelope_and_escaping": 78542
+      },
+      "duplicate_source_characters": 0,
+      "over_capacity": 0
+    },
+    "verify": {
+      "request_count": 13,
+      "wire_bytes": 1315130,
+      "body_source_utf8_bytes": 159186,
+      "support_source_utf8_bytes": 750,
+      "decoded_message_text_bytes": 1210028,
+      "estimated_input_tokens": 1315546,
+      "categories_bytes": {
+        "body_source_text": 160383,
+        "body_metadata_and_structure": 954642,
+        "support_source_text": 750,
+        "support_metadata_and_structure": 21525,
+        "scope_reference_metadata": 28398,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 1976,
+        "system_schema_text": 3302,
+        "system_other_instructions": 39052,
+        "http_envelope_and_escaping": 105102
+      },
+      "duplicate_source_characters": 0,
+      "over_capacity": 8
+    }
+  },
+  "extract_body_field_marginal_payload_bytes": {
+    "document_id": 21770,
+    "document_version": 53492,
+    "end": 5775,
+    "heading_path": 87104,
+    "kind": 11784,
+    "locator": 144488,
+    "parent_section_id": 20563,
+    "physical_locator": 84695,
+    "physical_path": 13062,
+    "range_id": 27368,
+    "section_id": 16526,
+    "source_range_id": 31722,
+    "start": 6220,
+    "text": 166603,
+    "text_boundaries": 27368,
+    "unit_id": 19337,
+    "cells": 55651,
+    "empty": 3388,
+    "header": 3630,
+    "leading_row": 4798,
+    "non_requirement_reason": 7260,
+    "row_end": 2950,
+    "row_start": 3427,
+    "table_id": 7020,
+    "text_basis": 5808
+  },
+  "requests": [
+    {
+      "ordinal": 1,
+      "task": "extract",
+      "pack_id": "pack-7080975bdcccf370af033e84",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 13,
+      "support_ranges": 0,
+      "template_ranges": 0,
+      "wire_bytes": 44266,
+      "wire_sha256": "d1738a6fd6138455f5744572817e30f5c1e43698f30034d1110f819c6c1515b5",
+      "decoded_message_text_bytes": 42671,
+      "categories_bytes": {
+        "body_source_text": 29075,
+        "body_metadata_and_structure": 9046,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 1595
+      },
+      "categories_percent": {
+        "body_source_text": 65.682,
+        "body_metadata_and_structure": 20.436,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.262,
+        "system_schema_text": 1.706,
+        "system_other_instructions": 8.311,
+        "http_envelope_and_escaping": 3.603
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 455,
+        "document_version": 1118,
+        "end": 132,
+        "heading_path": 372,
+        "kind": 221,
+        "locator": 1906,
+        "parent_section_id": 339,
+        "physical_locator": 1431,
+        "physical_path": 273,
+        "range_id": 572,
+        "section_id": 325,
+        "source_range_id": 663,
+        "start": 130,
+        "text": 29205,
+        "text_boundaries": 572,
+        "unit_id": 382
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 240
+        },
+        "document_version": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 792
+        },
+        "end": {
+          "occurrences": 13,
+          "unique_values": 11,
+          "repeated_value_bytes": 4
+        },
+        "heading_path": {
+          "occurrences": 13,
+          "unique_values": 3,
+          "repeated_value_bytes": 89
+        },
+        "kind": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 108
+        },
+        "locator": {
+          "occurrences": 13,
+          "unique_values": 3,
+          "repeated_value_bytes": 1319
+        },
+        "parent_section_id": {
+          "occurrences": 13,
+          "unique_values": 2,
+          "repeated_value_bytes": 51
+        },
+        "physical_locator": {
+          "occurrences": 13,
+          "unique_values": 11,
+          "repeated_value_bytes": 180
+        },
+        "physical_path": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 48
+        },
+        "range_id": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 13,
+          "unique_values": 3,
+          "repeated_value_bytes": 110
+        },
+        "source_range_id": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 12
+        },
+        "text": {
+          "occurrences": 13,
+          "unique_values": 11,
+          "repeated_value_bytes": 128
+        },
+        "text_boundaries": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 300
+        },
+        "unit_id": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 28889,
+      "support_source_utf8_bytes": 0,
+      "measurement": {
+        "input_tokens": 44298,
+        "text_tokens": 44266,
+        "body_tokens": 39403,
+        "support_tokens": 0,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 64778,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.400553,
+      "duplicate_source_characters": 0,
+      "source_characters": 25651,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 1,
+      "task": "verify",
+      "pack_id": "pack-7080975bdcccf370af033e84",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 16,
+      "support_ranges": 0,
+      "template_ranges": 0,
+      "wire_bytes": 49195,
+      "wire_sha256": "ced6e33ff0fa5aa88e313b2e14d8065d8605e49c9a115934ae599334a7dfbde2",
+      "decoded_message_text_bytes": 47120,
+      "categories_bytes": {
+        "body_source_text": 29075,
+        "body_metadata_and_structure": 14635,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 2075
+      },
+      "categories_percent": {
+        "body_source_text": 59.102,
+        "body_metadata_and_structure": 29.749,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.309,
+        "system_schema_text": 0.516,
+        "system_other_instructions": 6.106,
+        "http_envelope_and_escaping": 4.218
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 560,
+        "document_version": 1376,
+        "empty": 39,
+        "end": 156,
+        "heading_path": 495,
+        "image_anchor": 60,
+        "image_disposition": 1477,
+        "image_ref": 640,
+        "kind": 287,
+        "locator": 2697,
+        "non_requirement_reason": 159,
+        "ocr_status": 72,
+        "parent_section_id": 421,
+        "physical_locator": 2249,
+        "physical_path": 406,
+        "range_id": 704,
+        "section_id": 400,
+        "source_range_id": 816,
+        "start": 160,
+        "text": 29235,
+        "text_basis": 81,
+        "text_boundaries": 704,
+        "unit_id": 485
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 300
+        },
+        "document_version": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 990
+        },
+        "empty": {
+          "occurrences": 3,
+          "unique_values": 1,
+          "repeated_value_bytes": 8
+        },
+        "end": {
+          "occurrences": 16,
+          "unique_values": 12,
+          "repeated_value_bytes": 6
+        },
+        "heading_path": {
+          "occurrences": 16,
+          "unique_values": 3,
+          "repeated_value_bytes": 164
+        },
+        "image_anchor": {
+          "occurrences": 3,
+          "unique_values": 1,
+          "repeated_value_bytes": 8
+        },
+        "image_disposition": {
+          "occurrences": 3,
+          "unique_values": 2,
+          "repeated_value_bytes": 472
+        },
+        "image_ref": {
+          "occurrences": 3,
+          "unique_values": 2,
+          "repeated_value_bytes": 200
+        },
+        "kind": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 136
+        },
+        "locator": {
+          "occurrences": 16,
+          "unique_values": 6,
+          "repeated_value_bytes": 1319
+        },
+        "non_requirement_reason": {
+          "occurrences": 3,
+          "unique_values": 1,
+          "repeated_value_bytes": 54
+        },
+        "ocr_status": {
+          "occurrences": 3,
+          "unique_values": 1,
+          "repeated_value_bytes": 20
+        },
+        "parent_section_id": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 70
+        },
+        "physical_locator": {
+          "occurrences": 16,
+          "unique_values": 14,
+          "repeated_value_bytes": 180
+        },
+        "physical_path": {
+          "occurrences": 16,
+          "unique_values": 4,
+          "repeated_value_bytes": 48
+        },
+        "range_id": {
+          "occurrences": 16,
+          "unique_values": 16,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 16,
+          "unique_values": 3,
+          "repeated_value_bytes": 143
+        },
+        "source_range_id": {
+          "occurrences": 16,
+          "unique_values": 16,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 15
+        },
+        "text": {
+          "occurrences": 16,
+          "unique_values": 12,
+          "repeated_value_bytes": 132
+        },
+        "text_basis": {
+          "occurrences": 3,
+          "unique_values": 1,
+          "repeated_value_bytes": 26
+        },
+        "text_boundaries": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 375
+        },
+        "unit_id": {
+          "occurrences": 16,
+          "unique_values": 16,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 28889,
+      "support_source_utf8_bytes": 0,
+      "measurement": {
+        "input_tokens": 49227,
+        "text_tokens": 49195,
+        "body_tokens": 45540,
+        "support_tokens": 0,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 69707,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.445123,
+      "duplicate_source_characters": 0,
+      "source_characters": 25651,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 2,
+      "task": "extract",
+      "pack_id": "pack-e089f98ece20d33c8f6ff742",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 64,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 103436,
+      "wire_sha256": "42d88d51355e17e55bd814cb96cc634e4695e5938810961b0e55ef698e4fe764",
+      "decoded_message_text_bytes": 94422,
+      "categories_bytes": {
+        "body_source_text": 13919,
+        "body_metadata_and_structure": 70082,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 794,
+        "scope_reference_metadata": 5053,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 9014
+      },
+      "categories_percent": {
+        "body_source_text": 13.457,
+        "body_metadata_and_structure": 67.754,
+        "support_source_text": 0.023,
+        "support_metadata_and_structure": 0.768,
+        "scope_reference_metadata": 4.885,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.112,
+        "system_schema_text": 0.73,
+        "system_other_instructions": 3.557,
+        "http_envelope_and_escaping": 8.715
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 8816,
+        "document_id": 2240,
+        "document_version": 5504,
+        "empty": 672,
+        "end": 581,
+        "header": 720,
+        "heading_path": 5075,
+        "kind": 1328,
+        "leading_row": 955,
+        "locator": 11670,
+        "non_requirement_reason": 1440,
+        "parent_section_id": 2050,
+        "physical_locator": 10128,
+        "physical_path": 1344,
+        "range_id": 2816,
+        "row_end": 585,
+        "row_start": 679,
+        "section_id": 1603,
+        "source_range_id": 3264,
+        "start": 640,
+        "table_id": 1392,
+        "text": 14559,
+        "text_basis": 1152,
+        "text_boundaries": 2816,
+        "unit_id": 1845
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 48,
+          "unique_values": 41,
+          "repeated_value_bytes": 802
+        },
+        "document_id": {
+          "occurrences": 64,
+          "unique_values": 1,
+          "repeated_value_bytes": 1260
+        },
+        "document_version": {
+          "occurrences": 64,
+          "unique_values": 1,
+          "repeated_value_bytes": 4158
+        },
+        "empty": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 235
+        },
+        "end": {
+          "occurrences": 64,
+          "unique_values": 45,
+          "repeated_value_bytes": 35
+        },
+        "header": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 235
+        },
+        "heading_path": {
+          "occurrences": 64,
+          "unique_values": 9,
+          "repeated_value_bytes": 3025
+        },
+        "kind": {
+          "occurrences": 64,
+          "unique_values": 2,
+          "repeated_value_bytes": 793
+        },
+        "leading_row": {
+          "occurrences": 48,
+          "unique_values": 2,
+          "repeated_value_bytes": 226
+        },
+        "locator": {
+          "occurrences": 64,
+          "unique_values": 14,
+          "repeated_value_bytes": 8061
+        },
+        "non_requirement_reason": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 188
+        },
+        "parent_section_id": {
+          "occurrences": 64,
+          "unique_values": 5,
+          "repeated_value_bytes": 650
+        },
+        "physical_locator": {
+          "occurrences": 64,
+          "unique_values": 13,
+          "repeated_value_bytes": 7350
+        },
+        "physical_path": {
+          "occurrences": 64,
+          "unique_values": 1,
+          "repeated_value_bytes": 252
+        },
+        "range_id": {
+          "occurrences": 64,
+          "unique_values": 64,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 48,
+          "unique_values": 16,
+          "repeated_value_bytes": 34
+        },
+        "row_start": {
+          "occurrences": 48,
+          "unique_values": 16,
+          "repeated_value_bytes": 33
+        },
+        "section_id": {
+          "occurrences": 64,
+          "unique_values": 9,
+          "repeated_value_bytes": 606
+        },
+        "source_range_id": {
+          "occurrences": 64,
+          "unique_values": 64,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 64,
+          "unique_values": 1,
+          "repeated_value_bytes": 63
+        },
+        "table_id": {
+          "occurrences": 48,
+          "unique_values": 5,
+          "repeated_value_bytes": 731
+        },
+        "text": {
+          "occurrences": 64,
+          "unique_values": 52,
+          "repeated_value_bytes": 508
+        },
+        "text_basis": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 470
+        },
+        "text_boundaries": {
+          "occurrences": 64,
+          "unique_values": 1,
+          "repeated_value_bytes": 1575
+        },
+        "unit_id": {
+          "occurrences": 64,
+          "unique_values": 21,
+          "repeated_value_bytes": 731
+        }
+      },
+      "body_source_utf8_bytes": 13870,
+      "support_source_utf8_bytes": 24,
+      "measurement": {
+        "input_tokens": 103468,
+        "text_tokens": 103436,
+        "body_tokens": 92218,
+        "support_tokens": 910,
+        "overhead_tokens": 10308,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 123948,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.935583,
+      "duplicate_source_characters": 0,
+      "source_characters": 5290,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 2,
+      "task": "verify",
+      "pack_id": "pack-e089f98ece20d33c8f6ff742",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 71,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 116954,
+      "wire_sha256": "f15901c68f30fda04e41f096ca913bb5281cc38a16a8de02d61feaa4f52958b9",
+      "decoded_message_text_bytes": 106720,
+      "categories_bytes": {
+        "body_source_text": 13919,
+        "body_metadata_and_structure": 83520,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 794,
+        "scope_reference_metadata": 5053,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 10234
+      },
+      "categories_percent": {
+        "body_source_text": 11.901,
+        "body_metadata_and_structure": 71.413,
+        "support_source_text": 0.021,
+        "support_metadata_and_structure": 0.679,
+        "scope_reference_metadata": 4.321,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.13,
+        "system_schema_text": 0.217,
+        "system_other_instructions": 2.569,
+        "http_envelope_and_escaping": 8.75
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 8816,
+        "document_id": 2485,
+        "document_version": 6106,
+        "empty": 763,
+        "end": 637,
+        "header": 720,
+        "heading_path": 5764,
+        "image_anchor": 140,
+        "image_disposition": 3451,
+        "image_ref": 1491,
+        "kind": 1482,
+        "leading_row": 955,
+        "locator": 13490,
+        "non_requirement_reason": 1811,
+        "ocr_status": 168,
+        "parent_section_id": 2275,
+        "physical_locator": 12011,
+        "physical_path": 1659,
+        "range_id": 3124,
+        "row_end": 585,
+        "row_start": 679,
+        "section_id": 1779,
+        "source_range_id": 3621,
+        "start": 710,
+        "table_id": 1392,
+        "text": 14629,
+        "text_basis": 1341,
+        "text_boundaries": 3124,
+        "unit_id": 2090
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 48,
+          "unique_values": 41,
+          "repeated_value_bytes": 802
+        },
+        "document_id": {
+          "occurrences": 71,
+          "unique_values": 1,
+          "repeated_value_bytes": 1400
+        },
+        "document_version": {
+          "occurrences": 71,
+          "unique_values": 1,
+          "repeated_value_bytes": 4620
+        },
+        "empty": {
+          "occurrences": 55,
+          "unique_values": 2,
+          "repeated_value_bytes": 259
+        },
+        "end": {
+          "occurrences": 71,
+          "unique_values": 46,
+          "repeated_value_bytes": 41
+        },
+        "header": {
+          "occurrences": 48,
+          "unique_values": 1,
+          "repeated_value_bytes": 235
+        },
+        "heading_path": {
+          "occurrences": 71,
+          "unique_values": 9,
+          "repeated_value_bytes": 3602
+        },
+        "image_anchor": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 24
+        },
+        "image_disposition": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 2832
+        },
+        "image_ref": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 1200
+        },
+        "kind": {
+          "occurrences": 71,
+          "unique_values": 3,
+          "repeated_value_bytes": 877
+        },
+        "leading_row": {
+          "occurrences": 48,
+          "unique_values": 2,
+          "repeated_value_bytes": 226
+        },
+        "locator": {
+          "occurrences": 71,
+          "unique_values": 21,
+          "repeated_value_bytes": 8061
+        },
+        "non_requirement_reason": {
+          "occurrences": 55,
+          "unique_values": 2,
+          "repeated_value_bytes": 350
+        },
+        "ocr_status": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "parent_section_id": {
+          "occurrences": 71,
+          "unique_values": 5,
+          "repeated_value_bytes": 728
+        },
+        "physical_locator": {
+          "occurrences": 71,
+          "unique_values": 20,
+          "repeated_value_bytes": 7350
+        },
+        "physical_path": {
+          "occurrences": 71,
+          "unique_values": 8,
+          "repeated_value_bytes": 252
+        },
+        "range_id": {
+          "occurrences": 71,
+          "unique_values": 71,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 48,
+          "unique_values": 16,
+          "repeated_value_bytes": 34
+        },
+        "row_start": {
+          "occurrences": 48,
+          "unique_values": 16,
+          "repeated_value_bytes": 33
+        },
+        "section_id": {
+          "occurrences": 71,
+          "unique_values": 9,
+          "repeated_value_bytes": 684
+        },
+        "source_range_id": {
+          "occurrences": 71,
+          "unique_values": 71,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 71,
+          "unique_values": 1,
+          "repeated_value_bytes": 70
+        },
+        "table_id": {
+          "occurrences": 48,
+          "unique_values": 5,
+          "repeated_value_bytes": 731
+        },
+        "text": {
+          "occurrences": 71,
+          "unique_values": 53,
+          "repeated_value_bytes": 520
+        },
+        "text_basis": {
+          "occurrences": 55,
+          "unique_values": 2,
+          "repeated_value_bytes": 548
+        },
+        "text_boundaries": {
+          "occurrences": 71,
+          "unique_values": 1,
+          "repeated_value_bytes": 1750
+        },
+        "unit_id": {
+          "occurrences": 71,
+          "unique_values": 28,
+          "repeated_value_bytes": 731
+        }
+      },
+      "body_source_utf8_bytes": 13870,
+      "support_source_utf8_bytes": 24,
+      "measurement": {
+        "input_tokens": 116986,
+        "text_tokens": 116954,
+        "body_tokens": 106944,
+        "support_tokens": 910,
+        "overhead_tokens": 9100,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 137466,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.057816,
+      "duplicate_source_characters": 0,
+      "source_characters": 5290,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 3,
+      "task": "extract",
+      "pack_id": "pack-718357d1c41924469868c9db",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 69,
+      "support_ranges": 4,
+      "template_ranges": 0,
+      "wire_bytes": 107792,
+      "wire_sha256": "8740a88ba3c7abfaf1cd376f15f6fcda26c59427e1adbf17267956244ab02850",
+      "decoded_message_text_bytes": 100014,
+      "categories_bytes": {
+        "body_source_text": 15145,
+        "body_metadata_and_structure": 73215,
+        "support_source_text": 85,
+        "support_metadata_and_structure": 3456,
+        "scope_reference_metadata": 3563,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 7778
+      },
+      "categories_percent": {
+        "body_source_text": 14.05,
+        "body_metadata_and_structure": 67.922,
+        "support_source_text": 0.079,
+        "support_metadata_and_structure": 3.206,
+        "scope_reference_metadata": 3.305,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.108,
+        "system_schema_text": 0.7,
+        "system_other_instructions": 3.413,
+        "http_envelope_and_escaping": 7.216
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2288,
+        "document_id": 2415,
+        "document_version": 5934,
+        "empty": 224,
+        "end": 638,
+        "header": 240,
+        "heading_path": 12350,
+        "kind": 1253,
+        "leading_row": 318,
+        "locator": 18193,
+        "non_requirement_reason": 480,
+        "parent_section_id": 2269,
+        "physical_locator": 8811,
+        "physical_path": 1449,
+        "range_id": 3036,
+        "row_end": 192,
+        "row_start": 224,
+        "section_id": 1794,
+        "source_range_id": 3519,
+        "start": 690,
+        "table_id": 464,
+        "text": 15835,
+        "text_basis": 384,
+        "text_boundaries": 3036,
+        "unit_id": 2187
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 16,
+          "unique_values": 13,
+          "repeated_value_bytes": 402
+        },
+        "document_id": {
+          "occurrences": 69,
+          "unique_values": 1,
+          "repeated_value_bytes": 1360
+        },
+        "document_version": {
+          "occurrences": 69,
+          "unique_values": 1,
+          "repeated_value_bytes": 4488
+        },
+        "empty": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 75
+        },
+        "end": {
+          "occurrences": 69,
+          "unique_values": 48,
+          "repeated_value_bytes": 42
+        },
+        "header": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 75
+        },
+        "heading_path": {
+          "occurrences": 69,
+          "unique_values": 46,
+          "repeated_value_bytes": 4231
+        },
+        "kind": {
+          "occurrences": 69,
+          "unique_values": 2,
+          "repeated_value_bytes": 678
+        },
+        "leading_row": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 69
+        },
+        "locator": {
+          "occurrences": 69,
+          "unique_values": 48,
+          "repeated_value_bytes": 4389
+        },
+        "non_requirement_reason": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "parent_section_id": {
+          "occurrences": 69,
+          "unique_values": 15,
+          "repeated_value_bytes": 642
+        },
+        "physical_locator": {
+          "occurrences": 69,
+          "unique_values": 9,
+          "repeated_value_bytes": 6468
+        },
+        "physical_path": {
+          "occurrences": 69,
+          "unique_values": 1,
+          "repeated_value_bytes": 272
+        },
+        "range_id": {
+          "occurrences": 69,
+          "unique_values": 69,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 16,
+          "unique_values": 8,
+          "repeated_value_bytes": 8
+        },
+        "row_start": {
+          "occurrences": 16,
+          "unique_values": 8,
+          "repeated_value_bytes": 8
+        },
+        "section_id": {
+          "occurrences": 69,
+          "unique_values": 46,
+          "repeated_value_bytes": 276
+        },
+        "source_range_id": {
+          "occurrences": 69,
+          "unique_values": 69,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 69,
+          "unique_values": 1,
+          "repeated_value_bytes": 68
+        },
+        "table_id": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 238
+        },
+        "text": {
+          "occurrences": 69,
+          "unique_values": 68,
+          "repeated_value_bytes": 83
+        },
+        "text_basis": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 150
+        },
+        "text_boundaries": {
+          "occurrences": 69,
+          "unique_values": 1,
+          "repeated_value_bytes": 1700
+        },
+        "unit_id": {
+          "occurrences": 69,
+          "unique_values": 55,
+          "repeated_value_bytes": 238
+        }
+      },
+      "body_source_utf8_bytes": 15016,
+      "support_source_utf8_bytes": 85,
+      "measurement": {
+        "input_tokens": 107824,
+        "text_tokens": 107792,
+        "body_tokens": 95191,
+        "support_tokens": 3915,
+        "overhead_tokens": 8686,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 128304,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.974971,
+      "duplicate_source_characters": 0,
+      "source_characters": 6021,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 3,
+      "task": "verify",
+      "pack_id": "pack-718357d1c41924469868c9db",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 75,
+      "support_ranges": 4,
+      "template_ranges": 0,
+      "wire_bytes": 119774,
+      "wire_sha256": "0d3e3e184c315e88bd9a1b214f4c2a80f0893a8377a85b95a29eda0990163417",
+      "decoded_message_text_bytes": 110960,
+      "categories_bytes": {
+        "body_source_text": 15145,
+        "body_metadata_and_structure": 85301,
+        "support_source_text": 85,
+        "support_metadata_and_structure": 3456,
+        "scope_reference_metadata": 3563,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 8814
+      },
+      "categories_percent": {
+        "body_source_text": 12.645,
+        "body_metadata_and_structure": 71.218,
+        "support_source_text": 0.071,
+        "support_metadata_and_structure": 2.885,
+        "scope_reference_metadata": 2.975,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.127,
+        "system_schema_text": 0.212,
+        "system_other_instructions": 2.508,
+        "http_envelope_and_escaping": 7.359
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2288,
+        "document_id": 2625,
+        "document_version": 6450,
+        "empty": 302,
+        "end": 686,
+        "header": 240,
+        "heading_path": 13498,
+        "image_anchor": 120,
+        "image_disposition": 2958,
+        "image_ref": 1278,
+        "kind": 1385,
+        "leading_row": 318,
+        "locator": 19753,
+        "non_requirement_reason": 798,
+        "ocr_status": 144,
+        "parent_section_id": 2467,
+        "physical_locator": 10425,
+        "physical_path": 1719,
+        "range_id": 3300,
+        "row_end": 192,
+        "row_start": 224,
+        "section_id": 1950,
+        "source_range_id": 3825,
+        "start": 750,
+        "table_id": 464,
+        "text": 15895,
+        "text_basis": 546,
+        "text_boundaries": 3300,
+        "unit_id": 2397
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 16,
+          "unique_values": 13,
+          "repeated_value_bytes": 402
+        },
+        "document_id": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 1480
+        },
+        "document_version": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 4884
+        },
+        "empty": {
+          "occurrences": 22,
+          "unique_values": 2,
+          "repeated_value_bytes": 95
+        },
+        "end": {
+          "occurrences": 75,
+          "unique_values": 49,
+          "repeated_value_bytes": 47
+        },
+        "header": {
+          "occurrences": 16,
+          "unique_values": 1,
+          "repeated_value_bytes": 75
+        },
+        "heading_path": {
+          "occurrences": 75,
+          "unique_values": 46,
+          "repeated_value_bytes": 5283
+        },
+        "image_anchor": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 20
+        },
+        "image_disposition": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 2360
+        },
+        "image_ref": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 1000
+        },
+        "kind": {
+          "occurrences": 75,
+          "unique_values": 3,
+          "repeated_value_bytes": 748
+        },
+        "leading_row": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 69
+        },
+        "locator": {
+          "occurrences": 75,
+          "unique_values": 54,
+          "repeated_value_bytes": 4389
+        },
+        "non_requirement_reason": {
+          "occurrences": 22,
+          "unique_values": 2,
+          "repeated_value_bytes": 195
+        },
+        "ocr_status": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 50
+        },
+        "parent_section_id": {
+          "occurrences": 75,
+          "unique_values": 15,
+          "repeated_value_bytes": 714
+        },
+        "physical_locator": {
+          "occurrences": 75,
+          "unique_values": 15,
+          "repeated_value_bytes": 6468
+        },
+        "physical_path": {
+          "occurrences": 75,
+          "unique_values": 7,
+          "repeated_value_bytes": 272
+        },
+        "range_id": {
+          "occurrences": 75,
+          "unique_values": 75,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 16,
+          "unique_values": 8,
+          "repeated_value_bytes": 8
+        },
+        "row_start": {
+          "occurrences": 16,
+          "unique_values": 8,
+          "repeated_value_bytes": 8
+        },
+        "section_id": {
+          "occurrences": 75,
+          "unique_values": 46,
+          "repeated_value_bytes": 348
+        },
+        "source_range_id": {
+          "occurrences": 75,
+          "unique_values": 75,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 74
+        },
+        "table_id": {
+          "occurrences": 16,
+          "unique_values": 2,
+          "repeated_value_bytes": 238
+        },
+        "text": {
+          "occurrences": 75,
+          "unique_values": 69,
+          "repeated_value_bytes": 93
+        },
+        "text_basis": {
+          "occurrences": 22,
+          "unique_values": 2,
+          "repeated_value_bytes": 215
+        },
+        "text_boundaries": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 1850
+        },
+        "unit_id": {
+          "occurrences": 75,
+          "unique_values": 61,
+          "repeated_value_bytes": 238
+        }
+      },
+      "body_source_utf8_bytes": 15016,
+      "support_source_utf8_bytes": 85,
+      "measurement": {
+        "input_tokens": 119806,
+        "text_tokens": 119774,
+        "body_tokens": 108381,
+        "support_tokens": 3915,
+        "overhead_tokens": 7478,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 140286,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.083315,
+      "duplicate_source_characters": 0,
+      "source_characters": 6021,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 4,
+      "task": "extract",
+      "pack_id": "pack-3a717ced70efbcc62506dfbb",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 70,
+      "support_ranges": 4,
+      "template_ranges": 0,
+      "wire_bytes": 106628,
+      "wire_sha256": "1abce1579ffd4f9ef3ed56e78bc68b931af1476c6abc589583b7917b98170347",
+      "decoded_message_text_bytes": 99491,
+      "categories_bytes": {
+        "body_source_text": 17943,
+        "body_metadata_and_structure": 69637,
+        "support_source_text": 132,
+        "support_metadata_and_structure": 3567,
+        "scope_reference_metadata": 3662,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 7137
+      },
+      "categories_percent": {
+        "body_source_text": 16.828,
+        "body_metadata_and_structure": 65.308,
+        "support_source_text": 0.124,
+        "support_metadata_and_structure": 3.345,
+        "scope_reference_metadata": 3.434,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.109,
+        "system_schema_text": 0.708,
+        "system_other_instructions": 3.45,
+        "http_envelope_and_escaping": 6.693
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 2450,
+        "document_version": 6020,
+        "end": 658,
+        "heading_path": 11988,
+        "kind": 1190,
+        "locator": 20340,
+        "parent_section_id": 2323,
+        "physical_locator": 7770,
+        "physical_path": 1470,
+        "range_id": 3080,
+        "section_id": 1842,
+        "source_range_id": 3570,
+        "start": 700,
+        "text": 18643,
+        "text_boundaries": 3080,
+        "unit_id": 2317
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 70,
+          "unique_values": 1,
+          "repeated_value_bytes": 1380
+        },
+        "document_version": {
+          "occurrences": 70,
+          "unique_values": 1,
+          "repeated_value_bytes": 4554
+        },
+        "end": {
+          "occurrences": 70,
+          "unique_values": 54,
+          "repeated_value_bytes": 34
+        },
+        "heading_path": {
+          "occurrences": 70,
+          "unique_values": 60,
+          "repeated_value_bytes": 1572
+        },
+        "kind": {
+          "occurrences": 70,
+          "unique_values": 1,
+          "repeated_value_bytes": 621
+        },
+        "locator": {
+          "occurrences": 70,
+          "unique_values": 62,
+          "repeated_value_bytes": 2171
+        },
+        "parent_section_id": {
+          "occurrences": 70,
+          "unique_values": 15,
+          "repeated_value_bytes": 669
+        },
+        "physical_locator": {
+          "occurrences": 70,
+          "unique_values": 9,
+          "repeated_value_bytes": 5551
+        },
+        "physical_path": {
+          "occurrences": 70,
+          "unique_values": 1,
+          "repeated_value_bytes": 276
+        },
+        "range_id": {
+          "occurrences": 70,
+          "unique_values": 70,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 70,
+          "unique_values": 62,
+          "repeated_value_bytes": 98
+        },
+        "source_range_id": {
+          "occurrences": 70,
+          "unique_values": 70,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 70,
+          "unique_values": 1,
+          "repeated_value_bytes": 69
+        },
+        "text": {
+          "occurrences": 70,
+          "unique_values": 67,
+          "repeated_value_bytes": 565
+        },
+        "text_boundaries": {
+          "occurrences": 70,
+          "unique_values": 1,
+          "repeated_value_bytes": 1725
+        },
+        "unit_id": {
+          "occurrences": 70,
+          "unique_values": 70,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 17779,
+      "support_source_utf8_bytes": 132,
+      "measurement": {
+        "input_tokens": 106660,
+        "text_tokens": 106628,
+        "body_tokens": 93764,
+        "support_tokens": 4073,
+        "overhead_tokens": 8791,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 127140,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.964446,
+      "duplicate_source_characters": 0,
+      "source_characters": 6895,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 4,
+      "task": "verify",
+      "pack_id": "pack-3a717ced70efbcc62506dfbb",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 78,
+      "support_ranges": 4,
+      "template_ranges": 0,
+      "wire_bytes": 122785,
+      "wire_sha256": "c51cf2f031ba9254e62cb8f4cd322db0832c1b308ea7a8e8b8e02670d54dd5d6",
+      "decoded_message_text_bytes": 114244,
+      "categories_bytes": {
+        "body_source_text": 17943,
+        "body_metadata_and_structure": 85530,
+        "support_source_text": 132,
+        "support_metadata_and_structure": 3567,
+        "scope_reference_metadata": 3662,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 8541
+      },
+      "categories_percent": {
+        "body_source_text": 14.613,
+        "body_metadata_and_structure": 69.658,
+        "support_source_text": 0.108,
+        "support_metadata_and_structure": 2.905,
+        "scope_reference_metadata": 2.982,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.124,
+        "system_schema_text": 0.207,
+        "system_other_instructions": 2.447,
+        "http_envelope_and_escaping": 6.956
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 2730,
+        "document_version": 6708,
+        "empty": 104,
+        "end": 722,
+        "heading_path": 13293,
+        "image_anchor": 160,
+        "image_disposition": 3944,
+        "image_ref": 1704,
+        "kind": 1366,
+        "locator": 22420,
+        "non_requirement_reason": 424,
+        "ocr_status": 192,
+        "parent_section_id": 2589,
+        "physical_locator": 9922,
+        "physical_path": 1830,
+        "range_id": 3432,
+        "section_id": 2052,
+        "source_range_id": 3978,
+        "start": 780,
+        "text": 18723,
+        "text_basis": 216,
+        "text_boundaries": 3432,
+        "unit_id": 2597
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 78,
+          "unique_values": 1,
+          "repeated_value_bytes": 1540
+        },
+        "document_version": {
+          "occurrences": 78,
+          "unique_values": 1,
+          "repeated_value_bytes": 5082
+        },
+        "empty": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 28
+        },
+        "end": {
+          "occurrences": 78,
+          "unique_values": 55,
+          "repeated_value_bytes": 41
+        },
+        "heading_path": {
+          "occurrences": 78,
+          "unique_values": 60,
+          "repeated_value_bytes": 2749
+        },
+        "image_anchor": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 28
+        },
+        "image_disposition": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 3304
+        },
+        "image_ref": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 1400
+        },
+        "kind": {
+          "occurrences": 78,
+          "unique_values": 2,
+          "repeated_value_bytes": 719
+        },
+        "locator": {
+          "occurrences": 78,
+          "unique_values": 70,
+          "repeated_value_bytes": 2171
+        },
+        "non_requirement_reason": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 189
+        },
+        "ocr_status": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 70
+        },
+        "parent_section_id": {
+          "occurrences": 78,
+          "unique_values": 15,
+          "repeated_value_bytes": 767
+        },
+        "physical_locator": {
+          "occurrences": 78,
+          "unique_values": 17,
+          "repeated_value_bytes": 5551
+        },
+        "physical_path": {
+          "occurrences": 78,
+          "unique_values": 9,
+          "repeated_value_bytes": 276
+        },
+        "range_id": {
+          "occurrences": 78,
+          "unique_values": 78,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 78,
+          "unique_values": 62,
+          "repeated_value_bytes": 196
+        },
+        "source_range_id": {
+          "occurrences": 78,
+          "unique_values": 78,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 78,
+          "unique_values": 1,
+          "repeated_value_bytes": 77
+        },
+        "text": {
+          "occurrences": 78,
+          "unique_values": 68,
+          "repeated_value_bytes": 579
+        },
+        "text_basis": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 91
+        },
+        "text_boundaries": {
+          "occurrences": 78,
+          "unique_values": 1,
+          "repeated_value_bytes": 1925
+        },
+        "unit_id": {
+          "occurrences": 78,
+          "unique_values": 78,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 17779,
+      "support_source_utf8_bytes": 132,
+      "measurement": {
+        "input_tokens": 122817,
+        "text_tokens": 122785,
+        "body_tokens": 111129,
+        "support_tokens": 4073,
+        "overhead_tokens": 7583,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 143297,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.110541,
+      "duplicate_source_characters": 0,
+      "source_characters": 6895,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 5,
+      "task": "extract",
+      "pack_id": "pack-e627181a51d7de7503b280e7",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 33,
+      "support_ranges": 4,
+      "template_ranges": 0,
+      "wire_bytes": 56909,
+      "wire_sha256": "bf3d780c25b240ecbd4f32c3a897dc587224ca13d1aa0c49e5d9a795ab5a0c10",
+      "decoded_message_text_bytes": 53125,
+      "categories_bytes": {
+        "body_source_text": 8566,
+        "body_metadata_and_structure": 34075,
+        "support_source_text": 94,
+        "support_metadata_and_structure": 3498,
+        "scope_reference_metadata": 2342,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 3784
+      },
+      "categories_percent": {
+        "body_source_text": 15.052,
+        "body_metadata_and_structure": 59.876,
+        "support_source_text": 0.165,
+        "support_metadata_and_structure": 6.147,
+        "scope_reference_metadata": 4.115,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.204,
+        "system_schema_text": 1.327,
+        "system_other_instructions": 6.465,
+        "http_envelope_and_escaping": 6.649
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 1155,
+        "document_version": 2838,
+        "end": 311,
+        "heading_path": 6232,
+        "kind": 561,
+        "locator": 10192,
+        "parent_section_id": 1112,
+        "physical_locator": 3663,
+        "physical_path": 693,
+        "range_id": 1452,
+        "section_id": 891,
+        "source_range_id": 1683,
+        "start": 330,
+        "text": 8896,
+        "text_boundaries": 1452,
+        "unit_id": 1115
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 33,
+          "unique_values": 1,
+          "repeated_value_bytes": 640
+        },
+        "document_version": {
+          "occurrences": 33,
+          "unique_values": 1,
+          "repeated_value_bytes": 2112
+        },
+        "end": {
+          "occurrences": 33,
+          "unique_values": 27,
+          "repeated_value_bytes": 14
+        },
+        "heading_path": {
+          "occurrences": 33,
+          "unique_values": 28,
+          "repeated_value_bytes": 1009
+        },
+        "kind": {
+          "occurrences": 33,
+          "unique_values": 1,
+          "repeated_value_bytes": 288
+        },
+        "locator": {
+          "occurrences": 33,
+          "unique_values": 28,
+          "repeated_value_bytes": 1634
+        },
+        "parent_section_id": {
+          "occurrences": 33,
+          "unique_values": 11,
+          "repeated_value_bytes": 278
+        },
+        "physical_locator": {
+          "occurrences": 33,
+          "unique_values": 6,
+          "repeated_value_bytes": 2457
+        },
+        "physical_path": {
+          "occurrences": 33,
+          "unique_values": 1,
+          "repeated_value_bytes": 128
+        },
+        "range_id": {
+          "occurrences": 33,
+          "unique_values": 33,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 33,
+          "unique_values": 28,
+          "repeated_value_bytes": 65
+        },
+        "source_range_id": {
+          "occurrences": 33,
+          "unique_values": 33,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 33,
+          "unique_values": 1,
+          "repeated_value_bytes": 32
+        },
+        "text": {
+          "occurrences": 33,
+          "unique_values": 32,
+          "repeated_value_bytes": 64
+        },
+        "text_boundaries": {
+          "occurrences": 33,
+          "unique_values": 1,
+          "repeated_value_bytes": 800
+        },
+        "unit_id": {
+          "occurrences": 33,
+          "unique_values": 33,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 8493,
+      "support_source_utf8_bytes": 94,
+      "measurement": {
+        "input_tokens": 56941,
+        "text_tokens": 56909,
+        "body_tokens": 45552,
+        "support_tokens": 3966,
+        "overhead_tokens": 7391,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 77421,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.514874,
+      "duplicate_source_characters": 0,
+      "source_characters": 3215,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 5,
+      "task": "verify",
+      "pack_id": "pack-e627181a51d7de7503b280e7",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 38,
+      "support_ranges": 4,
+      "template_ranges": 0,
+      "wire_bytes": 66833,
+      "wire_sha256": "874275688709c22ddb7c7cc647b408a24b9f751d3b2c9f9aec7e53706c3fddd7",
+      "decoded_message_text_bytes": 62197,
+      "categories_bytes": {
+        "body_source_text": 8566,
+        "body_metadata_and_structure": 44287,
+        "support_source_text": 94,
+        "support_metadata_and_structure": 3498,
+        "scope_reference_metadata": 2342,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 4636
+      },
+      "categories_percent": {
+        "body_source_text": 12.817,
+        "body_metadata_and_structure": 66.265,
+        "support_source_text": 0.141,
+        "support_metadata_and_structure": 5.234,
+        "scope_reference_metadata": 3.504,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.227,
+        "system_schema_text": 0.38,
+        "system_other_instructions": 4.495,
+        "http_envelope_and_escaping": 6.937
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 1330,
+        "document_version": 3268,
+        "empty": 65,
+        "end": 351,
+        "heading_path": 7321,
+        "image_anchor": 100,
+        "image_disposition": 2465,
+        "image_ref": 1065,
+        "kind": 671,
+        "locator": 11492,
+        "non_requirement_reason": 265,
+        "ocr_status": 120,
+        "parent_section_id": 1280,
+        "physical_locator": 5008,
+        "physical_path": 918,
+        "range_id": 1672,
+        "section_id": 1026,
+        "source_range_id": 1938,
+        "start": 380,
+        "text": 8946,
+        "text_basis": 135,
+        "text_boundaries": 1672,
+        "unit_id": 1290
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 38,
+          "unique_values": 1,
+          "repeated_value_bytes": 740
+        },
+        "document_version": {
+          "occurrences": 38,
+          "unique_values": 1,
+          "repeated_value_bytes": 2442
+        },
+        "empty": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 16
+        },
+        "end": {
+          "occurrences": 38,
+          "unique_values": 28,
+          "repeated_value_bytes": 18
+        },
+        "heading_path": {
+          "occurrences": 38,
+          "unique_values": 28,
+          "repeated_value_bytes": 2018
+        },
+        "image_anchor": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 16
+        },
+        "image_disposition": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 1888
+        },
+        "image_ref": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 800
+        },
+        "kind": {
+          "occurrences": 38,
+          "unique_values": 2,
+          "repeated_value_bytes": 344
+        },
+        "locator": {
+          "occurrences": 38,
+          "unique_values": 33,
+          "repeated_value_bytes": 1634
+        },
+        "non_requirement_reason": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 108
+        },
+        "ocr_status": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 40
+        },
+        "parent_section_id": {
+          "occurrences": 38,
+          "unique_values": 11,
+          "repeated_value_bytes": 341
+        },
+        "physical_locator": {
+          "occurrences": 38,
+          "unique_values": 11,
+          "repeated_value_bytes": 2457
+        },
+        "physical_path": {
+          "occurrences": 38,
+          "unique_values": 6,
+          "repeated_value_bytes": 128
+        },
+        "range_id": {
+          "occurrences": 38,
+          "unique_values": 38,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 38,
+          "unique_values": 28,
+          "repeated_value_bytes": 130
+        },
+        "source_range_id": {
+          "occurrences": 38,
+          "unique_values": 38,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 38,
+          "unique_values": 1,
+          "repeated_value_bytes": 37
+        },
+        "text": {
+          "occurrences": 38,
+          "unique_values": 33,
+          "repeated_value_bytes": 72
+        },
+        "text_basis": {
+          "occurrences": 5,
+          "unique_values": 1,
+          "repeated_value_bytes": 52
+        },
+        "text_boundaries": {
+          "occurrences": 38,
+          "unique_values": 1,
+          "repeated_value_bytes": 925
+        },
+        "unit_id": {
+          "occurrences": 38,
+          "unique_values": 38,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 8493,
+      "support_source_utf8_bytes": 94,
+      "measurement": {
+        "input_tokens": 66865,
+        "text_tokens": 66833,
+        "body_tokens": 56684,
+        "support_tokens": 3966,
+        "overhead_tokens": 6183,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 87345,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.60461,
+      "duplicate_source_characters": 0,
+      "source_characters": 3215,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 6,
+      "task": "extract",
+      "pack_id": "pack-af253d2948ae0543744282a4",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 68,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 102490,
+      "wire_sha256": "c8a1344339514578bde627e6763b21bfdae0895909e94e2b520e904a1aaa4525",
+      "decoded_message_text_bytes": 92848,
+      "categories_bytes": {
+        "body_source_text": 9519,
+        "body_metadata_and_structure": 77961,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 794,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 9642
+      },
+      "categories_percent": {
+        "body_source_text": 9.288,
+        "body_metadata_and_structure": 76.067,
+        "support_source_text": 0.023,
+        "support_metadata_and_structure": 0.775,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.113,
+        "system_schema_text": 0.737,
+        "system_other_instructions": 3.59,
+        "http_envelope_and_escaping": 9.408
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 11215,
+        "document_id": 2380,
+        "document_version": 5848,
+        "empty": 854,
+        "end": 626,
+        "header": 915,
+        "heading_path": 5508,
+        "kind": 1461,
+        "leading_row": 1214,
+        "locator": 11510,
+        "non_requirement_reason": 1830,
+        "parent_section_id": 2176,
+        "physical_locator": 11429,
+        "physical_path": 1428,
+        "range_id": 2992,
+        "row_end": 749,
+        "row_start": 868,
+        "section_id": 1836,
+        "source_range_id": 3468,
+        "start": 680,
+        "table_id": 1769,
+        "text": 10199,
+        "text_basis": 1464,
+        "text_boundaries": 2992,
+        "unit_id": 1934
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 61,
+          "unique_values": 59,
+          "repeated_value_bytes": 529
+        },
+        "document_id": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 1340
+        },
+        "document_version": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 4422
+        },
+        "empty": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 300
+        },
+        "end": {
+          "occurrences": 68,
+          "unique_values": 46,
+          "repeated_value_bytes": 45
+        },
+        "header": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 300
+        },
+        "heading_path": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 4355
+        },
+        "kind": {
+          "occurrences": 68,
+          "unique_values": 2,
+          "repeated_value_bytes": 894
+        },
+        "leading_row": {
+          "occurrences": 61,
+          "unique_values": 2,
+          "repeated_value_bytes": 290
+        },
+        "locator": {
+          "occurrences": 68,
+          "unique_values": 7,
+          "repeated_value_bytes": 9631
+        },
+        "non_requirement_reason": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 240
+        },
+        "parent_section_id": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 737
+        },
+        "physical_locator": {
+          "occurrences": 68,
+          "unique_values": 13,
+          "repeated_value_bytes": 8491
+        },
+        "physical_path": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 268
+        },
+        "range_id": {
+          "occurrences": 68,
+          "unique_values": 68,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 51
+        },
+        "row_start": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 49
+        },
+        "section_id": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 871
+        },
+        "source_range_id": {
+          "occurrences": 68,
+          "unique_values": 68,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 67
+        },
+        "table_id": {
+          "occurrences": 61,
+          "unique_values": 6,
+          "repeated_value_bytes": 935
+        },
+        "text": {
+          "occurrences": 68,
+          "unique_values": 65,
+          "repeated_value_bytes": 131
+        },
+        "text_basis": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 600
+        },
+        "text_boundaries": {
+          "occurrences": 68,
+          "unique_values": 1,
+          "repeated_value_bytes": 1675
+        },
+        "unit_id": {
+          "occurrences": 68,
+          "unique_values": 13,
+          "repeated_value_bytes": 935
+        }
+      },
+      "body_source_utf8_bytes": 9514,
+      "support_source_utf8_bytes": 24,
+      "measurement": {
+        "input_tokens": 102522,
+        "text_tokens": 102490,
+        "body_tokens": 96717,
+        "support_tokens": 910,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 123002,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.927029,
+      "duplicate_source_characters": 0,
+      "source_characters": 3957,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 6,
+      "task": "verify",
+      "pack_id": "pack-af253d2948ae0543744282a4",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 74,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 113810,
+      "wire_sha256": "471ce805730d2c98e550a6a321f03ad1f8f44c7b06fc82acfcb3e50d57774c5a",
+      "decoded_message_text_bytes": 103132,
+      "categories_bytes": {
+        "body_source_text": 9519,
+        "body_metadata_and_structure": 89385,
+        "support_source_text": 24,
+        "support_metadata_and_structure": 794,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 10678
+      },
+      "categories_percent": {
+        "body_source_text": 8.364,
+        "body_metadata_and_structure": 78.539,
+        "support_source_text": 0.021,
+        "support_metadata_and_structure": 0.698,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.134,
+        "system_schema_text": 0.223,
+        "system_other_instructions": 2.639,
+        "http_envelope_and_escaping": 9.382
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 11215,
+        "document_id": 2590,
+        "document_version": 6364,
+        "empty": 932,
+        "end": 674,
+        "header": 915,
+        "heading_path": 5994,
+        "image_anchor": 120,
+        "image_disposition": 2958,
+        "image_ref": 1278,
+        "kind": 1593,
+        "leading_row": 1214,
+        "locator": 13070,
+        "non_requirement_reason": 2148,
+        "ocr_status": 144,
+        "parent_section_id": 2368,
+        "physical_locator": 13043,
+        "physical_path": 1698,
+        "range_id": 3256,
+        "row_end": 749,
+        "row_start": 868,
+        "section_id": 1998,
+        "source_range_id": 3774,
+        "start": 740,
+        "table_id": 1769,
+        "text": 10259,
+        "text_basis": 1626,
+        "text_boundaries": 3256,
+        "unit_id": 2144
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 61,
+          "unique_values": 59,
+          "repeated_value_bytes": 529
+        },
+        "document_id": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 1460
+        },
+        "document_version": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 4818
+        },
+        "empty": {
+          "occurrences": 67,
+          "unique_values": 2,
+          "repeated_value_bytes": 320
+        },
+        "end": {
+          "occurrences": 74,
+          "unique_values": 47,
+          "repeated_value_bytes": 50
+        },
+        "header": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 300
+        },
+        "heading_path": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 4745
+        },
+        "image_anchor": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 20
+        },
+        "image_disposition": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 2360
+        },
+        "image_ref": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 1000
+        },
+        "kind": {
+          "occurrences": 74,
+          "unique_values": 3,
+          "repeated_value_bytes": 964
+        },
+        "leading_row": {
+          "occurrences": 61,
+          "unique_values": 2,
+          "repeated_value_bytes": 290
+        },
+        "locator": {
+          "occurrences": 74,
+          "unique_values": 13,
+          "repeated_value_bytes": 9631
+        },
+        "non_requirement_reason": {
+          "occurrences": 67,
+          "unique_values": 2,
+          "repeated_value_bytes": 375
+        },
+        "ocr_status": {
+          "occurrences": 6,
+          "unique_values": 1,
+          "repeated_value_bytes": 50
+        },
+        "parent_section_id": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 803
+        },
+        "physical_locator": {
+          "occurrences": 74,
+          "unique_values": 19,
+          "repeated_value_bytes": 8491
+        },
+        "physical_path": {
+          "occurrences": 74,
+          "unique_values": 7,
+          "repeated_value_bytes": 268
+        },
+        "range_id": {
+          "occurrences": 74,
+          "unique_values": 74,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 51
+        },
+        "row_start": {
+          "occurrences": 61,
+          "unique_values": 18,
+          "repeated_value_bytes": 49
+        },
+        "section_id": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 949
+        },
+        "source_range_id": {
+          "occurrences": 74,
+          "unique_values": 74,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 73
+        },
+        "table_id": {
+          "occurrences": 61,
+          "unique_values": 6,
+          "repeated_value_bytes": 935
+        },
+        "text": {
+          "occurrences": 74,
+          "unique_values": 66,
+          "repeated_value_bytes": 141
+        },
+        "text_basis": {
+          "occurrences": 67,
+          "unique_values": 2,
+          "repeated_value_bytes": 665
+        },
+        "text_boundaries": {
+          "occurrences": 74,
+          "unique_values": 1,
+          "repeated_value_bytes": 1825
+        },
+        "unit_id": {
+          "occurrences": 74,
+          "unique_values": 19,
+          "repeated_value_bytes": 935
+        }
+      },
+      "body_source_utf8_bytes": 9514,
+      "support_source_utf8_bytes": 24,
+      "measurement": {
+        "input_tokens": 113842,
+        "text_tokens": 113810,
+        "body_tokens": 109245,
+        "support_tokens": 910,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 134322,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.029387,
+      "duplicate_source_characters": 0,
+      "source_characters": 3957,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 7,
+      "task": "extract",
+      "pack_id": "pack-3af109e690faf8858b5388c0",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 77,
+      "support_ranges": 2,
+      "template_ranges": 0,
+      "wire_bytes": 101509,
+      "wire_sha256": "79563afc3f7ad7637e6cba10fd2ade50c3f45965d09bb5d0d99659629a9913b2",
+      "decoded_message_text_bytes": 94257,
+      "categories_bytes": {
+        "body_source_text": 16264,
+        "body_metadata_and_structure": 71692,
+        "support_source_text": 65,
+        "support_metadata_and_structure": 1686,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 7252
+      },
+      "categories_percent": {
+        "body_source_text": 16.022,
+        "body_metadata_and_structure": 70.626,
+        "support_source_text": 0.064,
+        "support_metadata_and_structure": 1.661,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.114,
+        "system_schema_text": 0.744,
+        "system_other_instructions": 3.624,
+        "http_envelope_and_escaping": 7.144
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 2695,
+        "document_version": 6622,
+        "end": 716,
+        "heading_path": 10656,
+        "kind": 1309,
+        "locator": 19896,
+        "parent_section_id": 2560,
+        "physical_locator": 8547,
+        "physical_path": 1617,
+        "range_id": 3388,
+        "section_id": 2079,
+        "source_range_id": 3927,
+        "start": 770,
+        "text": 17034,
+        "text_boundaries": 3388,
+        "unit_id": 2599
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 77,
+          "unique_values": 1,
+          "repeated_value_bytes": 1520
+        },
+        "document_version": {
+          "occurrences": 77,
+          "unique_values": 1,
+          "repeated_value_bytes": 5016
+        },
+        "end": {
+          "occurrences": 77,
+          "unique_values": 59,
+          "repeated_value_bytes": 37
+        },
+        "heading_path": {
+          "occurrences": 77,
+          "unique_values": 66,
+          "repeated_value_bytes": 937
+        },
+        "kind": {
+          "occurrences": 77,
+          "unique_values": 1,
+          "repeated_value_bytes": 684
+        },
+        "locator": {
+          "occurrences": 77,
+          "unique_values": 66,
+          "repeated_value_bytes": 2312
+        },
+        "parent_section_id": {
+          "occurrences": 77,
+          "unique_values": 19,
+          "repeated_value_bytes": 707
+        },
+        "physical_locator": {
+          "occurrences": 77,
+          "unique_values": 13,
+          "repeated_value_bytes": 5824
+        },
+        "physical_path": {
+          "occurrences": 77,
+          "unique_values": 1,
+          "repeated_value_bytes": 304
+        },
+        "range_id": {
+          "occurrences": 77,
+          "unique_values": 77,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 77,
+          "unique_values": 66,
+          "repeated_value_bytes": 143
+        },
+        "source_range_id": {
+          "occurrences": 77,
+          "unique_values": 77,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 77,
+          "unique_values": 1,
+          "repeated_value_bytes": 76
+        },
+        "text": {
+          "occurrences": 77,
+          "unique_values": 72,
+          "repeated_value_bytes": 350
+        },
+        "text_boundaries": {
+          "occurrences": 77,
+          "unique_values": 1,
+          "repeated_value_bytes": 1900
+        },
+        "unit_id": {
+          "occurrences": 77,
+          "unique_values": 77,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 16121,
+      "support_source_utf8_bytes": 65,
+      "measurement": {
+        "input_tokens": 101541,
+        "text_tokens": 101509,
+        "body_tokens": 94709,
+        "support_tokens": 1937,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 122021,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.918159,
+      "duplicate_source_characters": 0,
+      "source_characters": 6122,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 7,
+      "task": "verify",
+      "pack_id": "pack-3af109e690faf8858b5388c0",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 88,
+      "support_ranges": 2,
+      "template_ranges": 0,
+      "wire_bytes": 123629,
+      "wire_sha256": "168b33f0a76a9ba28a20eadd4183f24c112de35060b859a40375f0a13eae69e9",
+      "decoded_message_text_bytes": 114427,
+      "categories_bytes": {
+        "body_source_text": 16264,
+        "body_metadata_and_structure": 93002,
+        "support_source_text": 65,
+        "support_metadata_and_structure": 1686,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 9202
+      },
+      "categories_percent": {
+        "body_source_text": 13.155,
+        "body_metadata_and_structure": 75.227,
+        "support_source_text": 0.053,
+        "support_metadata_and_structure": 1.364,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.123,
+        "system_schema_text": 0.205,
+        "system_other_instructions": 2.43,
+        "http_envelope_and_escaping": 7.443
+      },
+      "body_field_marginal_payload_bytes": {
+        "document_id": 3080,
+        "document_version": 7568,
+        "empty": 143,
+        "end": 804,
+        "heading_path": 11918,
+        "image_anchor": 220,
+        "image_disposition": 5423,
+        "image_ref": 2343,
+        "kind": 1551,
+        "locator": 22756,
+        "non_requirement_reason": 583,
+        "ocr_status": 264,
+        "parent_section_id": 2907,
+        "physical_locator": 11506,
+        "physical_path": 2112,
+        "range_id": 3872,
+        "section_id": 2376,
+        "source_range_id": 4488,
+        "start": 880,
+        "text": 17144,
+        "text_basis": 297,
+        "text_boundaries": 3872,
+        "unit_id": 2984
+      },
+      "body_field_repetition": {
+        "document_id": {
+          "occurrences": 88,
+          "unique_values": 1,
+          "repeated_value_bytes": 1740
+        },
+        "document_version": {
+          "occurrences": 88,
+          "unique_values": 1,
+          "repeated_value_bytes": 5742
+        },
+        "empty": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 40
+        },
+        "end": {
+          "occurrences": 88,
+          "unique_values": 60,
+          "repeated_value_bytes": 47
+        },
+        "heading_path": {
+          "occurrences": 88,
+          "unique_values": 66,
+          "repeated_value_bytes": 2023
+        },
+        "image_anchor": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 40
+        },
+        "image_disposition": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 4720
+        },
+        "image_ref": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 2000
+        },
+        "kind": {
+          "occurrences": 88,
+          "unique_values": 2,
+          "repeated_value_bytes": 824
+        },
+        "locator": {
+          "occurrences": 88,
+          "unique_values": 77,
+          "repeated_value_bytes": 2312
+        },
+        "non_requirement_reason": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 270
+        },
+        "ocr_status": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 100
+        },
+        "parent_section_id": {
+          "occurrences": 88,
+          "unique_values": 19,
+          "repeated_value_bytes": 823
+        },
+        "physical_locator": {
+          "occurrences": 88,
+          "unique_values": 24,
+          "repeated_value_bytes": 5824
+        },
+        "physical_path": {
+          "occurrences": 88,
+          "unique_values": 12,
+          "repeated_value_bytes": 304
+        },
+        "range_id": {
+          "occurrences": 88,
+          "unique_values": 88,
+          "repeated_value_bytes": 0
+        },
+        "section_id": {
+          "occurrences": 88,
+          "unique_values": 66,
+          "repeated_value_bytes": 286
+        },
+        "source_range_id": {
+          "occurrences": 88,
+          "unique_values": 88,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 88,
+          "unique_values": 1,
+          "repeated_value_bytes": 87
+        },
+        "text": {
+          "occurrences": 88,
+          "unique_values": 73,
+          "repeated_value_bytes": 370
+        },
+        "text_basis": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "text_boundaries": {
+          "occurrences": 88,
+          "unique_values": 1,
+          "repeated_value_bytes": 2175
+        },
+        "unit_id": {
+          "occurrences": 88,
+          "unique_values": 88,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 16121,
+      "support_source_utf8_bytes": 65,
+      "measurement": {
+        "input_tokens": 123661,
+        "text_tokens": 123629,
+        "body_tokens": 118037,
+        "support_tokens": 1937,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 144141,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.118173,
+      "duplicate_source_characters": 0,
+      "source_characters": 6122,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 8,
+      "task": "extract",
+      "pack_id": "pack-a59b1587285bdadca13aac78",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 47,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 75272,
+      "wire_sha256": "1da5f00d5a51afce55443810d271f02fa6c2c32a1870aa7fb2270eefa54902ee",
+      "decoded_message_text_bytes": 69349,
+      "categories_bytes": {
+        "body_source_text": 15073,
+        "body_metadata_and_structure": 48891,
+        "support_source_text": 27,
+        "support_metadata_and_structure": 808,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 5923
+      },
+      "categories_percent": {
+        "body_source_text": 20.025,
+        "body_metadata_and_structure": 64.952,
+        "support_source_text": 0.036,
+        "support_metadata_and_structure": 1.073,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.154,
+        "system_schema_text": 1.003,
+        "system_other_instructions": 4.888,
+        "http_envelope_and_escaping": 7.869
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 4368,
+        "document_id": 1645,
+        "document_version": 4042,
+        "empty": 378,
+        "end": 444,
+        "header": 405,
+        "heading_path": 4160,
+        "kind": 934,
+        "leading_row": 535,
+        "locator": 9229,
+        "non_requirement_reason": 810,
+        "parent_section_id": 1598,
+        "physical_locator": 6968,
+        "physical_path": 987,
+        "range_id": 2068,
+        "row_end": 324,
+        "row_start": 378,
+        "section_id": 1269,
+        "source_range_id": 2397,
+        "start": 470,
+        "table_id": 783,
+        "text": 15543,
+        "text_basis": 648,
+        "text_boundaries": 2068,
+        "unit_id": 1420
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 27,
+          "unique_values": 27,
+          "repeated_value_bytes": 0
+        },
+        "document_id": {
+          "occurrences": 47,
+          "unique_values": 1,
+          "repeated_value_bytes": 920
+        },
+        "document_version": {
+          "occurrences": 47,
+          "unique_values": 1,
+          "repeated_value_bytes": 3036
+        },
+        "empty": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "end": {
+          "occurrences": 47,
+          "unique_values": 44,
+          "repeated_value_bytes": 6
+        },
+        "header": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "heading_path": {
+          "occurrences": 47,
+          "unique_values": 12,
+          "repeated_value_bytes": 2048
+        },
+        "kind": {
+          "occurrences": 47,
+          "unique_values": 2,
+          "repeated_value_bytes": 535
+        },
+        "leading_row": {
+          "occurrences": 27,
+          "unique_values": 2,
+          "repeated_value_bytes": 121
+        },
+        "locator": {
+          "occurrences": 47,
+          "unique_values": 17,
+          "repeated_value_bytes": 5073
+        },
+        "non_requirement_reason": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 104
+        },
+        "parent_section_id": {
+          "occurrences": 47,
+          "unique_values": 1,
+          "repeated_value_bytes": 598
+        },
+        "physical_locator": {
+          "occurrences": 47,
+          "unique_values": 14,
+          "repeated_value_bytes": 4430
+        },
+        "physical_path": {
+          "occurrences": 47,
+          "unique_values": 1,
+          "repeated_value_bytes": 184
+        },
+        "range_id": {
+          "occurrences": 47,
+          "unique_values": 47,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 19
+        },
+        "row_start": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 19
+        },
+        "section_id": {
+          "occurrences": 47,
+          "unique_values": 12,
+          "repeated_value_bytes": 455
+        },
+        "source_range_id": {
+          "occurrences": 47,
+          "unique_values": 47,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 47,
+          "unique_values": 1,
+          "repeated_value_bytes": 46
+        },
+        "table_id": {
+          "occurrences": 27,
+          "unique_values": 5,
+          "repeated_value_bytes": 374
+        },
+        "text": {
+          "occurrences": 47,
+          "unique_values": 45,
+          "repeated_value_bytes": 140
+        },
+        "text_basis": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 260
+        },
+        "text_boundaries": {
+          "occurrences": 47,
+          "unique_values": 1,
+          "repeated_value_bytes": 1150
+        },
+        "unit_id": {
+          "occurrences": 47,
+          "unique_values": 25,
+          "repeated_value_bytes": 374
+        }
+      },
+      "body_source_utf8_bytes": 14991,
+      "support_source_utf8_bytes": 27,
+      "measurement": {
+        "input_tokens": 75304,
+        "text_tokens": 75272,
+        "body_tokens": 69482,
+        "support_tokens": 927,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 95784,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.680917,
+      "duplicate_source_characters": 0,
+      "source_characters": 5874,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 8,
+      "task": "verify",
+      "pack_id": "pack-a59b1587285bdadca13aac78",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 55,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 90908,
+      "wire_sha256": "9479f22e7e1673205f0931ee8be5b79ff2f679016326ae30751c7a4d26689a7b",
+      "decoded_message_text_bytes": 83581,
+      "categories_bytes": {
+        "body_source_text": 15073,
+        "body_metadata_and_structure": 64263,
+        "support_source_text": 27,
+        "support_metadata_and_structure": 808,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 7327
+      },
+      "categories_percent": {
+        "body_source_text": 16.58,
+        "body_metadata_and_structure": 70.69,
+        "support_source_text": 0.03,
+        "support_metadata_and_structure": 0.889,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.167,
+        "system_schema_text": 0.279,
+        "system_other_instructions": 3.304,
+        "http_envelope_and_escaping": 8.06
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 4368,
+        "document_id": 1925,
+        "document_version": 4730,
+        "empty": 482,
+        "end": 508,
+        "header": 405,
+        "heading_path": 4932,
+        "image_anchor": 160,
+        "image_disposition": 3944,
+        "image_ref": 1704,
+        "kind": 1110,
+        "leading_row": 535,
+        "locator": 11309,
+        "non_requirement_reason": 1234,
+        "ocr_status": 192,
+        "parent_section_id": 1870,
+        "physical_locator": 9120,
+        "physical_path": 1347,
+        "range_id": 2420,
+        "row_end": 324,
+        "row_start": 378,
+        "section_id": 1485,
+        "source_range_id": 2805,
+        "start": 550,
+        "table_id": 783,
+        "text": 15623,
+        "text_basis": 864,
+        "text_boundaries": 2420,
+        "unit_id": 1700
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 27,
+          "unique_values": 27,
+          "repeated_value_bytes": 0
+        },
+        "document_id": {
+          "occurrences": 55,
+          "unique_values": 1,
+          "repeated_value_bytes": 1080
+        },
+        "document_version": {
+          "occurrences": 55,
+          "unique_values": 1,
+          "repeated_value_bytes": 3564
+        },
+        "empty": {
+          "occurrences": 35,
+          "unique_values": 2,
+          "repeated_value_bytes": 158
+        },
+        "end": {
+          "occurrences": 55,
+          "unique_values": 45,
+          "repeated_value_bytes": 13
+        },
+        "header": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "heading_path": {
+          "occurrences": 55,
+          "unique_values": 12,
+          "repeated_value_bytes": 2692
+        },
+        "image_anchor": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 28
+        },
+        "image_disposition": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 3304
+        },
+        "image_ref": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 1400
+        },
+        "kind": {
+          "occurrences": 55,
+          "unique_values": 3,
+          "repeated_value_bytes": 633
+        },
+        "leading_row": {
+          "occurrences": 27,
+          "unique_values": 2,
+          "repeated_value_bytes": 121
+        },
+        "locator": {
+          "occurrences": 55,
+          "unique_values": 25,
+          "repeated_value_bytes": 5073
+        },
+        "non_requirement_reason": {
+          "occurrences": 35,
+          "unique_values": 2,
+          "repeated_value_bytes": 293
+        },
+        "ocr_status": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 70
+        },
+        "parent_section_id": {
+          "occurrences": 55,
+          "unique_values": 1,
+          "repeated_value_bytes": 702
+        },
+        "physical_locator": {
+          "occurrences": 55,
+          "unique_values": 22,
+          "repeated_value_bytes": 4430
+        },
+        "physical_path": {
+          "occurrences": 55,
+          "unique_values": 9,
+          "repeated_value_bytes": 184
+        },
+        "range_id": {
+          "occurrences": 55,
+          "unique_values": 55,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 19
+        },
+        "row_start": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 19
+        },
+        "section_id": {
+          "occurrences": 55,
+          "unique_values": 12,
+          "repeated_value_bytes": 559
+        },
+        "source_range_id": {
+          "occurrences": 55,
+          "unique_values": 55,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 55,
+          "unique_values": 1,
+          "repeated_value_bytes": 54
+        },
+        "table_id": {
+          "occurrences": 27,
+          "unique_values": 5,
+          "repeated_value_bytes": 374
+        },
+        "text": {
+          "occurrences": 55,
+          "unique_values": 46,
+          "repeated_value_bytes": 154
+        },
+        "text_basis": {
+          "occurrences": 35,
+          "unique_values": 2,
+          "repeated_value_bytes": 351
+        },
+        "text_boundaries": {
+          "occurrences": 55,
+          "unique_values": 1,
+          "repeated_value_bytes": 1350
+        },
+        "unit_id": {
+          "occurrences": 55,
+          "unique_values": 33,
+          "repeated_value_bytes": 374
+        }
+      },
+      "body_source_utf8_bytes": 14991,
+      "support_source_utf8_bytes": 27,
+      "measurement": {
+        "input_tokens": 90940,
+        "text_tokens": 90908,
+        "body_tokens": 86326,
+        "support_tokens": 927,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 111420,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.822302,
+      "duplicate_source_characters": 0,
+      "source_characters": 5874,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 9,
+      "task": "extract",
+      "pack_id": "pack-e3b671fc28047b32a866c4b3",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 30,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 64315,
+      "wire_sha256": "e34b390f6fcc960f86a3a7629a62ecb0c037b150aa87c8290a67027e0208e421",
+      "decoded_message_text_bytes": 58897,
+      "categories_bytes": {
+        "body_source_text": 3972,
+        "body_metadata_and_structure": 37044,
+        "support_source_text": 27,
+        "support_metadata_and_structure": 808,
+        "scope_reference_metadata": 12496,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 5418
+      },
+      "categories_percent": {
+        "body_source_text": 6.176,
+        "body_metadata_and_structure": 57.598,
+        "support_source_text": 0.042,
+        "support_metadata_and_structure": 1.256,
+        "scope_reference_metadata": 19.429,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.18,
+        "system_schema_text": 1.174,
+        "system_other_instructions": 5.72,
+        "http_envelope_and_escaping": 8.424
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 6350,
+        "document_id": 1050,
+        "document_version": 2580,
+        "empty": 252,
+        "end": 274,
+        "header": 270,
+        "heading_path": 4530,
+        "kind": 600,
+        "leading_row": 351,
+        "locator": 6198,
+        "non_requirement_reason": 540,
+        "parent_section_id": 1020,
+        "physical_locator": 4440,
+        "physical_path": 630,
+        "range_id": 1320,
+        "row_end": 217,
+        "row_start": 253,
+        "section_id": 810,
+        "source_range_id": 1530,
+        "start": 300,
+        "table_id": 522,
+        "text": 4272,
+        "text_basis": 432,
+        "text_boundaries": 1320,
+        "unit_id": 896
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 18,
+          "unique_values": 12,
+          "repeated_value_bytes": 2330
+        },
+        "document_id": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 580
+        },
+        "document_version": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 1914
+        },
+        "empty": {
+          "occurrences": 18,
+          "unique_values": 1,
+          "repeated_value_bytes": 85
+        },
+        "end": {
+          "occurrences": 30,
+          "unique_values": 22,
+          "repeated_value_bytes": 16
+        },
+        "header": {
+          "occurrences": 18,
+          "unique_values": 1,
+          "repeated_value_bytes": 85
+        },
+        "heading_path": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 3915
+        },
+        "kind": {
+          "occurrences": 30,
+          "unique_values": 2,
+          "repeated_value_bytes": 337
+        },
+        "leading_row": {
+          "occurrences": 18,
+          "unique_values": 2,
+          "repeated_value_bytes": 72
+        },
+        "locator": {
+          "occurrences": 30,
+          "unique_values": 10,
+          "repeated_value_bytes": 4188
+        },
+        "non_requirement_reason": {
+          "occurrences": 18,
+          "unique_values": 1,
+          "repeated_value_bytes": 68
+        },
+        "parent_section_id": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 377
+        },
+        "physical_locator": {
+          "occurrences": 30,
+          "unique_values": 18,
+          "repeated_value_bytes": 1601
+        },
+        "physical_path": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 116
+        },
+        "range_id": {
+          "occurrences": 30,
+          "unique_values": 30,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 18,
+          "unique_values": 5,
+          "repeated_value_bytes": 13
+        },
+        "row_start": {
+          "occurrences": 18,
+          "unique_values": 5,
+          "repeated_value_bytes": 13
+        },
+        "section_id": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 377
+        },
+        "source_range_id": {
+          "occurrences": 30,
+          "unique_values": 30,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 29
+        },
+        "table_id": {
+          "occurrences": 18,
+          "unique_values": 9,
+          "repeated_value_bytes": 153
+        },
+        "text": {
+          "occurrences": 30,
+          "unique_values": 24,
+          "repeated_value_bytes": 444
+        },
+        "text_basis": {
+          "occurrences": 18,
+          "unique_values": 1,
+          "repeated_value_bytes": 170
+        },
+        "text_boundaries": {
+          "occurrences": 30,
+          "unique_values": 1,
+          "repeated_value_bytes": 725
+        },
+        "unit_id": {
+          "occurrences": 30,
+          "unique_values": 21,
+          "repeated_value_bytes": 153
+        }
+      },
+      "body_source_utf8_bytes": 3943,
+      "support_source_utf8_bytes": 27,
+      "measurement": {
+        "input_tokens": 64347,
+        "text_tokens": 64315,
+        "body_tokens": 45173,
+        "support_tokens": 927,
+        "overhead_tokens": 18215,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 84827,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.581841,
+      "duplicate_source_characters": 0,
+      "source_characters": 1696,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 9,
+      "task": "verify",
+      "pack_id": "pack-e3b671fc28047b32a866c4b3",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 89,
+      "support_ranges": 1,
+      "template_ranges": 0,
+      "wire_bytes": 145732,
+      "wire_sha256": "9d512b867f80eb118b5c95e6c1a002fcb3ccffafc699e5ba4655ac496962b445",
+      "decoded_message_text_bytes": 132586,
+      "categories_bytes": {
+        "body_source_text": 3972,
+        "body_metadata_and_structure": 111873,
+        "support_source_text": 27,
+        "support_metadata_and_structure": 808,
+        "scope_reference_metadata": 12496,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 13146
+      },
+      "categories_percent": {
+        "body_source_text": 2.726,
+        "body_metadata_and_structure": 76.766,
+        "support_source_text": 0.019,
+        "support_metadata_and_structure": 0.554,
+        "scope_reference_metadata": 8.575,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.104,
+        "system_schema_text": 0.174,
+        "system_other_instructions": 2.061,
+        "http_envelope_and_escaping": 9.021
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 10184,
+        "document_id": 3115,
+        "document_version": 7654,
+        "empty": 1019,
+        "end": 746,
+        "header": 1035,
+        "heading_path": 13439,
+        "image_anchor": 160,
+        "image_disposition": 3944,
+        "image_ref": 1704,
+        "kind": 1898,
+        "leading_row": 1371,
+        "locator": 16685,
+        "non_requirement_reason": 3157,
+        "ocr_status": 192,
+        "parent_section_id": 3026,
+        "physical_locator": 15458,
+        "physical_path": 2061,
+        "range_id": 3916,
+        "row_end": 841,
+        "row_start": 976,
+        "section_id": 2403,
+        "source_range_id": 4539,
+        "start": 890,
+        "table_id": 2001,
+        "text": 4862,
+        "text_basis": 1872,
+        "text_boundaries": 3916,
+        "unit_id": 2604
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 69,
+          "unique_values": 25,
+          "repeated_value_bytes": 4843
+        },
+        "document_id": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 1760
+        },
+        "document_version": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 5808
+        },
+        "empty": {
+          "occurrences": 77,
+          "unique_values": 2,
+          "repeated_value_bytes": 317
+        },
+        "end": {
+          "occurrences": 89,
+          "unique_values": 23,
+          "repeated_value_bytes": 74
+        },
+        "header": {
+          "occurrences": 69,
+          "unique_values": 1,
+          "repeated_value_bytes": 340
+        },
+        "heading_path": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 11880
+        },
+        "image_anchor": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 28
+        },
+        "image_disposition": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 3304
+        },
+        "image_ref": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 1400
+        },
+        "kind": {
+          "occurrences": 89,
+          "unique_values": 3,
+          "repeated_value_bytes": 1149
+        },
+        "leading_row": {
+          "occurrences": 69,
+          "unique_values": 2,
+          "repeated_value_bytes": 327
+        },
+        "locator": {
+          "occurrences": 89,
+          "unique_values": 18,
+          "repeated_value_bytes": 12034
+        },
+        "non_requirement_reason": {
+          "occurrences": 77,
+          "unique_values": 3,
+          "repeated_value_bytes": 1107
+        },
+        "ocr_status": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 70
+        },
+        "parent_section_id": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 1144
+        },
+        "physical_locator": {
+          "occurrences": 89,
+          "unique_values": 26,
+          "repeated_value_bytes": 9447
+        },
+        "physical_path": {
+          "occurrences": 89,
+          "unique_values": 9,
+          "repeated_value_bytes": 320
+        },
+        "range_id": {
+          "occurrences": 89,
+          "unique_values": 89,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 69,
+          "unique_values": 14,
+          "repeated_value_bytes": 63
+        },
+        "row_start": {
+          "occurrences": 69,
+          "unique_values": 14,
+          "repeated_value_bytes": 61
+        },
+        "section_id": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 1144
+        },
+        "source_range_id": {
+          "occurrences": 89,
+          "unique_values": 89,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 88
+        },
+        "table_id": {
+          "occurrences": 69,
+          "unique_values": 9,
+          "repeated_value_bytes": 1020
+        },
+        "text": {
+          "occurrences": 89,
+          "unique_values": 25,
+          "repeated_value_bytes": 560
+        },
+        "text_basis": {
+          "occurrences": 77,
+          "unique_values": 2,
+          "repeated_value_bytes": 771
+        },
+        "text_boundaries": {
+          "occurrences": 89,
+          "unique_values": 1,
+          "repeated_value_bytes": 2200
+        },
+        "unit_id": {
+          "occurrences": 89,
+          "unique_values": 29,
+          "repeated_value_bytes": 1020
+        }
+      },
+      "body_source_utf8_bytes": 3943,
+      "support_source_utf8_bytes": 27,
+      "measurement": {
+        "input_tokens": 145764,
+        "text_tokens": 145732,
+        "body_tokens": 127798,
+        "support_tokens": 927,
+        "overhead_tokens": 17007,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 166244,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.318034,
+      "duplicate_source_characters": 0,
+      "source_characters": 1696,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 10,
+      "task": "extract",
+      "pack_id": "pack-da149b1a642c52cebb9d6bd5",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 61,
+      "support_ranges": 0,
+      "template_ranges": 0,
+      "wire_bytes": 96493,
+      "wire_sha256": "02c9abdaaf807fa44bd40594fdee79a045a16da191db7356aea56f97567dbf65",
+      "decoded_message_text_bytes": 90002,
+      "categories_bytes": {
+        "body_source_text": 20389,
+        "body_metadata_and_structure": 63781,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 1282,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 6491
+      },
+      "categories_percent": {
+        "body_source_text": 21.13,
+        "body_metadata_and_structure": 66.099,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 1.329,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.12,
+        "system_schema_text": 0.782,
+        "system_other_instructions": 3.813,
+        "http_envelope_and_escaping": 6.727
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2277,
+        "document_id": 2135,
+        "document_version": 5246,
+        "empty": 112,
+        "end": 578,
+        "header": 120,
+        "heading_path": 10270,
+        "kind": 1077,
+        "leading_row": 157,
+        "locator": 16856,
+        "non_requirement_reason": 240,
+        "parent_section_id": 2056,
+        "physical_locator": 7289,
+        "physical_path": 1281,
+        "range_id": 2684,
+        "row_end": 96,
+        "row_start": 112,
+        "section_id": 1647,
+        "source_range_id": 3111,
+        "start": 610,
+        "table_id": 232,
+        "text": 20999,
+        "text_basis": 192,
+        "text_boundaries": 2684,
+        "unit_id": 1988
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 8,
+          "unique_values": 8,
+          "repeated_value_bytes": 0
+        },
+        "document_id": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 1200
+        },
+        "document_version": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 3960
+        },
+        "empty": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 35
+        },
+        "end": {
+          "occurrences": 61,
+          "unique_values": 51,
+          "repeated_value_bytes": 22
+        },
+        "header": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 35
+        },
+        "heading_path": {
+          "occurrences": 61,
+          "unique_values": 32,
+          "repeated_value_bytes": 4246
+        },
+        "kind": {
+          "occurrences": 61,
+          "unique_values": 2,
+          "repeated_value_bytes": 566
+        },
+        "leading_row": {
+          "occurrences": 8,
+          "unique_values": 2,
+          "repeated_value_bytes": 28
+        },
+        "locator": {
+          "occurrences": 61,
+          "unique_values": 35,
+          "repeated_value_bytes": 6669
+        },
+        "non_requirement_reason": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 28
+        },
+        "parent_section_id": {
+          "occurrences": 61,
+          "unique_values": 4,
+          "repeated_value_bytes": 732
+        },
+        "physical_locator": {
+          "occurrences": 61,
+          "unique_values": 23,
+          "repeated_value_bytes": 3781
+        },
+        "physical_path": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 240
+        },
+        "range_id": {
+          "occurrences": 61,
+          "unique_values": 61,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 8,
+          "unique_values": 3,
+          "repeated_value_bytes": 5
+        },
+        "row_start": {
+          "occurrences": 8,
+          "unique_values": 3,
+          "repeated_value_bytes": 5
+        },
+        "section_id": {
+          "occurrences": 61,
+          "unique_values": 32,
+          "repeated_value_bytes": 377
+        },
+        "source_range_id": {
+          "occurrences": 61,
+          "unique_values": 61,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "table_id": {
+          "occurrences": 8,
+          "unique_values": 3,
+          "repeated_value_bytes": 85
+        },
+        "text": {
+          "occurrences": 61,
+          "unique_values": 61,
+          "repeated_value_bytes": 0
+        },
+        "text_basis": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 70
+        },
+        "text_boundaries": {
+          "occurrences": 61,
+          "unique_values": 1,
+          "repeated_value_bytes": 1500
+        },
+        "unit_id": {
+          "occurrences": 61,
+          "unique_values": 56,
+          "repeated_value_bytes": 85
+        }
+      },
+      "body_source_utf8_bytes": 20141,
+      "support_source_utf8_bytes": 0,
+      "measurement": {
+        "input_tokens": 96525,
+        "text_tokens": 96493,
+        "body_tokens": 90248,
+        "support_tokens": 0,
+        "overhead_tokens": 6245,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 117005,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.872803,
+      "duplicate_source_characters": 0,
+      "source_characters": 7747,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 10,
+      "task": "verify",
+      "pack_id": "pack-da149b1a642c52cebb9d6bd5",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 86,
+      "support_ranges": 0,
+      "template_ranges": 0,
+      "wire_bytes": 144591,
+      "wire_sha256": "7cbf8c6284d85ea54f9fad6d30bb9292f13e775cd335c8722ec6f775a55519c0",
+      "decoded_message_text_bytes": 133930,
+      "categories_bytes": {
+        "body_source_text": 20389,
+        "body_metadata_and_structure": 108849,
+        "support_source_text": 0,
+        "support_metadata_and_structure": 0,
+        "scope_reference_metadata": 1282,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 10661
+      },
+      "categories_percent": {
+        "body_source_text": 14.101,
+        "body_metadata_and_structure": 75.281,
+        "support_source_text": 0.0,
+        "support_metadata_and_structure": 0.0,
+        "scope_reference_metadata": 0.887,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.105,
+        "system_schema_text": 0.176,
+        "system_other_instructions": 2.078,
+        "http_envelope_and_escaping": 7.373
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2727,
+        "document_id": 3010,
+        "document_version": 7396,
+        "empty": 437,
+        "end": 778,
+        "header": 210,
+        "heading_path": 14588,
+        "image_anchor": 380,
+        "image_disposition": 9367,
+        "image_ref": 4047,
+        "kind": 1627,
+        "leading_row": 277,
+        "locator": 22810,
+        "non_requirement_reason": 1505,
+        "ocr_status": 456,
+        "parent_section_id": 2897,
+        "physical_locator": 13468,
+        "physical_path": 2262,
+        "range_id": 3784,
+        "row_end": 168,
+        "row_start": 196,
+        "section_id": 2322,
+        "source_range_id": 4386,
+        "start": 860,
+        "table_id": 406,
+        "text": 21249,
+        "text_basis": 849,
+        "text_boundaries": 3784,
+        "unit_id": 2821
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 14,
+          "unique_values": 14,
+          "repeated_value_bytes": 0
+        },
+        "document_id": {
+          "occurrences": 86,
+          "unique_values": 1,
+          "repeated_value_bytes": 1700
+        },
+        "document_version": {
+          "occurrences": 86,
+          "unique_values": 1,
+          "repeated_value_bytes": 5610
+        },
+        "empty": {
+          "occurrences": 33,
+          "unique_values": 2,
+          "repeated_value_bytes": 131
+        },
+        "end": {
+          "occurrences": 86,
+          "unique_values": 52,
+          "repeated_value_bytes": 46
+        },
+        "header": {
+          "occurrences": 14,
+          "unique_values": 1,
+          "repeated_value_bytes": 65
+        },
+        "heading_path": {
+          "occurrences": 86,
+          "unique_values": 32,
+          "repeated_value_bytes": 8164
+        },
+        "image_anchor": {
+          "occurrences": 19,
+          "unique_values": 1,
+          "repeated_value_bytes": 72
+        },
+        "image_disposition": {
+          "occurrences": 19,
+          "unique_values": 1,
+          "repeated_value_bytes": 8496
+        },
+        "image_ref": {
+          "occurrences": 19,
+          "unique_values": 1,
+          "repeated_value_bytes": 3600
+        },
+        "kind": {
+          "occurrences": 86,
+          "unique_values": 3,
+          "repeated_value_bytes": 902
+        },
+        "leading_row": {
+          "occurrences": 14,
+          "unique_values": 2,
+          "repeated_value_bytes": 58
+        },
+        "locator": {
+          "occurrences": 86,
+          "unique_values": 54,
+          "repeated_value_bytes": 7617
+        },
+        "non_requirement_reason": {
+          "occurrences": 33,
+          "unique_values": 3,
+          "repeated_value_bytes": 599
+        },
+        "ocr_status": {
+          "occurrences": 19,
+          "unique_values": 1,
+          "repeated_value_bytes": 180
+        },
+        "parent_section_id": {
+          "occurrences": 86,
+          "unique_values": 4,
+          "repeated_value_bytes": 1048
+        },
+        "physical_locator": {
+          "occurrences": 86,
+          "unique_values": 42,
+          "repeated_value_bytes": 4729
+        },
+        "physical_path": {
+          "occurrences": 86,
+          "unique_values": 20,
+          "repeated_value_bytes": 264
+        },
+        "range_id": {
+          "occurrences": 86,
+          "unique_values": 86,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 14,
+          "unique_values": 8,
+          "repeated_value_bytes": 6
+        },
+        "row_start": {
+          "occurrences": 14,
+          "unique_values": 8,
+          "repeated_value_bytes": 6
+        },
+        "section_id": {
+          "occurrences": 86,
+          "unique_values": 32,
+          "repeated_value_bytes": 702
+        },
+        "source_range_id": {
+          "occurrences": 86,
+          "unique_values": 86,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 86,
+          "unique_values": 1,
+          "repeated_value_bytes": 85
+        },
+        "table_id": {
+          "occurrences": 14,
+          "unique_values": 3,
+          "repeated_value_bytes": 187
+        },
+        "text": {
+          "occurrences": 86,
+          "unique_values": 62,
+          "repeated_value_bytes": 48
+        },
+        "text_basis": {
+          "occurrences": 33,
+          "unique_values": 2,
+          "repeated_value_bytes": 364
+        },
+        "text_boundaries": {
+          "occurrences": 86,
+          "unique_values": 1,
+          "repeated_value_bytes": 2125
+        },
+        "unit_id": {
+          "occurrences": 86,
+          "unique_values": 75,
+          "repeated_value_bytes": 187
+        }
+      },
+      "body_source_utf8_bytes": 20141,
+      "support_source_utf8_bytes": 0,
+      "measurement": {
+        "input_tokens": 144623,
+        "text_tokens": 144591,
+        "body_tokens": 139554,
+        "support_tokens": 0,
+        "overhead_tokens": 5037,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 165103,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.307717,
+      "duplicate_source_characters": 0,
+      "source_characters": 7747,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 11,
+      "task": "extract",
+      "pack_id": "pack-96610b7a152820c3d18d8c6f",
+      "boundary_reason": "native_structure_prefix",
+      "body_ranges": 66,
+      "support_ranges": 2,
+      "template_ranges": 0,
+      "wire_bytes": 109224,
+      "wire_sha256": "b59515401bf08a45fcae24d46d49423ee68998361c0b3d79206836c666430cd7",
+      "decoded_message_text_bytes": 99000,
+      "categories_bytes": {
+        "body_source_text": 5350,
+        "body_metadata_and_structure": 87369,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 1676,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 10224
+      },
+      "categories_percent": {
+        "body_source_text": 4.898,
+        "body_metadata_and_structure": 79.991,
+        "support_source_text": 0.05,
+        "support_metadata_and_structure": 1.534,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.106,
+        "system_schema_text": 0.691,
+        "system_other_instructions": 3.368,
+        "http_envelope_and_escaping": 9.361
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 15784,
+        "document_id": 2310,
+        "document_version": 5676,
+        "empty": 742,
+        "end": 595,
+        "header": 795,
+        "heading_path": 11682,
+        "kind": 1387,
+        "leading_row": 1053,
+        "locator": 12762,
+        "non_requirement_reason": 1590,
+        "parent_section_id": 2244,
+        "physical_locator": 10821,
+        "physical_path": 1386,
+        "range_id": 2904,
+        "row_end": 655,
+        "row_start": 759,
+        "section_id": 1782,
+        "source_range_id": 3366,
+        "start": 660,
+        "table_id": 1537,
+        "text": 6010,
+        "text_basis": 1272,
+        "text_boundaries": 2904,
+        "unit_id": 1912
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 53,
+          "unique_values": 51,
+          "repeated_value_bytes": 532
+        },
+        "document_id": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 1300
+        },
+        "document_version": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 4290
+        },
+        "empty": {
+          "occurrences": 53,
+          "unique_values": 1,
+          "repeated_value_bytes": 260
+        },
+        "end": {
+          "occurrences": 66,
+          "unique_values": 33,
+          "repeated_value_bytes": 65
+        },
+        "header": {
+          "occurrences": 53,
+          "unique_values": 1,
+          "repeated_value_bytes": 260
+        },
+        "heading_path": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 10465
+        },
+        "kind": {
+          "occurrences": 66,
+          "unique_values": 2,
+          "repeated_value_bytes": 836
+        },
+        "leading_row": {
+          "occurrences": 53,
+          "unique_values": 2,
+          "repeated_value_bytes": 249
+        },
+        "locator": {
+          "occurrences": 66,
+          "unique_values": 8,
+          "repeated_value_bytes": 10644
+        },
+        "non_requirement_reason": {
+          "occurrences": 53,
+          "unique_values": 1,
+          "repeated_value_bytes": 208
+        },
+        "parent_section_id": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 845
+        },
+        "physical_locator": {
+          "occurrences": 66,
+          "unique_values": 15,
+          "repeated_value_bytes": 7667
+        },
+        "physical_path": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 260
+        },
+        "range_id": {
+          "occurrences": 66,
+          "unique_values": 66,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 53,
+          "unique_values": 19,
+          "repeated_value_bytes": 43
+        },
+        "row_start": {
+          "occurrences": 53,
+          "unique_values": 19,
+          "repeated_value_bytes": 42
+        },
+        "section_id": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 845
+        },
+        "source_range_id": {
+          "occurrences": 66,
+          "unique_values": 66,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 65
+        },
+        "table_id": {
+          "occurrences": 53,
+          "unique_values": 7,
+          "repeated_value_bytes": 782
+        },
+        "text": {
+          "occurrences": 66,
+          "unique_values": 59,
+          "repeated_value_bytes": 206
+        },
+        "text_basis": {
+          "occurrences": 53,
+          "unique_values": 1,
+          "repeated_value_bytes": 520
+        },
+        "text_boundaries": {
+          "occurrences": 66,
+          "unique_values": 1,
+          "repeated_value_bytes": 1625
+        },
+        "unit_id": {
+          "occurrences": 66,
+          "unique_values": 20,
+          "repeated_value_bytes": 782
+        }
+      },
+      "body_source_utf8_bytes": 5321,
+      "support_source_utf8_bytes": 55,
+      "measurement": {
+        "input_tokens": 109256,
+        "text_tokens": 109224,
+        "body_tokens": 102444,
+        "support_tokens": 1917,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 129736,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.98792,
+      "duplicate_source_characters": 0,
+      "source_characters": 2392,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 11,
+      "task": "verify",
+      "pack_id": "pack-96610b7a152820c3d18d8c6f",
+      "boundary_reason": "native_structure_prefix",
+      "body_ranges": 75,
+      "support_ranges": 2,
+      "template_ranges": 0,
+      "wire_bytes": 126833,
+      "wire_sha256": "14831bdfe1b0e464bd611a1ab10cff8f561be7ab48334f148aa4c36a35b28ca3",
+      "decoded_message_text_bytes": 115081,
+      "categories_bytes": {
+        "body_source_text": 5350,
+        "body_metadata_and_structure": 104590,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 1676,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 11752
+      },
+      "categories_percent": {
+        "body_source_text": 4.218,
+        "body_metadata_and_structure": 82.463,
+        "support_source_text": 0.043,
+        "support_metadata_and_structure": 1.321,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.12,
+        "system_schema_text": 0.2,
+        "system_other_instructions": 2.368,
+        "http_envelope_and_escaping": 9.266
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 15859,
+        "document_id": 2625,
+        "document_version": 6450,
+        "empty": 859,
+        "end": 667,
+        "header": 810,
+        "heading_path": 13275,
+        "image_anchor": 160,
+        "image_disposition": 3944,
+        "image_ref": 1704,
+        "kind": 1585,
+        "leading_row": 1073,
+        "locator": 15018,
+        "non_requirement_reason": 2057,
+        "ocr_status": 192,
+        "parent_section_id": 2550,
+        "physical_locator": 13158,
+        "physical_path": 1767,
+        "range_id": 3300,
+        "row_end": 667,
+        "row_start": 773,
+        "section_id": 2025,
+        "source_range_id": 3825,
+        "start": 750,
+        "table_id": 1566,
+        "text": 6100,
+        "text_basis": 1512,
+        "text_boundaries": 3300,
+        "unit_id": 2220
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 54,
+          "unique_values": 52,
+          "repeated_value_bytes": 532
+        },
+        "document_id": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 1480
+        },
+        "document_version": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 4884
+        },
+        "empty": {
+          "occurrences": 62,
+          "unique_values": 2,
+          "repeated_value_bytes": 292
+        },
+        "end": {
+          "occurrences": 75,
+          "unique_values": 34,
+          "repeated_value_bytes": 73
+        },
+        "header": {
+          "occurrences": 54,
+          "unique_values": 1,
+          "repeated_value_bytes": 265
+        },
+        "heading_path": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 11914
+        },
+        "image_anchor": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 28
+        },
+        "image_disposition": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 3304
+        },
+        "image_ref": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 1400
+        },
+        "kind": {
+          "occurrences": 75,
+          "unique_values": 3,
+          "repeated_value_bytes": 948
+        },
+        "leading_row": {
+          "occurrences": 54,
+          "unique_values": 2,
+          "repeated_value_bytes": 254
+        },
+        "locator": {
+          "occurrences": 75,
+          "unique_values": 16,
+          "repeated_value_bytes": 10809
+        },
+        "non_requirement_reason": {
+          "occurrences": 62,
+          "unique_values": 3,
+          "repeated_value_bytes": 397
+        },
+        "ocr_status": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 70
+        },
+        "parent_section_id": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 962
+        },
+        "physical_locator": {
+          "occurrences": 75,
+          "unique_values": 23,
+          "repeated_value_bytes": 7832
+        },
+        "physical_path": {
+          "occurrences": 75,
+          "unique_values": 9,
+          "repeated_value_bytes": 264
+        },
+        "range_id": {
+          "occurrences": 75,
+          "unique_values": 75,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 54,
+          "unique_values": 19,
+          "repeated_value_bytes": 44
+        },
+        "row_start": {
+          "occurrences": 54,
+          "unique_values": 19,
+          "repeated_value_bytes": 43
+        },
+        "section_id": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 962
+        },
+        "source_range_id": {
+          "occurrences": 75,
+          "unique_values": 75,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 74
+        },
+        "table_id": {
+          "occurrences": 54,
+          "unique_values": 7,
+          "repeated_value_bytes": 799
+        },
+        "text": {
+          "occurrences": 75,
+          "unique_values": 60,
+          "repeated_value_bytes": 222
+        },
+        "text_basis": {
+          "occurrences": 62,
+          "unique_values": 2,
+          "repeated_value_bytes": 621
+        },
+        "text_boundaries": {
+          "occurrences": 75,
+          "unique_values": 1,
+          "repeated_value_bytes": 1850
+        },
+        "unit_id": {
+          "occurrences": 75,
+          "unique_values": 28,
+          "repeated_value_bytes": 799
+        }
+      },
+      "body_source_utf8_bytes": 5321,
+      "support_source_utf8_bytes": 55,
+      "measurement": {
+        "input_tokens": 126865,
+        "text_tokens": 126833,
+        "body_tokens": 121261,
+        "support_tokens": 1917,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 147345,
+        "fits": false,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 1.147144,
+      "duplicate_source_characters": 0,
+      "source_characters": 2392,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 12,
+      "task": "extract",
+      "pack_id": "pack-f501011502fc6ca0d982b3c7",
+      "boundary_reason": "native_structure_prefix",
+      "body_ranges": 13,
+      "support_ranges": 3,
+      "template_ranges": 0,
+      "wire_bytes": 28661,
+      "wire_sha256": "5ee3b6a1320025695310782b8678a87d7e7fac3ec47e48a5423cb7872c6c9de9",
+      "decoded_message_text_bytes": 26198,
+      "categories_bytes": {
+        "body_source_text": 1860,
+        "body_metadata_and_structure": 16864,
+        "support_source_text": 162,
+        "support_metadata_and_structure": 2762,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 2463
+      },
+      "categories_percent": {
+        "body_source_text": 6.49,
+        "body_metadata_and_structure": 58.84,
+        "support_source_text": 0.565,
+        "support_metadata_and_structure": 9.637,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.405,
+        "system_schema_text": 2.634,
+        "system_other_instructions": 12.836,
+        "http_envelope_and_escaping": 8.594
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2929,
+        "document_id": 455,
+        "document_version": 1118,
+        "empty": 126,
+        "end": 119,
+        "header": 135,
+        "heading_path": 2301,
+        "kind": 266,
+        "leading_row": 177,
+        "locator": 2690,
+        "non_requirement_reason": 270,
+        "parent_section_id": 442,
+        "physical_locator": 2027,
+        "physical_path": 273,
+        "range_id": 572,
+        "row_end": 108,
+        "row_start": 126,
+        "section_id": 351,
+        "source_range_id": 663,
+        "start": 130,
+        "table_id": 261,
+        "text": 1990,
+        "text_basis": 216,
+        "text_boundaries": 572,
+        "unit_id": 382
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 9,
+          "unique_values": 9,
+          "repeated_value_bytes": 0
+        },
+        "document_id": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 240
+        },
+        "document_version": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 792
+        },
+        "empty": {
+          "occurrences": 9,
+          "unique_values": 1,
+          "repeated_value_bytes": 40
+        },
+        "end": {
+          "occurrences": 13,
+          "unique_values": 10,
+          "repeated_value_bytes": 6
+        },
+        "header": {
+          "occurrences": 9,
+          "unique_values": 1,
+          "repeated_value_bytes": 40
+        },
+        "heading_path": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 1932
+        },
+        "kind": {
+          "occurrences": 13,
+          "unique_values": 2,
+          "repeated_value_bytes": 139
+        },
+        "leading_row": {
+          "occurrences": 9,
+          "unique_values": 2,
+          "repeated_value_bytes": 33
+        },
+        "locator": {
+          "occurrences": 13,
+          "unique_values": 4,
+          "repeated_value_bytes": 1793
+        },
+        "non_requirement_reason": {
+          "occurrences": 9,
+          "unique_values": 1,
+          "repeated_value_bytes": 32
+        },
+        "parent_section_id": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 156
+        },
+        "physical_locator": {
+          "occurrences": 13,
+          "unique_values": 6,
+          "repeated_value_bytes": 1026
+        },
+        "physical_path": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 48
+        },
+        "range_id": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 9,
+          "unique_values": 6,
+          "repeated_value_bytes": 3
+        },
+        "row_start": {
+          "occurrences": 9,
+          "unique_values": 6,
+          "repeated_value_bytes": 3
+        },
+        "section_id": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 156
+        },
+        "source_range_id": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 12
+        },
+        "table_id": {
+          "occurrences": 9,
+          "unique_values": 3,
+          "repeated_value_bytes": 102
+        },
+        "text": {
+          "occurrences": 13,
+          "unique_values": 13,
+          "repeated_value_bytes": 0
+        },
+        "text_basis": {
+          "occurrences": 9,
+          "unique_values": 1,
+          "repeated_value_bytes": 80
+        },
+        "text_boundaries": {
+          "occurrences": 13,
+          "unique_values": 1,
+          "repeated_value_bytes": 300
+        },
+        "unit_id": {
+          "occurrences": 13,
+          "unique_values": 7,
+          "repeated_value_bytes": 102
+        }
+      },
+      "body_source_utf8_bytes": 1840,
+      "support_source_utf8_bytes": 162,
+      "measurement": {
+        "input_tokens": 28693,
+        "text_tokens": 28661,
+        "body_tokens": 20594,
+        "support_tokens": 3204,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 49173,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.259449,
+      "duplicate_source_characters": 0,
+      "source_characters": 822,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 12,
+      "task": "verify",
+      "pack_id": "pack-f501011502fc6ca0d982b3c7",
+      "boundary_reason": "native_structure_prefix",
+      "body_ranges": 27,
+      "support_ranges": 3,
+      "template_ranges": 0,
+      "wire_bytes": 47557,
+      "wire_sha256": "ca430a975d6c50e04c1414661398d06b0191ddc8bef82399e84a208f9245bec5",
+      "decoded_message_text_bytes": 43306,
+      "categories_bytes": {
+        "body_source_text": 1860,
+        "body_metadata_and_structure": 35112,
+        "support_source_text": 162,
+        "support_metadata_and_structure": 2762,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 4251
+      },
+      "categories_percent": {
+        "body_source_text": 3.911,
+        "body_metadata_and_structure": 73.831,
+        "support_source_text": 0.341,
+        "support_metadata_and_structure": 5.808,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.32,
+        "system_schema_text": 0.534,
+        "system_other_instructions": 6.317,
+        "http_envelope_and_escaping": 8.939
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 3829,
+        "document_id": 945,
+        "document_version": 2322,
+        "empty": 308,
+        "end": 231,
+        "header": 315,
+        "heading_path": 4779,
+        "image_anchor": 40,
+        "image_disposition": 986,
+        "image_ref": 426,
+        "kind": 574,
+        "leading_row": 417,
+        "locator": 5214,
+        "non_requirement_reason": 892,
+        "ocr_status": 48,
+        "parent_section_id": 918,
+        "physical_locator": 4677,
+        "physical_path": 615,
+        "range_id": 1188,
+        "row_end": 252,
+        "row_start": 294,
+        "section_id": 729,
+        "source_range_id": 1377,
+        "start": 270,
+        "table_id": 609,
+        "text": 2130,
+        "text_basis": 558,
+        "text_boundaries": 1188,
+        "unit_id": 788
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 21,
+          "unique_values": 16,
+          "repeated_value_bytes": 330
+        },
+        "document_id": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 520
+        },
+        "document_version": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 1716
+        },
+        "empty": {
+          "occurrences": 23,
+          "unique_values": 2,
+          "repeated_value_bytes": 92
+        },
+        "end": {
+          "occurrences": 27,
+          "unique_values": 11,
+          "repeated_value_bytes": 19
+        },
+        "header": {
+          "occurrences": 21,
+          "unique_values": 1,
+          "repeated_value_bytes": 100
+        },
+        "heading_path": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 4186
+        },
+        "image_anchor": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "image_disposition": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 472
+        },
+        "image_ref": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 200
+        },
+        "kind": {
+          "occurrences": 27,
+          "unique_values": 3,
+          "repeated_value_bytes": 321
+        },
+        "leading_row": {
+          "occurrences": 21,
+          "unique_values": 2,
+          "repeated_value_bytes": 93
+        },
+        "locator": {
+          "occurrences": 27,
+          "unique_values": 6,
+          "repeated_value_bytes": 3665
+        },
+        "non_requirement_reason": {
+          "occurrences": 23,
+          "unique_values": 3,
+          "repeated_value_bytes": 246
+        },
+        "ocr_status": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 10
+        },
+        "parent_section_id": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 338
+        },
+        "physical_locator": {
+          "occurrences": 27,
+          "unique_values": 8,
+          "repeated_value_bytes": 2898
+        },
+        "physical_path": {
+          "occurrences": 27,
+          "unique_values": 3,
+          "repeated_value_bytes": 96
+        },
+        "range_id": {
+          "occurrences": 27,
+          "unique_values": 27,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 21,
+          "unique_values": 8,
+          "repeated_value_bytes": 13
+        },
+        "row_start": {
+          "occurrences": 21,
+          "unique_values": 8,
+          "repeated_value_bytes": 13
+        },
+        "section_id": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 338
+        },
+        "source_range_id": {
+          "occurrences": 27,
+          "unique_values": 27,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 26
+        },
+        "table_id": {
+          "occurrences": 21,
+          "unique_values": 3,
+          "repeated_value_bytes": 306
+        },
+        "text": {
+          "occurrences": 27,
+          "unique_values": 14,
+          "repeated_value_bytes": 26
+        },
+        "text_basis": {
+          "occurrences": 23,
+          "unique_values": 2,
+          "repeated_value_bytes": 213
+        },
+        "text_boundaries": {
+          "occurrences": 27,
+          "unique_values": 1,
+          "repeated_value_bytes": 650
+        },
+        "unit_id": {
+          "occurrences": 27,
+          "unique_values": 9,
+          "repeated_value_bytes": 306
+        }
+      },
+      "body_source_utf8_bytes": 1840,
+      "support_source_utf8_bytes": 162,
+      "measurement": {
+        "input_tokens": 47589,
+        "text_tokens": 47557,
+        "body_tokens": 40698,
+        "support_tokens": 3204,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 68069,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.430311,
+      "duplicate_source_characters": 0,
+      "source_characters": 822,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    },
+    {
+      "ordinal": 13,
+      "task": "extract",
+      "pack_id": "pack-d7ce0238b2dd62d81abe40c5",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 11,
+      "support_ranges": 2,
+      "template_ranges": 0,
+      "wire_bytes": 24410,
+      "wire_sha256": "9d1be66d96602539f64eed6706376bbf9be072675c1b380cd8e1bd719f912809",
+      "decoded_message_text_bytes": 22589,
+      "categories_bytes": {
+        "body_source_text": 3308,
+        "body_metadata_and_structure": 13000,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 1676,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 116,
+        "system_schema_text": 755,
+        "system_other_instructions": 3679,
+        "http_envelope_and_escaping": 1821
+      },
+      "categories_percent": {
+        "body_source_text": 13.552,
+        "body_metadata_and_structure": 53.257,
+        "support_source_text": 0.225,
+        "support_metadata_and_structure": 6.866,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.475,
+        "system_schema_text": 3.093,
+        "system_other_instructions": 15.072,
+        "http_envelope_and_escaping": 7.46
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 1624,
+        "document_id": 385,
+        "document_version": 946,
+        "empty": 28,
+        "end": 103,
+        "header": 30,
+        "heading_path": 1980,
+        "kind": 197,
+        "leading_row": 38,
+        "locator": 3046,
+        "non_requirement_reason": 60,
+        "parent_section_id": 374,
+        "physical_locator": 1371,
+        "physical_path": 231,
+        "range_id": 484,
+        "row_end": 24,
+        "row_start": 28,
+        "section_id": 297,
+        "source_range_id": 561,
+        "start": 110,
+        "table_id": 60,
+        "text": 3418,
+        "text_basis": 48,
+        "text_boundaries": 484,
+        "unit_id": 360
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 2,
+          "unique_values": 2,
+          "repeated_value_bytes": 0
+        },
+        "document_id": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 200
+        },
+        "document_version": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 660
+        },
+        "empty": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 5
+        },
+        "end": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        },
+        "header": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 5
+        },
+        "heading_path": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 1640
+        },
+        "kind": {
+          "occurrences": 11,
+          "unique_values": 2,
+          "repeated_value_bytes": 86
+        },
+        "leading_row": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "locator": {
+          "occurrences": 11,
+          "unique_values": 3,
+          "repeated_value_bytes": 2312
+        },
+        "non_requirement_reason": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 4
+        },
+        "parent_section_id": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "physical_locator": {
+          "occurrences": 11,
+          "unique_values": 9,
+          "repeated_value_bytes": 184
+        },
+        "physical_path": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 40
+        },
+        "range_id": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 1
+        },
+        "row_start": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 1
+        },
+        "section_id": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 130
+        },
+        "source_range_id": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 10
+        },
+        "table_id": {
+          "occurrences": 2,
+          "unique_values": 2,
+          "repeated_value_bytes": 0
+        },
+        "text": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        },
+        "text_basis": {
+          "occurrences": 2,
+          "unique_values": 1,
+          "repeated_value_bytes": 10
+        },
+        "text_boundaries": {
+          "occurrences": 11,
+          "unique_values": 1,
+          "repeated_value_bytes": 250
+        },
+        "unit_id": {
+          "occurrences": 11,
+          "unique_values": 11,
+          "repeated_value_bytes": 0
+        }
+      },
+      "body_source_utf8_bytes": 3268,
+      "support_source_utf8_bytes": 55,
+      "measurement": {
+        "input_tokens": 24442,
+        "text_tokens": 24410,
+        "body_tokens": 17630,
+        "support_tokens": 1917,
+        "overhead_tokens": 4863,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 44922,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.221011,
+      "duplicate_source_characters": 0,
+      "source_characters": 1383,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": null
+    },
+    {
+      "ordinal": 13,
+      "task": "verify",
+      "pack_id": "pack-d7ce0238b2dd62d81abe40c5",
+      "boundary_reason": "complete_adjacent_sections",
+      "body_ranges": 24,
+      "support_ranges": 2,
+      "template_ranges": 0,
+      "wire_bytes": 46529,
+      "wire_sha256": "3b670bef09939237506af1fe674a5dc58f8789794c51423bc5f83619b3cbe34d",
+      "decoded_message_text_bytes": 42744,
+      "categories_bytes": {
+        "body_source_text": 3308,
+        "body_metadata_and_structure": 34295,
+        "support_source_text": 55,
+        "support_metadata_and_structure": 1676,
+        "scope_reference_metadata": 0,
+        "shared_section_and_template_structure": 0,
+        "payload_keys_and_other_fields": 152,
+        "system_schema_text": 254,
+        "system_other_instructions": 3004,
+        "http_envelope_and_escaping": 3785
+      },
+      "categories_percent": {
+        "body_source_text": 7.11,
+        "body_metadata_and_structure": 73.707,
+        "support_source_text": 0.118,
+        "support_metadata_and_structure": 3.602,
+        "scope_reference_metadata": 0.0,
+        "shared_section_and_template_structure": 0.0,
+        "payload_keys_and_other_fields": 0.327,
+        "system_schema_text": 0.546,
+        "system_other_instructions": 6.456,
+        "http_envelope_and_escaping": 8.135
+      },
+      "body_field_marginal_payload_bytes": {
+        "cells": 2074,
+        "document_id": 840,
+        "document_version": 2064,
+        "empty": 197,
+        "end": 207,
+        "header": 120,
+        "heading_path": 4320,
+        "image_anchor": 140,
+        "image_disposition": 3451,
+        "image_ref": 1491,
+        "kind": 483,
+        "leading_row": 158,
+        "locator": 5916,
+        "non_requirement_reason": 689,
+        "ocr_status": 168,
+        "parent_section_id": 816,
+        "physical_locator": 4358,
+        "physical_path": 678,
+        "range_id": 1056,
+        "row_end": 96,
+        "row_start": 112,
+        "section_id": 648,
+        "source_range_id": 1224,
+        "start": 240,
+        "table_id": 240,
+        "text": 3548,
+        "text_basis": 381,
+        "text_boundaries": 1056,
+        "unit_id": 785
+      },
+      "body_field_repetition": {
+        "cells": {
+          "occurrences": 8,
+          "unique_values": 5,
+          "repeated_value_bytes": 198
+        },
+        "document_id": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 460
+        },
+        "document_version": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 1518
+        },
+        "empty": {
+          "occurrences": 15,
+          "unique_values": 2,
+          "repeated_value_bytes": 53
+        },
+        "end": {
+          "occurrences": 24,
+          "unique_values": 12,
+          "repeated_value_bytes": 12
+        },
+        "header": {
+          "occurrences": 8,
+          "unique_values": 1,
+          "repeated_value_bytes": 35
+        },
+        "heading_path": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 3772
+        },
+        "image_anchor": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 24
+        },
+        "image_disposition": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 2832
+        },
+        "image_ref": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 1200
+        },
+        "kind": {
+          "occurrences": 24,
+          "unique_values": 3,
+          "repeated_value_bytes": 254
+        },
+        "leading_row": {
+          "occurrences": 8,
+          "unique_values": 2,
+          "repeated_value_bytes": 29
+        },
+        "locator": {
+          "occurrences": 24,
+          "unique_values": 10,
+          "repeated_value_bytes": 3284
+        },
+        "non_requirement_reason": {
+          "occurrences": 15,
+          "unique_values": 3,
+          "repeated_value_bytes": 251
+        },
+        "ocr_status": {
+          "occurrences": 7,
+          "unique_values": 1,
+          "repeated_value_bytes": 60
+        },
+        "parent_section_id": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 299
+        },
+        "physical_locator": {
+          "occurrences": 24,
+          "unique_values": 16,
+          "repeated_value_bytes": 1156
+        },
+        "physical_path": {
+          "occurrences": 24,
+          "unique_values": 8,
+          "repeated_value_bytes": 64
+        },
+        "range_id": {
+          "occurrences": 24,
+          "unique_values": 24,
+          "repeated_value_bytes": 0
+        },
+        "row_end": {
+          "occurrences": 8,
+          "unique_values": 4,
+          "repeated_value_bytes": 4
+        },
+        "row_start": {
+          "occurrences": 8,
+          "unique_values": 4,
+          "repeated_value_bytes": 4
+        },
+        "section_id": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 299
+        },
+        "source_range_id": {
+          "occurrences": 24,
+          "unique_values": 24,
+          "repeated_value_bytes": 0
+        },
+        "start": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 23
+        },
+        "table_id": {
+          "occurrences": 8,
+          "unique_values": 2,
+          "repeated_value_bytes": 108
+        },
+        "text": {
+          "occurrences": 24,
+          "unique_values": 12,
+          "repeated_value_bytes": 24
+        },
+        "text_basis": {
+          "occurrences": 15,
+          "unique_values": 2,
+          "repeated_value_bytes": 148
+        },
+        "text_boundaries": {
+          "occurrences": 24,
+          "unique_values": 1,
+          "repeated_value_bytes": 575
+        },
+        "unit_id": {
+          "occurrences": 24,
+          "unique_values": 18,
+          "repeated_value_bytes": 108
+        }
+      },
+      "body_source_utf8_bytes": 3268,
+      "support_source_utf8_bytes": 55,
+      "measurement": {
+        "input_tokens": 46561,
+        "text_tokens": 46529,
+        "body_tokens": 40957,
+        "support_tokens": 1917,
+        "overhead_tokens": 3655,
+        "framing_tokens": 32,
+        "image_tokens": 0,
+        "image_count": 0,
+        "output_reserve": 16384,
+        "safety": 4096,
+        "context_tokens": 131072,
+        "total_context_tokens": 67041,
+        "fits": true,
+        "method": "utf8_bytes_canonical_request_v1"
+      },
+      "available_input_capacity": 110592,
+      "input_capacity_utilization": 0.421016,
+      "duplicate_source_characters": 0,
+      "source_characters": 1383,
+      "source_duplicate_ratio": 0.0,
+      "api_fields": [
+        "messages",
+        "model",
+        "response_format"
+      ],
+      "tools_count": 0,
+      "response_format": {
+        "type": "json_object"
+      },
+      "verify_requirements_note": "Source-only lower bound; no real extraction has been run."
+    }
+  ]
+}

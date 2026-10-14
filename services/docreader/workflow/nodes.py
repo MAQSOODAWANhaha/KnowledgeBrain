@@ -1,0 +1,359 @@
+"""Tender-specific graph nodes; only file references leave these functions."""
+import asyncio
+import hashlib
+import json
+import time
+
+from langgraph.types import interrupt
+import psycopg
+
+from docreader.integrations.store import InvalidConfirmation
+from docreader.tender.checks import verify_all, verify_pack
+from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
+from docreader.tender.planning import build_plan
+from docreader.tender.requirements import extract_pack
+
+
+def _raise_failures(results):
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if failures:
+        # Successful siblings have already committed. A non-retryable failure
+        # (especially uncertain provider execution) must not be hidden by an
+        # earlier infrastructure failure and trigger another paid attempt.
+        retryable = (psycopg.OperationalError, psycopg.InterfaceError, ConnectionError, TimeoutError)
+        raise next((failure for failure in failures if not isinstance(failure, retryable)), failures[0])
+
+
+class TenderNodes:
+    def __init__(self, store, artifacts, lease, model=None):
+        self.store, self.artifacts, self.lease = store, artifacts, lease
+        self.model = model
+        self.repo = EvidenceRepository(artifacts)
+        self.semaphore = asyncio.Semaphore(4)
+        self._ocr_locks = {}
+        self._budget = None
+
+    def _ensure_model(self):
+        if self.model is None:
+            from docreader.llm import ModelConfig, OpenAIModel
+
+            self.model = OpenAIModel(ModelConfig.from_env(), self.store, self.lease, artifacts=self.artifacts)
+        return self.model
+
+    def _request_budget(self):
+        if self._budget is not None:
+            return self._budget
+        model = self._ensure_model()
+        if hasattr(model, "request_budget"):
+            self._budget = model.request_budget()
+        else:
+            from docreader.llm.budget import RequestBudget
+
+            # Deterministic injected models use the same ordinary context contract.
+            self._budget = RequestBudget(context_tokens=131072, model="gpt-6-luna")
+        return self._budget
+
+    async def _execution_spec(self):
+        model = self._ensure_model()
+        spec = (model.execution_spec() if hasattr(model, "execution_spec") else
+                {"injected_model": f"{type(model).__module__}.{type(model).__qualname__}"})
+        # Also check before returning cached model-derived artifacts after a restart.
+        await self.store.pin_execution_spec(self.lease, spec)
+        return spec
+
+    async def _pin_source_spec(self):
+        from docreader.workflow.source_spec import source_spec
+
+        spec = source_spec()
+        async def produce():
+            return spec
+        await self._save("source-spec", produce, inputs=spec)
+
+    async def prepare(self):
+        # A completed checkpoint can skip every node, so recovery guards belong here too.
+        await self._pin_source_spec()
+        revision = await self.store.get_revision(self.lease)
+        if revision["execution_spec"] is not None:
+            await self._execution_spec()
+        # Plan capacity is revision-owned, while native parser identity is shared.
+        # Check it even if a completed checkpoint skips all graph nodes.
+        row = await self.store.get_run(self.lease.run_id)
+        plan_receipt = next((item for item in row["artifacts"]
+                             if item["stage"] == "pack-plan" and not item["scope"]), None)
+        if plan_receipt:
+            from docreader.integrations.store import Conflict
+
+            digest = hashlib.sha256(json.dumps(self._request_budget().spec(), sort_keys=True,
+                                              separators=(",", ":")).encode()).hexdigest()
+            if plan_receipt["metadata"]["budget_digest"] != digest:
+                raise Conflict("request budget changed within an immutable domain revision")
+
+    async def call(self, task, payload, images=()):
+        return await self._ensure_model().call(task, payload, images=images)
+
+    async def close(self):
+        if self.model is not None and hasattr(self.model, "close"):
+            await self.model.close()
+
+    async def _read(self, ref):
+        return await asyncio.to_thread(self.artifacts.read_json, ref)
+
+    async def _save(self, stage, operation, *, scope="", is_ref=False, inputs=None, model=False):
+        identity = {"upstream": inputs or {}}
+        if model:
+            identity["execution_spec"] = await self._execution_spec()
+        input_digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        previous = await self.store.receipt(self.lease, stage, scope, input_digest=input_digest)
+        if previous:
+            return previous["artifact_ref"]
+        start = time.monotonic()
+        value = await operation()
+        ref = value if is_ref else await asyncio.to_thread(self.artifacts.put_json, value)
+        metadata = {"elapsed_seconds": time.monotonic() - start}
+        if isinstance(value, dict):
+            metadata.update({key: value[key] for key in ("counts", "stats", "blocking", "plan_digest", "budget_digest") if key in value})
+        await self.store.commit_artifact(self.lease, stage, ref, scope=scope, metadata=metadata,
+                                         input_digest=input_digest)
+        return ref
+
+    async def register(self, state):
+        manifest_ref = await self.store.get_manifest(self.lease.run_id, self.lease.source_version)
+        async def produce():
+            manifest = await self._read(manifest_ref)
+            return await asyncio.to_thread(register_manifest, manifest, self.artifacts)
+
+        return {"registered_ref": await self._save("register", produce, inputs=manifest_ref)}
+
+    async def freeze(self, state):
+        await self._pin_source_spec()
+        async def ocr(image_ref, source):
+            # Occurrence coordinates stay in raw evidence. Literal OCR sees only
+            # pixels, so repeated logos/stamps never need one request per page.
+            import base64
+
+            async def produce():
+                data = await asyncio.to_thread(self.artifacts.read_bytes, image_ref)
+                mime = image_ref.get("media_type", "image/png")
+                image = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+                return await self.call("ocr", {"image_sha256": image_ref["sha256"]}, images=[image])
+
+            image_identity = image_ref["sha256"]
+            lock = self._ocr_locks.setdefault(image_identity, asyncio.Lock())
+            async with lock:
+                ref = await self._save("ocr", produce, scope=image_identity,
+                                       inputs=image_ref, model=True)
+                return await self._read(ref)
+
+        async def produce():
+            registered = await self._read(state["registered_ref"])
+
+            async def document(source):
+                async with self.semaphore:
+                    async def freeze_document():
+                        return await freeze_sources({"documents": [source], "issues": [],
+                                                     "image_dispositions": registered.get("image_dispositions", [])}, self.artifacts,
+                                                    ocr=ocr, budget=self._request_budget(), plan=False)
+                    ref = await self._save("freeze-document", freeze_document, scope=str(source["ordinal"]),
+                                           is_ref=True, inputs={"source": source,
+                                                               "image_dispositions": registered.get("image_dispositions", [])})
+                    return await self._read(ref)
+
+            results = await asyncio.gather(*(document(source) for source in registered["documents"]),
+                                           return_exceptions=True)
+            _raise_failures(results)
+            merged = {"schema_version": 2, "documents": [], "issues": list(registered["issues"]),
+                      "native_range_count": 0, "stats": {}}
+            for result in results:
+                for key in ("documents", "issues"):
+                    merged[key].extend(result[key])
+                merged["native_range_count"] += result["native_range_count"]
+                for key, value in result["stats"].items():
+                    merged["stats"][key] = merged["stats"].get(key, 0) + value
+            return merged
+
+        frozen_ref = await self._save("freeze", produce, inputs=state["registered_ref"])
+        revision = await self.store.get_revision(self.lease)
+        scope_decisions_ref = revision.get("scope_decisions_ref")
+
+        async def plan_sources():
+            from docreader.tender.evidence import plan_sources as build_source_plan
+
+            frozen = await self._read(frozen_ref)
+            decisions = await self._read(scope_decisions_ref) if scope_decisions_ref else None
+            result = await build_source_plan(
+                frozen, self.artifacts, budget=self._request_budget(),
+                scope_decisions=decisions["scope_decisions"] if decisions else [],
+                run_identity={"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                              "domain_revision": self.lease.domain_revision},
+            )
+            return await self._read(result)
+
+        pack_plan_ref = await self._save("pack-plan", plan_sources, inputs={
+            "frozen_ref": frozen_ref, "scope_decisions_ref": scope_decisions_ref,
+            "request_budget": self._request_budget().spec(),
+        })
+        return {"frozen_ref": frozen_ref, "pack_plan_ref": pack_plan_ref}
+
+    async def _packs(self, index, stage, function, upstream=None):
+        async def worker(item):
+            async with self.semaphore:
+                async def produce():
+                    pack = await asyncio.to_thread(self.repo.load_pack, item["artifact_ref"])
+                    return await function(pack)
+
+                scope = (f"{index['plan_digest']}:{item['pack_id']}" if index.get("task") == "verify" else item["pack_id"])
+                ref = await self._save(stage, produce, scope=scope,
+                                       inputs={"source": item["artifact_ref"], "upstream": (upstream or {}).get(item["pack_id"])},
+                                       model=True)
+                return {"pack_id": item["pack_id"], "artifact_ref": ref}
+
+        # Infrastructure failure of one pack never rolls back independent successful receipts.
+        results = await asyncio.gather(*(worker(item) for item in index["packs"]), return_exceptions=True)
+        _raise_failures(results)
+        return results
+
+    async def extract(self, state):
+        revision = await self.store.get_revision(self.lease)
+        correction = revision["corrected_requirements_ref"]
+        async def produce():
+            if correction is not None:
+                return await self._read(correction)
+            index = await self._read(state["pack_plan_ref"])
+            packs = await self._packs(index, "extract-pack", lambda pack: extract_pack(pack, self))
+            return {"packs": packs, "counts": {"packs": len(packs)}}
+
+        return {"requirements_ref": await self._save("extract", produce,
+                                                  inputs={"pack_plan_ref": state["pack_plan_ref"], "corrected_requirements_ref": correction},
+                                                  model=correction is None)}
+
+    async def verify(self, state):
+        async def produce():
+            from docreader.tender.evidence.downstream import PLANNER_VERSION, plan_downstream, select_extraction
+
+            index = await self._read(state["pack_plan_ref"])
+            extraction_index = await self._read(state["requirements_ref"])
+            # Index once, not one full source scan per request.
+            extractions = {
+                item["pack_id"]: await self._read(item["artifact_ref"]) for item in extraction_index["packs"]
+            }
+            by_ref = {item["artifact_ref"]["sha256"]: extractions[item["pack_id"]] for item in extraction_index["packs"]}
+            async def replan():
+                return await asyncio.to_thread(plan_downstream, index, state["requirements_ref"],
+                                               self.artifacts, self._request_budget(), task="verify")
+            plan_ref = await self._save("verify-plan", replan, is_ref=True, inputs={
+                "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": state["requirements_ref"],
+                "request_budget": self._request_budget().spec(),
+                "planner_version": PLANNER_VERSION,
+            })
+            verification_index = await self._read(plan_ref)
+            async def check(pack):
+                return await verify_pack(pack, select_extraction(pack, by_ref), self)
+
+            results = await self._packs(verification_index, "verify-pack", check)
+            verifications = [await self._read(item["artifact_ref"]) for item in results]
+            verification_packs = [await self._read(item["artifact_ref"]) for item in verification_index["packs"]]
+            summary = verify_all(index, list(extractions.values()), verifications, verification_packs=verification_packs)
+            summary["issues"] = list({json.dumps(item, sort_keys=True): item
+                                      for item in [*summary["issues"], *verification_index["issues"]]}.values())
+            summary["counts"]["blocking_issues"] = sum(item.get("blocking", True) for item in summary["issues"])
+            summary["blocking"] = bool(summary["counts"]["blocking_issues"])
+            summary["pack_results"] = results
+            summary["pack_plan_ref"] = plan_ref
+            summary["requirements_ref"] = state["requirements_ref"]
+            return summary
+
+        ref = await self._save("verify", produce, inputs={"pack_plan_ref": state["pack_plan_ref"],
+                                                        "requirements_ref": state["requirements_ref"]}, model=True)
+        checked = await self._read(ref)
+        digest = hashlib.sha256(json.dumps({
+            "source_version": self.lease.source_version, "domain_revision": self.lease.domain_revision,
+            "frozen_ref": state["frozen_ref"], "pack_plan_ref": state["pack_plan_ref"],
+            "requirements_ref": state["requirements_ref"], "verification_ref": ref,
+        }, sort_keys=True).encode()).hexdigest()
+        return {"verification_ref": ref, "checklist_digest": digest,
+                "status": "blocked" if checked["blocking"] else "waiting-confirmation"}
+
+    async def confirm(self, state):
+        approved = interrupt({"run_id": self.lease.run_id, "source_version": self.lease.source_version, "domain_revision": self.lease.domain_revision,
+                              "checklist_digest": state["checklist_digest"], "verification_ref": state["verification_ref"]})
+        if (approved.get("source_version") != self.lease.source_version
+                or approved.get("domain_revision") != self.lease.domain_revision
+                or approved.get("checklist_digest") != state["checklist_digest"]):
+            raise InvalidConfirmation("confirmation does not match this checklist")
+        row = await self.store.get_run(self.lease.run_id)
+        if not any(item["checklist_digest"] == state["checklist_digest"]
+                   and item["domain_revision"] == self.lease.domain_revision for item in row["confirmations"]):
+            raise InvalidConfirmation("confirmation was not persisted")
+
+        async def produce():
+            return approved
+
+        await self._save("confirm", produce, inputs={"checklist_digest": state["checklist_digest"]})
+        return {}
+
+    async def plan(self, state):
+        async def produce():
+            from docreader.tender.checks import apply_applicability_decisions
+            from docreader.tender.evidence.downstream import DEPENDENCY_ISSUES, PLANNER_VERSION, plan_downstream, select_extraction
+            from docreader.tender.evidence.view import source_view
+            from docreader.tender.schema import issue
+
+            checked = await self._read(state["verification_ref"])
+            index = await self._read(state["pack_plan_ref"])
+            async def replan():
+                return await asyncio.to_thread(plan_downstream, index, checked["requirements_ref"], self.artifacts,
+                                               self._request_budget(), task="plan", verification_ref=state["verification_ref"])
+            plan_ref = await self._save("response-pack-plan", replan, is_ref=True, inputs={
+                "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": checked["requirements_ref"],
+                "verification_ref": state["verification_ref"], "request_budget": self._request_budget().spec(),
+                "planner_version": PLANNER_VERSION,
+            })
+            response_index = await self._read(plan_ref)
+            extraction_index = await self._read(checked["requirements_ref"])
+            extractions = {entry["artifact_ref"]["sha256"]: await self._read(entry["artifact_ref"])
+                           for entry in extraction_index["packs"]}
+
+            async def group(entry):
+                async with self.semaphore:
+                    descriptor = await asyncio.to_thread(self.repo.load_pack, entry["artifact_ref"])
+                    extraction = select_extraction(descriptor, extractions)
+                    requirements = [item for item in apply_applicability_decisions(
+                        extraction["requirements"], checked["applicability_decisions"],
+                    ) if item["applicable"]]
+                    references = {item["requirement_id"]: item for item in descriptor["requirement_refs"]}
+                    async def build():
+                        if (descriptor["planning_details"]["budget"]["fits"] is not True
+                                or any(item["code"] in DEPENDENCY_ISSUES for item in descriptor["issues"])):
+                            return {"items": [], "issues": descriptor["issues"], "blocking": True}
+                        return await build_plan(requirements, self, requirement_refs=references,
+                                                source_context=source_view(descriptor) if descriptor["supporting"] else None)
+                    ref = await self._save("plan-pack", build, scope=f"{response_index['plan_digest']}:{entry['pack_id']}",
+                                           inputs={"pack_plan_ref": entry["artifact_ref"],
+                                                   "verification_ref": state["verification_ref"],
+                                                   "checklist_digest": state["checklist_digest"]},
+                                           model=True)
+                    return {"pack_id": entry["pack_id"], "artifact_ref": ref, "result": await self._read(ref)}
+
+            results = await asyncio.gather(*(group(entry) for entry in response_index["packs"]), return_exceptions=True)
+            _raise_failures(results)
+            results = [result for result in results if result is not None]
+            from collections import Counter
+            expected = Counter(item["requirement_id"] for extraction in extractions.values()
+                               for item in apply_applicability_decisions(extraction["requirements"], checked["applicability_decisions"])
+                               if item["applicable"])
+            actual = Counter(item["requirement_id"] for result in results for item in result["result"]["items"])
+            issues = list(response_index["issues"])
+            if expected != actual:
+                issues.append(issue("response_plan_coverage_mismatch", "Response items must cover the current applicable requirements exactly once."))
+            return {"packs": [{"pack_id": result["pack_id"], "artifact_ref": result["artifact_ref"]} for result in results],
+                    "pack_plan_ref": plan_ref, "issues": issues,
+                    "blocking": bool(issues) or any(result["result"]["blocking"] for result in results),
+                    "checklist_digest": state["checklist_digest"],
+                    "counts": {"packs": len(results),
+                               "items": sum(len(result["result"]["items"]) for result in results),
+                               "issues": len(issues) + sum(len(result["result"]["issues"]) for result in results)}}
+
+        ref = await self._save("plan", produce, inputs={"verification_ref": state["verification_ref"],
+                                                              "checklist_digest": state["checklist_digest"]}, model=True)
+        plan = await self._read(ref)
+        return {"response_plan_ref": ref, "status": "blocked" if plan["blocking"] else "response-plan-ready"}

@@ -1,0 +1,174 @@
+{
+  "blocking": false,
+  "counts": {
+    "applicable_requirements": 6,
+    "blocking_issues": 0,
+    "packs": 4,
+    "ranges": 12,
+    "requirements": 6,
+    "verified_packs": 4
+  },
+  "issues": [],
+  "pack_results": [
+    {
+      "pack_id": "pack-b4eab61d0d97b30ac5f9c468",
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "57/576df31ebf2a95823041fdff4509ca1b72fa80d2a6167203e1578bd9357c2adb",
+        "sha256": "576df31ebf2a95823041fdff4509ca1b72fa80d2a6167203e1578bd9357c2adb",
+        "size": 113
+      }
+    },
+    {
+      "pack_id": "pack-f56d5146c32145ca7271c5cb",
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "d9/d9dc144912df14fb9902469b1474f10567942249701d7018d0510ab390c0afd5",
+        "sha256": "d9dc144912df14fb9902469b1474f10567942249701d7018d0510ab390c0afd5",
+        "size": 377
+      }
+    },
+    {
+      "pack_id": "pack-61ea363a33cdfda2dc3cdb8f",
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "ae/ae0dee3e3ff61424c5631a9ccbbea2720b1d1cc4ed6fda304012cff31dd6af2c",
+        "sha256": "ae0dee3e3ff61424c5631a9ccbbea2720b1d1cc4ed6fda304012cff31dd6af2c",
+        "size": 113
+      }
+    },
+    {
+      "pack_id": "pack-fa646f26deacd1e967133eef",
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "cc/cc0895bea528718a96bb36179c2a0b233fa35f84e76c8f0374dc005dab29cb8c",
+        "sha256": "cc0895bea528718a96bb36179c2a0b233fa35f84e76c8f0374dc005dab29cb8c",
+        "size": 113
+      }
+    }
+  ],
+  "requirement_packs": {
+    "req-range-5d9c23b2af63f7b683dd016a": "pack-f56d5146c32145ca7271c5cb",
+    "req-range-849f61e1325ea0b214338093": "pack-61ea363a33cdfda2dc3cdb8f",
+    "req-range-88d912aee9472645595d201a": "pack-f56d5146c32145ca7271c5cb",
+    "req-range-aa481319d0d76324d772708a": "pack-f56d5146c32145ca7271c5cb",
+    "req-range-b249e4d8161c12191e4ef66f": "pack-b4eab61d0d97b30ac5f9c468",
+    "req-range-c631244abdb71ffce1c590c0": "pack-fa646f26deacd1e967133eef"
+  },
+  "requirements": [
+    {
+      "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
+      "applicable": true,
+      "conditions": [],
+      "cross_references": [],
+      "evidence": [
+        {
+          "quote": "Delivery obligations\nThe supplier must provide a signed delivery commitment.",
+          "range_id": "range-b249e4d8161c12191e4ef66f"
+        }
+      ],
+      "exceptions": [],
+      "numbers": [],
+      "requirement_id": "req-range-b249e4d8161c12191e4ef66f",
+      "scoring": {},
+      "subject": "supplier",
+      "text": "Delivery obligations\nThe supplier must provide a signed delivery commitment.",
+      "veto_risk": false
+    },
+    {
+      "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
+      "applicable": true,
+      "conditions": [],
+      "cross_references": [],
+      "evidence": [
+        {
+          "quote": "The supplier must name a delivery coordinator. | ",
+          "range_id": "range-5d9c23b2af63f7b683dd016a"
+        }
+      ],
+      "exceptions": [],
+      "numbers": [],
+      "requirement_id": "req-range-5d9c23b2af63f7b683dd016a",
+      "scoring": {},
+      "subject": "supplier",
+      "text": "The supplier must name a delivery coordinator. | ",
+      "veto_risk": false
+    },
+    {
+      "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
+      "applicable": true,
+      "conditions": [],
+      "cross_references": [],
+      "evidence": [
+        {
+          "quote": "The supplier must provide the illustrated maintenance schedule.",
+          "range_id": "range-aa481319d0d76324d772708a"
+        }
+      ],
+      "exceptions": [],
+      "numbers": [],
+      "requirement_id": "req-range-aa481319d0d76324d772708a",
+      "scoring": {},
+      "subject": "supplier",
+      "text": "The supplier must provide the illustrated maintenance schedule.",
+      "veto_risk": false
+    },
+    {
+      "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
+      "applicable": true,
+      "conditions": [],
+      "cross_references": [],
+      "evidence": [
+        {
+          "quote": "The supplier must provide a service contact. | ",
+          "range_id": "range-88d912aee9472645595d201a"
+        }
+      ],
+      "exceptions": [],
+      "numbers": [],
+      "requirement_id": "req-range-88d912aee9472645595d201a",
+      "scoring": {},
+      "subject": "supplier",
+      "text": "The supplier must provide a service contact. | ",
+      "veto_risk": false
+    },
+    {
+      "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
+      "applicable": true,
+      "conditions": [],
+      "cross_references": [],
+      "evidence": [
+        {
+          "quote": "The supplier must provide a written quality assurance statement.",
+          "range_id": "range-849f61e1325ea0b214338093"
+        }
+      ],
+      "exceptions": [],
+      "numbers": [],
+      "requirement_id": "req-range-849f61e1325ea0b214338093",
+      "scoring": {},
+      "subject": "supplier",
+      "text": "The supplier must provide a written quality assurance statement.",
+      "veto_risk": false
+    },
+    {
+      "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
+      "applicable": true,
+      "conditions": [],
+      "cross_references": [],
+      "evidence": [
+        {
+          "quote": "The supplier must provide the illustrated maintenance schedule.",
+          "range_id": "range-c631244abdb71ffce1c590c0"
+        }
+      ],
+      "exceptions": [],
+      "numbers": [],
+      "requirement_id": "req-range-c631244abdb71ffce1c590c0",
+      "scoring": {},
+      "subject": "supplier",
+      "text": "The supplier must provide the illustrated maintenance schedule.",
+      "veto_risk": false
+    }
+  ]
+}

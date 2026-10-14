@@ -1,0 +1,168 @@
+{
+  "documents": [
+    {
+      "document_id": "main",
+      "file_name": "main.docx",
+      "freeze_seconds": 2.6116195990000506,
+      "issues": [],
+      "modification_scope": null,
+      "ordinal": 0,
+      "original_ref": {
+        "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "relative_path": "dc/dca4057d5ba980e67f62021830de511d2a15a4476ef367785805c21028cc87cd",
+        "sha256": "dca4057d5ba980e67f62021830de511d2a15a4476ef367785805c21028cc87cd",
+        "size": 36655
+      },
+      "pack_count": 1,
+      "parse_seconds": 2.607355200000029,
+      "range_count": 1,
+      "raw_ref": {
+        "media_type": "application/json",
+        "relative_path": "8a/8aef170f64393b34e3fd097dfeae2d61ecf6fc91dbcd33714f1b22d73bd9fcfc",
+        "sha256": "8aef170f64393b34e3fd097dfeae2d61ecf6fc91dbcd33714f1b22d73bd9fcfc",
+        "size": 2273
+      },
+      "replaces": null,
+      "role": "main",
+      "status": "complete",
+      "version": "one"
+    },
+    {
+      "document_id": "annex",
+      "file_name": "annex.xlsx",
+      "freeze_seconds": 0.12116132300002391,
+      "issues": [],
+      "modification_scope": null,
+      "ordinal": 1,
+      "original_ref": {
+        "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "relative_path": "82/82fce59a785462bff0fe530ac74fb40bb4c8357e6f7d7972fcb3f6cd4866d00e",
+        "sha256": "82fce59a785462bff0fe530ac74fb40bb4c8357e6f7d7972fcb3f6cd4866d00e",
+        "size": 7795
+      },
+      "pack_count": 1,
+      "parse_seconds": 0.0311633639998945,
+      "range_count": 9,
+      "raw_ref": {
+        "media_type": "application/json",
+        "relative_path": "e8/e840ffca32dc79e4af7060a1a37ce84b671de8d62b0a1acbdf40d17371720350",
+        "sha256": "e840ffca32dc79e4af7060a1a37ce84b671de8d62b0a1acbdf40d17371720350",
+        "size": 24563
+      },
+      "replaces": null,
+      "role": "attachment",
+      "status": "complete",
+      "version": "one"
+    },
+    {
+      "document_id": "quality",
+      "file_name": "quality.pdf",
+      "freeze_seconds": 0.06175715500012302,
+      "issues": [],
+      "modification_scope": null,
+      "ordinal": 2,
+      "original_ref": {
+        "media_type": "application/pdf",
+        "relative_path": "b0/b00cd37f1834f78637b5ea1e6578ab01497d8ebc934fdeaa9a6e76ed7bf4a9c6",
+        "sha256": "b00cd37f1834f78637b5ea1e6578ab01497d8ebc934fdeaa9a6e76ed7bf4a9c6",
+        "size": 683
+      },
+      "pack_count": 1,
+      "parse_seconds": 0.04984935100014809,
+      "range_count": 1,
+      "raw_ref": {
+        "media_type": "application/json",
+        "relative_path": "e3/e38e3ea34b157ac30928a4ec01722665567f4ec9850d5640b1238cfc3d9d0ff3",
+        "sha256": "e38e3ea34b157ac30928a4ec01722665567f4ec9850d5640b1238cfc3d9d0ff3",
+        "size": 2385
+      },
+      "replaces": null,
+      "role": "attachment",
+      "status": "complete",
+      "version": "one"
+    },
+    {
+      "document_id": "image",
+      "file_name": "schedule.png",
+      "freeze_seconds": 0.13856417600004534,
+      "issues": [],
+      "modification_scope": null,
+      "ordinal": 3,
+      "original_ref": {
+        "media_type": "image/png",
+        "relative_path": "24/247da5051c36e651b28b5194a0bf47ead42b0aebcc0f08c611c29ec306db4978",
+        "sha256": "247da5051c36e651b28b5194a0bf47ead42b0aebcc0f08c611c29ec306db4978",
+        "size": 1299
+      },
+      "pack_count": 1,
+      "parse_seconds": 0.006242950000114433,
+      "range_count": 1,
+      "raw_ref": {
+        "media_type": "application/json",
+        "relative_path": "36/36e425247c6c39f1c4d7ffcba89a8d079b57cc18fbc6b2823ac3a797ed172108",
+        "sha256": "36e425247c6c39f1c4d7ffcba89a8d079b57cc18fbc6b2823ac3a797ed172108",
+        "size": 2395
+      },
+      "replaces": null,
+      "role": "attachment",
+      "status": "complete",
+      "version": "one"
+    }
+  ],
+  "issues": [],
+  "packs": [
+    {
+      "document_id": "main",
+      "pack_id": "pack-b4eab61d0d97b30ac5f9c468",
+      "range_count": 1,
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "fb/fb288c3c75fb48dfa4a86f795e3ffd5efca6474ac7df3089dcff92496dbca0ec",
+        "sha256": "fb288c3c75fb48dfa4a86f795e3ffd5efca6474ac7df3089dcff92496dbca0ec",
+        "size": 1069
+      }
+    },
+    {
+      "document_id": "annex",
+      "pack_id": "pack-f56d5146c32145ca7271c5cb",
+      "range_count": 9,
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "64/64307c7895cee7c10ea06240965f046b142e34c949fc164a218029218c458080",
+        "sha256": "64307c7895cee7c10ea06240965f046b142e34c949fc164a218029218c458080",
+        "size": 16852
+      }
+    },
+    {
+      "document_id": "quality",
+      "pack_id": "pack-61ea363a33cdfda2dc3cdb8f",
+      "range_count": 1,
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "4a/4a88ed107729516e7a4ab45a811ce61ac3f73cdb1a161f545d7879ebbcf6bb85",
+        "sha256": "4a88ed107729516e7a4ab45a811ce61ac3f73cdb1a161f545d7879ebbcf6bb85",
+        "size": 919
+      }
+    },
+    {
+      "document_id": "image",
+      "pack_id": "pack-fa646f26deacd1e967133eef",
+      "range_count": 1,
+      "ref": {
+        "media_type": "application/json",
+        "relative_path": "90/9094312265994c2d9e9157d5ade4c0847f98c3e31adf11bb5d43e3a5b521aa1f",
+        "sha256": "9094312265994c2d9e9157d5ade4c0847f98c3e31adf11bb5d43e3a5b521aa1f",
+        "size": 1378
+      }
+    }
+  ],
+  "range_count": 12,
+  "schema_version": 1,
+  "stats": {
+    "document_count": 4,
+    "duration_seconds": 2.9331707970000025,
+    "image_count": 2,
+    "ocr_request_count": 2,
+    "pack_count": 4
+  }
+}
