@@ -139,3 +139,14 @@ Rust run/outbox/API/鉴权/事务围栏、流量切换、旧实现移除、部�
 - 全程真实模型调用0次、真实usage未知；13范围审议未决、人工ground truth与真实LLM验收未完成。
   目前无重分/重试假设下为4抽取+4验证+0..4计划，8..12次仅作待确认预估。
 - Rust/Cargo diff为空；独立Python已验收，Rust生产集成仍未实施，未切流/合并/部署。
+
+## 当前运行代码的镜像核验
+
+实现提交 `51d7ec322e7ac09cb6c05043ccb07e8ecf03d76c`；镜像
+`sha256:8769713667a41d1810e351b47a29f49b074c1a8acf15e51102895bb7010d3032`，镜像内Python 3.11.17。
+48个运行模块/提示SHA256逐项与提交源码一致，原main/新schema/graph/jobs/CLI/四提示导入通过；
+容器CLI init连接真实PostgreSQL独立临时schema成功并清理。默认CMD仍为
+`["uv","run","--no-dev","python","main.py"]`。见[当前镜像证据](evidence/image-verification-review.json)。
+
+本机构建依然只用临时Dockerfile的BuildKit CA secret mount解决受控代理信任，不关闭TLS，
+证书不持久保存；提交Dockerfile的默认生产入口不变。本核验不代表已部署或已切流。

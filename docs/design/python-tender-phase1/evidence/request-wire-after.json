@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "evidence_kind": "actual_sdk_wire_review_after",
-  "runtime_commit": "d7ef9ecb1a8573777db28a66b642a2601c32c6b9",
-  "runtime_dirty": true,
+  "runtime_commit": "51d7ec322e7ac09cb6c05043ccb07e8ecf03d76c",
+  "runtime_dirty": false,
   "runtime_source_sha256": {
     "services/docreader/llm/__init__.py": "550f67a557a22122c0ff7cefc009381c3a039d1c059ed7a240d47bf0e10f65b1",
     "services/docreader/llm/budget.py": "deea5df1236a0ecc832d5d1ae7ef4baef9d93539b963a23a148fa764fbca10dd",
