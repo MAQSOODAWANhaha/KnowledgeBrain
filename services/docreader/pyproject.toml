@@ -7,7 +7,7 @@ name = "docreader"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10.18"
+requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "ebooklib>=0.20",
@@ -33,11 +33,18 @@ dependencies = [
     "requests>=2.34.2",
     "textract==1.5.0",
     "trafilatura>=2.2.0",
+    "langgraph>=1.0,<2",
+    "langgraph-checkpoint-postgres>=3,<4",
+    "psycopg[binary,pool]>=3.2,<4",
+    "dramatiq[redis]>=1.18,<2",
+    "openai>=2,<3",
+    "httpx>=0.28,<1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0",
+    "pytest-asyncio>=1,<2",
     "xlsxwriter>=3.2.9",
 ]
 
@@ -49,7 +56,20 @@ packages = [
     "docreader.parser",
     "docreader.proto",
     "docreader.utils",
+    "docreader.llm",
+    "docreader.tender",
+    "docreader.tender.evidence",
+    "docreader.tender.requirements",
+    "docreader.tender.planning",
+    "docreader.tender.checks",
+    "docreader.tender.prompts",
+    "docreader.workflow",
+    "docreader.jobs",
+    "docreader.integrations",
 ]
+
+[tool.setuptools.package-data]
+"docreader.tender.prompts" = ["*.md"]
 
 [tool.pyright]
 include = ["."]
@@ -58,15 +78,17 @@ stubPath = "typings"
 extraPaths = ["..", "services"]
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = "none"
 
 [tool.pytest.ini_options]
 pythonpath = [".."]
+asyncio_mode = "auto"
+markers = ["integration: requires real PostgreSQL and Redis"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 extend-exclude = [".venv", "proto"]
 
 [tool.ruff.lint]
