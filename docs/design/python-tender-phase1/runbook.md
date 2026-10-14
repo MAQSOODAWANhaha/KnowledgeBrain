@@ -89,3 +89,12 @@ uv build --wheel
 
 确定性模型在 `tests/acceptance/fixture_model.py`，只用于测试，没有生产 mock 开关。
 它不发外部请求、不编造 paid usage。真实 LLM 验收需原文件、明确上下文容量，以及付费前确认。
+
+生成一份持久合成实际产物供人工检查（仅测试模型，无外部调用）：
+
+```sh
+uv run --frozen python tests/acceptance/run_sample.py --root /tmp/tender-sample --evidence /tmp/tender-evidence
+```
+
+该命令使用 `TENDER_TEST_DATABASE_URL`；输出运行、验证、来源索引与响应计划 JSON。
+运行文件原件/大型产物保留在 `--root` 下，JSON 引用可通过其 artifact root 校验 SHA256。

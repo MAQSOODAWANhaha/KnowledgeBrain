@@ -78,6 +78,8 @@ CLI status 实读24个产物回执和6项计划，状态为 `response-plan-ready
 本地验证使用从提交的 Dockerfile 生成的临时副本，仅将 `RUN uv sync` 加入 BuildKit
 CA secret mount，并传入受控 build proxy/add-host；未关闭 TLS，证书不写入镜像。
 提交的生产 Dockerfile/default CMD 未改；`.dockerignore` 明确保留新提示资源。
+另逐文件比较镜像与代码提交 `aba9d5d0ee3004ebb320c2e2674ddfd694eff384`：
+40个新增 Python/提示文件 SHA256 全部相同，见 [镜像核对清单](evidence/image-verification.json)。
 
 ## D. 真实 LLM 语义验收（单独记录）
 
