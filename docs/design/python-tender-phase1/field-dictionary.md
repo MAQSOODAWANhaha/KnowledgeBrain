@@ -27,7 +27,10 @@
 | `task` | extract/verify/plan/ocr | 请求/计划所服务的具体领域动作 |
 | `input_digest` | sha256，直接上游引用及相关操作配置的摘要 | 相同输入重试幂等；改变输入不得复用旧回执 |
 | `budget_digest` | sha256，实际请求构造与容量规范摘要 | 包含model/C/prompt/reserves；不含秘密、不等于usage |
-| `context_tokens` | positive int或null，配置的单次模型上下文容量 | 配置适配后budget spec、测量和client同名；C只是文档数学符号，不另存C/max_context_tokens别名 |
+| `context_tokens` | positive int或null，配置的provider总上下文上限（输入+输出+安全余量） | 与输入预算分开；旧131072配置不自动升级为更大服务窗口 |
+| `input_budget_tokens`, `correction_input_budget_tokens` | positive int，普通输入131072、显式纠错最多262144 token | 共享预算合同；普通verify/plan和新domain_revision不自动使用纠错额度 |
+| `correction` | bool，明确标记一次修复请求可使用纠错输入额度 | 不改变provider总窗口或wire输出参数；未知总窗口不授权双倍 |
+| `effective_input_budget_tokens` | int或null，当前输入预算与总窗口扣预留后的较小值 | planner/client使用同一测量；UTF8保守估算不是provider实测token |
 | `request_digest` | SHA256，完整无鉴权模型请求的摘要 | 模型审计与发送重放身份；包括图片、消息、模型和协议参数，不是仅payload文本hash；同运行修订/task下sent或uncertain阻止自动重付费，完整成功响应可复用 |
 | `plan_digest` | sha256，task+input_digest+budget_digest+selectors/决议的规范摘要 | 新预算或作用域绑定生成新计划，规范来源身份不变 |
 | `requirement_id` | string，当前要求清单内义务身份 | 验证决议、计划项引用同一身份；内容修正产生新domain_revision |
@@ -49,7 +52,8 @@
 
 1. **PackPlan**：规范冻结来源在同source_version内复用，分包计划属于domain_revision，含task、
    input_digest、budget_digest及plan_digest。重试复用同计划；作用域/输入/预算变化须新修订/新计划，
-   不碰原件、不复用旧extract/verify回执。verify/plan将真实要求加入请求后再次准入，装不下明确阻断。
+   不碰原件、不复用旧extract/verify回执。verify/plan按完整实际输入生成阶段计划，必要时按语义
+   和依赖重分；仅不可分单元超限才预算阻断，预算拒绝与模型语义失败分开。
 2. **有效要求视图**：`applicability_decisions`按requirement_id保存具体决议；计划只处理原要求与
    当前决议合成的有效视图。实际文本、数字、条件纠正依旧通过领域修订，不能伪装成验证结论。
 3. **有限作用域审议**：新增独立`review-scope`入口；检查当前来源和计划摘要、具体问题range_id、
