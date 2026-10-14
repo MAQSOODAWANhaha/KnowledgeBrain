@@ -106,6 +106,11 @@ domain_revision增加也不能自动开启双倍。未知tokenizer的UTF8上界�
 计划读取当前适用性决议；若适用义务依赖已失效义务而未明确解开关系，同样保持未决。
 恢复计划、成功子包与当前修订绑定；旧修订/过期确认不授权新输入。
 
+跨旧包合并后，旧support ID可能与现body区间重合。保留不可变evidence的原ID，以共享
+`source_aliases`把旧ID映射到本请求已发送的精确字符区间，不重写要求或再发送相同正文。
+验证逐个核查别名及其实际片段，别名无text。响应计划的显式来源范围引用附带必要的
+`source_context`（共享SourceView及完整条件）；纯要求身份依赖直接携带完整关联义务。
+
 HTTP压缩/解码失败发生在发送以后，不能因为不是合法模型JSON就证明服务未执行。
 `httpx.DecodingError`必须保留已收到的部分审计及未知usage，标为`uncertain`并禁止同digest
 自动重新发送。即使部分响应写盘、审计提交或业务产物提交失败，先前`sent`/`uncertain`
