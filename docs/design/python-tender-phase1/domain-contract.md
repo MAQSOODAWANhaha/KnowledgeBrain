@@ -97,6 +97,7 @@ range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来�
   range_id/parent_range_id/document_id/unit_id/start/end、原 locator/physical_locator/physical_path、
   section_id/heading_path 与 scope_binding（状态 unresolved、候选 applies_to_range_ids）、
   reason=incomplete_condition_sentence；不含 text/cells/图像 payload。完整原文仍在 body/raw。
+  pending 的 locator 只保留定位字段，嵌套 cells 内容也必须移除。
   extract/verify 透传 pending 元数据作为待补读问题，不能将它当已读原文或新正文覆盖。
   condition_scope_unresolved 与宿主 scope_context_pending 均阻断；模型低阻断或空 findings
   不能解除它们。此修正不实现自动范围审议，也不要求改动原件或伪造来源新版本。
@@ -119,3 +120,5 @@ range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来�
 范围，它们分别保留准确连续原文及偏移；不能用省略号拼接不连续原文冒充一个证据范围。
 真实 PDF 离线预检的原件、解析正文、图片和冻结包只写私有目录；Git 只收摘要 hash、计数、
 页码、问题类别、覆盖断言与 token 估算方法。估算不是模型实际用量，OCR 未执行不能写成功。
+
+最新结构分包与各层内容去重合同见 [packing-review](packing-review.md)。旧分包inline body/supporting持久格式与verify回显requirements均待按新合同替换，不作为最终实现。
