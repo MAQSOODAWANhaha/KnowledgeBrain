@@ -29,7 +29,7 @@ uv run --frozen python -m docreader.jobs.dispatcher
 
 AsyncIO 每 worker 进程一个事件循环；4 threads 最多承载4条并发消息。原生解析隔离到线程/
 现有解析器进程池，模型并发每 run 为4。取消通过数据库心跳/节点围栏观察，不等队列排队。
-执行基础设施故障共享4次命令失败上限；语义未决不队列重试，需修订来源或人工核查。
+执行基础设施故障共享4次命令失败上限；语义未决不队列重试；原件改变走 revise，同来源要求补漏/纠正走 correct 并重新核查。
 dispatcher 数据库断连会退避后继续，Redis 发布失败保留命令并按相同上限结算。
 
 ## 提交与确认
@@ -49,7 +49,7 @@ manifest 示例（路径相对 manifest 文件；首次提交会复制原件）�
 ```sh
 uv run --frozen python -m docreader.integrations.cli submit manifest.json --request-key submission-001
 uv run --frozen python -m docreader.integrations.cli status <run_id>
-uv run --frozen python -m docreader.integrations.cli confirm <run_id> --version 1 --digest <checklist_digest> --request-key confirm-001
+uv run --frozen python -m docreader.integrations.cli confirm <run_id> --version 1 --domain-revision 1 --digest <checklist_digest> --request-key confirm-001
 uv run --frozen python -m docreader.integrations.cli cancel <run_id>
 uv run --frozen python -m docreader.integrations.cli revise <run_id> revised-manifest.json --request-key revision-002
 ```
@@ -59,6 +59,30 @@ uv run --frozen python -m docreader.integrations.cli revise <run_id> revised-man
 resume 命令，完成后 status=`response-plan-ready`，实际计划在 `results.plan`。
 `results` 给出业务 JSON；artifacts 数组给出内容摘要和相对文件引用、阶段耗时。usage 中
 每请求的真实用量缺失时保留 null；uncertain 表示可能已执行/计费，绝不伪造精确一次。
+
+## 同来源业务纠错
+
+`source_version` 在 CLI/旧字段中仍名 `version`；`domain_revision` 独立递增。当前结果只包含
+本来源的共享冻结数据及当前修订，历史要求/确认/计划保留审计但不授权当前修订。
+从 `results.extract` 的每个 pack ref 读取并整理完整纠错 JSON：
+
+```json
+{"packs": [{"pack_id": "<existing-pack-id>", "requirements": [], "dispositions": [], "issues": []}]}
+```
+
+这里数组仅示意结构，实际必须给出所有原包，并满足各来源范围的要求/非要求/未决处置合同；
+不能直接用空数组清除义务。每包 requirements/dispositions 使用抽取产物同一 schema，
+不提交 source_ranges、覆盖计数等宿主生成字段。未解决问题可保存后重新验证，但不得放行。
+
+```sh
+uv run --frozen python -m docreader.integrations.cli correct <run_id> corrected-requirements.json --version 1 --expected-revision 1 --base-requirements-digest <extract-artifact-sha256> --reason '补漏或纠正的实际依据' --request-key correction-002
+uv run --frozen python -m docreader.integrations.cli status <run_id>
+uv run --frozen python -m docreader.integrations.cli confirm <run_id> --version 1 --domain-revision 2 --digest <new-checklist-digest> --request-key confirm-002
+```
+
+correct 拒绝过期基线和 cancelled run，已冻结来源保持不变。旧确认立即失效；新修订通过
+独立验证后再次等待确认。相同 request key/相同内容幂等；不能以 unchanged manifest
+调用 revise 伪造来源变更。非秘密模型/提示配置恢复时必须与固定快照一致，密钥轮换允许。
 
 ## 同镜像不同角色
 
