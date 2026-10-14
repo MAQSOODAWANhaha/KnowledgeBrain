@@ -36,6 +36,10 @@
 | `conditions`, `exceptions` | string[]，要求的适用条件/例外语义 | 与来源范围关系scope_binding不同，不机械合并 |
 | `scope_binding` | 来源条件到具体range_id集合的关系 | 明确bound/unresolved；祖先正文不自动成为条件 |
 | `scope_bindings` | `ScopeBindingRef[]`，每包完整条件的来源范围、字符区间及`scope_binding` | 无text；条件已在body中时仍传递明确目标，正文与supporting区间并集只发送一次 |
+| `sections` | 请求内`{section_id,parent_section_id?,heading_path}[]` | 章节语义共享一次；每来源只引用section_id，宿主保留完整物理坐标 |
+| `blank_table_templates` | 请求内空白填写结构摘要数组 | 每项table_id/column_count、rows区间及原range_ids，可含merges/table_ids；不代表无要求，仍需逐原range处置和独立验证 |
+| `column_count` | positive int，表格原矩形宽度 | 保护空白字段及模板列数，不用非空列数替代 |
+| `host_reviewed_range_ids` | 仅宿主已证实空白页/显式审议装饰图的range_id[] | 与模型`reviewed_range_ids`分开，模板空行不进入此列表；不伪称模型读过 |
 | `scope_decisions` | 人工bind/local_only决议记录列表 | 每项带range_id、证据、理由、明确目标；进入新领域修订后重分包/重验 |
 | `applicability_decisions` | requirement_id键控小型适用性决议 | 验证产物保存；计划读取原要求+当前决议有效视图，不复制完整要求 |
 | `checklist_digest` | sha256，source_version/domain_revision/来源/计划/要求/验证摘要 | 确认精确绑定，任何相关修订使旧确认失效 |

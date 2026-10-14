@@ -16,6 +16,7 @@ CLI `python -m docreader.integrations.cli`，显式 PostgreSQL DSN、Redis URL�
 | `cancel` | run_id | 直接写意图并作废未执行命令；心跳/节点边界观察 |
 | `revise` | run_id、新 manifest | 增加来源版本；旧确认无效；新 checkpoint thread；显式新 start |
 | `correct` | run_id/source_version/expected_revision/base_requirements_digest、完整纠错要求清单、reason、request key | 同来源产生新领域修订；重新独立验证与确认；不伪造来源改版 |
+| `review-scope` | run_id/source_version/expected_revision/base_plan_digest、带证据的scope_decisions、reason、request key | 同来源新领域修订中绑定明确目标或审定仅局部适用；重分包、重抽取、重验与重新确认 |
 | `dispatch` | 可选单轮 | token 领取待投命令、投 Redis、确认发布、对失联命令补投 |
 
 manifest 含 documents（document_id、role=main/attachment/clarification/amendment、document_version、
