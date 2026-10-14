@@ -94,3 +94,5 @@ checkpoint；实现需同时保护图执行与业务产物，不能只给产物�
 随后接领域实现和真实 parser，再做故障注入与混合文档验收。详细标准及证据见
 [acceptance.md](acceptance.md)。基线已知 Rust bidding CI 为 500 passed / 2 failed /
 24 ignored（前轮记录），不是本 PR 引入；本阶段不修改该 Rust 测试。
+
+用户重点补充：[分包设计评估与Rust→Python规则对照](packing-review.md)。固定字符分包的旧21包仅作诊断基线，不计新合同验收。
