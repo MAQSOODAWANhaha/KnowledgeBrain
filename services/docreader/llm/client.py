@@ -164,9 +164,18 @@ class OpenAIModel:
             except UncertainModelResponse:
                 await self._finish_stream(request_id, "uncertain", stream, digest, "stream_missing_done", started)
                 raise
-            except (ModelSemanticError, httpx.DecodingError) as error:
-                if isinstance(error, httpx.DecodingError):
-                    stream.failure = "invalid_stream_encoding"
+            except httpx.DecodingError:
+                # HTTP decompression can fail after paid response bytes arrived.
+                # It is not a complete semantic rejection or permission to resend.
+                stream.failure = "invalid_stream_encoding"
+                try:
+                    await self._finish_stream(request_id, "uncertain", stream, digest, stream.failure, started)
+                except Exception:
+                    # An unavailable response/audit store leaves the durable sent
+                    # fence in place; do not turn uncertainty into a queue retry.
+                    raise UncertainModelResponse("model response decoding and audit failed; provider execution and billing are uncertain") from None
+                raise UncertainModelResponse("model response decoding failed after send; provider execution and billing are uncertain") from None
+            except ModelSemanticError:
                 await self._finish_stream(request_id, "failed", stream, digest,
                                           stream.failure or "invalid_json_response", started)
                 raise ModelSemanticError("model endpoint returned an invalid or incomplete JSON stream") from None
