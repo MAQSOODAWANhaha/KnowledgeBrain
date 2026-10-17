@@ -1009,16 +1009,13 @@ class Store:
                         (Jsonb(response_ref), request_id),
                     )
                 return
-            observed = _recorded_first_data(activity)
+            observed = _recorded_first_data(activity) or {}
             await conn.execute(
                 "UPDATE tender_model_requests SET status = %s, usage = COALESCE(%s, usage), error = %s, "
-                "response_ref = COALESCE(%s, response_ref), "
-                "metadata = CASE WHEN %s IS NULL THEN metadata ELSE metadata || %s END, "
+                "response_ref = COALESCE(%s, response_ref), metadata = metadata || %s, "
                 "sent_at = CASE WHEN %s = 'sent' THEN COALESCE(sent_at, clock_timestamp()) ELSE sent_at END, "
                 "finished_at = CASE WHEN %s != 'sent' THEN clock_timestamp() ELSE finished_at END WHERE request_id = %s",
                 (status, Jsonb(usage) if usage is not None else None, Jsonb(_safe_metadata(error)),
-                 Jsonb(response_ref) if response_ref is not None else None,
-                 Jsonb(observed) if observed is not None else None,
-                 Jsonb(observed) if observed is not None else None,
+                 Jsonb(response_ref) if response_ref is not None else None, Jsonb(observed),
                  status, status, request_id),
             )
