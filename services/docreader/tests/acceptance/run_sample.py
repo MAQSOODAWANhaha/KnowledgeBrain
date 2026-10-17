@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from fixture_model import FixtureModel
+from fixture_analysis_model import AnalysisFixtureModel
 from test_phase1 import mixed_manifest
 
 from docreader.integrations.artifacts import ArtifactStore
@@ -29,7 +29,7 @@ async def sample(root, evidence):
     run = await store.submit(artifacts.put_json(manifest), uuid4().hex)
 
     def factory(s, a, lease):
-        return TenderNodes(s, a, lease, FixtureModel(s, lease))
+        return TenderNodes(s, a, lease, AnalysisFixtureModel(s, lease, artifacts=a))
 
     async def execute():
         cmd = (await store.get_run(run["run_id"]))["commands"][-1]
@@ -41,7 +41,7 @@ async def sample(root, evidence):
         raise RuntimeError("synthetic sample did not pass its verification gate")
     await store.confirm(run["run_id"], 1, paused["checklist_digest"], "synthetic-review")
     completed = await execute()
-    assert completed["status"] == "response-plan-ready"
+    assert completed["status"] == "analysis-ready"
     results = {}
     for receipt in completed["artifacts"]:
         if not receipt["scope"]:
@@ -57,7 +57,7 @@ async def sample(root, evidence):
         "stage_receipts": completed["artifacts"], "commands": completed["commands"],
         "remaining": ["real original documents + real model semantic acceptance", "future Rust integration"],
     }
-    for name, data in {"sample-run": report, "sample-plan": results["plan"],
+    for name, data in {"sample-run": report, "sample-items": results["extract"],
                        "sample-verification": results["verify"], "sample-sources": results["freeze"]}.items():
         (evidence / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n")
     print(json.dumps({"run_id": run["run_id"], "status": completed["status"],

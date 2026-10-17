@@ -9,11 +9,23 @@ from typing import Sequence
 
 
 class ModelConfigurationError(ValueError):
-    """Deployment/model configuration needs correction, not a queue retry."""
+    """Deployment/model configuration was rejected; execution retries are bounded."""
 
 
 class ModelSemanticError(ValueError):
-    """A domain node must expose this result or perform its bounded repair."""
+    """A complete response or its domain contract was rejected."""
+
+
+class ModelContractError(ModelSemanticError):
+    """Durable feedback for an unaccepted response; details stay out of logs."""
+
+    def __init__(self, errors):
+        self.errors = errors
+        super().__init__("Model response violated its host contract")
+
+
+class ModelCorrectionStalled(ModelSemanticError):
+    """The proposed correction is itself an already rejected request."""
 
 
 class ModelBudgetError(ValueError):

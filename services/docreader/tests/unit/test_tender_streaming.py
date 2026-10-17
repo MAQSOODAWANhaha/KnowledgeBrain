@@ -61,10 +61,9 @@ async def test_first_body_shares_180_seconds_with_headers(monkeypatch, tmp_path,
     client, audit, _, source = timed_model(monkeypatch, [(body_delay, GOOD)],
                                           header_delay=header_delay, artifacts=artifacts)
     async with client:
-        with pytest.raises(UncertainModelResponse) as error:
+        with pytest.raises(ModelInfrastructureError):
             await client.call("extract", {})
-    assert not isinstance(error.value, (ConnectionError, TimeoutError))
-    assert audit.events[-1]["status"] == "uncertain"
+    assert audit.events[-1]["status"] == "failed"
     assert audit.events[-1]["error"]["type"] == "first_data_idle_timeout"
     assert audit.events[-1]["usage"] is None
     assert artifacts.writes == 1
@@ -282,6 +281,115 @@ async def test_sent_or_uncertain_recovery_never_replays_transport(tmp_path):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("provider_type,code", [
+    ("server_error", "request_timeout"),
+    ("service_unavailable_error", "server_is_overloaded"),
+])
+@pytest.mark.parametrize("done", [False, True])
+@pytest.mark.parametrize("event_prefix", ["", "event: error\n"])
+async def test_provider_stream_errors_preserve_cause_without_authorizing_replay(tmp_path, provider_type, code, done, event_prefix):
+    calls, audit, artifacts = [], ReplayAudit(), CountedArtifacts(tmp_path)
+    error = {"error": {"type": provider_type, "code": code, "message": "private provider detail"}}
+    body = event('{"partial":') + (event_prefix + "data: " + json.dumps(error) + "\n\n").encode() + (DONE if done else b"")
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    client, _ = model(handler, audit, artifacts=artifacts)
+    async with client:
+        with pytest.raises(UncertainModelResponse):
+            await client.call("extract", {})
+        with pytest.raises(RequestReplayBlocked):
+            await client.call("extract", {})
+    terminal = audit.events[-1]
+    assert terminal["status"] == "uncertain"
+    assert terminal["error"]["type"] == "provider_stream_error"
+    assert terminal["error"]["provider_error"] == {"type": provider_type, "code": code}
+    assert "private provider detail" not in json.dumps(terminal["error"])
+    assert artifacts.read_json(terminal["response_ref"])["provider_error"] == {"type": provider_type, "code": code}
+    assert len(calls) == artifacts.writes == 1
+
+
+async def test_provider_error_identifiers_reject_prose_and_redact_credentials(tmp_path):
+    artifacts = CountedArtifacts(tmp_path)
+    body = {"error": {"type": "request included private details", "code": "synthetic-secret"}}
+    client, audit = model(lambda _: httpx.Response(200, content="data: " + json.dumps(body) + "\n\n",
+                                                   headers={"content-type": "text/event-stream"}), artifacts=artifacts)
+    async with client:
+        with pytest.raises(UncertainModelResponse):
+            await client.call("extract", {})
+    terminal = audit.events[-1]
+    assert terminal["error"]["provider_error"] == {"code": "[REDACTED]"}
+    saved = artifacts.read_json(terminal["response_ref"])
+    assert saved["provider_error"] == {"code": "[REDACTED]"}
+    assert "synthetic-secret" not in json.dumps(saved)
+
+
+@pytest.mark.parametrize("headers", [{}, {"content-type": "text/plain"}])
+async def test_parsed_provider_error_retains_uncertainty_with_invalid_content_type(tmp_path, headers):
+    calls, audit, artifacts = [], ReplayAudit(), CountedArtifacts(tmp_path)
+    error_frame = b'data: {"error":{"type":"server_error","code":"request_timeout"}}\n\n'
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=error_frame + GOOD, headers=headers)
+
+    client, _ = model(handler, audit, artifacts=artifacts)
+    async with client:
+        with pytest.raises(UncertainModelResponse):
+            await client.call("extract", {})
+        with pytest.raises(RequestReplayBlocked):
+            await client.call("extract", {})
+    terminal = audit.events[-1]
+    assert terminal["status"] == "uncertain"
+    assert terminal["error"]["type"] == "provider_stream_error"
+    assert terminal["error"]["provider_error"] == {"type": "server_error", "code": "request_timeout"}
+    assert len(calls) == artifacts.writes == 1
+
+
+@pytest.mark.parametrize("headers", [{}, {"content-type": "text/plain"}])
+async def test_invalid_content_type_without_provider_error_remains_semantic_failure(headers):
+    client, audit = model(lambda _: httpx.Response(200, content=GOOD, headers=headers))
+    async with client:
+        with pytest.raises(ModelSemanticError):
+            await client.call("extract", {})
+    assert audit.events[-1]["status"] == "failed"
+    assert audit.events[-1]["error"]["type"] == "invalid_stream_content_type"
+
+
+@pytest.mark.parametrize("error_frame", [
+    b"event: error\n\n",
+    b"event: error\ndata: not JSON\n\n",
+    b"event: error\ndata: \xff\n\n",
+    b"event: error\ndata: {}\n\n",
+    b"event: error\ndata: []\n\n",
+    b"event: error\ndata: null\n\n",
+    b"event: error\ndata: [DONE]\n\n",
+    b'data: {"error":"private provider prose"}\n\n',
+    b'data: {"error":null}\n\n',
+])
+async def test_explicit_provider_error_is_uncertain_even_without_diagnostic_object(tmp_path, error_frame):
+    calls, audit, artifacts = [], ReplayAudit(), CountedArtifacts(tmp_path)
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=error_frame + GOOD, headers={"content-type": "text/event-stream"})
+
+    client, _ = model(handler, audit, artifacts=artifacts)
+    async with client:
+        with pytest.raises(UncertainModelResponse):
+            await client.call("extract", {})
+        with pytest.raises(RequestReplayBlocked):
+            await client.call("extract", {})
+    terminal = audit.events[-1]
+    assert terminal["status"] == "uncertain"
+    assert terminal["error"]["type"] == "provider_stream_error"
+    assert terminal["error"]["provider_error"] == {}
+    assert artifacts.read_json(terminal["response_ref"])["provider_error"] == {}
+    assert len(calls) == artifacts.writes == 1
+
+
 def test_request_digest_binds_full_body_and_normalized_endpoint_without_keys():
     request = build_request("gpt-6-luna", "Read JSON", {"a": "中文"}, [ImageInput(b"img", "image/png")])
     base = request_digest("https://CHAT.invalid:443/v1", request)
@@ -335,10 +443,11 @@ async def test_real_wait_for_enforces_idle_on_a_stalled_stream(tmp_path, with_pa
                                                    headers={"content-type": "text/event-stream"}),
                           timeout_seconds=0.02, artifacts=CountedArtifacts(tmp_path))
     async with client:
-        with pytest.raises(UncertainModelResponse):
+        with pytest.raises(UncertainModelResponse if with_partial else ModelInfrastructureError):
             await client.call("extract", {})
     expected = "between_data_idle_timeout" if with_partial else "first_data_idle_timeout"
     assert audit.events[-1]["error"]["type"] == expected
+    assert audit.events[-1]["status"] == ("uncertain" if with_partial else "failed")
 
 
 async def test_cancellation_preserves_received_partial_stream_once(tmp_path):
@@ -377,10 +486,13 @@ async def test_every_domain_task_uses_the_same_streaming_builder(task):
     assert requests[0]["stream"] is True and requests[0]["stream_options"] == {"include_usage": True}
 
 
-@pytest.mark.parametrize("prefix", [b"event: error\n\n", b"data: invalid JSON\n\n"])
-async def test_protocol_error_cannot_be_overridden_by_later_valid_completion(monkeypatch, prefix):
+@pytest.mark.parametrize("prefix,error_class,failure", [
+    (b"event: error\n\n", UncertainModelResponse, "provider_stream_error"),
+    (b"data: invalid JSON\n\n", ModelSemanticError, "invalid_stream_envelope"),
+])
+async def test_protocol_error_cannot_be_overridden_by_later_valid_completion(monkeypatch, prefix, error_class, failure):
     client, audit, _, _ = timed_model(monkeypatch, [(1, prefix), (1, GOOD)])
     async with client:
-        with pytest.raises(ModelSemanticError):
+        with pytest.raises(error_class):
             await client.call("extract", {})
-    assert audit.events[-1]["error"]["type"] == "invalid_stream_envelope"
+    assert audit.events[-1]["error"]["type"] == failure

@@ -19,14 +19,15 @@ from psycopg.conninfo import make_conninfo
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import InvalidConfirmation, Store
 from docreader.jobs.settings import Settings
-from docreader.llm import ModelInfrastructureError, UncertainModelResponse
+from docreader.llm import ModelInfrastructureError, ModelSemanticError, UncertainModelResponse
 from docreader.tender.evidence import register_manifest
 from docreader.workflow.nodes import TenderNodes
 from docreader.workflow.persistence import initialize_checkpoints
 from docreader.workflow.runner import execute_command
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fixture_model import FixtureModel, fixture_request_digest
+from fixture_model import fixture_request_digest
+from fixture_analysis_model import AnalysisFixtureModel
 
 pytestmark = pytest.mark.integration
 
@@ -94,7 +95,7 @@ async def runtime(tmp_path):
 async def execute(store, settings, run, **model_options):
     cmd = (await store.get_run(run["run_id"]))["commands"][-1]
     def factory(s, a, lease):
-        return TenderNodes(s, a, lease, FixtureModel(s, lease, **model_options))
+        return TenderNodes(s, a, lease, AnalysisFixtureModel(s, lease, artifacts=a, **model_options))
     await execute_command(run["run_id"], cmd["command_id"], cmd["source_version"], settings, factory)
     return await store.get_run(run["run_id"])
 
@@ -104,11 +105,7 @@ def output(artifacts, run, stage):
                                     if item["stage"] == stage and not item["scope"]))
 
 
-def plan_items(artifacts, plan):
-    return [item for entry in plan["packs"] for item in artifacts.read_json(entry["artifact_ref"])["items"]]
-
-
-async def test_mixed_formats_confirm_to_concrete_response_plan(runtime):
+async def test_mixed_formats_confirm_to_analysis_ready(runtime):
     store, artifacts, settings, run = runtime
     row = await execute(store, settings, run)
     checked = output(artifacts, row, "verify")
@@ -117,19 +114,19 @@ async def test_mixed_formats_confirm_to_concrete_response_plan(runtime):
     assert frozen["stats"]["document_count"] == 4
     assert frozen["stats"]["image_count"] == 2  # Excel embedded + standalone; no text PDF render.
     assert output(artifacts, row, "pack-plan")["range_count"] == checked["counts"]["ranges"]
-    assert checked["counts"]["requirements"] >= 5
+    assert checked["counts"]["items"] >= 5
     assert all(row["usage"][i]["metadata"]["test_double"] for i in range(len(row["usage"])))
     assert all(request["usage"] is None for request in row["usage"])  # Never fabricate paid usage.
     await store.confirm(run["run_id"], 1, row["checklist_digest"], "first-confirm")
     completed = await execute(store, settings, run)
-    assert completed["status"] == "response-plan-ready"
-    plan = output(artifacts, completed, "plan")
-    items = plan_items(artifacts, plan)
-    assert len(items) == checked["counts"]["applicable_requirements"]
-    assert all(item["action"] and item["material_needs"] and item["requirement_ref"] for item in items)
-    assert "requirements" not in checked and "requirement_packs" not in checked
-    assert all("constraint_snapshot" not in item for item in items)
-    assert plan["checklist_digest"] == completed["checklist_digest"]
+    assert completed["status"] == "analysis-ready"
+    extracted = output(artifacts, completed, "extract")
+    items = [item for entry in extracted["packs"] for item in artifacts.read_json(entry["artifact_ref"])["items"]]
+    assert len(items) == checked["counts"]["items"]
+    assert all(item["evidence"] for item in items)
+    assert "items" not in checked
+    assert not any(item["stage"] == "plan" for item in completed["artifacts"])
+    assert not any(request["task"] == "plan" for request in completed["usage"])
 
 
 async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sources(runtime):
@@ -156,9 +153,9 @@ async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sou
 async def test_uncertain_sibling_prevents_queue_replay_even_when_refusal_is_first(runtime):
     store, _, settings, run = runtime
 
-    class MixedFailureModel(FixtureModel):
+    class MixedFailureModel(AnalysisFixtureModel):
         async def call(self, task, payload, images=()):
-            if task == "extract" and payload.get("document_id") == "annex":
+            if task == "extract" and any(view["document_id"] == "annex" for view in payload.get("source_views", [])):
                 request_id = uuid4().hex
                 await self.store.begin_request(self.lease, request_id, "deterministic-contract-fixture", task, {
                     "request_digest": fixture_request_digest(task, payload, images),
@@ -171,7 +168,7 @@ async def test_uncertain_sibling_prevents_queue_replay_even_when_refusal_is_firs
 
     cmd = (await store.get_run(run["run_id"]))["commands"][-1]
     def factory(s, a, lease):
-        return TenderNodes(s, a, lease, MixedFailureModel(s, lease, fail_document="main"))
+        return TenderNodes(s, a, lease, MixedFailureModel(s, lease, artifacts=a, fail_document="main"))
     with pytest.raises(UncertainModelResponse):
         await execute_command(run["run_id"], cmd["command_id"], 1, settings, factory)
     row = await store.get_run(run["run_id"])
@@ -185,39 +182,50 @@ async def test_uncertain_sibling_prevents_queue_replay_even_when_refusal_is_firs
     assert len((await store.get_run(run["run_id"]))["usage"]) == previous_requests
 
 
-async def test_semantic_failure_is_unresolved_not_global_success_and_revision_invalidates(runtime):
+async def test_protocol_failure_is_failed_and_successful_siblings_survive_source_revision(runtime):
+    from docreader.llm.request import ModelCorrectionStalled
+
     store, artifacts, settings, run = runtime
-    row = await execute(store, settings, run, malformed_document="annex")
-    assert row["status"] == "blocked"
-    checked = output(artifacts, row, "verify")
-    assert checked["counts"]["requirements"] > 0  # independent successful documents retained
-    assert checked["counts"]["blocking_issues"] > 0
+    for attempt in range(2):
+        with pytest.raises(ModelSemanticError):
+            await execute(store, settings, run, malformed_document="annex")
+        current = await store.get_run(run["run_id"])
+        assert current["status"] == "pending"
+        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
+    before = len(current["usage"])
+    with pytest.raises(ModelCorrectionStalled):
+        await execute(store, settings, run, malformed_document="annex")
+    row = await store.get_run(run["run_id"])
+    assert row["status"] == "failed"
+    assert len(row["usage"]) == before and row["commands"][-1]["infrastructure_failures"] == 2
+    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 2
+    assert any(item["stage"] == "extract-pack" for item in row["artifacts"])
+    assert not any(item["stage"] == "verify" for item in row["artifacts"])
     with pytest.raises(InvalidConfirmation):
-        await store.confirm(run["run_id"], 1, row["checklist_digest"], "cannot-force")
-    # A source revision represents actual supplied content/metadata changes, never a retry shortcut.
+        await store.confirm(run["run_id"], 1, "unverified", "cannot-force")
     manifest = artifacts.read_json(row["manifest_ref"])
     manifest["documents"][0]["document_version"] = "two"
     revised = await store.revise(run["run_id"], artifacts.put_json(manifest), "reviewed-source-version")
     assert revised["source_version"] == 2
     recovered = await execute(store, settings, run)
     assert recovered["status"] == "waiting-confirmation"
-    assert recovered["checklist_digest"] != row["checklist_digest"]
     with pytest.raises(InvalidConfirmation):
-        await store.confirm(run["run_id"], 1, row["checklist_digest"], "expired-version")
+        await store.confirm(run["run_id"], 1, "unverified", "expired-version")
 
 
-async def test_same_source_correction_revalidates_and_invalidates_previous_confirmation_and_plan(runtime):
+async def test_same_source_correction_revalidates_and_invalidates_previous_confirmation(runtime):
     store, artifacts, settings, run = runtime
     first = await execute(store, settings, run)
     await store.confirm(run["run_id"], 1, first["checklist_digest"], "confirm-r1", domain_revision=1)
     ready = await execute(store, settings, run)
-    assert ready["status"] == "response-plan-ready"
+    assert ready["status"] == "analysis-ready"
     original_source = next(a["artifact_ref"] for a in ready["artifacts"] if a["stage"] == "freeze")
     original_extract = next(a["artifact_ref"] for a in ready["artifacts"] if a["stage"] == "extract")
     corrected = artifacts.read_json(original_extract)
     first_pack = corrected["packs"][0]
     pack = artifacts.read_json(first_pack["artifact_ref"])
-    pack["requirements"][0]["veto_risk"] = True  # manual classification, deterministic fixture only
+    pack["items"][0]["domains"] = ["delivery"]  # manual classification, deterministic fixture only
+    pack["source_ranges"] = {"forged-source": {"text": "Caller supplied metadata is untrusted."}}
     first_pack["artifact_ref"] = artifacts.put_json(pack)
     corrected_ref = artifacts.put_json(corrected)
     revision = await store.correct(run["run_id"], 1, 1, original_extract["sha256"], corrected_ref,
@@ -238,16 +246,17 @@ async def test_same_source_correction_revalidates_and_invalidates_previous_confi
     assert second["checklist_digest"] != first["checklist_digest"]
     assert next(a["artifact_ref"] for a in second["artifacts"] if a["stage"] == "freeze") == original_source
     reviewed = output(artifacts, second, "verify")
-    reviewed_index = artifacts.read_json(reviewed["requirements_ref"])
-    assert artifacts.read_json(reviewed_index["packs"][0]["artifact_ref"])["requirements"][0]["veto_risk"]
+    reviewed_index = artifacts.read_json(reviewed["items_ref"])
+    assert artifacts.read_json(reviewed_index["packs"][0]["artifact_ref"])["items"][0]["domains"] == ["delivery"]
+    assert "forged-source" not in artifacts.read_json(reviewed_index["packs"][0]["artifact_ref"])["source_ranges"]
     assert all(r["task"] != "extract" for r in second["usage"] if r["domain_revision"] == 2)
     assert any(r["task"] == "verify" for r in second["usage"] if r["domain_revision"] == 2)
     with pytest.raises(InvalidConfirmation):
         await store.confirm(run["run_id"], 1, first["checklist_digest"], "wrong-digest-r2", domain_revision=2)
     await store.confirm(run["run_id"], 1, second["checklist_digest"], "confirm-r2", domain_revision=2)
     final = await execute(store, settings, run)
-    assert final["status"] == "response-plan-ready"
-    assert output(artifacts, final, "plan")["checklist_digest"] == second["checklist_digest"]
+    assert final["status"] == "analysis-ready"
+    assert not any(item["stage"] == "plan" for item in final["artifacts"])
 
 
 async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(runtime, monkeypatch):
@@ -256,11 +265,11 @@ async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(run
     store, artifacts, settings, run = runtime
     async def execute_with_spec(label):
         cmd = (await store.get_run(run["run_id"]))["commands"][-1]
-        class ConfiguredFixture(FixtureModel):
+        class ConfiguredFixture(AnalysisFixtureModel):
             def execution_spec(self):
                 return {"test_configuration": label}
         def factory(s, a, lease):
-            return TenderNodes(s, a, lease, ConfiguredFixture(s, lease))
+            return TenderNodes(s, a, lease, ConfiguredFixture(s, lease, artifacts=a))
         await execute_command(run["run_id"], cmd["command_id"], cmd["source_version"], settings, factory)
 
     await execute_with_spec("original")
@@ -270,7 +279,7 @@ async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(run
     failed_once = False
     async def fail_receipt_after_checkpoint(self, lease, status, **kwargs):
         nonlocal failed_once
-        if status == "response-plan-ready" and not failed_once:
+        if status == "analysis-ready" and not failed_once:
             failed_once = True
             raise psycopg.OperationalError("injected receipt failure after complete checkpoint")
         return await original_release(self, lease, status, **kwargs)
@@ -279,9 +288,13 @@ async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(run
         await execute_with_spec("original")
     pending = await store.get_run(run["run_id"])
     assert pending["status"] == "pending"
-    assert plan_items(artifacts, output(artifacts, pending, "plan"))
-    with pytest.raises(Conflict):
-        await execute_with_spec("changed")
+    assert any(item["stage"] == "confirm" for item in pending["artifacts"])
+    for attempt in range(1, 4):
+        with pytest.raises(Conflict):
+            await execute_with_spec("changed")
+        current = await store.get_run(run["run_id"])
+        assert current["status"] == ("pending" if attempt < 3 else "failed")
+        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
     failed = await store.get_run(run["run_id"])
     assert failed["status"] == "failed"
     assert len(failed["usage"]) == len(pending["usage"])
@@ -296,8 +309,12 @@ async def test_partial_recovery_refuses_changed_native_parser_configuration(runt
         await execute(store, settings, run, fail_document="annex")
     before = await store.get_run(run["run_id"])
     monkeypatch.setattr(pdf_parser, "SCAN_MIN_CHARS_PER_PAGE", pdf_parser.SCAN_MIN_CHARS_PER_PAGE + 1)
-    with pytest.raises(Conflict):
-        await execute(store, settings, run)
+    for attempt in range(1, 4):
+        with pytest.raises(Conflict):
+            await execute(store, settings, run)
+        current = await store.get_run(run["run_id"])
+        assert current["status"] == ("pending" if attempt < 3 else "failed")
+        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
     after = await store.get_run(run["run_id"])
     assert after["status"] == "failed"
     assert len(after["usage"]) == len(before["usage"])
@@ -345,11 +362,13 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
     registered = register_manifest({"documents": [{"document_id": "scope-form", "document_version": "one",
                                                   "role": "main", "path": str(path)}]}, artifacts)
     run = await store.submit(artifacts.put_json(registered), "scope-form")
-    blocked = await execute(store, settings, run)
+    blocked = await execute(store, settings, run, scope_ambiguity=True)
     assert blocked["status"] == "blocked"
     first_plan = output(artifacts, blocked, "pack-plan")
     frozen = next(item["artifact_ref"] for item in blocked["artifacts"] if item["stage"] == "freeze")
-    problem = next(item for item in first_plan["issues"] if item["code"] == "condition_scope_unresolved")
+    assert not any(item["code"] == "condition_scope_unresolved" for item in first_plan["issues"])
+    problem = next(item for item in output(artifacts, blocked, "verify")["issues"]
+                   if item["code"] == "semantic_scope_unresolved")
     repo = EvidenceRepository(artifacts)
     source = repo.source_index(first_plan["documents"][0]["source_index_ref"])
     source_range = next(entry for entry in source.ranges if condition in entry["text"])
@@ -368,7 +387,7 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
     with pytest.raises(Conflict):
         await store.review_scope(run["run_id"], 1, 1, first_plan["plan_digest"], review_ref,
                                  "expired-scope-baseline", "Old plan cannot revise a newer domain revision")
-    reviewed = await execute(store, settings, run)  # A fresh executor/checkpoint thread.
+    reviewed = await execute(store, settings, run, scope_ambiguity=True)  # The same fixture re-reads the human proposal.
     assert reviewed["source_version"] == 1 and reviewed["domain_revision"] == 2
     assert reviewed["status"] == "waiting-confirmation", output(artifacts, reviewed, "verify")["issues"]
     assert next(item["artifact_ref"] for item in reviewed["artifacts"] if item["stage"] == "freeze") == frozen
@@ -381,73 +400,4 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
         await store.confirm(run["run_id"], 1, blocked["checklist_digest"], "old-scope-confirm", domain_revision=1)
     await store.confirm(run["run_id"], 1, reviewed["checklist_digest"], "scope-confirm-r2", domain_revision=2)
     ready = await execute(store, settings, run)
-    assert ready["status"] == "response-plan-ready"
-
-
-async def test_complete_verify_and_response_inputs_repartition_in_actual_workflow(runtime):
-    from collections import Counter
-    from docreader.llm import RequestBudget
-    from docreader.tender.checks.verify import verify_payload
-    from docreader.tender.evidence import EvidenceRepository
-
-    store, artifacts, settings, _ = runtime
-    path = settings.artifact_root.parent / "complete-input.docx"
-    document = Document()
-    document.add_heading("Supplier obligations", level=1)
-    for suffix in "abcdefgh":
-        document.add_heading("Delivery package " + suffix, level=1)
-        document.add_paragraph("The supplier must provide a signed delivery commitment for package " + suffix + ".")
-    document.save(path)
-    registered = register_manifest({"documents": [{"document_id": "budget-fixture", "document_version": "one",
-                                                  "role": "main", "path": str(path)}]}, artifacts)
-    run = await store.submit(artifacts.put_json(registered), "complete-input-budget")
-    calls = []
-
-    class CompleteInputModel(FixtureModel):
-        def request_budget(self):
-            return RequestBudget(context_tokens=32768)
-
-        async def call(self, task, payload, images=()):
-            self.request_budget().require(task, payload, images)
-            calls.append((task, payload))
-            result = await super().call(task, payload, images)
-            if task == "extract":
-                for requirement in result["requirements"]:
-                    requirement["applicability_basis"] = "The unconditional supplier instruction applies to this response. " * 60
-                for disposition in result["dispositions"]:
-                    disposition["reason"] += " The complete cited source supports this disposition." * 12
-            return result
-
-    async def execute_current():
-        command = (await store.get_run(run["run_id"]))["commands"][-1]
-        await execute_command(run["run_id"], command["command_id"], 1, settings,
-                              lambda s, a, lease: TenderNodes(s, a, lease, CompleteInputModel(s, lease)))
-        return await store.get_run(run["run_id"])
-
-    row = await execute_current()
-    checked = output(artifacts, row, "verify")
-    assert row["status"] == "waiting-confirmation", checked["issues"]
-    original = output(artifacts, row, "pack-plan")
-    assert len(original["packs"]) == 1
-    extracted_index = output(artifacts, row, "extract")
-    extraction = artifacts.read_json(extracted_index["packs"][0]["artifact_ref"])
-    source_pack = EvidenceRepository(artifacts).load_pack(original["packs"][0])
-    assert RequestBudget(32768).measure("verify", verify_payload(source_pack, extraction))["fits"] is False
-    replanned = artifacts.read_json(checked["pack_plan_ref"])
-    assert replanned["task"] == "verify" and len(replanned["packs"]) > 1
-    verification_calls = [payload for task, payload in calls if task == "verify"]
-    assert Counter(d["range_id"] for payload in verification_calls for d in payload["dispositions"]) == Counter(
-        d["range_id"] for d in extraction["dispositions"])
-    assert Counter(r["requirement_id"] for payload in verification_calls for r in payload["requirements"]) == Counter(
-        r["requirement_id"] for r in extraction["requirements"])
-    assert all(RequestBudget(32768).fits("verify", payload) for payload in verification_calls)
-    await store.confirm(run["run_id"], 1, row["checklist_digest"], "budget-confirm")
-    ready = await execute_current()
-    assert ready["status"] == "response-plan-ready", output(artifacts, ready, "plan")
-    plan = output(artifacts, ready, "plan")
-    assert len(plan["packs"]) > 1
-    assert len(plan_items(artifacts, plan)) == len(extraction["requirements"]) == 8
-    assert artifacts.read_json(plan["pack_plan_ref"])["task"] == "plan"
-    before = len(calls)
-    await execute_current()
-    assert len(calls) == before
+    assert ready["status"] == "analysis-ready"

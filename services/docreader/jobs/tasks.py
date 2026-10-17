@@ -1,19 +1,20 @@
 import dramatiq
-import psycopg
 
+from docreader.integrations.store import Cancelled, RequestReplayBlocked, StaleExecution
 from docreader.jobs.broker import broker
 from docreader.jobs.settings import Settings
+from docreader.llm.request import ModelCorrectionStalled, UncertainModelResponse
 from docreader.workflow.runner import execute_command
 
 
-def infrastructure_retry(retries, exception):
-    return retries < 4 and isinstance(
-        exception, (psycopg.OperationalError, psycopg.InterfaceError, ConnectionError, TimeoutError)
+def execution_retry(retries, exception):
+    return retries < 3 and isinstance(exception, Exception) and not isinstance(
+        exception, (Cancelled, StaleExecution, UncertainModelResponse, RequestReplayBlocked, ModelCorrectionStalled)
     )
 
 
-@dramatiq.actor(broker=broker, queue_name="tender", max_retries=4,
-                retry_when=infrastructure_retry, min_backoff=1000, max_backoff=30000,
+@dramatiq.actor(broker=broker, queue_name="tender", max_retries=3,
+                retry_when=execution_retry, min_backoff=1000, max_backoff=30000,
                 time_limit=float("inf"))
 async def tender_command(run_id: str, command_id: str, source_version: int):
     from docreader.workflow.nodes import TenderNodes

@@ -15,6 +15,12 @@ def fixture_request_digest(task, payload, images=()):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+def fixture_source_texts(source):
+    # Preserve sent prose; never join separate cells into an invented quotation.
+    return ([source["text"]] if "text" in source
+            else [cell["text"] for cell in source.get("cells", [])])
+
+
 class FixtureModel:
     def __init__(self, store=None, lease=None, *, fail_document=None, malformed_document=None):
         self.store, self.lease = store, lease
@@ -43,10 +49,11 @@ class FixtureModel:
         elif task == "extract":
             requirements, dispositions = [], []
             for source in payload["body"]:
-                text = source["text"]
-                required = "must" in text.lower()
-                requirement_id = f"req-{source['range_id']}"
-                if required:
+                texts = [text for text in fixture_source_texts(source) if "must" in text.lower()]
+                requirement_ids = []
+                for number, text in enumerate(texts, start=1):
+                    requirement_id = f"req-{source['range_id']}" + (f":{number}" if len(texts) > 1 else "")
+                    requirement_ids.append(requirement_id)
                     requirements.append({
                         "requirement_id": requirement_id, "text": text, "subject": "supplier",
                         "evidence": [{"range_id": source["range_id"], "quote": text}],
@@ -55,9 +62,9 @@ class FixtureModel:
                         "applicability_basis": "Unconditional supplier instruction in this synthetic fixture.",
                     })
                 dispositions.append({"range_id": source["range_id"],
-                                     "status": "requirements" if required else "non_requirement",
-                                     "reason": "Literal must instruction." if required else "Source is a descriptive heading or empty field without an obligation.",
-                                     "requirement_ids": [requirement_id] if required else []})
+                                     "status": "requirements" if requirement_ids else "non_requirement",
+                                     "reason": "Literal must instruction." if requirement_ids else "Source is a descriptive heading or empty field without an obligation.",
+                                     "requirement_ids": requirement_ids})
             for template in payload.get("blank_table_templates", []):
                 for rows in template["rows"]:
                     dispositions.extend({

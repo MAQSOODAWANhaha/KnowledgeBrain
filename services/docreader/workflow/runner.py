@@ -7,7 +7,9 @@ from langgraph.types import Command
 from psycopg.rows import dict_row
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.integrations.store import Cancelled, StaleExecution, Store
+from docreader.integrations.store import Cancelled, RequestReplayBlocked, StaleExecution, Store
+from docreader.llm import UncertainModelResponse
+from docreader.llm.request import ModelCorrectionStalled
 from docreader.workflow.graph import build_graph
 from docreader.workflow.persistence import FencedPostgresSaver
 
@@ -34,7 +36,7 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
             previous = await graph.aget_state(config)
             cmd = await store.get_command(command_id)
             if cmd["kind"] == "resume" and any(task.interrupts for task in previous.tasks):
-                value = Command(resume=cmd["payload"])
+                value = Command(resume={key: value for key, value in cmd["payload"].items() if key != "retry"})
             elif previous.values:
                 value = None
             else:
@@ -46,7 +48,7 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
             state = final.values
             paused = any(task.interrupts for task in final.tasks)
             status = "waiting-confirmation" if paused else state.get("status", "failed")
-            if status not in {"waiting-confirmation", "response-plan-ready", "blocked", "failed"}:
+            if status not in {"waiting-confirmation", "analysis-ready", "blocked", "failed"}:
                 raise RuntimeError("graph ended without an explicit terminal state")
             await store.release(lease, status, checklist_digest=state.get("checklist_digest"))
 
@@ -64,13 +66,13 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
         await graph_task
     except (Cancelled, StaleExecution):
         return
-    except (psycopg.OperationalError, psycopg.InterfaceError, ConnectionError, TimeoutError):
+    except (UncertainModelResponse, RequestReplayBlocked, ModelCorrectionStalled) as error:
         with suppress(StaleExecution, psycopg.Error):
-            await store.release(lease, "retry")
+            await store.release(lease, "failed", error=type(error).__name__)
         raise
     except Exception as error:
         with suppress(StaleExecution, psycopg.Error):
-            await store.release(lease, "failed", error=type(error).__name__)
+            await store.release(lease, "retry", error=type(error).__name__)
         raise
     finally:
         for task in (graph_task, heart_task):

@@ -31,12 +31,19 @@ def parse_args():
     command.add_argument("--domain-revision", required=True, type=int)
     command.add_argument("--digest", required=True)
     command.add_argument("--request-key", required=True)
+    command = commands.add_parser("retry")
+    command.add_argument("run_id")
+    command.add_argument("--source-version", required=True, type=int)
+    command.add_argument("--domain-revision", required=True, type=int)
+    command.add_argument("--failed-command-id", required=True)
+    command.add_argument("--reason", required=True)
+    command.add_argument("--request-key", required=True)
     command = commands.add_parser("correct")
     command.add_argument("run_id")
-    command.add_argument("requirements", type=Path, help="JSON containing the complete inline packs extraction list")
+    command.add_argument("items", type=Path, help="Analysis v2 JSON containing the complete inline packs list")
     command.add_argument("--source-version", required=True, type=int)
     command.add_argument("--expected-revision", required=True, type=int)
-    command.add_argument("--base-requirements-digest", required=True)
+    command.add_argument("--base-items-digest", required=True)
     command.add_argument("--reason", required=True)
     command.add_argument("--request-key", required=True)
     command = commands.add_parser("review-scope")
@@ -77,12 +84,28 @@ async def run(args):
                 "domain_revision": row.get("submitted_domain_revision", row["domain_revision"]),
                 "status": row["status"], "issues": registered.get("issues", [])}
     if args.command == "status":
+        from docreader.llm.usage import budget_observation
+
         row = await store.get_run(args.run_id)
         # Return actual domain summary and refs; never print configuration credentials.
         row["results"] = {}
         for item in row["artifacts"]:
             if not item["scope"]:
                 row["results"][item["stage"]] = await asyncio.to_thread(artifacts.read_json, item["artifact_ref"])
+        verification = row["results"].get("verify", {})
+        if verification.get("schema_version") == 2:
+            from docreader.tender.checks.analysis import current_items
+
+            row["results"]["current_items"] = await asyncio.to_thread(current_items, artifacts, verification)
+        plans = [value for stage, value in row["results"].items()
+                 if stage.startswith("analysis-") and stage.endswith("-plan")]
+        if source_plan := row["results"].get("pack-plan"):
+            budgets = []
+            for pack in source_plan["packs"]:
+                descriptor = await asyncio.to_thread(artifacts.read_json, pack["artifact_ref"])
+                budgets.append({"budget": descriptor["planning_details"]["budget"]})
+            plans.insert(0, {"phase": "extract", "requests": budgets})
+        row["budget_observation"] = budget_observation(row["usage"], plans)
         return row
     if args.command == "cancel":
         row = await store.cancel(args.run_id)
@@ -92,15 +115,22 @@ async def run(args):
             args.run_id, args.source_version, args.digest, args.request_key, domain_revision=args.domain_revision,
         )
         return {"command_id": row["command_id"], "status": row["status"]}
+    if args.command == "retry":
+        row = await store.retry(
+            args.run_id, args.source_version, args.domain_revision, args.failed_command_id,
+            args.request_key, args.reason,
+        )
+        return {"command_id": row["command_id"], "status": row["status"],
+                "source_version": row["source_version"], "domain_revision": row["domain_revision"]}
     if args.command == "correct":
-        corrected = json.loads(args.requirements.read_text())
+        corrected = json.loads(args.items.read_text())
         row = await store.get_run(args.run_id)
         ref = await asyncio.to_thread(
             _correction_ref, artifacts, row, args.source_version, args.expected_revision,
-            args.base_requirements_digest, corrected,
+            args.base_items_digest, corrected,
         )
         result = await store.correct(
-            args.run_id, args.source_version, args.expected_revision, args.base_requirements_digest,
+            args.run_id, args.source_version, args.expected_revision, args.base_items_digest,
             ref, args.request_key, args.reason,
         )
         return {"run_id": args.run_id, "source_version": result["submitted_source_version"],
@@ -126,12 +156,14 @@ async def run(args):
 
 
 def _correction_ref(artifacts, run, source_version, revision, base_digest, corrected):
-    """Rebuild only requirements; all evidence identities come from frozen files."""
-    from docreader.tender.requirements import validate_correction
+    """Rebuild v2 items; all evidence identities come from frozen files."""
+    from docreader.tender.requirements import validate_item_correction
     from docreader.tender.evidence import EvidenceRepository
+    from docreader.tender.checks.analysis import assign_issues
 
-    if not isinstance(corrected, dict) or set(corrected) != {"packs"} or not isinstance(corrected["packs"], list):
-        raise ValueError("correction must contain a complete packs list")
+    if (not isinstance(corrected, dict) or set(corrected) != {"schema_version", "packs"}
+            or corrected["schema_version"] != 2 or not isinstance(corrected["packs"], list)):
+        raise ValueError("correction must contain schema_version 2 and a complete packs list")
     # Include immutable history so a lost CLI response can replay its request key.
     receipts = [*run["artifacts"], *run["history"]["artifacts"]]
     base = next((item for item in receipts if item["source_version"] == source_version and item["domain_revision"] == revision
@@ -139,9 +171,13 @@ def _correction_ref(artifacts, run, source_version, revision, base_digest, corre
     frozen = next((item for item in receipts if item["source_version"] == source_version and item["domain_revision"] == revision
                    and item["stage"] == "pack-plan" and not item["scope"]), None)
     if not base or not frozen or base["artifact_ref"]["sha256"] != base_digest:
-        raise ValueError("correction baseline does not identify frozen extracted requirements")
+        raise ValueError("correction baseline does not identify frozen extracted items")
     index = artifacts.read_json(base["artifact_ref"])
+    if index.get("schema_version") != 2:
+        raise ValueError("legacy extraction is read-only; correction requires analysis v2 items")
     source_index = artifacts.read_json(frozen["artifact_ref"])
+    native = artifacts.read_json(source_index["frozen_ref"]) if source_index.get("frozen_ref") else source_index
+    global_issues = assign_issues(native.get("issues", []), "source")
     expected = {item["pack_id"] for item in index["packs"]}
     sources = {item["pack_id"]: item["artifact_ref"] for item in source_index["packs"]}
     by_id = {}
@@ -157,9 +193,12 @@ def _correction_ref(artifacts, run, source_version, revision, base_digest, corre
     for entry in index["packs"]:
         pack_id = entry["pack_id"]
         pack = repository.load_pack(sources[pack_id])
-        result = validate_correction(pack, {key: value for key, value in by_id[pack_id].items() if key != "pack_id"})
+        issues = assign_issues([*global_issues, *pack.get("issues", [])], pack_id)
+        result = validate_item_correction(pack, {key: value for key, value in by_id[pack_id].items() if key != "pack_id"},
+                                          issues=issues)
+        result["issues"] = assign_issues(result["issues"], pack_id)
         output.append({"pack_id": pack_id, "artifact_ref": artifacts.put_json(result)})
-    return artifacts.put_json({"packs": output, "counts": {"packs": len(output)}})
+    return artifacts.put_json({"schema_version": 2, "packs": output, "counts": {"packs": len(output)}})
 
 
 def _scope_review_ref(artifacts, run, source_version, domain_revision, base_plan_digest, submitted):
@@ -180,9 +219,13 @@ def _scope_review_ref(artifacts, run, source_version, domain_revision, base_plan
                      if item["source_version"] == source_version and item["domain_revision"] == domain_revision), None)
     if not revision:
         raise ValueError("scope review revision is absent")
+    analysis = (revision.get("execution_spec") or {}).get("workflow_protocol", {}).get("schema_version") == 2
+    verified = next((item for item in receipts if item["source_version"] == source_version
+                     and item["domain_revision"] == domain_revision and item["stage"] == "verify" and not item["scope"]), None)
+    review_issues = artifacts.read_json(verified["artifact_ref"])["issues"] if analysis and verified else []
     validated = validate_scope_decisions(
         artifacts.read_json(frozen["artifact_ref"]), artifacts.read_json(plan["artifact_ref"]),
-        submitted["scope_decisions"], EvidenceRepository(artifacts),
+        submitted["scope_decisions"], EvidenceRepository(artifacts), analysis=analysis, review_issues=review_issues,
     )
     existing = (artifacts.read_json(revision["scope_decisions_ref"])["scope_decisions"]
                 if revision["scope_decisions_ref"] else [])

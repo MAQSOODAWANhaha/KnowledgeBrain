@@ -1,0 +1,3543 @@
+{
+  "evidence_kind": "synthetic_semantic_review_cases",
+  "annotation_status": "agent_authored_draft",
+  "human_review_completed": false,
+  "model_evaluation_completed": false,
+  "semantic_acceptance": false,
+  "label_policy": "预期结论为 agent 编写的草案，不是人工 ground truth，不要求模型复述特定 issue code 或理由措辞；expected、category、provenance 和 case_id 不得发送给模型。",
+  "schema_version": 2,
+  "dataset_id": "tender-semantic-draft-v2-routing",
+  "source_corpus_sha256": "6644d486b5fab3c47597c4edeb5f3d4c946c744d06b7f5c84cfda40da6c582e5",
+  "purpose": "使用当前v2完整来源、事项及补遗决议输入评测独立核验；预期为待人工复核草案，不代表抽取或五节点验收。",
+  "migration_notes": [
+    "原13组正反样本与2个跨文档样本保留；表格引文改为各单元格明文。",
+    "补遗样本改为相同原事项、不同替换决议；用retained_rules表达维护义务是否保留。",
+    "新增4个局部漏项边界、异常例外和续报补读样本；预期仍为待人工复核草案。"
+  ],
+  "cases": [
+    {
+      "case_id": "unit-assignment-consistent",
+      "category": "number_unit_assignment",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-001",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-1",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p001",
+            "document_id": "synthetic-doc-001",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s001-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r001-01",
+                "text": "投标人须在30天内交付设备，报价不得超过60万元。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p001:i1",
+            "kind": "obligation",
+            "text": "投标人须在30天内交付设备，报价不得超过60万元。",
+            "evidence": [
+              {
+                "range_id": "r001-01",
+                "quote": "投标人须在30天内交付设备，报价不得超过60万元。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              },
+              {
+                "value": "60",
+                "unit": "万元",
+                "quote": "60万元"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r001-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "交付期限与报价上限均保持原数字、单位及归属。",
+        "source_evidence": [
+          {
+            "range_id": "r001-01",
+            "quote": "投标人须在30天内交付设备，报价不得超过60万元。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r001-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "unit-assignment-incorrect",
+      "category": "number_unit_assignment",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-001",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-2",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p001",
+            "document_id": "synthetic-doc-001",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s001-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r001-01",
+                "text": "投标人须在30天内交付设备，报价不得超过60万元。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p001:i1",
+            "kind": "obligation",
+            "text": "投标人须在60天内交付设备，报价不得超过30万元。",
+            "evidence": [
+              {
+                "range_id": "r001-01",
+                "quote": "投标人须在30天内交付设备，报价不得超过60万元。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              },
+              {
+                "value": "60",
+                "unit": "万元",
+                "quote": "60万元"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r001-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "正文将期限与报价的数值互换；numbers 数组仍正确不能弥补正文错误。",
+        "source_evidence": [
+          {
+            "range_id": "r001-01",
+            "quote": "投标人须在30天内交付设备，报价不得超过60万元。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r001-01"
+        ],
+        "affected_item_ids": [
+          "p001:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "subject-assignment-consistent",
+      "category": "subject_quantity_assignment",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-002",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-3",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p002",
+            "document_id": "synthetic-doc-002",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s002-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r002-01",
+                "text": "投标人须安排3名项目经理和6名实施工程师。",
+                "kind": "paragraph",
+                "section_id": "s002-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p002:i1",
+            "kind": "obligation",
+            "text": "投标人须配置项目经理3名、实施工程师6名。",
+            "evidence": [
+              {
+                "range_id": "r002-01",
+                "quote": "投标人须安排3名项目经理和6名实施工程师。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "3",
+                "unit": "名",
+                "quote": "3名"
+              },
+              {
+                "value": "6",
+                "unit": "名",
+                "quote": "6名"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r002-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p002:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "语序改变，但两类岗位的人数归属保持不变。",
+        "source_evidence": [
+          {
+            "range_id": "r002-01",
+            "quote": "投标人须安排3名项目经理和6名实施工程师。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r002-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "subject-assignment-incorrect",
+      "category": "subject_quantity_assignment",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-002",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-4",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p002",
+            "document_id": "synthetic-doc-002",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s002-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r002-01",
+                "text": "投标人须安排3名项目经理和6名实施工程师。",
+                "kind": "paragraph",
+                "section_id": "s002-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p002:i1",
+            "kind": "obligation",
+            "text": "投标人须配置项目经理6名、实施工程师3名。",
+            "evidence": [
+              {
+                "range_id": "r002-01",
+                "quote": "投标人须安排3名项目经理和6名实施工程师。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "3",
+                "unit": "名",
+                "quote": "3名"
+              },
+              {
+                "value": "6",
+                "unit": "名",
+                "quote": "6名"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r002-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p002:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "数字和单位集合均相同，但项目经理与实施工程师的人数被交换。",
+        "source_evidence": [
+          {
+            "range_id": "r002-01",
+            "quote": "投标人须安排3名项目经理和6名实施工程师。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r002-01"
+        ],
+        "affected_item_ids": [
+          "p002:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "comparison-direction-consistent",
+      "category": "comparator_direction",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-003",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-5",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p003",
+            "document_id": "synthetic-doc-003",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s003-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r003-01",
+                "text": "投标人应至少配置30名技术人员。",
+                "kind": "paragraph",
+                "section_id": "s003-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p003:i1",
+            "kind": "obligation",
+            "text": "投标人配置的技术人员不得少于30名。",
+            "evidence": [
+              {
+                "range_id": "r003-01",
+                "quote": "投标人应至少配置30名技术人员。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "名",
+                "quote": "30名"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r003-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p003:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "不得少于与至少表达相同下限，不应因措辞不同误报。",
+        "source_evidence": [
+          {
+            "range_id": "r003-01",
+            "quote": "投标人应至少配置30名技术人员。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r003-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "comparison-direction-incorrect",
+      "category": "comparator_direction",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-003",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-6",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p003",
+            "document_id": "synthetic-doc-003",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s003-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r003-01",
+                "text": "投标人应至少配置30名技术人员。",
+                "kind": "paragraph",
+                "section_id": "s003-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p003:i1",
+            "kind": "obligation",
+            "text": "投标人配置的技术人员不得超过30名。",
+            "evidence": [
+              {
+                "range_id": "r003-01",
+                "quote": "投标人应至少配置30名技术人员。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "名",
+                "quote": "30名"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r003-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p003:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "人员下限被改成上限。",
+        "source_evidence": [
+          {
+            "range_id": "r003-01",
+            "quote": "投标人应至少配置30名技术人员。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r003-01"
+        ],
+        "affected_item_ids": [
+          "p003:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "comparison-omission-consistent",
+      "category": "comparator_omission",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-004",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-7",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p004",
+            "document_id": "synthetic-doc-004",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s004-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r004-01",
+                "text": "投标人须配置至少30名且不超过50名技术人员。",
+                "kind": "paragraph",
+                "section_id": "s004-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p004:i1",
+            "kind": "obligation",
+            "text": "投标人配置的技术人员不少于30名且不多于50名。",
+            "evidence": [
+              {
+                "range_id": "r004-01",
+                "quote": "投标人须配置至少30名且不超过50名技术人员。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "名",
+                "quote": "30名"
+              },
+              {
+                "value": "50",
+                "unit": "名",
+                "quote": "50名"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r004-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p004:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "人员数量的30名下限和50名上限均明确保留。",
+        "source_evidence": [
+          {
+            "range_id": "r004-01",
+            "quote": "投标人须配置至少30名且不超过50名技术人员。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r004-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "comparison-omission-incorrect",
+      "category": "comparator_omission",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-004",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-8",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p004",
+            "document_id": "synthetic-doc-004",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s004-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r004-01",
+                "text": "投标人须配置至少30名且不超过50名技术人员。",
+                "kind": "paragraph",
+                "section_id": "s004-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p004:i1",
+            "kind": "obligation",
+            "text": "投标人须至少配置30名技术人员。",
+            "evidence": [
+              {
+                "range_id": "r004-01",
+                "quote": "投标人须配置至少30名"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "名",
+                "quote": "30名"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r004-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p004:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "仅保留30名下限，截短引文并遗漏50名上限；必须读取完整 body 才能识别遗漏，不能只比较候选引文。",
+        "source_evidence": [
+          {
+            "range_id": "r004-01",
+            "quote": "投标人须配置至少30名且不超过50名技术人员。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r004-01"
+        ],
+        "affected_item_ids": [
+          "p004:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "comparison-equivalence-consistent",
+      "category": "comparator_equivalence",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-005",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-9",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p005",
+            "document_id": "synthetic-doc-005",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s005-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r005-01",
+                "text": "投标人承诺交付周期不大于30天。",
+                "kind": "paragraph",
+                "section_id": "s005-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p005:i1",
+            "kind": "obligation",
+            "text": "投标人承诺交付周期不超过30天。",
+            "evidence": [
+              {
+                "range_id": "r005-01",
+                "quote": "投标人承诺交付周期不大于30天。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r005-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p005:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "不大于与不超过均为包含边界的上限，语义等价。",
+        "source_evidence": [
+          {
+            "range_id": "r005-01",
+            "quote": "投标人承诺交付周期不大于30天。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r005-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "comparison-equivalence-incorrect",
+      "category": "comparator_equivalence",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-005",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-10",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p005",
+            "document_id": "synthetic-doc-005",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s005-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r005-01",
+                "text": "投标人承诺交付周期不大于30天。",
+                "kind": "paragraph",
+                "section_id": "s005-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p005:i1",
+            "kind": "obligation",
+            "text": "投标人承诺交付周期大于30天。",
+            "evidence": [
+              {
+                "range_id": "r005-01",
+                "quote": "投标人承诺交付周期不大于30天。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r005-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p005:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "删除否定后，上限被改成严格大于。",
+        "source_evidence": [
+          {
+            "range_id": "r005-01",
+            "quote": "投标人承诺交付周期不大于30天。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r005-01"
+        ],
+        "affected_item_ids": [
+          "p005:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "condition-scope-consistent",
+      "category": "condition_scope",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-006",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-11",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p006",
+            "document_id": "synthetic-doc-006",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s006-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r006-01",
+                "text": "投标人须提交实施计划。",
+                "kind": "paragraph",
+                "section_id": "s006-01"
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "r006-02",
+                "text": "本节要求仅适用于第一标段。",
+                "kind": "paragraph",
+                "section_id": "s006-01",
+                "source_range_id": "r006-02",
+                "start": 0,
+                "end": 13
+              }
+            ],
+            "scope_bindings": [
+              {
+                "range_id": "r006-02",
+                "source_range_id": "r006-02",
+                "start": 0,
+                "end": 13,
+                "scope_binding": {
+                  "kind": "reviewed_targets",
+                  "status": "bound",
+                  "complete_sentence": true,
+                  "applies_to_range_ids": [
+                    "r006-01"
+                  ],
+                  "reviewed_target_range_ids": [
+                    "r006-01"
+                  ]
+                }
+              }
+            ],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p006:i1",
+            "kind": "submission_requirement",
+            "text": "第一标段投标人须提交实施计划。",
+            "evidence": [
+              {
+                "range_id": "r006-01",
+                "quote": "投标人须提交实施计划。"
+              },
+              {
+                "range_id": "r006-02",
+                "quote": "本节要求仅适用于第一标段。"
+              }
+            ],
+            "subject": "投标人",
+            "conditions": [
+              "仅适用于第一标段"
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r006-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p006:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "明确的第一标段适用范围被保留。",
+        "source_evidence": [
+          {
+            "range_id": "r006-01",
+            "quote": "投标人须提交实施计划。"
+          },
+          {
+            "range_id": "r006-02",
+            "quote": "本节要求仅适用于第一标段。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r006-01",
+          "r006-02"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "condition-scope-incorrect",
+      "category": "condition_scope",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-006",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-12",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p006",
+            "document_id": "synthetic-doc-006",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s006-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r006-01",
+                "text": "投标人须提交实施计划。",
+                "kind": "paragraph",
+                "section_id": "s006-01"
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "r006-02",
+                "text": "本节要求仅适用于第一标段。",
+                "kind": "paragraph",
+                "section_id": "s006-01",
+                "source_range_id": "r006-02",
+                "start": 0,
+                "end": 13
+              }
+            ],
+            "scope_bindings": [
+              {
+                "range_id": "r006-02",
+                "source_range_id": "r006-02",
+                "start": 0,
+                "end": 13,
+                "scope_binding": {
+                  "kind": "reviewed_targets",
+                  "status": "bound",
+                  "complete_sentence": true,
+                  "applies_to_range_ids": [
+                    "r006-01"
+                  ],
+                  "reviewed_target_range_ids": [
+                    "r006-01"
+                  ]
+                }
+              }
+            ],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p006:i1",
+            "kind": "submission_requirement",
+            "text": "各标段投标人均须提交实施计划。",
+            "evidence": [
+              {
+                "range_id": "r006-01",
+                "quote": "投标人须提交实施计划。"
+              },
+              {
+                "range_id": "r006-02",
+                "quote": "本节要求仅适用于第一标段。"
+              }
+            ],
+            "subject": "投标人"
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r006-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p006:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "将仅第一标段的要求扩展到各标段；所需条件原文和明确目标均已提供。",
+        "source_evidence": [
+          {
+            "range_id": "r006-01",
+            "quote": "投标人须提交实施计划。"
+          },
+          {
+            "range_id": "r006-02",
+            "quote": "本节要求仅适用于第一标段。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r006-01",
+          "r006-02"
+        ],
+        "affected_item_ids": [
+          "p006:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "exception-preservation-consistent",
+      "category": "exception_preservation",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-007",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-13",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p007",
+            "document_id": "synthetic-doc-007",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s007-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r007-01",
+                "text": "投标人须在30天内交付设备，不可抗力导致的延期除外。",
+                "kind": "paragraph",
+                "section_id": "s007-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p007:i1",
+            "kind": "obligation",
+            "text": "投标人须在30天内交付设备，不可抗力导致的延期除外。",
+            "evidence": [
+              {
+                "range_id": "r007-01",
+                "quote": "投标人须在30天内交付设备，不可抗力导致的延期除外。"
+              }
+            ],
+            "subject": "投标人",
+            "exceptions": [
+              "不可抗力导致的延期除外"
+            ],
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r007-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p007:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "交付期限及不可抗力延期例外均完整保留。",
+        "source_evidence": [
+          {
+            "range_id": "r007-01",
+            "quote": "投标人须在30天内交付设备，不可抗力导致的延期除外。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r007-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "exception-preservation-incorrect",
+      "category": "exception_preservation",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-007",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-14",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p007",
+            "document_id": "synthetic-doc-007",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s007-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r007-01",
+                "text": "投标人须在30天内交付设备，不可抗力导致的延期除外。",
+                "kind": "paragraph",
+                "section_id": "s007-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p007:i1",
+            "kind": "obligation",
+            "text": "投标人须无条件在30天内交付设备。",
+            "evidence": [
+              {
+                "range_id": "r007-01",
+                "quote": "投标人须在30天内交付设备，不可抗力导致的延期除外。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r007-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p007:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "删除例外并新增无条件承诺，改变了义务范围。",
+        "source_evidence": [
+          {
+            "range_id": "r007-01",
+            "quote": "投标人须在30天内交付设备，不可抗力导致的延期除外。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r007-01"
+        ],
+        "affected_item_ids": [
+          "p007:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "table-unit-consistent",
+      "category": "table_unit_inheritance",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-008",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-15",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p008",
+            "document_id": "synthetic-doc-008",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s008-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r008-01",
+                "kind": "table_region",
+                "section_id": "s008-01",
+                "table_id": "t008-01",
+                "row_start": 1,
+                "row_end": 2,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "服务器"
+                  },
+                  {
+                    "column": 1,
+                    "text": "60"
+                  }
+                ]
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "r008-02",
+                "kind": "table_region",
+                "section_id": "s008-01",
+                "table_id": "t008-01",
+                "row_start": 0,
+                "row_end": 1,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "设备"
+                  },
+                  {
+                    "column": 1,
+                    "text": "单价（万元）"
+                  }
+                ],
+                "header": true
+              },
+              {
+                "range_id": "r008-03",
+                "text": "投标人须按下表列出的单价填报设备报价。",
+                "kind": "paragraph",
+                "section_id": "s008-01"
+              }
+            ],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p008:i1",
+            "kind": "obligation",
+            "text": "投标人的服务器单价为60万元。",
+            "evidence": [
+              {
+                "range_id": "r008-01",
+                "quote": "服务器"
+              },
+              {
+                "range_id": "r008-01",
+                "quote": "60"
+              },
+              {
+                "range_id": "r008-02",
+                "quote": "设备"
+              },
+              {
+                "range_id": "r008-02",
+                "quote": "单价（万元）"
+              },
+              {
+                "range_id": "r008-03",
+                "quote": "投标人须按下表列出的单价填报设备报价。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "60",
+                "unit": "万元",
+                "quote": "60"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r008-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p008:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "报价说明明确要求按表列单价填报；单元格中的60继承同表对应列表头的万元。合法引文分别来自行、表头和说明，不伪造连续的60万元引文。",
+        "source_evidence": [
+          {
+            "range_id": "r008-01",
+            "quote": "服务器"
+          },
+          {
+            "range_id": "r008-01",
+            "quote": "60"
+          },
+          {
+            "range_id": "r008-02",
+            "quote": "设备"
+          },
+          {
+            "range_id": "r008-02",
+            "quote": "单价（万元）"
+          },
+          {
+            "range_id": "r008-03",
+            "quote": "投标人须按下表列出的单价填报设备报价。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r008-01",
+          "r008-02",
+          "r008-03"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "table-unit-incorrect",
+      "category": "table_unit_inheritance",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-008",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-16",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p008",
+            "document_id": "synthetic-doc-008",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s008-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r008-01",
+                "kind": "table_region",
+                "section_id": "s008-01",
+                "table_id": "t008-01",
+                "row_start": 1,
+                "row_end": 2,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "服务器"
+                  },
+                  {
+                    "column": 1,
+                    "text": "60"
+                  }
+                ]
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "r008-02",
+                "kind": "table_region",
+                "section_id": "s008-01",
+                "table_id": "t008-01",
+                "row_start": 0,
+                "row_end": 1,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "设备"
+                  },
+                  {
+                    "column": 1,
+                    "text": "单价（万元）"
+                  }
+                ],
+                "header": true
+              },
+              {
+                "range_id": "r008-03",
+                "text": "投标人须按下表列出的单价填报设备报价。",
+                "kind": "paragraph",
+                "section_id": "s008-01"
+              }
+            ],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p008:i1",
+            "kind": "obligation",
+            "text": "投标人的服务器单价为60元。",
+            "evidence": [
+              {
+                "range_id": "r008-01",
+                "quote": "服务器"
+              },
+              {
+                "range_id": "r008-01",
+                "quote": "60"
+              },
+              {
+                "range_id": "r008-02",
+                "quote": "设备"
+              },
+              {
+                "range_id": "r008-02",
+                "quote": "单价（万元）"
+              },
+              {
+                "range_id": "r008-03",
+                "quote": "投标人须按下表列出的单价填报设备报价。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "60",
+                "unit": "元",
+                "quote": "60"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r008-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p008:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "报价说明要求按表列单价填报，表头单位为万元，抽取却使用元。本例观察模型能否读取同列表头并识别单位错误。",
+        "source_evidence": [
+          {
+            "range_id": "r008-01",
+            "quote": "服务器"
+          },
+          {
+            "range_id": "r008-01",
+            "quote": "60"
+          },
+          {
+            "range_id": "r008-02",
+            "quote": "设备"
+          },
+          {
+            "range_id": "r008-02",
+            "quote": "单价（万元）"
+          },
+          {
+            "range_id": "r008-03",
+            "quote": "投标人须按下表列出的单价填报设备报价。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r008-01",
+          "r008-02",
+          "r008-03"
+        ],
+        "affected_item_ids": [
+          "p008:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "within-range-omission-consistent",
+      "category": "within_range_omission",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-009",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-17",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p009",
+            "document_id": "synthetic-doc-009",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s009-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r009-01",
+                "text": "投标人应在30天内交付设备，并提供1年免费维护。",
+                "kind": "paragraph",
+                "section_id": "s009-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p009:i1",
+            "kind": "obligation",
+            "text": "投标人应在30天内交付设备。",
+            "evidence": [
+              {
+                "range_id": "r009-01",
+                "quote": "投标人应在30天内交付设备，并提供1年免费维护。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          },
+          {
+            "item_id": "p009:i2",
+            "kind": "obligation",
+            "text": "投标人须提供1年免费维护。",
+            "evidence": [
+              {
+                "range_id": "r009-01",
+                "quote": "投标人应在30天内交付设备，并提供1年免费维护。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "1",
+                "unit": "年",
+                "quote": "1年"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r009-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p009:i1",
+              "p009:i2"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "交付和免费维护两条原子义务均被提取。",
+        "source_evidence": [
+          {
+            "range_id": "r009-01",
+            "quote": "投标人应在30天内交付设备，并提供1年免费维护。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r009-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "within-range-omission-incorrect",
+      "category": "within_range_omission",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-009",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-18",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p009",
+            "document_id": "synthetic-doc-009",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s009-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r009-01",
+                "text": "投标人应在30天内交付设备，并提供1年免费维护。",
+                "kind": "paragraph",
+                "section_id": "s009-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p009:i1",
+            "kind": "obligation",
+            "text": "投标人应在30天内交付设备。",
+            "evidence": [
+              {
+                "range_id": "r009-01",
+                "quote": "投标人应在30天内交付设备，并提供1年免费维护。"
+              }
+            ],
+            "subject": "投标人",
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r009-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p009:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "虽然该 range 已有 disposition 且引文包含全句，但抽取遗漏了1年免费维护义务。",
+        "source_evidence": [
+          {
+            "range_id": "r009-01",
+            "quote": "投标人应在30天内交付设备，并提供1年免费维护。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r009-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "background-only-consistent",
+      "category": "non_requirement_background",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-010",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-19",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p010",
+            "document_id": "synthetic-doc-010",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s010-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r010-01",
+                "text": "项目背景：本单位上一年度完成了信息系统升级。本段仅介绍已完成事项，不提出本次投标义务。",
+                "kind": "paragraph",
+                "section_id": "s010-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r010-01",
+            "status": "non_item",
+            "reason": "本段明确仅介绍上一年度已完成的升级事项，不提出本次投标义务。",
+            "item_ids": []
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "本例已明确排除本次投标义务，非要求处置有具体原文依据。",
+        "source_evidence": [
+          {
+            "range_id": "r010-01",
+            "quote": "项目背景：本单位上一年度完成了信息系统升级。本段仅介绍已完成事项，不提出本次投标义务。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r010-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "background-only-incorrect",
+      "category": "non_requirement_background",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-010",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-20",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p010",
+            "document_id": "synthetic-doc-010",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s010-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r010-01",
+                "text": "项目背景：本单位上一年度完成了信息系统升级。本段仅介绍已完成事项，不提出本次投标义务。",
+                "kind": "paragraph",
+                "section_id": "s010-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p010:i1",
+            "kind": "obligation",
+            "text": "投标人须完成信息系统升级。",
+            "evidence": [
+              {
+                "range_id": "r010-01",
+                "quote": "本单位上一年度完成了信息系统升级。"
+              }
+            ],
+            "subject": "投标人"
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r010-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p010:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "把本单位过去完成的背景事项改写成投标人的本次义务。",
+        "source_evidence": [
+          {
+            "range_id": "r010-01",
+            "quote": "项目背景：本单位上一年度完成了信息系统升级。本段仅介绍已完成事项，不提出本次投标义务。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r010-01"
+        ],
+        "affected_item_ids": [
+          "p010:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "partial-amendment-consistent",
+      "category": "partial_amendment",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-011",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-21",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p011",
+            "document_id": "synthetic-doc-011",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s011-01",
+                "heading_path": "合成补遗 > 交付期限调整"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r011-01",
+                "text": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。",
+                "kind": "paragraph",
+                "section_id": "s011-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "amendment"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p011:i1",
+            "kind": "obligation",
+            "text": "投标人须在30天内交付，并提供1年免费维护。",
+            "evidence": [
+              {
+                "range_id": "r011-01",
+                "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+              }
+            ]
+          },
+          {
+            "item_id": "p011:i2",
+            "kind": "obligation",
+            "text": "本次将交付期限改为45天。",
+            "evidence": [
+              {
+                "range_id": "r011-01",
+                "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [
+          {
+            "decision_id": "associate-1:d1",
+            "issue_ids": [],
+            "reason": "补遗只修改交付期限，维护义务继续有效。",
+            "evidence": [
+              {
+                "range_id": "r011-01",
+                "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+              }
+            ],
+            "amendment": {
+              "target_item_id": "p011:i1",
+              "effect": "replace",
+              "affected_scope": "交付期限",
+              "retained_rules": [
+                {
+                  "text": "投标人须提供1年免费维护。",
+                  "scope": "原免费维护义务",
+                  "evidence": [
+                    {
+                      "range_id": "r011-01",
+                      "quote": "免费维护要求保持不变"
+                    }
+                  ]
+                }
+              ],
+              "replacement_item_ids": [
+                "p011:i2"
+              ]
+            }
+          }
+        ],
+        "dispositions": [
+          {
+            "range_id": "r011-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p011:i1",
+              "p011:i2"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "只修改交付期限，独立核验应接受保留维护义务的替换决议。",
+        "source_evidence": [
+          {
+            "range_id": "r011-01",
+            "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r011-01"
+        ],
+        "affected_item_ids": [],
+        "affected_decision_ids": [],
+        "accepted_decision_ids": [
+          "associate-1:d1"
+        ]
+      }
+    },
+    {
+      "case_id": "partial-amendment-incorrect",
+      "category": "partial_amendment",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-011",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-22",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p011",
+            "document_id": "synthetic-doc-011",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s011-01",
+                "heading_path": "合成补遗 > 交付期限调整"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r011-01",
+                "text": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。",
+                "kind": "paragraph",
+                "section_id": "s011-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "amendment"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p011:i1",
+            "kind": "obligation",
+            "text": "投标人须在30天内交付，并提供1年免费维护。",
+            "evidence": [
+              {
+                "range_id": "r011-01",
+                "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+              }
+            ]
+          },
+          {
+            "item_id": "p011:i2",
+            "kind": "obligation",
+            "text": "本次将交付期限改为45天。",
+            "evidence": [
+              {
+                "range_id": "r011-01",
+                "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [
+          {
+            "decision_id": "associate-1:d1",
+            "issue_ids": [],
+            "reason": "补遗将原交付与维护义务整体替换为45天交付。",
+            "evidence": [
+              {
+                "range_id": "r011-01",
+                "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+              }
+            ],
+            "amendment": {
+              "target_item_id": "p011:i1",
+              "effect": "replace",
+              "affected_scope": "交付和免费维护全部义务",
+              "retained_rules": [],
+              "replacement_item_ids": [
+                "p011:i2"
+              ]
+            }
+          }
+        ],
+        "dispositions": [
+          {
+            "range_id": "r011-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p011:i1",
+              "p011:i2"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "决议把局部交付修改扩大为全部替换，遗漏原维护义务，应拒绝该决议。",
+        "source_evidence": [
+          {
+            "range_id": "r011-01",
+            "quote": "原条款要求投标人在30天内交付，并提供1年免费维护。本次仅将交付期限改为45天，免费维护要求保持不变。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r011-01"
+        ],
+        "affected_item_ids": [
+          "p011:i1"
+        ],
+        "affected_decision_ids": [
+          "associate-1:d1"
+        ],
+        "accepted_decision_ids": []
+      }
+    },
+    {
+      "case_id": "section-identity-consistent",
+      "category": "same_heading_distinct_sections",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-012",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-23",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p012",
+            "document_id": "synthetic-doc-012",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s012-01",
+                "heading_path": "第一标段 > 服务要求"
+              },
+              {
+                "section_id": "s012-02",
+                "heading_path": "第二标段 > 服务要求"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r012-01",
+                "text": "服务期限为3年。",
+                "kind": "paragraph",
+                "section_id": "s012-01"
+              },
+              {
+                "range_id": "r012-02",
+                "text": "服务期限为5年。",
+                "kind": "paragraph",
+                "section_id": "s012-02"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p012:i1",
+            "kind": "obligation",
+            "text": "第一标段投标人的服务期限为3年。",
+            "evidence": [
+              {
+                "range_id": "r012-01",
+                "quote": "服务期限为3年。"
+              }
+            ],
+            "subject": "第一标段投标人",
+            "conditions": [
+              "第一标段"
+            ],
+            "numbers": [
+              {
+                "value": "3",
+                "unit": "年",
+                "quote": "3年"
+              }
+            ]
+          },
+          {
+            "item_id": "p012:i2",
+            "kind": "obligation",
+            "text": "第二标段投标人的服务期限为5年。",
+            "evidence": [
+              {
+                "range_id": "r012-02",
+                "quote": "服务期限为5年。"
+              }
+            ],
+            "subject": "第二标段投标人",
+            "conditions": [
+              "第二标段"
+            ],
+            "numbers": [
+              {
+                "value": "5",
+                "unit": "年",
+                "quote": "5年"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r012-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p012:i1"
+            ]
+          },
+          {
+            "range_id": "r012-02",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p012:i2"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "两个服务要求标题归属不同标段，分别保留3年和5年。",
+        "source_evidence": [
+          {
+            "range_id": "r012-01",
+            "quote": "服务期限为3年。"
+          },
+          {
+            "range_id": "r012-02",
+            "quote": "服务期限为5年。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r012-01",
+          "r012-02"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "section-identity-incorrect",
+      "category": "same_heading_distinct_sections",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-012",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-24",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p012",
+            "document_id": "synthetic-doc-012",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s012-01",
+                "heading_path": "第一标段 > 服务要求"
+              },
+              {
+                "section_id": "s012-02",
+                "heading_path": "第二标段 > 服务要求"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r012-01",
+                "text": "服务期限为3年。",
+                "kind": "paragraph",
+                "section_id": "s012-01"
+              },
+              {
+                "range_id": "r012-02",
+                "text": "服务期限为5年。",
+                "kind": "paragraph",
+                "section_id": "s012-02"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p012:i1",
+            "kind": "obligation",
+            "text": "第一标段投标人的服务期限为5年。",
+            "evidence": [
+              {
+                "range_id": "r012-01",
+                "quote": "服务期限为3年。"
+              },
+              {
+                "range_id": "r012-02",
+                "quote": "服务期限为5年。"
+              }
+            ],
+            "subject": "第一标段投标人",
+            "conditions": [
+              "第一标段"
+            ],
+            "numbers": [
+              {
+                "value": "5",
+                "unit": "年",
+                "quote": "5年"
+              }
+            ]
+          },
+          {
+            "item_id": "p012:i2",
+            "kind": "obligation",
+            "text": "第二标段投标人的服务期限为5年。",
+            "evidence": [
+              {
+                "range_id": "r012-02",
+                "quote": "服务期限为5年。"
+              }
+            ],
+            "subject": "第二标段投标人",
+            "conditions": [
+              "第二标段"
+            ],
+            "numbers": [
+              {
+                "value": "5",
+                "unit": "年",
+                "quote": "5年"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r012-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p012:i1"
+            ]
+          },
+          {
+            "range_id": "r012-02",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p012:i1",
+              "p012:i2"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "不能因标题同名或证据包含5年，把第二标段期限赋给第一标段；应读 section_id 对应的完整 heading_path。",
+        "source_evidence": [
+          {
+            "range_id": "r012-01",
+            "quote": "服务期限为3年。"
+          },
+          {
+            "range_id": "r012-02",
+            "quote": "服务期限为5年。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r012-01",
+          "r012-02"
+        ],
+        "affected_item_ids": [
+          "p012:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "partially-blank-table-consistent",
+      "category": "partially_blank_table",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-013",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-25",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p013",
+            "document_id": "synthetic-doc-013",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s013-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r013-01",
+                "kind": "table_region",
+                "section_id": "s013-01",
+                "table_id": "t013-01",
+                "row_start": 1,
+                "row_end": 2,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "项目负责人"
+                  },
+                  {
+                    "column": 1,
+                    "text": ""
+                  }
+                ]
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "r013-02",
+                "text": "投标人须填写下表各岗位人员的姓名及证书编号。",
+                "kind": "paragraph",
+                "section_id": "s013-01"
+              },
+              {
+                "range_id": "r013-03",
+                "kind": "table_region",
+                "section_id": "s013-01",
+                "table_id": "t013-01",
+                "row_start": 0,
+                "row_end": 1,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "岗位"
+                  },
+                  {
+                    "column": 1,
+                    "text": "姓名及证书编号"
+                  }
+                ],
+                "header": true
+              }
+            ],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p013:i1",
+            "kind": "submission_requirement",
+            "text": "投标人须填写项目负责人的姓名及证书编号。",
+            "evidence": [
+              {
+                "range_id": "r013-01",
+                "quote": "项目负责人"
+              },
+              {
+                "range_id": "r013-02",
+                "quote": "投标人须填写下表各岗位人员的姓名及证书编号。"
+              },
+              {
+                "range_id": "r013-03",
+                "quote": "岗位"
+              },
+              {
+                "range_id": "r013-03",
+                "quote": "姓名及证书编号"
+              }
+            ],
+            "subject": "投标人"
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r013-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p013:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "岗位行与表头、填写指令共同构成具体填报义务，空字段并不取消义务。",
+        "source_evidence": [
+          {
+            "range_id": "r013-01",
+            "quote": "项目负责人"
+          },
+          {
+            "range_id": "r013-02",
+            "quote": "投标人须填写下表各岗位人员的姓名及证书编号。"
+          },
+          {
+            "range_id": "r013-03",
+            "quote": "岗位"
+          },
+          {
+            "range_id": "r013-03",
+            "quote": "姓名及证书编号"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r013-01",
+          "r013-02",
+          "r013-03"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "partially-blank-table-incorrect",
+      "category": "partially_blank_table",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-doc-013",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-26",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p013",
+            "document_id": "synthetic-doc-013",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s013-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r013-01",
+                "kind": "table_region",
+                "section_id": "s013-01",
+                "table_id": "t013-01",
+                "row_start": 1,
+                "row_end": 2,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "项目负责人"
+                  },
+                  {
+                    "column": 1,
+                    "text": ""
+                  }
+                ]
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "r013-02",
+                "text": "投标人须填写下表各岗位人员的姓名及证书编号。",
+                "kind": "paragraph",
+                "section_id": "s013-01"
+              },
+              {
+                "range_id": "r013-03",
+                "kind": "table_region",
+                "section_id": "s013-01",
+                "table_id": "t013-01",
+                "row_start": 0,
+                "row_end": 1,
+                "column_count": 2,
+                "start": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "text": "岗位"
+                  },
+                  {
+                    "column": 1,
+                    "text": "姓名及证书编号"
+                  }
+                ],
+                "header": true
+              }
+            ],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r013-01",
+            "status": "non_item",
+            "reason": "本行姓名及证书编号为空，因此只是空白示例，不构成投标要求。",
+            "item_ids": []
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "仅凭未填字段将正文判为非要求，遗漏了已明确要求的填报动作。",
+        "source_evidence": [
+          {
+            "range_id": "r013-01",
+            "quote": "项目负责人"
+          },
+          {
+            "range_id": "r013-02",
+            "quote": "投标人须填写下表各岗位人员的姓名及证书编号。"
+          },
+          {
+            "range_id": "r013-03",
+            "quote": "岗位"
+          },
+          {
+            "range_id": "r013-03",
+            "quote": "姓名及证书编号"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r013-01",
+          "r013-02",
+          "r013-03"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "joint-conflict",
+      "category": "cross_document_conflict",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "joint-conflict",
+        "location": "两份独立文档各自的 source_view"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-27",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p014",
+            "document_id": "synthetic-doc-014",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s014-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r014-01",
+                "text": "第一标段投标人的交付期限不得超过30天。",
+                "kind": "paragraph",
+                "section_id": "s014-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          },
+          {
+            "pack_id": "p015",
+            "document_id": "synthetic-doc-015",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s015-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r015-01",
+                "text": "第一标段投标人的交付期限不得少于45天。",
+                "kind": "paragraph",
+                "section_id": "s015-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "attachment"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p014:i1",
+            "kind": "obligation",
+            "text": "第一标段投标人的交付期限不得超过30天。",
+            "evidence": [
+              {
+                "range_id": "r014-01",
+                "quote": "第一标段投标人的交付期限不得超过30天。"
+              }
+            ],
+            "subject": "第一标段投标人",
+            "conditions": [
+              "第一标段"
+            ],
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          },
+          {
+            "item_id": "p015:i1",
+            "kind": "obligation",
+            "text": "第一标段投标人的交付期限不得少于45天。",
+            "evidence": [
+              {
+                "range_id": "r015-01",
+                "quote": "第一标段投标人的交付期限不得少于45天。"
+              }
+            ],
+            "subject": "第一标段投标人",
+            "conditions": [
+              "第一标段"
+            ],
+            "numbers": [
+              {
+                "value": "45",
+                "unit": "天",
+                "quote": "45天"
+              }
+            ]
+          }
+        ],
+        "dispositions": [
+          {
+            "range_id": "r014-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p014:i1"
+            ]
+          },
+          {
+            "range_id": "r015-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p015:i1"
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "conflict",
+        "rationale": "两份文件都约束第一标段，同一交付期限同时要求不超过30天和不少于45天，没有可同时满足的期限；没有显式替换关系，不能按文件顺序覆盖。",
+        "source_evidence": [
+          {
+            "range_id": "r014-01",
+            "quote": "第一标段投标人的交付期限不得超过30天。"
+          },
+          {
+            "range_id": "r015-01",
+            "quote": "第一标段投标人的交付期限不得少于45天。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r014-01",
+          "r015-01"
+        ],
+        "affected_item_ids": [
+          "p014:i1",
+          "p015:i1"
+        ]
+      }
+    },
+    {
+      "case_id": "joint-compatible",
+      "category": "cross_document_conflict",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "joint-compatible",
+        "location": "两份独立文档各自的 source_view"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-28",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p016",
+            "document_id": "synthetic-doc-016",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s016-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r016-01",
+                "text": "第一标段投标人的交付期限不得超过30天。",
+                "kind": "paragraph",
+                "section_id": "s016-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          },
+          {
+            "pack_id": "p017",
+            "document_id": "synthetic-doc-017",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s017-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r017-01",
+                "text": "第二标段投标人的交付期限不得少于45天。",
+                "kind": "paragraph",
+                "section_id": "s017-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "attachment"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p016:i1",
+            "kind": "obligation",
+            "text": "第一标段投标人的交付期限不得超过30天。",
+            "evidence": [
+              {
+                "range_id": "r016-01",
+                "quote": "第一标段投标人的交付期限不得超过30天。"
+              }
+            ],
+            "subject": "第一标段投标人",
+            "conditions": [
+              "第一标段"
+            ],
+            "numbers": [
+              {
+                "value": "30",
+                "unit": "天",
+                "quote": "30天"
+              }
+            ]
+          },
+          {
+            "item_id": "p017:i1",
+            "kind": "obligation",
+            "text": "第二标段投标人的交付期限不得少于45天。",
+            "evidence": [
+              {
+                "range_id": "r017-01",
+                "quote": "第二标段投标人的交付期限不得少于45天。"
+              }
+            ],
+            "subject": "第二标段投标人",
+            "conditions": [
+              "第二标段"
+            ],
+            "numbers": [
+              {
+                "value": "45",
+                "unit": "天",
+                "quote": "45天"
+              }
+            ]
+          }
+        ],
+        "dispositions": [
+          {
+            "range_id": "r016-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p016:i1"
+            ]
+          },
+          {
+            "range_id": "r017-01",
+            "status": "items",
+            "reason": "本段列明本次投标所需履行的具体义务。",
+            "item_ids": [
+              "p017:i1"
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "一份约束第一标段上限，另一份约束第二标段下限，适用对象不同，不能只因30和45不同就判冲突。",
+        "source_evidence": [
+          {
+            "range_id": "r016-01",
+            "quote": "第一标段投标人的交付期限不得超过30天。"
+          },
+          {
+            "range_id": "r017-01",
+            "quote": "第二标段投标人的交付期限不得少于45天。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r016-01",
+          "r017-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "context-is-not-omission-target",
+      "category": "review_scope_and_routing",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-routing",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-routing",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p001",
+            "document_id": "synthetic-doc-001",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s001-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r001-01",
+                "text": "投标人须提交资格证明。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "supporting": [
+              {
+                "range_id": "routing-context",
+                "text": "本项目不接受联合体投标。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p001:i1",
+            "kind": "obligation",
+            "text": "投标人须提交资格证明。",
+            "evidence": [
+              {
+                "range_id": "r001-01",
+                "quote": "投标人须提交资格证明。"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r001-01",
+            "status": "items",
+            "reason": "抽取将本段归为已列事项。",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "consistent",
+        "rationale": "联合体条款仅为上下文，本请求不声明它的台账完整，不能仅因未携带对应事项报漏项。",
+        "source_evidence": [
+          {
+            "range_id": "r001-01",
+            "quote": "投标人须提交资格证明。"
+          },
+          {
+            "range_id": "routing-context",
+            "quote": "本项目不接受联合体投标。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r001-01",
+          "routing-context"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "real-omission-in-review-target",
+      "category": "review_scope_and_routing",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-routing",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-routing",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p001",
+            "document_id": "synthetic-doc-001",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s001-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r001-01",
+                "text": "本项目不接受联合体投标。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r001-01",
+            "status": "non_item",
+            "reason": "抽取将本段归为说明。",
+            "item_ids": []
+          }
+        ],
+        "issues": [],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "该范围是本次漏项检查目标，实际含资格限制，非事项处置不正确。",
+        "source_evidence": [
+          {
+            "range_id": "r001-01",
+            "quote": "本项目不接受联合体投标。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r001-01"
+        ],
+        "affected_item_ids": []
+      }
+    },
+    {
+      "case_id": "optional-exception-needs-local-correction",
+      "category": "review_scope_and_routing",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-routing",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-routing",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p001",
+            "document_id": "synthetic-doc-001",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s001-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r001-01",
+                "text": "代理商须提交业绩，制造商免交。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p001:i1",
+            "kind": "obligation",
+            "text": "投标人须提交业绩。",
+            "evidence": [
+              {
+                "range_id": "r001-01",
+                "quote": "代理商须提交业绩，制造商免交。"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r001-01",
+            "status": "items",
+            "reason": "抽取将本段归为已列事项。",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "issues": [
+          {
+            "issue_id": "routing-optional",
+            "code": "extraction_optional_fields_unresolved",
+            "detail": "items[0] 的 conditions/exceptions 原值：[代理商须提交，制造商免交。]，核心已保留，异常字段待核对。",
+            "blocking": true,
+            "range_id": "r001-01",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "incorrect",
+        "rationale": "正文扩大了义务范围；异常字段保留了条件例外，原文已足够，应续报原问题且无需补读。",
+        "source_evidence": [
+          {
+            "range_id": "r001-01",
+            "quote": "代理商须提交业绩，制造商免交。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r001-01"
+        ],
+        "affected_item_ids": [
+          "p001:i1"
+        ],
+        "needs_source": false,
+        "continued_issue_ids": [
+          "routing-optional"
+        ]
+      }
+    },
+    {
+      "case_id": "unseen-attachment-needs-source",
+      "category": "review_scope_and_routing",
+      "provenance": {
+        "kind": "synthetic",
+        "source_id": "synthetic-routing",
+        "location": "本例 source_view 中的完整原文及章节/表格结构"
+      },
+      "payload": {
+        "schema_version": 2,
+        "operation": "review",
+        "work_unit_id": "review-routing",
+        "source_version": 1,
+        "domain_revision": 1,
+        "source_views": [
+          {
+            "pack_id": "p001",
+            "document_id": "synthetic-doc-001",
+            "document_version": "synthetic-v1",
+            "sections": [
+              {
+                "section_id": "s001-01",
+                "heading_path": "合成招标文件 > 本例条款"
+              }
+            ],
+            "body": [
+              {
+                "range_id": "r001-01",
+                "text": "投标人须满足附件A中的资格条件。",
+                "kind": "paragraph",
+                "section_id": "s001-01"
+              }
+            ],
+            "supporting": [],
+            "scope_bindings": [],
+            "pending_scope_context": [],
+            "role": "main"
+          }
+        ],
+        "items": [
+          {
+            "item_id": "p001:i1",
+            "kind": "obligation",
+            "text": "投标人须满足附件A中的资格条件。",
+            "evidence": [
+              {
+                "range_id": "r001-01",
+                "quote": "投标人须满足附件A中的资格条件。"
+              }
+            ]
+          }
+        ],
+        "relations": [],
+        "decisions": [],
+        "dispositions": [
+          {
+            "range_id": "r001-01",
+            "status": "items",
+            "reason": "抽取将本段归为已列事项。",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "issues": [
+          {
+            "issue_id": "routing-attachment",
+            "code": "unresolved_reference",
+            "detail": "资格条件见附件A，需读取目标原文。",
+            "blocking": true,
+            "range_id": "r001-01",
+            "item_ids": [
+              "p001:i1"
+            ]
+          }
+        ],
+        "candidates": []
+      },
+      "expected": {
+        "verdict": "unresolved",
+        "rationale": "附件A正文未提供，当前请求无法判断资格条件；应续报并请求补读，不能声称全文缺失附件。",
+        "source_evidence": [
+          {
+            "range_id": "r001-01",
+            "quote": "投标人须满足附件A中的资格条件。"
+          }
+        ],
+        "reviewed_range_ids": [
+          "r001-01"
+        ],
+        "affected_item_ids": [],
+        "needs_source": true,
+        "continued_issue_ids": [
+          "routing-attachment"
+        ]
+      }
+    }
+  ]
+}

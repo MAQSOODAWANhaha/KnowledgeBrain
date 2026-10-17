@@ -72,6 +72,7 @@ class StreamResponse:
         self.done = False
         self.finish_reason = None
         self.failure = None
+        self.provider_error = None
         self.counts = {key: 0 for key in (
             "raw_received_chunks", "raw_received_bytes", "received_chunks", "received_bytes", "sse_events", "heartbeat_events",
             "content_deltas", "thinking_deltas", "tool_deltas", "usage_events", "done_events",
@@ -91,35 +92,50 @@ class StreamResponse:
     def _event(self, raw: bytes):
         self.counts["sse_events"] += 1
         try:
-            lines = re.split(r"\r\n|\r|\n", raw.decode("utf-8"))
+            lines = re.split(rb"\r\n|\r|\n", raw)
             data, event_type = [], None
             heartbeat = False
             for line in lines:
-                if line.startswith(":"):
+                if line.startswith(b":"):
                     heartbeat = True
                     continue
-                name, _, value = line.partition(":")
-                value = value.removeprefix(" ")
-                if name == "data":
+                name, _, value = line.partition(b":")
+                value = value.removeprefix(b" ")
+                if name == b"data":
                     data.append(value)
-                elif name == "event":
-                    event_type = value
+                elif name == b"event":
+                    event_type = value.decode("utf-8")
+            if event_type == "error":
+                # The explicit protocol error fences replay even when its
+                # diagnostic payload is absent, malformed, or not JSON.
+                self.provider_error = {}
+                self.failure = "provider_stream_error"
             if heartbeat or event_type in {"ping", "heartbeat"}:
                 self.counts["heartbeat_events"] += 1
-            if event_type == "error":
-                raise ValueError
             if not data or event_type in {"ping", "heartbeat"}:
                 return
             if self.done:
                 raise ValueError
-            value = "\n".join(data)
+            value = b"\n".join(data).decode("utf-8")
             if value.strip() == "[DONE]":
                 self.done = True
                 self.counts["done_events"] += 1
                 return
             envelope = json.loads(value, parse_constant=invalid_json_constant)
-            if not isinstance(envelope, dict) or "error" in envelope:
+            if not isinstance(envelope, dict):
                 raise ValueError
+            if "error" in envelope or event_type == "error":
+                error = envelope.get("error", envelope)
+                error = error if isinstance(error, dict) else {}
+                # Preserve diagnostic identifiers, never provider prose, URLs,
+                # request bodies, or arbitrary nested data in operator errors.
+                self.provider_error = {
+                    key: value for key in ("type", "code")
+                    if isinstance(value := error.get(key), str)
+                    and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value)
+                }
+                self.failure = "provider_stream_error"
+                return
             usage = reported_usage(envelope.get("usage"))
             if usage is not None:
                 self.usage = usage
@@ -155,6 +171,8 @@ class StreamResponse:
             self.failure = self.failure or "invalid_stream_envelope"
 
     def result(self) -> dict:
+        if self.provider_error is not None:
+            raise UncertainModelResponse("model provider reported a stream error; provider execution and billing are uncertain")
         if not self.done:
             raise UncertainModelResponse("model stream ended without completion; provider execution and billing are uncertain")
         if self.failure or self.pending.strip():
@@ -175,5 +193,6 @@ class StreamResponse:
                 "raw_body": self.raw.decode("utf-8", errors="replace"),
                 "activity": dict(self.counts), "finish_reason": self.finish_reason,
                 "done": self.done, "usage": self.usage,
+                "provider_error": self.provider_error,
                 "usage_status": "reported" if self.usage is not None else "unknown",
                 "outcome": outcome}

@@ -187,7 +187,8 @@ def _digest(value) -> str:
 
 
 async def plan_sources(frozen_index: dict, artifacts: ArtifactStore, budget: RequestBudget | None = None,
-                       scope_decisions: list | None = None, run_identity: dict | None = None) -> dict:
+                       scope_decisions: list | None = None, run_identity: dict | None = None,
+                       *, payload_builder: Callable[[dict], dict] | None = None, analysis: bool = False) -> dict:
     """A domain-revision plan over immutable sources; never reparse original files."""
     budget = budget or RequestBudget(context_tokens=131072)
     decisions = deepcopy(scope_decisions or [])
@@ -204,21 +205,29 @@ async def plan_sources(frozen_index: dict, artifacts: ArtifactStore, budget: Req
         for document in frozen["documents"]], "scope_decisions": decisions})
     repository = EvidenceRepository(artifacts)
     documents, packs, issues, probes = deepcopy(frozen["documents"]), [], list(frozen["issues"]), 0
+    payload_digests = []
     for document in documents:
         if "source_index_ref" not in document:
             continue
         source = await asyncio.to_thread(repository.source_index, document["source_index_ref"])
-        planned, stats = await asyncio.to_thread(make_packs, source, budget, decisions)
+        planned, stats = await asyncio.to_thread(make_packs, source, budget, decisions,
+                                                 payload_builder=payload_builder, analysis=analysis)
         probes += stats["probe_count"]
         for pack in planned:
             pack.update(raw_ref=document["raw_ref"], source_index_ref=document["source_index_ref"])
             pack["planning_details"]["budget_spec_ref"] = budget_spec_ref
+            if payload_builder is not None:
+                materialized = {**pack, "body": [source.materialize(item) for item in pack["body"]],
+                                "supporting": [source.materialize(item) for item in pack["supporting"]]}
+                payload_digests.append({"pack_id": pack["pack_id"], "payload_digest": _digest(payload_builder(materialized))})
             document["issues"].extend(pack["issues"])
             issues.extend(pack["issues"])
         document.update(range_count=sum(len(pack["body"]) for pack in planned), pack_count=len(planned),
                         plan_stats=stats, status="partial" if document["issues"] else "complete")
         document["issues"] = list({_digest(value): value for value in document["issues"]}.values())
         packs.extend(planned)
+    if payload_builder is not None:
+        input_digest = _digest({"source_input_digest": input_digest, "request_payloads": payload_digests})
     plan_digest = _digest({"task": "extract", "input_digest": input_digest, "budget_digest": budget_digest,
                            "packs": packs, "scope_decisions": decisions})
     pack_refs = []

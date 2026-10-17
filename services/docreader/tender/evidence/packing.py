@@ -227,8 +227,31 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
 
 class SupportingIndex:
     """Index structural dependencies once; a candidate only visits its own ranges."""
-    def __init__(self, ranges: list[dict], scope_decisions=()):
-        self.introductions, self.conditions, self.issues, self.sections = condition_context(ranges, scope_decisions)
+    def __init__(self, ranges: list[dict], scope_decisions=(), *, analysis=False):
+        self.analysis = analysis
+        self.by_id = {entry["range_id"]: entry for entry in ranges}
+        self.introductions, self.conditions, self.issues, self.sections = condition_context(
+            ranges, () if analysis else scope_decisions)
+        if analysis:
+            # Legacy language hints can select context, never bind scope or
+            # create semantic blockers in the analysis workflow.
+            self.issues = defaultdict(list)
+            candidates = {candidate["range_id"]: candidate for values in self.conditions.values()
+                          for _, candidate in values}
+            for decision in scope_decisions:
+                if decision["decision"] != "bind":
+                    continue
+                source = self.by_id.get(decision["range_id"], candidates.get(decision["range_id"]))
+                if source is None:
+                    raise ValueError("reviewed scope source is absent from immutable evidence")
+                value = {**source, "scope_binding": {
+                    "section_id": source.get("section_id"), "heading_path": source.get("heading_path", ""),
+                    "kind": "reviewed_targets", "relationship": "cumulative", "status": "bound",
+                    "table_ids": [], "complete_sentence": True,
+                    "reviewed_target_range_ids": decision["target_range_ids"],
+                    "decision_range_id": decision["range_id"],
+                }}
+                self.conditions[source.get("section_id") or "unlocated"].append((0, value))
         self.position = {entry["range_id"]: index for index, entry in enumerate(ranges)}
         self.pending_by_parent = defaultdict(list)
         self.reviewed_targets = defaultdict(list)
@@ -237,7 +260,7 @@ class SupportingIndex:
                 if candidate["scope_binding"].get("kind") == "reviewed_targets":
                     for target in candidate["scope_binding"]["reviewed_target_range_ids"]:
                         self.reviewed_targets[target].append(candidate)
-                elif not candidate["scope_binding"]["complete_sentence"]:
+                elif not analysis and not candidate["scope_binding"]["complete_sentence"]:
                     self.pending_by_parent[candidate["parent_range_id"]].append(candidate)
         self.headers, self.merged = defaultdict(list), defaultdict(list)
         for entry in ranges:
@@ -302,6 +325,10 @@ class SupportingIndex:
                     if position > self.position[original]:
                         break
                     if position == self.position[original] and candidate["end"] > entry["start"]:
+                        continue
+                    if self.analysis:
+                        original_context = self.by_id[candidate["source_range_id"]]
+                        context.setdefault(original_context["range_id"], {**original_context, "reason": "scope_candidate"})
                         continue
                     table_scope = candidate["scope_binding"]["table_ids"]
                     if table_scope and not set(table_scope).intersection(entry.get("table_ids") or [entry.get("table_id")]):

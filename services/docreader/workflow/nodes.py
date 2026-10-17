@@ -5,23 +5,20 @@ import json
 import time
 
 from langgraph.types import interrupt
-import psycopg
-
-from docreader.integrations.store import InvalidConfirmation
-from docreader.tender.checks import verify_all, verify_pack
+from docreader.integrations.store import Cancelled, InvalidConfirmation, RequestReplayBlocked, StaleExecution
+from docreader.llm import UncertainModelResponse
+from docreader.llm.request import ModelCorrectionStalled
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
-from docreader.tender.planning import build_plan
-from docreader.tender.requirements import extract_pack
+from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
 def _raise_failures(results):
     failures = [result for result in results if isinstance(result, BaseException)]
     if failures:
-        # Successful siblings have already committed. A non-retryable failure
-        # (especially uncertain provider execution) must not be hidden by an
-        # earlier infrastructure failure and trigger another paid attempt.
-        retryable = (psycopg.OperationalError, psycopg.InterfaceError, ConnectionError, TimeoutError)
-        raise next((failure for failure in failures if not isinstance(failure, retryable)), failures[0])
+        # Successful siblings have already committed. Uncertain payment or a
+        # lost execution fence must not be hidden by another retryable failure.
+        stop = (UncertainModelResponse, RequestReplayBlocked, Cancelled, StaleExecution, ModelCorrectionStalled)
+        raise next((failure for failure in failures if isinstance(failure, stop)), failures[0])
 
 
 class TenderNodes:
@@ -29,7 +26,7 @@ class TenderNodes:
         self.store, self.artifacts, self.lease = store, artifacts, lease
         self.model = model
         self.repo = EvidenceRepository(artifacts)
-        self.semaphore = asyncio.Semaphore(4)
+        self.semaphore = asyncio.Semaphore(2)
         self._ocr_locks = {}
         self._budget = None
 
@@ -57,6 +54,7 @@ class TenderNodes:
         model = self._ensure_model()
         spec = (model.execution_spec() if hasattr(model, "execution_spec") else
                 {"injected_model": f"{type(model).__module__}.{type(model).__qualname__}"})
+        spec = {**spec, "workflow_protocol": WORKFLOW_PROTOCOL}
         # Also check before returning cached model-derived artifacts after a restart.
         await self.store.pin_execution_spec(self.lease, spec)
         return spec
@@ -71,13 +69,23 @@ class TenderNodes:
 
     async def prepare(self):
         # A completed checkpoint can skip every node, so recovery guards belong here too.
-        await self._pin_source_spec()
+        from docreader.integrations.store import Conflict
+
         revision = await self.store.get_revision(self.lease)
-        if revision["execution_spec"] is not None:
-            await self._execution_spec()
+        row = await self.store.get_run(self.lease.run_id)
+        spec = revision["execution_spec"]
+        inherited_analysis = any(
+            item["source_version"] == self.lease.source_version
+            and (item.get("execution_spec") or {}).get("workflow_protocol") == WORKFLOW_PROTOCOL
+            for item in row["history"]["revisions"]
+        )
+        if ((spec is not None and spec.get("workflow_protocol") != WORKFLOW_PROTOCOL)
+                or (spec is None and row["artifacts"] and not inherited_analysis)):
+            raise Conflict("execution protocol changed; prior revisions are read-only, submit a new analysis run")
+        await self._execution_spec()
+        await self._pin_source_spec()
         # Plan capacity is revision-owned, while native parser identity is shared.
         # Check it even if a completed checkpoint skips all graph nodes.
-        row = await self.store.get_run(self.lease.run_id)
         plan_receipt = next((item for item in row["artifacts"]
                              if item["stage"] == "pack-plan" and not item["scope"]), None)
         if plan_receipt:
@@ -90,6 +98,12 @@ class TenderNodes:
 
     async def call(self, task, payload, images=()):
         return await self._ensure_model().call(task, payload, images=images)
+
+    async def call_validated(self, task, payload, validate):
+        from docreader.llm.recovery import call_validated
+
+        return await call_validated(self._ensure_model(), self.store, self.artifacts,
+                                    self.lease, task, payload, validate)
 
     async def close(self):
         if self.model is not None and hasattr(self.model, "close"):
@@ -177,14 +191,23 @@ class TenderNodes:
 
         async def plan_sources():
             from docreader.tender.evidence import plan_sources as build_source_plan
+            from docreader.tender.checks.analysis import assign_issues
+            from docreader.tender.requirements import item_payload
 
             frozen = await self._read(frozen_ref)
+            roles = {document["document_id"]: document["role"] for document in frozen["documents"]}
             decisions = await self._read(scope_decisions_ref) if scope_decisions_ref else None
+            identity = {"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                        "domain_revision": self.lease.domain_revision}
+            source_issues = assign_issues(frozen["issues"], "source")
             result = await build_source_plan(
                 frozen, self.artifacts, budget=self._request_budget(),
+                analysis=True,
                 scope_decisions=decisions["scope_decisions"] if decisions else [],
-                run_identity={"run_id": self.lease.run_id, "source_version": self.lease.source_version,
-                              "domain_revision": self.lease.domain_revision},
+                run_identity=identity,
+                payload_builder=lambda pack: item_payload(pack, identity=identity, role=roles[pack["document_id"]],
+                    issues=assign_issues([*source_issues, *pack.get("issues", [])], pack["pack_id"]),
+                    scope_decisions=decisions["scope_decisions"] if decisions else ()),
             )
             return await self._read(result)
 
@@ -213,69 +236,94 @@ class TenderNodes:
         return results
 
     async def extract(self, state):
+        from docreader.tender.checks.analysis import assign_issues
+        from docreader.tender.requirements import extract_items, validate_item_correction
+
         revision = await self.store.get_revision(self.lease)
-        correction = revision["corrected_requirements_ref"]
+        correction = revision["corrected_items_ref"]
+        index = await self._read(state["pack_plan_ref"])
+        frozen = await self._read(state["frozen_ref"])
+        roles = {document["document_id"]: document["role"] for document in frozen["documents"]}
+        identity = {"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                    "domain_revision": self.lease.domain_revision}
+        global_issues = assign_issues(frozen["issues"], "source")
+        decisions_ref = revision.get("scope_decisions_ref")
+        decisions = await self._read(decisions_ref) if decisions_ref else None
+        scope_decisions = decisions["scope_decisions"] if decisions else ()
+
         async def produce():
             if correction is not None:
-                return await self._read(correction)
-            index = await self._read(state["pack_plan_ref"])
-            packs = await self._packs(index, "extract-pack", lambda pack: extract_pack(pack, self))
-            return {"packs": packs, "counts": {"packs": len(packs)}}
+                corrected = await self._read(correction)
+                if corrected.get("schema_version") != 2:
+                    raise ValueError("correction must use the analysis v2 protocol")
+                expected = {entry["pack_id"]: entry for entry in index["packs"]}
+                entries = corrected.get("packs", [])
+                if (len(entries) != len(expected) or
+                        {entry["pack_id"] for entry in entries} != set(expected)):
+                    raise ValueError("correction must cover every current extraction pack")
+                packs = []
+                for entry in entries:
+                    pack = await asyncio.to_thread(self.repo.load_pack, expected[entry["pack_id"]]["artifact_ref"])
+                    value = await self._read(entry["artifact_ref"])
+                    # Revalidate even callers that bypassed the CLI. Host metadata is
+                    # rebuilt by the validator; it cannot authorize altered source IDs.
+                    payload = {key: value[key] for key in
+                               ("schema_version", "items", "dispositions", "relations", "issues")}
+                    issues = assign_issues([*global_issues, *pack.get("issues", [])], pack["pack_id"])
+                    validated = validate_item_correction(pack, payload, issues=issues)
+                    validated["issues"] = assign_issues(validated["issues"], pack["pack_id"])
+                    ref = await asyncio.to_thread(self.artifacts.put_json, validated)
+                    packs.append({"pack_id": pack["pack_id"], "artifact_ref": ref})
+                return {"schema_version": 2, "packs": packs, "counts": {"packs": len(packs)}}
 
-        return {"requirements_ref": await self._save("extract", produce,
-                                                  inputs={"pack_plan_ref": state["pack_plan_ref"], "corrected_requirements_ref": correction},
-                                                  model=correction is None)}
+            async def extract(pack):
+                issues = assign_issues([*global_issues, *pack.get("issues", [])], pack["pack_id"])
+                result = await extract_items(pack, self, identity=identity, issues=issues,
+                                             scope_decisions=scope_decisions, role=roles[pack["document_id"]])
+                result["issues"] = assign_issues(result.get("issues", []), pack["pack_id"])
+                return result
+
+            packs = await self._packs(index, "extract-pack", extract)
+            return {"schema_version": 2, "packs": packs, "counts": {"packs": len(packs)}}
+
+        return {"items_ref": await self._save("extract", produce,
+                                              inputs={"pack_plan_ref": state["pack_plan_ref"],
+                                                      "corrected_items_ref": correction},
+                                              model=correction is None)}
 
     async def verify(self, state):
+        from docreader.tender.checks.analysis import verify_analysis
+
         async def produce():
-            from docreader.tender.evidence.downstream import PLANNER_VERSION, plan_downstream, select_extraction
-
-            index = await self._read(state["pack_plan_ref"])
-            extraction_index = await self._read(state["requirements_ref"])
-            # Index once, not one full source scan per request.
-            extractions = {
-                item["pack_id"]: await self._read(item["artifact_ref"]) for item in extraction_index["packs"]
-            }
-            by_ref = {item["artifact_ref"]["sha256"]: extractions[item["pack_id"]] for item in extraction_index["packs"]}
-            async def replan():
-                return await asyncio.to_thread(plan_downstream, index, state["requirements_ref"],
-                                               self.artifacts, self._request_budget(), task="verify")
-            plan_ref = await self._save("verify-plan", replan, is_ref=True, inputs={
-                "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": state["requirements_ref"],
-                "request_budget": self._request_budget().spec(),
-                "planner_version": PLANNER_VERSION,
-            })
-            verification_index = await self._read(plan_ref)
-            async def check(pack):
-                return await verify_pack(pack, select_extraction(pack, by_ref), self)
-
-            results = await self._packs(verification_index, "verify-pack", check)
-            verifications = [await self._read(item["artifact_ref"]) for item in results]
-            verification_packs = [await self._read(item["artifact_ref"]) for item in verification_index["packs"]]
-            summary = verify_all(index, list(extractions.values()), verifications, verification_packs=verification_packs)
-            summary["issues"] = list({json.dumps(item, sort_keys=True): item
-                                      for item in [*summary["issues"], *verification_index["issues"]]}.values())
-            summary["counts"]["blocking_issues"] = sum(item.get("blocking", True) for item in summary["issues"])
-            summary["blocking"] = bool(summary["counts"]["blocking_issues"])
-            summary["pack_results"] = results
-            summary["pack_plan_ref"] = plan_ref
-            summary["requirements_ref"] = state["requirements_ref"]
-            return summary
+            source_plan = await self._read(state["pack_plan_ref"])
+            items_index = await self._read(state["items_ref"])
+            if items_index.get("schema_version") != 2:
+                raise ValueError("analysis verification requires v2 items")
+            summary = await verify_analysis(
+                source_plan, items_index, self.artifacts, self, self._request_budget(),
+                identity={"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                          "domain_revision": self.lease.domain_revision},
+                save=self._save,
+            )
+            return {**summary, "items_ref": state["items_ref"]}
 
         ref = await self._save("verify", produce, inputs={"pack_plan_ref": state["pack_plan_ref"],
-                                                        "requirements_ref": state["requirements_ref"]}, model=True)
+                                                        "items_ref": state["items_ref"]}, model=True)
         checked = await self._read(ref)
         digest = hashlib.sha256(json.dumps({
+            "schema_version": 2,
             "source_version": self.lease.source_version, "domain_revision": self.lease.domain_revision,
             "frozen_ref": state["frozen_ref"], "pack_plan_ref": state["pack_plan_ref"],
-            "requirements_ref": state["requirements_ref"], "verification_ref": ref,
+            "items_ref": state["items_ref"], "verification_ref": ref,
         }, sort_keys=True).encode()).hexdigest()
         return {"verification_ref": ref, "checklist_digest": digest,
                 "status": "blocked" if checked["blocking"] else "waiting-confirmation"}
 
     async def confirm(self, state):
-        approved = interrupt({"run_id": self.lease.run_id, "source_version": self.lease.source_version, "domain_revision": self.lease.domain_revision,
-                              "checklist_digest": state["checklist_digest"], "verification_ref": state["verification_ref"]})
+        approved = interrupt({"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                              "domain_revision": self.lease.domain_revision,
+                              "checklist_digest": state["checklist_digest"],
+                              "verification_ref": state["verification_ref"]})
         if (approved.get("source_version") != self.lease.source_version
                 or approved.get("domain_revision") != self.lease.domain_revision
                 or approved.get("checklist_digest") != state["checklist_digest"]):
@@ -284,76 +332,12 @@ class TenderNodes:
         if not any(item["checklist_digest"] == state["checklist_digest"]
                    and item["domain_revision"] == self.lease.domain_revision for item in row["confirmations"]):
             raise InvalidConfirmation("confirmation was not persisted")
+        checked = await self._read(state["verification_ref"])
+        if checked["blocking"] or checked.get("items_ref") != state["items_ref"]:
+            raise InvalidConfirmation("analysis confirmation requires the verified current items")
 
         async def produce():
             return approved
 
         await self._save("confirm", produce, inputs={"checklist_digest": state["checklist_digest"]})
-        return {}
-
-    async def plan(self, state):
-        async def produce():
-            from docreader.tender.checks import apply_applicability_decisions
-            from docreader.tender.evidence.downstream import DEPENDENCY_ISSUES, PLANNER_VERSION, plan_downstream, select_extraction
-            from docreader.tender.evidence.view import source_view
-            from docreader.tender.schema import issue
-
-            checked = await self._read(state["verification_ref"])
-            index = await self._read(state["pack_plan_ref"])
-            async def replan():
-                return await asyncio.to_thread(plan_downstream, index, checked["requirements_ref"], self.artifacts,
-                                               self._request_budget(), task="plan", verification_ref=state["verification_ref"])
-            plan_ref = await self._save("response-pack-plan", replan, is_ref=True, inputs={
-                "pack_plan_ref": state["pack_plan_ref"], "requirements_ref": checked["requirements_ref"],
-                "verification_ref": state["verification_ref"], "request_budget": self._request_budget().spec(),
-                "planner_version": PLANNER_VERSION,
-            })
-            response_index = await self._read(plan_ref)
-            extraction_index = await self._read(checked["requirements_ref"])
-            extractions = {entry["artifact_ref"]["sha256"]: await self._read(entry["artifact_ref"])
-                           for entry in extraction_index["packs"]}
-
-            async def group(entry):
-                async with self.semaphore:
-                    descriptor = await asyncio.to_thread(self.repo.load_pack, entry["artifact_ref"])
-                    extraction = select_extraction(descriptor, extractions)
-                    requirements = [item for item in apply_applicability_decisions(
-                        extraction["requirements"], checked["applicability_decisions"],
-                    ) if item["applicable"]]
-                    references = {item["requirement_id"]: item for item in descriptor["requirement_refs"]}
-                    async def build():
-                        if (descriptor["planning_details"]["budget"]["fits"] is not True
-                                or any(item["code"] in DEPENDENCY_ISSUES for item in descriptor["issues"])):
-                            return {"items": [], "issues": descriptor["issues"], "blocking": True}
-                        return await build_plan(requirements, self, requirement_refs=references,
-                                                source_context=source_view(descriptor) if descriptor["supporting"] else None)
-                    ref = await self._save("plan-pack", build, scope=f"{response_index['plan_digest']}:{entry['pack_id']}",
-                                           inputs={"pack_plan_ref": entry["artifact_ref"],
-                                                   "verification_ref": state["verification_ref"],
-                                                   "checklist_digest": state["checklist_digest"]},
-                                           model=True)
-                    return {"pack_id": entry["pack_id"], "artifact_ref": ref, "result": await self._read(ref)}
-
-            results = await asyncio.gather(*(group(entry) for entry in response_index["packs"]), return_exceptions=True)
-            _raise_failures(results)
-            results = [result for result in results if result is not None]
-            from collections import Counter
-            expected = Counter(item["requirement_id"] for extraction in extractions.values()
-                               for item in apply_applicability_decisions(extraction["requirements"], checked["applicability_decisions"])
-                               if item["applicable"])
-            actual = Counter(item["requirement_id"] for result in results for item in result["result"]["items"])
-            issues = list(response_index["issues"])
-            if expected != actual:
-                issues.append(issue("response_plan_coverage_mismatch", "Response items must cover the current applicable requirements exactly once."))
-            return {"packs": [{"pack_id": result["pack_id"], "artifact_ref": result["artifact_ref"]} for result in results],
-                    "pack_plan_ref": plan_ref, "issues": issues,
-                    "blocking": bool(issues) or any(result["result"]["blocking"] for result in results),
-                    "checklist_digest": state["checklist_digest"],
-                    "counts": {"packs": len(results),
-                               "items": sum(len(result["result"]["items"]) for result in results),
-                               "issues": len(issues) + sum(len(result["result"]["issues"]) for result in results)}}
-
-        ref = await self._save("plan", produce, inputs={"verification_ref": state["verification_ref"],
-                                                              "checklist_digest": state["checklist_digest"]}, model=True)
-        plan = await self._read(ref)
-        return {"response_plan_ref": ref, "status": "blocked" if plan["blocking"] else "response-plan-ready"}
+        return {"status": "analysis-ready"}

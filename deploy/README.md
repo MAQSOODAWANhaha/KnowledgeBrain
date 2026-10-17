@@ -4,6 +4,11 @@
 Neo4j（`knowledge` profile）与 OnlyOffice（`editing` profile）不随招标栈自动启动。
 原图复核使用 Chat；OCR 可继承已确认支持图像的 Chat，或显式指定独立 VLM。
 
+默认 Compose 项目名为 `kb`，容器统一命名为 `kb_<服务名>`，例如 `kb_api`、`kb_postgres`。
+项目的网络和数据卷也使用 `kb` 命名空间。Python 招标工作流通过同一 Compose 的
+`python-tender` profile 启用，复用 PostgreSQL、应用数据库账号和 Redis；不再单独部署
+数据库、Redis 或配置另一组连接地址。
+
 ## 最少配置
 
 复制 `.env.example` 后，仅明确填写：
@@ -15,13 +20,19 @@ Neo4j（`knowledge` profile）与 OnlyOffice（`editing` profile）不随招标�
 - `KNOWLEDGEBRAIN_CHAT_BASE_URL/API_KEY/MODEL` 和整数 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS`。
 
 上下文 `131072` 是用户当前选择，而非永久代码上限。其余预算、超时、并发使用默认；
-无需 `KB_TENDER_AGENT_LIMITS` 或 tokenizer calibration JSON。未知模型需由供应商资料确认
-图像能力后设置可选 `KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES=true`，不会自动付费探测或猜测能力。
+无需 `KB_TENDER_AGENT_LIMITS` 或 tokenizer calibration JSON。Python 图片处理独立读取
+`KNOWLEDGEBRAIN_VLM_BASE_URL/API_KEY/MODEL`，三项均需配置，不自动复用 Chat 配置或按模型名猜测能力。
 招标模式 `KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED=false`，不以空 Embedding 地址伪装就绪。
 
 配置优先级为进程环境、显式 env 文件、程序默认。Compose `.env` 仅提供插值，支持的覆盖
 在 Compose environment 中逐项声明。密码保留原字节，含 `$` 或 `#` 的值在 env 文件使用单引号。
 不要将实际密码、密钥、带凭据 URI、渲染后的 Compose 配置贴入日志或提交仓库。
+
+Compose 统一传递 `KNOWLEDGEBRAIN_CHAT_*`、`KNOWLEDGEBRAIN_VLM_*` 和
+`KNOWLEDGEBRAIN_EMBEDDING_*`，不再向容器重复传递 `LLM_*`/`EMBEDDING_*` 别名。
+API 接收登录、LDAP 和 OnlyOffice 配置；Rust/Python worker 共享模型配置；Retention、
+Python 初始化和 dispatcher 仅接收各自需要的存储、队列或数据库配置。
+已移除没有消费者的 `KNOWLEDGEBRAIN_SHARED_CONCURRENCY`，其余仍在使用的并发配置保留。
 
 ### 数据库与网络
 
@@ -43,6 +54,12 @@ S3 仅在默认内部 `http://minio:9000` 且未提供访问凭据时派生 MinI
 跨主机 DocReader 的 TLS/证书策略需显式部署 overlay，禁止缺证书时降级；标准私有单机网络
 可选 `GRPC_AUTH_TOKEN` 会同时注入客户端与服务端。
 
+Python 使用同一组 `.env` 的 `POSTGRES_*` 值，由 Compose 映射为 libpq 标准
+`PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`，避免在 Compose 中拼接带密码的 URL；
+显式 `DATABASE_URL` 也可复用。Redis 使用相同 `REDIS_URL`，Dramatiq 的
+`python-tender` namespace 与 Rust 的 `kb:` 前缀区分。Python 只初始化自己的 `tender_*`
+运行表及 LangGraph checkpoint 表，产物由三个 Python 角色共享 `python-tender-artifacts` 卷。
+
 ## 招投标编辑接入状态
 
 OnlyOffice 不属于招标读取／Discover／Organize／Check 的前置条件。需要编辑时显式启用
@@ -61,6 +78,19 @@ cp deploy/.env.example deploy/.env
 # Fill required values; use fresh isolated data only.
 ./deploy/deploy.sh create
 ```
+
+启用 Python 工作流（复用同一项目内的 PostgreSQL/Redis，缺少时启动，并先完成共享数据库初始化）：
+
+```bash
+docker compose --env-file deploy/.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml \
+  --profile python-tender up -d --build python-tender-worker python-tender-dispatcher
+```
+
+先由 `migrate` 完成共享数据库 baseline，再由 `python-tender-init` 创建 Python 表及
+checkpoint，最后启动 worker/dispatcher，避免 Python 表先建立而触发空库初始化拒绝。
+三者没有新增宿主端口。该 profile 不自动切换 Rust 链路，也不会自行提交文件或调用模型。
+原件提交、状态核对和人工确认见[工作流运行手册](../docs/design/python-tender-phase1/runbook.md)。
 
 生产发布使用 `deploy/release-descriptor-v1.json`：
 
@@ -111,7 +141,7 @@ DDL。重启使用：
 ./deploy/deploy.sh up
 ```
 
-对象存储使用显式 `OBJECT_DIR`，本地布局为 `<OBJECT_DIR>/objects/<文件名>`，S3 key 为 `objects/<文件名>`。每个安装使用独立的数据库、Redis 数据库、S3 bucket 和对象目录；启用图谱时使用独立 Neo4j 数据库。路径穿越、符号链接与 ObjectRegistry 引用保护继续校验。仅支持全新安装，不提供旧布局兼容、迁移或跨后端 reset 编排。
+对象存储使用显式 `OBJECT_DIR`，本地布局为 `<OBJECT_DIR>/objects/<文件名>`，S3 key 为 `objects/<文件名>`。不同安装之间使用独立的数据库、Redis 数据库、S3 bucket 和对象目录；同一安装的 Rust/Python 角色共用 PostgreSQL 和 Redis。启用图谱时使用独立 Neo4j 数据库。路径穿越、符号链接与 ObjectRegistry 引用保护继续校验。仅支持全新安装，不提供旧布局兼容、迁移或跨后端 reset 编排。
 
 Redis 队列入口要求显式 `REDIS_URL`，不回退固定本机地址；Oxana 使用固定应用前缀 `kb:`，生产者和消费者必须连接同一安装的独立 Redis 数据库。
 
@@ -145,11 +175,14 @@ Redis 队列入口要求显式 `REDIS_URL`，不回退固定本机地址；Oxana
 
 `deploy.sh` 叠加 `docker-compose.local.yml`：Caddy 提供本地自签 HTTPS，默认浏览器入口
 为 `https://localhost:28080`（`API_HOST_PORT` 可覆盖）；证书由现有本地部署步骤准备。
-基础 Compose 直接映射 HTTP API `API_HOST_PORT` 默认 18080；内部 `API_PORT` 默认 8080，
+基础 Compose 直接映射 HTTP API `API_HOST_PORT` 默认 28080；内部 `API_PORT` 默认 8080，
 端口映射、Caddy upstream 和健康检查同步使用该值。DocReader 内部端口默认 50051，
 `DOCREADER_GRPC_PORT` 同步客户端默认地址与探针。数据服务默认没有主机映射。
 
-OnlyOffice 可选 profile 的浏览器入口为 18081；Neo4j 仅在明确启用 knowledge profile 时启动。
+OnlyOffice 可选 profile 的浏览器入口为 28081（`ONLYOFFICE_HOST_PORT`）；Neo4j 仅在明确启用
+knowledge profile 时启动，HTTP/Bolt 宿主端口默认为 27474/27687。启动前核对宿主监听及
+其他 Compose 项目的端口映射；如需覆盖端口，在现有 `.env` 中设置对应变量，并同步
+OnlyOffice 的浏览器 origin。
 本仓库的开发 release descriptor 不能当作生产身份。
 生产走上文说明的 release 工具并提供真实 descriptor；禁止以伪造摘要绕过校验。
 

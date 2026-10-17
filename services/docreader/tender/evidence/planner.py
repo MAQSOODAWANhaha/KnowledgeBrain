@@ -40,9 +40,15 @@ def _split(entry: dict) -> list[dict]:
 
 
 class StructuralPlanner:
-    def __init__(self, source: SourceIndex, budget, scope_decisions=()):
+    def __init__(self, source: SourceIndex, budget, scope_decisions=(), *, payload_builder=None, analysis=False):
         self.source, self.budget = source, budget
-        self.support = SupportingIndex(source.ranges, scope_decisions)
+        if payload_builder is None:
+            from docreader.tender.requirements.extract import extract_payload
+
+            payload_builder = extract_payload
+        self.payload_builder = payload_builder
+        self.support = SupportingIndex(source.ranges, scope_decisions, analysis=analysis)
+        self.version = "native-sections-analysis-context-v2" if analysis else PLANNER_VERSION
         self.probe_count = 0
         self.packs = []
         self.capacity_hint = None
@@ -54,7 +60,6 @@ class StructuralPlanner:
         return max(1, self.weights[base["range_id"]] * max(1, entry["end"] - entry["start"]) // max(1, base["end"] - base["start"]))
 
     def candidate(self, body: list[dict], reason: str) -> dict:
-        from docreader.tender.requirements.extract import extract_payload
         supporting, pending, issues, bindings = self.support.select(body)
         digest = hashlib.sha256("\0".join(entry["range_id"] for entry in body).encode()).hexdigest()[:24]
         pack = {"schema_version": 2, "pack_id": "pack-" + digest,
@@ -64,11 +69,11 @@ class StructuralPlanner:
                 "supporting": [selector(entry) for entry in supporting],
                 "pending_scope_context": pending, "scope_bindings": bindings, "issues": issues,
                 "compacted_blank_ranges": [entry["range_id"] for entry in body if entry.get("empty")],
-                "planning_details": {"planner_version": PLANNER_VERSION, "boundary_reason": reason,
+                "planning_details": {"planner_version": self.version, "boundary_reason": reason,
                          "section_ids": list(dict.fromkeys(entry.get("section_id") for entry in body))}}
         materialized = {**pack, "body": [self.source.materialize(entry) for entry in pack["body"]],
                         "supporting": [self.source.materialize(entry) for entry in pack["supporting"]]}
-        measurement = self.budget.measure("extract", extract_payload(materialized))
+        measurement = self.budget.measure("extract", self.payload_builder(materialized))
         self.probe_count += 1
         pack["planning_details"]["budget"] = measurement
         if measurement.get("input_tokens", 0) > 0 and measurement.get("context_tokens"):
@@ -190,11 +195,10 @@ class StructuralPlanner:
             for index, entry in enumerate(items):
                 entry["previous_fragment_id"] = items[index - 1]["range_id"] if index else None
                 entry["next_fragment_id"] = items[index + 1]["range_id"] if index + 1 < len(items) else None
-        from docreader.tender.requirements.extract import extract_payload
         for pack in self.packs:
             rendered = {**pack, "body": [self.source.materialize(item) for item in pack["body"]],
                         "supporting": [self.source.materialize(item) for item in pack["supporting"]]}
-            final = self.budget.measure("extract", extract_payload(rendered))
+            final = self.budget.measure("extract", self.payload_builder(rendered))
             self.probe_count += 1
             if self.admitted(pack) and final["fits"] is not True:
                 raise RuntimeError("final source links changed an admitted request budget")
@@ -202,7 +206,7 @@ class StructuralPlanner:
         return self.packs
 
 
-def make_packs(source: SourceIndex, budget, scope_decisions=()) -> tuple[list[dict], dict]:
-    planner = StructuralPlanner(source, budget, scope_decisions)
+def make_packs(source: SourceIndex, budget, scope_decisions=(), *, payload_builder=None, analysis=False) -> tuple[list[dict], dict]:
+    planner = StructuralPlanner(source, budget, scope_decisions, payload_builder=payload_builder, analysis=analysis)
     packs = planner.plan()
-    return packs, {"probe_count": planner.probe_count, "planner_version": PLANNER_VERSION}
+    return packs, {"probe_count": planner.probe_count, "planner_version": planner.version}

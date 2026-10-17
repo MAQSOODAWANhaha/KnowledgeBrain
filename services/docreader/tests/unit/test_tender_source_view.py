@@ -3,8 +3,10 @@
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
 from docreader.tender.evidence.view import host_reviewed_ranges, source_view
+from docreader.tender.schema import SourceRangeView
 
 
 def source(range_id, text="source condition", **extra):
@@ -57,20 +59,54 @@ def test_condition_intervals_and_reviewed_targets_survive_text_deduplication():
     assert sum(item["text"] == text for item in view["body"] + view["supporting"]) == 1
 
 
-def test_fragment_cell_offsets_replay_partial_fields_without_duplicated_values():
+def test_fragment_cells_supply_partial_text_without_duplicating_the_row():
     fragment = source("fragment", " | 30天", source_range_id="native-row", start=12, end=18,
                       kind="table_region", table_id="table-1", row_start=2, row_end=3,
                       column_count=2, text_boundaries={"start": False, "end": True},
                       cells=[{"column": 0, "start": 12, "end": 12, "row_span": 1, "col_span": 1},
                              {"column": 1, "start": 15, "end": 18, "row_span": 2, "col_span": 1}])
     value = source_view(pack([fragment]))["body"][0]
-    assert value["text"] == fragment["text"]
+    assert "text" not in value
     assert value["source_range_id"] == "native-row"
-    assert value["cells"][0] == {"column": 0, "start": 12, "end": 12}
+    assert value["cells"][0] == {"column": 0, "text": ""}
     cell = value["cells"][1]
-    assert value["text"][cell["start"] - value["start"]:cell["end"] - value["start"]] == "30天"
-    assert cell["row_span"] == 2 and "text" not in cell
+    assert cell["text"] == "30天" and cell["row_span"] == 2
+    assert not {"start", "end"} & cell.keys()
     assert value["text_boundaries"] == {"start": False, "end": True}
+
+
+def test_cell_text_preserves_unicode_delimiters_newlines_and_native_evidence():
+    values = ["人员😀 | 姓名\n证书", "", "３０天"]
+    row_text = " | ".join(values)
+    cells, offset = [], 0
+    for column, text in enumerate(values):
+        cells.append({"column": column, "text": text, "start": offset, "end": offset + len(text)})
+        offset += len(text) + 3
+    cells[2].update(formula="=A1", formula_references=["A1"], row_span=2)
+    row = source("table", row_text, kind="table_region", cells=cells)
+    before = deepcopy(row)
+    value = source_view(pack([row]))["body"][0]
+    assert "text" not in value
+    assert [cell["text"] for cell in value["cells"]] == values
+    assert value["cells"][2]["formula"] == "=A1"
+    assert value["cells"][2]["formula_references"] == ["A1"]
+    assert value["cells"][2]["row_span"] == 2
+    assert row == before
+
+
+def test_uncovered_row_prose_is_retained_without_fabricating_cell_values():
+    row = source("table", "说明：30天", kind="table_region",
+                 cells=[{"column": 0, "start": 3, "end": 6}])
+    value = source_view(pack([row]))["body"][0]
+    assert value["text"] == "说明：30天"
+    assert value["cells"] == [{"column": 0, "text": "30天"}]
+
+
+@pytest.mark.parametrize("fields", [{}, {"text": None}, {"cells": []},
+    {"cells": [{"column": 0, "start": 0, "end": 1}]}])
+def test_wire_range_cannot_replace_original_text_with_null_or_offset_only_cells(fields):
+    with pytest.raises(ValidationError):
+        SourceRangeView.model_validate({"range_id": "r1", **fields})
 
 
 def test_fragment_probe_and_materialized_cells_have_the_same_sending_view():

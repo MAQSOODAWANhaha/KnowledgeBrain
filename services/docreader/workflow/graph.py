@@ -1,4 +1,4 @@
-"""The single owner of the six tender business stages."""
+"""The single owner of the five tender analysis stages."""
 from langgraph.graph import END, START, StateGraph
 
 from docreader.workflow.state import STAGES, TenderState
@@ -16,6 +16,5 @@ def build_graph(nodes, checkpointer):
         "verify", lambda state: "blocked" if state.get("status") == "blocked" else "confirm",
         {"blocked": END, "confirm": "confirm"},
     )
-    builder.add_edge("confirm", "plan")
-    builder.add_edge("plan", END)
+    builder.add_edge("confirm", END)
     return builder.compile(checkpointer=checkpointer)

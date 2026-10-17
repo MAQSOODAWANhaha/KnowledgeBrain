@@ -1,16 +1,95 @@
-# 领域模块实施接口（骨架后启用）
+# 领域模块合同：目标分析流程与现行实现
 
-本文先定义各目录共享的最小 JSON 合同，避免并行实现产生第二套状态机。大型 JSON 仅在
-内容寻址文件中持久化，checkpoint 只存文件引用。所有数据版本为本次新版本，不做旧数据迁移。
+字段名、类型、可选性及枚举以[唯一字段字典](field-dictionary.md)为准，本文说明接口、职责和
+执行边界，不另定义同义结构。大型 JSON 仅在内容寻址文件中持久化，checkpoint 只存文件引用。
+以下区分工作区v2主线、共享接口和历史独立工具。五节点及新协议已实现，本轮尚未更新
+部署或发起付费调用，旧历史产物保持原义；测试和运行事实以[交接](handoff.md)为准。
+
+## 最新一期主线：完整分析招标文件（工作区已实现）
+
+目标主流程为 **register → freeze → extract → verify → confirm**，人工确认当前无阻断的
+分析结果后到 `analysis-ready`。目标产物为来源清单、统一事项台账、来源覆盖与独立核验结果、
+问题及有证据的决议。实际内容由招标原文决定，包括评分、否决、技术、服务、售后、人员及
+其他要求；不按业务类别建立不同发现流程。详细顺序见[业务工作流](business-workflow.md)。
+
+本期不处理企业响应数据，不生成响应计划、响应动作或准备待办，不决定评分机会是否采纳，
+不计算企业实际得分。原文明示的填表、附件、签章和证明材料要求仍须分析，但不能据此生成
+企业准备任务、声称材料已提供或判定企业已经满足要求。独立计划审阅不属于本期实施任务。
+
+### 统一事项的最小合同
+
+每项仅必填 `item_id`、`kind`、`text`、`evidence`。`kind` 使用四种类型：
+
+| kind | 源文分析内容 |
+| --- | --- |
+| `obligation` | 资格、技术、服务、人员等义务或约束 |
+| `scoring_rule` | 评分指标、分档、公式、加扣分及分值规则 |
+| `consequence_rule` | 否决、无效、不得参与、履约责任等独立于计分的触发规则及后果 |
+| `submission_requirement` | 原文明示的填报字段、正文内容、附件、证明、签章或提交要求 |
+
+对象、范围、条件、例外、数值、业务分类及各类型的具体信息均按来源可选。没有信息则省略，
+不强制填写空数组、空对象、`null` 或“无”。省略不证明原文不存在相关信息；无法判断的内容
+进入外部问题或待解析引用，不得把缺省适用性解释为“不适用”。评分规则记录源文规则及其
+所需证明，不推算投标人得分。各类型可以通过有证据的关系关联，不把同一证书或参数的
+资格、评分及否决含义混成一个布尔值。
+
+`work_unit_id` 由宿主提供，模型在该命名空间内生成 `item_id`，宿主校验格式与唯一性。
+持久事项引用为 `ItemRef{artifact_ref,item_id}`，不凭同一 ID 假定跨修订内容相同。目标统一
+台账根引用使用 `items_ref`；旧工具的`requirements_ref`保持原义，不增加兼容别名。
+目标业务输出使用 `schema_version=2`，不因此伪造来源或领域内容变更。目标 checkpoint 去掉
+`response_plan_ref`，分析结果由来源、事项、核验和确认回执投影，不另增分析状态机。
+
+### 发现、补读与核验的职责
+
+先统一全源发现，再对具体复杂问题按需处理；不通过技术、人员、评分等分类预路由原文。
+当前包未提供某章正文不代表全文缺失。可用性目录只用于定位，补读后的完整原文才是判断
+依据。verify 使用字段字典规定的 locate/associate/review 三种固定子操作，跨包引用最多一轮
+目标定位和补读核对；目标缺失、歧义或仍未决时进入人工裁决，不递归追索或自动反复生成。
+locate 还须按完整台账覆盖计划发现无显式引用的跨源候选，宿主装载相关完整原文后联合核验；
+分开核验的 ID 覆盖并集不能代替候选的联合审阅。
+
+associate 只提交有证据的 Decision 提案；独立 review 须逐条审阅并明确接受，才可解决提案
+绑定的具体问题。遗漏、拒绝、过期或审阅失败均保留原阻断，空 findings 不代表解决。
+提案、接受结果及原问题均在 verification_ref 下保留不可变回执，并进入确认摘要。
+补遗决议按字典的 AmendmentEffect 明确受影响原项、修改范围、全部保留规则和替代事项；
+纯删除不强造替代项。当前结果由原台账及有效决议投影，不增加可编辑的当前规则台账，
+不由宿主做自然语言范围运算；漏抽或原项错误通过显式领域修订后重验。
+
+自然语言义务、数字归属、比较关系、条件/例外、作用域、冲突及引用含义由带完整来源
+上下文的 LLM 独立核验及必要的人工裁决确定。宿主校验结构、来源定位、覆盖、身份版本、
+预算和执行状态；正则和词表不能作为最终语义裁判。模型空 findings 不能清除既有宿主问题。
+当前语言启发式及其局限见[职责边界与规则审查](semantic-review.md)。
+
+### 状态、确认与回执
+
+目标沿用 `pending/running/blocked/waiting-confirmation/failed/cancelled`，成功终态改为
+`analysis-ready`。`failed` 表示执行或协议失败，`blocked` 表示分析产物存在业务未决或必要
+来源缺口；`waiting-confirmation` 仅表示独立核验完成且无阻断，等待对当前分析结果正式确认。
+新主线成功终态为`analysis-ready`；旧`response-plan-ready`记录及历史类型保持原义。
+
+确认绑定当前 `source_version`、`domain_revision` 和包含来源、台账、关系/决议及核验结果的
+`checklist_digest`。确认不能解决或覆盖问题；内容修订使旧确认失效，必须重验。目标确认后
+即结束分析，不再进入计划生成。
+
+主阶段、问题处理子操作和模型请求分别保留回执，成功请求不等于语义通过，命令完成也不
+等于分析就绪。子操作进度、事项适用性及运行状态各自表达，不增加业务分类状态机。成功
+产物、旧版本、付费审计和 `uncertain` 围栏保留，不能靠换分包或协议版本绕过发送保护。
+
+## 历史六阶段接口与恢复事实
+
+旧主线为register → freeze → extract → verify → confirm → plan，使用Requirement/Plan合同
+并到response-plan-ready；现有运行容器仍是该版本。以下保留共享接口、历史独立工具及
+设计依据；新工作区主线不调用旧Plan，涉及计划的部分不纳入新一期目标。
 
 冻结恢复细化：图节点按文档登记 `freeze-document` 回执、按实际来源图登记 `ocr` 回执，
 之后合并小索引为全局 freeze 回执。部分文档/图片成功后其他范围基础设施失败，重投复用成功
 回执，不重复全量解析/OCR。抽取与验证同样按 pack 独立回执。技术失败允许独立范围先完成，
 全局只在所有必需范围具有成功产物或明确领域未决处置后推进。
-响应计划按已验证要求的原包分组调用并保存 `plan-pack` 回执，再合并为逐要求计划；
-避免把所有来源/要求重发到单个大上下文。全局检查仍覆盖全部适用要求，局部计划失败阻断终点。
+验证和响应计划按当前修订同文档全部抽取结果的完整输入独立规划，加入各阶段所需要求、
+处置或来源上下文后重新准入，不沿用抽取原包作为固定请求边界。响应计划保存 `plan-pack`
+回执，再合并为逐要求计划；全局检查覆盖全部适用要求，局部计划失败阻断终点。
 
-## 证据
+## 证据（现行接口）
 
 `register_manifest(manifest, artifacts)` 返回登记清单（documents/issues）；本地原件在提交时
 复制并持久化，运行重放不重新读取用户原路径。`freeze_sources(registration, artifacts, ocr)`
@@ -27,10 +106,10 @@ OCR callback `async(image_ref, source) -> {text,status,issues}`，由 Python 模
 原生范围返回文档问题。附件有位置没有内容时返回 attachment_content_not_extracted。
 `EvidenceRepository(artifacts).iter_packs(index_ref)` / `load_pack(pack_ref)` 复用冻结 refs。
 
-## 模型层
+## 模型层（现行接口）
 
 `ModelConfig.from_env(mapping=None)` 是单一配置解析源。`OpenAIModel(config, store, lease,
-prompts, concurrency=4, timeout_seconds=120).call(task,payload,images=()) -> dict`。
+prompts, concurrency=2, timeout_seconds=180).call(task,payload,images=()) -> dict`。
 images 是 bytes+MIME 或 data URL，只用于实际来源图像，不拉取任意远程 URL。
 类实现 async close/context manager。task 对应版本化领域提示（extract/verify/plan/ocr）。
 
@@ -41,7 +120,9 @@ ModelSemanticError 表示 JSON/拒答/结构错误，ModelConfigurationError 表
 队列与 dispatcher 共用命令基础设施失败计数，最多 4 次后明确 failed；进程失联恢复与语义修复
 不依靠该次数做业务判断。不写输出 token 上限，不将累计 usage 当单次 context 容量。
 
-## 抽取、验证与计划
+## 抽取、验证与计划（现行旧格式）
+
+本节保留历史`Requirement/Plan`格式及六阶段行为，不作为新一期的事项字段合同或任务清单。
 
 要求 JSON：`requirement_id,text,subject,evidence:[{range_id,quote}],conditions:[],exceptions:[],
 numbers:[{value,unit,quote}],scoring:{},veto_risk,cross_references:[],applicable,applicability_basis`。
@@ -55,19 +136,23 @@ numbers:[{value,unit,quote}],scoring:{},veto_risk,cross_references:[],applicable
 总计 100。局部失败包保留成功包；依赖失败范围不放行。核对结果摘要包含全部来源版本、
 要求和问题。未决阻断时图结束 blocked；人工确认不能覆盖阻断。
 
-`plan` 返回 `items:[{requirement_id,target_kind,target,action,material_needs:[]}]`。
+`plan` 返回 `items:[{requirement_id,target_kind,target,action,material_needs:[],constraint_digest}]`。
 target_kind 为 body/table_field/attachment/manual_action；target 是具体位置字符串，action
 必须说明该要求的实际响应动作，material_needs 非空（所需材料/用户输入，可明确“无需外部材料”
 及依据）。表格目标必须标识具体字段，正文目标须有章节定位及写作动作；仅标题/空槽位拒绝。
 所有适用要求恰好覆盖，引用要求不存在或缺项均阻断；终点 `response-plan-ready`。
 
-规则细化：数字以 Decimal 和原文单位反校验；只有来源明确 scoring.total 与 scoring.components
-时检查声明合计，不推定 100。同主体/条件/例外且去数字后同文、数字不同的跨文档要求标记
-潜在冲突待明确，不按日期覆盖。声明修改的补遗/澄清必须具有 replaces.document_id 及
-range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来源。全空 body 行可规则生成
-`non_requirement`（依据 empty_table_row），其他范围必须模型逐一处置。
+当前规则：数字以 Decimal 和原文单位做局部反查；只有 scoring.total 与 scoring.components
+同时声明时检查算术合计，不推定 100。合计关系是否由原文明示仍需模型核对。同主体/条件/
+例外且去数字后同文、数字不同的跨文档要求会被标记为潜在冲突；它是待审线索，不是通用
+语义证明。声明修改的补遗/澄清必须具有 replaces.document_id 及 range_id 或 scope；普通
+澄清不声明修改则保留但不覆盖其他来源。
 
-## 已识别的设计细化
+全空表格行只压缩发送视图，仍须模型结合表头和条件逐行给出有依据的处置并独立审阅，
+不能仅依据 empty_table_row 自动生成 `non_requirement`。已证明空白页或有显式审议的
+装饰图片由宿主单列，二者不能扩展为通用空表格处置规则。
+
+## 已识别的设计细化（现行证据实现与历史合同）
 
 - 现有 Excel 同时有 sheet/table 网格与 row units：正文覆盖选择唯一 row 范围；raw 保留全网格。
 - 现有 Word SECTION 可能聚合多段：保留原生定位，不捏造更细坐标。
@@ -78,7 +163,7 @@ range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来�
 - 原生 Excel 图片只有 drawing 序号；evidence 从原件 drawing anchor 补齐单元格/偏移。
   同时使用 raw grid 补齐 row unit 中省略的空单元格。全空行只压缩发送视图，范围身份仍在
   body（empty=true、non_requirement_reason=empty_table_row）及 compacted_blank_ranges；
-  抽取对其登记有依据的非要求处置。部分空行保留完整列位置，合并关系只读原网格。
+  抽取模型对其作有依据的处置，不能预设为非要求。部分空行保留完整列位置，合并关系只读原网格。
 - 分包保留同节及祖先节的导语/条件与表格表头来源；supporting 保留原 range_id 或绑定
   parent_range_id 的派生引用身份，正文身份
   在所有包之间互斥。导语范围必须有来源，字符偏移基于 native unit；不得虚构 Word 段落坐标。
@@ -104,14 +189,19 @@ range_id 或 scope；普通澄清不声明修改则保留但不覆盖其他来�
 - Excel 的 display_incomplete_reason（如公式无缓存或格式不能准确还原）必须升级为可见问题；
   PDF 内嵌附件登记独立 carrier 与未提取问题。原件存储损坏是技术失败，不伪装成文档问题。
 
-## 追加正确性评审合同（2026-10-14，先于修复）
+## 历史正确性评审合同（2026-10-14，保留依据）
+
+以下保留此前针对六阶段实现的约束目标及依据；计划相关目标不纳入新一期。字面及词表
+检查的局限及分析阶段已实现的独立审阅路径以上文及[规则审查](semantic-review.md)为准；
+来源解析与旧独立工具的历史启发式仍保留，新流程真实模型语义验收未完成。
 
 - 验证模型的 `blocking` 只能提高阻断级别。宿主对漏项、证据/数字/条件/适用性/冲突等
   正确性问题规定最低阻断等级，未知问题默认阻断；仅明列的纯信息类可非阻断。
   人工问题处理不是确认放行；问题未解决不得产生 response-plan-ready。
 - 响应计划引用不可变要求约束快照及摘要（对象、义务原文、条件、例外、数值/单位、
   比较关系等），每项结构化绑定必须与经验证要求一致。裸数字相同不能证明义务保真。
-  30工作日/30自然日/30天、至少/至多、适用对象/条件变更均应拒绝；保留人工语义复核边界。
+  30工作日/30自然日/30天、至少/至多、适用对象/条件变更均需核对。摘要一致只能证明绑定，
+  现有字面/词表检查不能证明自然语言保真；等价改写应由语义审阅判断，保留人工复核边界。
 - 分包需绑定章节/祖先中的累计前置适用条件及来源，不只取最近一条。“仅第一标段适用”
   与“联合体还需”必须同时出现在相关后续包的 supporting 中。结构能确定的范围按章节
   绑定，不能可靠确定条件作用域/替代关系则返回阻断问题，不能默默丢上下文或塞全篇。

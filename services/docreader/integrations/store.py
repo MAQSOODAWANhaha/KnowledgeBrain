@@ -18,6 +18,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from docreader.tender.schema import Task
+from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
 class StoreError(RuntimeError):
@@ -58,6 +59,19 @@ class Lease:
 
 
 SOURCE_STAGES = frozenset({"register", "freeze", "freeze-document", "ocr", "source-spec"})
+
+
+def _revision_view(row: dict[str, Any]) -> dict[str, Any]:
+    """Expose the current item name while retaining the historical SQL column."""
+    result = dict(row)
+    result["corrected_items_ref"] = result.pop("corrected_requirements_ref")
+    return result
+
+
+def _assert_analysis_protocol(revision: dict[str, Any]) -> None:
+    spec = revision.get("execution_spec")
+    if spec is not None and spec.get("workflow_protocol") != WORKFLOW_PROTOCOL:
+        raise Conflict("legacy six-stage revisions are read-only; submit a new analysis run")
 
 
 _SCHEMA = """
@@ -218,6 +232,26 @@ class Store:
             (str(uuid4()), run_id, source_version, domain_revision, kind, Jsonb(payload or {})),
         )).fetchone()
 
+    async def _assert_analysis_revision(self, conn: AsyncConnection, run: dict[str, Any]) -> None:
+        revision = await (await conn.execute(
+            "SELECT execution_spec FROM tender_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
+            (run["run_id"], run["source_version"], run["domain_revision"]),
+        )).fetchone()
+        _assert_analysis_protocol(revision)
+        if revision["execution_spec"] is None:
+            # Legacy workers wrote source-spec before pinning a model config.
+            # New v2 workers pin first; same-source corrections inherit that
+            # explicit protocol while reusing immutable source receipts.
+            legacy = await (await conn.execute(
+                "SELECT 1 FROM tender_artifacts a WHERE a.run_id = %s AND a.source_version = %s "
+                "AND a.stage = 'source-spec' AND NOT EXISTS (SELECT 1 FROM tender_revisions d "
+                "WHERE d.run_id = a.run_id AND d.source_version = a.source_version "
+                "AND d.execution_spec->'workflow_protocol' = %s)",
+                (run["run_id"], run["source_version"], Jsonb(WORKFLOW_PROTOCOL)),
+            )).fetchone()
+            if legacy:
+                raise Conflict("legacy six-stage revisions are read-only; submit a new analysis run")
+
     async def submit(self, manifest_ref: dict[str, Any], request_key: str) -> dict[str, Any]:
         if not request_key:
             raise ValueError("request_key is required")
@@ -258,6 +292,7 @@ class Store:
                 "SELECT * FROM tender_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (run_id, source_version, revision),
             )).fetchone()
+            run["revision"] = _revision_view(run["revision"])
             for key, query in (
                 ("artifacts", "SELECT * FROM tender_artifacts WHERE run_id = %s AND source_version = %s AND domain_revision IN (0, %s) ORDER BY stage, scope"),
                 ("commands", "SELECT * FROM tender_commands WHERE run_id = %s AND source_version = %s AND domain_revision = %s ORDER BY created_at"),
@@ -274,15 +309,17 @@ class Store:
                 ("revisions", "SELECT * FROM tender_revisions WHERE run_id = %s AND NOT (source_version = %s AND domain_revision = %s) ORDER BY created_at"),
             ):
                 run["history"][key] = await (await conn.execute(query, (run_id, source_version, revision))).fetchall()
+            run["history"]["revisions"] = [_revision_view(item) for item in run["history"]["revisions"]]
             return run
 
     async def get_revision(self, lease: Lease) -> dict[str, Any]:
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
-            return await (await conn.execute(
+            row = await (await conn.execute(
                 "SELECT * FROM tender_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (lease.run_id, lease.source_version, lease.domain_revision),
             )).fetchone()
+            return _revision_view(row)
 
     async def pin_execution_spec(self, lease: Lease, spec: dict[str, Any]) -> dict[str, Any]:
         if _safe_metadata(spec) != spec:
@@ -329,12 +366,19 @@ class Store:
         async with self.transaction() as conn:
             rows = await (await conn.execute(
                 "SELECT c.command_id FROM tender_commands c JOIN tender_runs r ON r.run_id = c.run_id "
+                "JOIN tender_revisions d ON d.run_id = r.run_id AND d.source_version = r.source_version "
+                "AND d.domain_revision = r.domain_revision "
                 "WHERE c.source_version = r.source_version AND c.domain_revision = r.domain_revision AND NOT r.cancel_requested "
+                "AND (d.execution_spec->'workflow_protocol' = %s OR (d.execution_spec IS NULL AND ("
+                "NOT EXISTS (SELECT 1 FROM tender_artifacts a WHERE a.run_id = r.run_id "
+                "AND a.source_version = r.source_version AND a.stage = 'source-spec') OR "
+                "EXISTS (SELECT 1 FROM tender_revisions h WHERE h.run_id = r.run_id "
+                "AND h.source_version = r.source_version AND h.execution_spec->'workflow_protocol' = %s)))) "
                 "AND (r.lease_until IS NULL OR r.lease_until <= clock_timestamp()) AND ("
                 "c.status = 'pending' OR (c.status = 'claimed' AND c.claim_until <= clock_timestamp()) OR "
                 "(c.status = 'published' AND c.published_at <= clock_timestamp() - %s * interval '1 second') OR "
                 "c.status = 'running') ORDER BY c.created_at LIMIT %s FOR UPDATE OF c SKIP LOCKED",
-                (redeliver_seconds, limit),
+                (Jsonb(WORKFLOW_PROTOCOL), Jsonb(WORKFLOW_PROTOCOL), redeliver_seconds, limit),
             )).fetchall()
             claimed = []
             for row in rows:
@@ -421,7 +465,37 @@ class Store:
                     or command["domain_revision"] != run["domain_revision"]
                     or command["status"] in {"completed", "cancelled"}):
                 return None
+            await self._assert_analysis_revision(conn, run)
             epoch = run["epoch"] + 1
+            # A terminated predecessor cannot tell whether an already sent model call
+            # was billed. Preserve that uncertainty even if its retry budget is spent.
+            await conn.execute(
+                "UPDATE tender_model_requests SET status = CASE WHEN status = 'sent' THEN 'uncertain' ELSE 'failed' END, "
+                "finished_at = clock_timestamp(), error = '{\"type\":\"executor_lost\"}'::jsonb "
+                "WHERE run_id = %s AND source_version = %s AND epoch < %s AND status IN ('prepared', 'sent')",
+                (run_id, source_version, epoch),
+            )
+            if run["lease_command_id"] == command_id:
+                # Dispatch can change running to claimed/published before takeover.
+                # The expired lease identifies the lost executor, not command status.
+                # Old workers did not count losses; execution_count preserves that floor.
+                failures = max(command["infrastructure_failures"] + 1, command["execution_count"])
+                await conn.execute(
+                    "UPDATE tender_commands SET infrastructure_failures = %s, last_error = %s WHERE command_id = %s",
+                    (failures, Jsonb({"type": "executor_lost"}), command_id),
+                )
+                if failures >= 4:
+                    receipt = {"status": "failed", "epoch": run["epoch"],
+                               "metadata": {"reason": "infrastructure_retries_exhausted"}}
+                    await conn.execute(
+                        "UPDATE tender_commands SET status = 'completed', completed_at = clock_timestamp(), "
+                        "receipt = %s WHERE command_id = %s", (Jsonb(receipt), command_id),
+                    )
+                    await conn.execute(
+                        "UPDATE tender_runs SET status = 'failed', lease_until = NULL, lease_command_id = NULL, "
+                        "updated_at = clock_timestamp() WHERE run_id = %s", (run_id,),
+                    )
+                    return None
             await conn.execute(
                 "UPDATE tender_runs SET status = 'running', epoch = %s, lease_command_id = %s, "
                 "lease_until = clock_timestamp() + %s * interval '1 second', updated_at = clock_timestamp() "
@@ -430,14 +504,6 @@ class Store:
             await conn.execute(
                 "UPDATE tender_commands SET status = 'running', started_at = clock_timestamp(), "
                 "execution_count = execution_count + 1 WHERE command_id = %s", (command_id,),
-            )
-            # A terminated predecessor cannot tell whether an already sent model call
-            # was billed. Preserve that uncertainty before a new executor can retry.
-            await conn.execute(
-                "UPDATE tender_model_requests SET status = CASE WHEN status = 'sent' THEN 'uncertain' ELSE 'failed' END, "
-                "finished_at = clock_timestamp(), error = '{\"type\":\"executor_lost\"}'::jsonb "
-                "WHERE run_id = %s AND source_version = %s AND epoch < %s AND status IN ('prepared', 'sent')",
-                (run_id, source_version, epoch),
             )
             return Lease(run_id, source_version, epoch, command_id, command["domain_revision"])
 
@@ -502,7 +568,7 @@ class Store:
         self, lease: Lease, status: str, checklist_digest: str | None = None,
         error: Any = None, metadata: dict[str, Any] | None = None, max_infrastructure_failures: int = 4,
     ) -> dict[str, Any]:
-        if status not in {"retry", "waiting-confirmation", "response-plan-ready", "blocked", "failed"}:
+        if status not in {"retry", "waiting-confirmation", "analysis-ready", "response-plan-ready", "blocked", "failed"}:
             raise ValueError("invalid execution result")
         if max_infrastructure_failures < 1:
             raise ValueError("max_infrastructure_failures must be positive")
@@ -538,6 +604,55 @@ class Store:
             )
             return await self._run(conn, lease.run_id)
 
+    async def retry(
+        self, run_id: str, source_version: int, domain_revision: int, failed_command_id: str,
+        request_key: str, reason: str,
+    ) -> dict[str, Any]:
+        """Explicitly continue a failed execution, retaining all paid receipts."""
+        if not request_key.strip() or not reason.strip() or source_version < 1 or domain_revision < 1:
+            raise ValueError("retry requires a request key, reason, and positive source/domain versions")
+        audit = {"failed_command_id": failed_command_id, "request_key": request_key, "reason": reason}
+        async with self.transaction() as conn:
+            run = await self._run(conn, run_id, lock=True)
+            if (run["source_version"] != source_version or run["domain_revision"] != domain_revision
+                    or run["cancel_requested"]):
+                raise Conflict("retry baseline is stale or the run is cancelled")
+            await self._assert_analysis_revision(conn, run)
+            prior = await (await conn.execute(
+                "SELECT * FROM tender_commands WHERE run_id = %s AND payload->'retry'->>'request_key' = %s",
+                (run_id, request_key),
+            )).fetchone()
+            if prior:
+                if (prior["source_version"] != source_version or prior["domain_revision"] != domain_revision
+                        or prior["payload"]["retry"] != audit):
+                    raise Conflict("request_key already identifies a different retry")
+                return prior
+            if run["status"] != "failed" or run["lease_live"]:
+                raise Conflict("only a failed run without an active lease can be retried")
+            failed = await (await conn.execute(
+                "SELECT * FROM tender_commands WHERE run_id = %s AND source_version = %s AND domain_revision = %s "
+                "ORDER BY created_at DESC, command_id DESC LIMIT 1 FOR UPDATE",
+                (run_id, source_version, domain_revision),
+            )).fetchone()
+            if (not failed or failed["command_id"] != failed_command_id or failed["status"] != "completed"
+                    or (failed["receipt"] or {}).get("status") != "failed"):
+                raise Conflict("retry must identify the current latest failed command")
+            uncertain = await (await conn.execute(
+                "SELECT request_id, status FROM tender_model_requests WHERE run_id = %s AND source_version = %s "
+                "AND domain_revision = %s AND status IN ('sent', 'uncertain') ORDER BY created_at, request_id LIMIT 1",
+                (run_id, source_version, domain_revision),
+            )).fetchone()
+            if uncertain:
+                raise RequestReplayBlocked(uncertain["request_id"], uncertain["status"])
+            payload = {key: value for key, value in failed["payload"].items() if key != "retry"}
+            command = await self._command(conn, run_id, source_version, failed["kind"],
+                                          {**payload, "retry": audit}, domain_revision=domain_revision)
+            await conn.execute(
+                "UPDATE tender_runs SET status = 'pending', updated_at = clock_timestamp() WHERE run_id = %s",
+                (run_id,),
+            )
+            return command
+
     async def confirm(
         self, run_id: str, source_version: int, checklist_digest: str, idempotency_key: str,
         *, domain_revision: int | None = None,
@@ -550,6 +665,7 @@ class Store:
             if (run["source_version"] != source_version or revision != run["domain_revision"]
                     or run["cancel_requested"]):
                 raise InvalidConfirmation("confirmation refers to a cancelled or replaced source/domain revision")
+            await self._assert_analysis_revision(conn, run)
             prior = await (await conn.execute(
                 "SELECT * FROM tender_confirmations WHERE run_id = %s AND ((source_version = %s AND domain_revision = %s) OR request_key = %s)",
                 (run_id, source_version, revision, idempotency_key),
@@ -598,6 +714,7 @@ class Store:
             raise ValueError("request_key is required")
         async with self.transaction() as conn:
             run = await self._run(conn, run_id, lock=True)
+            await self._assert_analysis_revision(conn, run)
             prior = await (await conn.execute(
                 "SELECT * FROM tender_versions WHERE run_id = %s AND request_key = %s", (run_id, request_key),
             )).fetchone()
@@ -638,20 +755,21 @@ class Store:
                     "submitted_source_version": source_version, "submitted_domain_revision": 1}
 
     async def correct(
-        self, run_id: str, source_version: int, expected_revision: int, base_requirements_digest: str,
-        corrected_requirements_ref: dict[str, Any], request_key: str, reason: str,
+        self, run_id: str, source_version: int, expected_revision: int, base_items_digest: str,
+        corrected_items_ref: dict[str, Any], request_key: str, reason: str,
     ) -> dict[str, Any]:
         if not request_key or not reason.strip() or expected_revision < 1:
             raise ValueError("correction requires a request key, reason, and positive expected revision")
         async with self.transaction() as conn:
             run = await self._run(conn, run_id, lock=True)
+            await self._assert_analysis_revision(conn, run)
             prior = await (await conn.execute(
                 "SELECT * FROM tender_revisions WHERE run_id = %s AND request_key = %s", (run_id, request_key),
             )).fetchone()
             if prior:
                 if (prior["source_version"] != source_version or prior["domain_revision"] != expected_revision + 1
-                        or prior["upstream_digest"] != base_requirements_digest
-                        or prior["corrected_requirements_ref"] != corrected_requirements_ref or prior["reason"] != reason):
+                        or prior["upstream_digest"] != base_items_digest
+                        or prior["corrected_requirements_ref"] != corrected_items_ref or prior["reason"] != reason):
                     raise Conflict("request_key already identifies a different correction")
                 return {**run, "submitted_source_version": source_version, "submitted_domain_revision": prior["domain_revision"]}
             if (run["source_version"] != source_version or run["domain_revision"] != expected_revision
@@ -667,19 +785,19 @@ class Store:
             )).fetchone()
             if not frozen or not extracted:
                 raise Conflict("sources must be frozen and requirements extracted before correction")
-            if extracted["artifact_ref"]["sha256"] != base_requirements_digest:
-                raise Conflict("requirements baseline digest does not match")
+            if extracted["artifact_ref"]["sha256"] != base_items_digest:
+                raise Conflict("items baseline digest does not match")
             previous_revision = await (await conn.execute(
-                "SELECT scope_decisions_ref FROM tender_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
+                "SELECT scope_decisions_ref, execution_spec FROM tender_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (run_id, source_version, expected_revision),
             )).fetchone()
             revision = expected_revision + 1
             await conn.execute(
                 "INSERT INTO tender_revisions(run_id, source_version, domain_revision, request_key, corrected_requirements_ref, scope_decisions_ref, upstream_digest, reason) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                (run_id, source_version, revision, request_key, Jsonb(corrected_requirements_ref),
+                (run_id, source_version, revision, request_key, Jsonb(corrected_items_ref),
                  Jsonb(previous_revision["scope_decisions_ref"]) if previous_revision["scope_decisions_ref"] is not None else None,
-                 base_requirements_digest, reason),
+                 base_items_digest, reason),
             )
             await conn.execute(
                 "UPDATE tender_runs SET domain_revision = %s, status = 'pending', epoch = epoch + 1, "
@@ -704,6 +822,7 @@ class Store:
             raise ValueError("scope review requires decisions, a request key, reason, and positive expected revision")
         async with self.transaction() as conn:
             run = await self._run(conn, run_id, lock=True)
+            await self._assert_analysis_revision(conn, run)
             prior = await (await conn.execute(
                 "SELECT * FROM tender_revisions WHERE run_id = %s AND request_key = %s", (run_id, request_key),
             )).fetchone()

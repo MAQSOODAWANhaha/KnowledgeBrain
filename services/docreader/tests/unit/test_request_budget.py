@@ -41,6 +41,51 @@ def test_decoded_content_and_reserves_decide_admission_wire_bytes_are_separate()
     assert request["response_format"] == {"type": "json_object"}
 
 
+@pytest.mark.parametrize("task", ["extract", "verify"])
+def test_analysis_source_views_report_body_and_support_without_changing_admission(task):
+    payload = {
+        "schema_version": 2,
+        "source_views": [
+            {"document_id": "main", "body": [{"range_id": "r1", "text": '正文 "三十天"'}],
+             "supporting": [{"range_id": "r2", "text": "适用第一标段。"}]},
+            {"document_id": "change", "body": [{"range_id": "r3", "text": "修订\\条件\n原文"}],
+             "supporting": []},
+        ],
+        "items": [{"text": "这部分属于事项开销。", "evidence": [{"quote": "正文"}]}],
+    }
+    b = budget()
+    request = b.request(task, payload)
+    measured = b.measure_request(request)
+    exact_text_bytes = len(PROMPTS[task].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
+    expected = {
+        field: sum(len(json.dumps(view[field], ensure_ascii=False, separators=(",", ":")).encode()) - 2
+                   for view in payload["source_views"])
+        for field in ("body", "supporting")
+    }
+    assert measured["body_tokens"] == expected["body"] > 0
+    assert measured["support_tokens"] == expected["supporting"] > 0
+    assert measured["text_tokens"] == exact_text_bytes
+    assert measured["overhead_tokens"] == exact_text_bytes - sum(expected.values())
+    assert measured["input_tokens"] == exact_text_bytes + 32
+    assert measured["total_context_tokens"] == exact_text_bytes + 32 + 16384 + 4096
+    assert measured["wire_bytes"] == len(json.dumps(request, ensure_ascii=False, sort_keys=True,
+                                                    separators=(",", ":"), allow_nan=False).encode())
+    assert measured["fits"] is True
+    assert budget(32768, output_reserve=32768).measure_request(request)["fits"] is False
+
+
+def test_source_contributions_include_top_level_and_nested_views_once_each():
+    payload = {"body": [{"text": "旧结构正文"}], "supporting": [{"text": "旧结构条件"}],
+               "source_views": [{"body": [{"text": "新结构正文"}], "supporting": [{"text": "新结构条件"}]}],
+               "items": [{"body": [{"text": "事项字段不能算作来源正文"}]}]}
+    measured = budget().measure("verify", payload)
+    for source_field, result_field in (("body", "body_tokens"), ("supporting", "support_tokens")):
+        expected = sum(len(json.dumps(view[source_field], ensure_ascii=False, separators=(",", ":")).encode()) - 2
+                       for view in [payload, *payload["source_views"]])
+        assert measured[result_field] == expected
+    assert measured["overhead_tokens"] > 0
+
+
 def test_complete_required_support_is_never_truncated_to_make_a_package_fit():
     b = budget(32768)
     payload = {"body": [{"text": "tiny"}], "supporting": [{"text": "条件" * 3000}]}
@@ -136,6 +181,37 @@ def test_default_domain_prompts_are_actual_schema_text_and_snapshot_is_immutable
 def test_non_json_payload_has_no_content_in_error(value):
     with pytest.raises(ModelSemanticError, match="JSON serializable"):
         budget().measure("extract", value)
+
+
+def test_verified_tokenizer_counts_verify_only_and_keeps_extract_bytes():
+    import tiktoken
+
+    encoding = tiktoken.get_encoding("o200k_base")
+    payload = {"source_views": [{"body": [{"range_id": "r1", "text": "投标人应提交营业执照副本。"}],
+                                 "supporting": [{"range_id": "r2", "text": "适用第一标段。"}]}]}
+    plain, tokenized = budget(), budget(tokenizer="o200k_base")
+    request = tokenized.request("verify", payload)
+    expected = (len(encoding.encode(PROMPTS["verify"]))
+                + len(encoding.encode(request["messages"][1]["content"][0]["text"])))
+    measured = tokenized.measure_request(request, "verify")
+    assert tokenized.measure("verify", payload) == measured
+    assert tokenized.measure_request(request)["method"] == "utf8_bytes_decoded_messages_v2"
+    assert measured["text_tokens"] == expected
+    assert measured["input_tokens"] == expected + 512
+    assert measured["output_reserve"] == 32768
+    assert measured["effective_input_budget_tokens"] == 131072 - 32768 - 4096
+    assert measured["total_context_tokens"] == expected + 512 + 32768 + 4096
+    assert measured["method"] == "o200k_base_decoded_messages_v1"
+    assert measured["body_tokens"] > 0 and measured["support_tokens"] > 0
+    assert measured["text_tokens"] < plain.measure("verify", payload)["text_tokens"]
+    assert tokenized.measure("extract", payload) == plain.measure("extract", payload)
+    assert "tokenized" not in plain.spec()
+    assert tokenized.spec()["tokenized"] == {"tokenizer": "o200k_base", "tasks": ["verify"],
+                                             "method": "o200k_base_decoded_messages_v1",
+                                             "framing_tokens": 512, "output_reserve": 32768}
+    assert budget(32768, tokenizer="o200k_base").measure("verify", payload)["output_reserve"] == 8192
+    with pytest.raises(ModelConfigurationError, match="tokenizer"):
+        budget(tokenizer="cl100k_base")
 
 
 def test_actual_tool_and_json_schema_fields_count_separately_from_http_escaping():

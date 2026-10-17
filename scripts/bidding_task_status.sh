@@ -7,7 +7,7 @@ Usage: scripts/bidding_task_status.sh [--list | request_artifact_id]
 --list lists all requirement_set_compile requests, newest first.
 Copy a request_artifact_id from the list to inspect its detailed progress.
 Omit the ID to inspect the latest requirement_set_compile request.
-Environment: KB_POSTGRES_CONTAINER (default knowledgebrain-postgres).
+Environment: KB_POSTGRES_CONTAINER (default kb_postgres).
 POSTGRES_USER and POSTGRES_DB are read inside the container (default knowledgebrain).
 Sections: CURRENT (current_attempt only), ATTEMPTS (history), PHASE (one row per completed turn).
 Phase is discover, outline (organize slots, then check), check, or complete.
@@ -20,7 +20,7 @@ if [[ $# -gt 1 || ( $# -eq 1 && $1 != --list && ! $1 =~ ^[[:xdigit:]]{8}-[[:xdig
   echo 'Expected --list or an optional UUID; use --help for usage.' >&2
   exit 2
 fi
-docker exec -i "${KB_POSTGRES_CONTAINER:-knowledgebrain-postgres}" sh -c '
+docker exec -i "${KB_POSTGRES_CONTAINER:-kb_postgres}" sh -c '
   exec psql -X -v ON_ERROR_STOP=1 -P pager=off -U "${POSTGRES_USER:-knowledgebrain}" -d "${POSTGRES_DB:-knowledgebrain}" -v requested_id="$1"
 ' sh "${1:-}" <<'SQL'
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;

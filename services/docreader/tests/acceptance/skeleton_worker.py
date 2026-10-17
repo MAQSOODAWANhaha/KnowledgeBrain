@@ -29,7 +29,7 @@ class SkeletonNodes:
         return {"frozen_ref": state["registered_ref"], "pack_plan_ref": state["registered_ref"]}
 
     async def extract(self, state):
-        return {"requirements_ref": state["frozen_ref"]}
+        return {"items_ref": state["frozen_ref"]}
 
     async def verify(self, state):
         return {"verification_ref": state["frozen_ref"], "checklist_digest": state["frozen_ref"]["sha256"]}
@@ -41,10 +41,7 @@ class SkeletonNodes:
                 or approved.get("source_version") != state["source_version"]
                 or approved.get("domain_revision") != state["domain_revision"]):
             raise ValueError("stale confirmation")
-        return {}
-
-    async def plan(self, state):
-        return {"status": "response-plan-ready", "response_plan_ref": state["verification_ref"]}
+        return {"status": "analysis-ready"}
 
 
 @dramatiq.actor(broker=broker, actor_name="skeleton_command", queue_name="tender-skeleton", max_retries=0,

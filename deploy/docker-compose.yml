@@ -1,4 +1,4 @@
-name: knowledgebrain
+name: kb
 
 # Production uses knowledgebrain-release with a real image descriptor.
 x-db-env: &db-env
@@ -9,18 +9,11 @@ x-db-env: &db-env
   POSTGRES_USER: ${POSTGRES_USER:?set application database username}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set application database password}
 
-x-app-env: &app-env
+x-queue-env: &queue-env
   REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+
+x-storage-env: &storage-env
   OBJECT_DIR: ${OBJECT_DIR:-/data/objects}
-  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
-  KB_ADMIN_USERNAME: ${KB_ADMIN_USERNAME:-}
-  KB_ADMIN_PASSWORD: ${KB_ADMIN_PASSWORD:-}
-  KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED: ${KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED:-false}
-  KNOWLEDGEBRAIN_BOOTSTRAP_KEY: ${KNOWLEDGEBRAIN_BOOTSTRAP_KEY:-}
-  KNOWLEDGEBRAIN_LDAP_URL: ${KNOWLEDGEBRAIN_LDAP_URL:-}
-  KNOWLEDGEBRAIN_LDAP_BIND_DN: ${KNOWLEDGEBRAIN_LDAP_BIND_DN:-uid={user},ou=people,dc=example,dc=com}
-  DOCREADER_ADDR: ${DOCREADER_ADDR:-docreader:${DOCREADER_GRPC_PORT:-50051}}
-  GRPC_AUTH_TOKEN: ${GRPC_AUTH_TOKEN:-}
   KNOWLEDGEBRAIN_S3_BUCKET: ${KNOWLEDGEBRAIN_S3_BUCKET:-knowledgebrain}
   KNOWLEDGEBRAIN_S3_ENDPOINT: ${KNOWLEDGEBRAIN_S3_ENDPOINT:-http://minio:9000}
   KNOWLEDGEBRAIN_S3_ACCESS_KEY: ${KNOWLEDGEBRAIN_S3_ACCESS_KEY:-}
@@ -28,29 +21,39 @@ x-app-env: &app-env
   MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set object storage username}
   MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set object storage password}
   KNOWLEDGEBRAIN_S3_REGION: ${KNOWLEDGEBRAIN_S3_REGION:-us-east-1}
-  KNOWLEDGEBRAIN_NEO4J_HTTP_URL: ${KNOWLEDGEBRAIN_NEO4J_HTTP_URL:-}
-  KNOWLEDGEBRAIN_NEO4J_USERNAME: ${KNOWLEDGEBRAIN_NEO4J_USERNAME:-neo4j}
-  KNOWLEDGEBRAIN_NEO4J_PASSWORD: ${KNOWLEDGEBRAIN_NEO4J_PASSWORD:-}
-  KNOWLEDGEBRAIN_EMBEDDING_BASE_URL: ${KNOWLEDGEBRAIN_EMBEDDING_BASE_URL:-}
-  KNOWLEDGEBRAIN_EMBEDDING_API_KEY: ${KNOWLEDGEBRAIN_EMBEDDING_API_KEY:-${EMBEDDING_API_KEY:-}}
-  KNOWLEDGEBRAIN_EMBEDDING_MODEL: ${KNOWLEDGEBRAIN_EMBEDDING_MODEL:-${EMBEDDING_MODEL:-}}
-  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+
+x-model-env: &model-env
   KNOWLEDGEBRAIN_CHAT_BASE_URL: ${KNOWLEDGEBRAIN_CHAT_BASE_URL:?set chat model base URL}
   KNOWLEDGEBRAIN_CHAT_API_KEY: ${KNOWLEDGEBRAIN_CHAT_API_KEY:?set chat model API key}
   KNOWLEDGEBRAIN_CHAT_MODEL: ${KNOWLEDGEBRAIN_CHAT_MODEL:?set chat model name}
   KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS: ${KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS:?set model context window}
-  KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES: ${KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES:-}
-  KB_AUTHORING_OUTPUT_TOKEN_RESERVE: ${KB_AUTHORING_OUTPUT_TOKEN_RESERVE:-}
-  KB_AUTHORING_TIMEOUT_MS: ${KB_AUTHORING_TIMEOUT_MS:-}
-  KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT: ${KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT:-}
-  LLM_BASE_URL: ${LLM_BASE_URL:-}
-  LLM_API_KEY: ${LLM_API_KEY:-}
-  LLM_MODEL: ${LLM_MODEL:-}
   KNOWLEDGEBRAIN_VLM_BASE_URL: ${KNOWLEDGEBRAIN_VLM_BASE_URL:-}
   KNOWLEDGEBRAIN_VLM_API_KEY: ${KNOWLEDGEBRAIN_VLM_API_KEY:-}
   KNOWLEDGEBRAIN_VLM_MODEL: ${KNOWLEDGEBRAIN_VLM_MODEL:-}
+
+# libpq reads these standard names; .env still has only one POSTGRES_* account.
+x-python-env: &python-env
+  DATABASE_URL: ${DATABASE_URL:-}
+  PGHOST: ${POSTGRES_HOST:-postgres}
+  PGPORT: ${POSTGRES_PORT:-5432}
+  PGDATABASE: ${POSTGRES_DB:-knowledgebrain}
+  PGUSER: ${POSTGRES_USER:?set application database username}
+  PGPASSWORD: ${POSTGRES_PASSWORD:?set application database password}
+  TENDER_ARTIFACT_ROOT: /artifacts
+
+x-app-env: &app-env
+  KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED: ${KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED:-false}
+  DOCREADER_ADDR: ${DOCREADER_ADDR:-docreader:${DOCREADER_GRPC_PORT:-50051}}
+  GRPC_AUTH_TOKEN: ${GRPC_AUTH_TOKEN:-}
+  KNOWLEDGEBRAIN_NEO4J_HTTP_URL: ${KNOWLEDGEBRAIN_NEO4J_HTTP_URL:-}
+  KNOWLEDGEBRAIN_NEO4J_USERNAME: ${KNOWLEDGEBRAIN_NEO4J_USERNAME:-neo4j}
+  KNOWLEDGEBRAIN_NEO4J_PASSWORD: ${KNOWLEDGEBRAIN_NEO4J_PASSWORD:-}
+  KNOWLEDGEBRAIN_EMBEDDING_BASE_URL: ${KNOWLEDGEBRAIN_EMBEDDING_BASE_URL:-}
+  KNOWLEDGEBRAIN_EMBEDDING_API_KEY: ${KNOWLEDGEBRAIN_EMBEDDING_API_KEY:-}
+  KNOWLEDGEBRAIN_EMBEDDING_MODEL: ${KNOWLEDGEBRAIN_EMBEDDING_MODEL:-}
+  KB_AUTHORING_OUTPUT_TOKEN_RESERVE: ${KB_AUTHORING_OUTPUT_TOKEN_RESERVE:-}
+  KB_AUTHORING_TIMEOUT_MS: ${KB_AUTHORING_TIMEOUT_MS:-}
+  KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT: ${KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT:-}
   KNOWLEDGEBRAIN_MINERU_ENDPOINT: ${KNOWLEDGEBRAIN_MINERU_ENDPOINT:-}
   KNOWLEDGEBRAIN_PADDLE_ENDPOINT: ${KNOWLEDGEBRAIN_PADDLE_ENDPOINT:-}
   KB_TENDER_PARSE_CONCURRENCY: ${KB_TENDER_PARSE_CONCURRENCY:-4}
@@ -61,22 +64,13 @@ x-app-env: &app-env
   KNOWLEDGEBRAIN_POSTPROCESS_CONCURRENCY: ${KNOWLEDGEBRAIN_POSTPROCESS_CONCURRENCY:-2}
   KNOWLEDGEBRAIN_ENRICHMENT_CONCURRENCY: ${KNOWLEDGEBRAIN_ENRICHMENT_CONCURRENCY:-12}
   KNOWLEDGEBRAIN_MAINTENANCE_CONCURRENCY: ${KNOWLEDGEBRAIN_MAINTENANCE_CONCURRENCY:-4}
-  KNOWLEDGEBRAIN_SHARED_CONCURRENCY: ${KNOWLEDGEBRAIN_SHARED_CONCURRENCY:-6}
   KNOWLEDGEBRAIN_WIKI_CONCURRENCY: ${KNOWLEDGEBRAIN_WIKI_CONCURRENCY:-8}
   RUST_LOG: ${RUST_LOG:-info}
   NO_COLOR: ${NO_COLOR:-1}
-  # Defaults must match deploy/.env.example. Browser uses SERVER_ORIGIN (Caddy TLS); API uses COMMAND_ORIGIN.
-  KB_ONLYOFFICE_SERVER_ORIGIN: ${KB_ONLYOFFICE_SERVER_ORIGIN:-https://127.0.0.1:18081/}
-  KB_ONLYOFFICE_COMMAND_ORIGIN: ${KB_ONLYOFFICE_COMMAND_ORIGIN:-http://onlyoffice/}
-  KB_ONLYOFFICE_API_ORIGIN: ${KB_ONLYOFFICE_API_ORIGIN:-http://api:8080/}
-  KB_ONLYOFFICE_JWT_SECRET: ${KB_ONLYOFFICE_JWT_SECRET:-}
-  KB_ONLYOFFICE_CAPABILITY_SECRET: ${KB_ONLYOFFICE_CAPABILITY_SECRET:-}
-  KB_ONLYOFFICE_TOKEN_TTL_SECONDS: ${KB_ONLYOFFICE_TOKEN_TTL_SECONDS:-1200}
-  KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS: ${KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS:-120}
 
 services:
   postgres:
-    container_name: knowledgebrain-postgres
+    container_name: kb_postgres
     image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     entrypoint: ["bash", "/usr/local/bin/knowledgebrain-postgres-entrypoint.sh"]
     command: ["postgres"]
@@ -97,7 +91,7 @@ services:
       start_period: 10s
 
   redis:
-    container_name: knowledgebrain-redis
+    container_name: kb_redis
     image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     volumes:
       - redis-data:/data
@@ -110,13 +104,13 @@ services:
 
   neo4j:
     profiles: ["knowledge"]
-    container_name: knowledgebrain-neo4j
+    container_name: kb_neo4j
     image: neo4j:5.26@sha256:89d577f2e49606de76441eca8cf7a0fe88e594cbaac4d2a3d86c6e59676e2b1e
     environment:
       NEO4J_AUTH: ${NEO4J_AUTH:-}
     ports:
-      - "${NEO4J_BOLT_PORT:-17687}:7687"
-      - "${NEO4J_HTTP_PORT:-17474}:7474"
+      - "${NEO4J_BOLT_PORT:-27687}:7687"
+      - "${NEO4J_HTTP_PORT:-27474}:7474"
     volumes:
       - neo4j-data:/data
     healthcheck:
@@ -127,7 +121,7 @@ services:
       start_period: 20s
 
   minio:
-    container_name: knowledgebrain-minio
+    container_name: kb_minio
     image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
@@ -143,7 +137,7 @@ services:
       start_period: 15s
 
   docreader:
-    container_name: knowledgebrain-docreader
+    container_name: kb_docreader
     profiles: ["runtime"]
     build:
       context: ..
@@ -174,8 +168,8 @@ services:
       start_period: 30s
 
   migrate:
-    container_name: knowledgebrain-migrate
-    profiles: ["runtime", "bootstrap"]
+    container_name: kb_migrate
+    profiles: ["runtime", "bootstrap", "python-tender"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
@@ -191,7 +185,7 @@ services:
     restart: "no"
 
   api:
-    container_name: knowledgebrain-api
+    container_name: kb_api
     profiles: ["runtime"]
     build:
       context: ..
@@ -201,11 +195,24 @@ services:
         BIN: api
     image: knowledgebrain-api:local
     environment:
-      <<: [*app-env, *db-env]
+      <<: [*app-env, *db-env, *storage-env, *model-env, *queue-env]
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      KB_ADMIN_USERNAME: ${KB_ADMIN_USERNAME:-}
+      KB_ADMIN_PASSWORD: ${KB_ADMIN_PASSWORD:-}
+      KNOWLEDGEBRAIN_BOOTSTRAP_KEY: ${KNOWLEDGEBRAIN_BOOTSTRAP_KEY:-}
+      KNOWLEDGEBRAIN_LDAP_URL: ${KNOWLEDGEBRAIN_LDAP_URL:-}
+      KNOWLEDGEBRAIN_LDAP_BIND_DN: ${KNOWLEDGEBRAIN_LDAP_BIND_DN:-uid={user},ou=people,dc=example,dc=com}
+      KB_ONLYOFFICE_SERVER_ORIGIN: ${KB_ONLYOFFICE_SERVER_ORIGIN:-https://127.0.0.1:28081/}
+      KB_ONLYOFFICE_COMMAND_ORIGIN: ${KB_ONLYOFFICE_COMMAND_ORIGIN:-http://onlyoffice/}
+      KB_ONLYOFFICE_API_ORIGIN: ${KB_ONLYOFFICE_API_ORIGIN:-http://api:8080/}
+      KB_ONLYOFFICE_JWT_SECRET: ${KB_ONLYOFFICE_JWT_SECRET:-}
+      KB_ONLYOFFICE_CAPABILITY_SECRET: ${KB_ONLYOFFICE_CAPABILITY_SECRET:-}
+      KB_ONLYOFFICE_TOKEN_TTL_SECONDS: ${KB_ONLYOFFICE_TOKEN_TTL_SECONDS:-1200}
+      KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS: ${KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS:-120}
       API_PORT: ${API_PORT:-8080}
       KNOWLEDGEBRAIN_WEB_ROOT: ${KNOWLEDGEBRAIN_WEB_ROOT:-/web}
     ports:
-      - "${API_HOST_PORT:-18080}:${API_PORT:-8080}"
+      - "${API_HOST_PORT:-28080}:${API_PORT:-8080}"
     restart: unless-stopped
     volumes:
       - objects:/data/objects
@@ -228,7 +235,7 @@ services:
       start_period: 15s
 
   worker:
-    container_name: knowledgebrain-worker
+    container_name: kb_worker
     profiles: ["runtime"]
     build:
       context: ..
@@ -238,7 +245,7 @@ services:
         BIN: worker
     image: knowledgebrain-worker:local
     environment:
-      <<: [*app-env, *db-env]
+      <<: [*app-env, *db-env, *storage-env, *model-env, *queue-env]
     restart: unless-stopped
     volumes:
       - objects:/data/objects
@@ -261,7 +268,7 @@ services:
       start_period: 15s
 
   retention:
-    container_name: knowledgebrain-retention
+    container_name: kb_retention
     profiles: ["runtime"]
     build:
       context: ..
@@ -271,7 +278,9 @@ services:
         BIN: worker
     image: knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
     environment:
-      <<: [*app-env, *db-env]
+      <<: [*db-env, *storage-env, *queue-env]
+      RUST_LOG: ${RUST_LOG:-info}
+      NO_COLOR: ${NO_COLOR:-1}
       BIN: retention
       RETENTION_PROBE_ADDR: 0.0.0.0:8082
     restart: unless-stopped
@@ -291,8 +300,56 @@ services:
       retries: 10
       start_period: 15s
 
+  python-tender-init:
+    container_name: kb_python_tender_init
+    profiles: ["python-tender"]
+    image: knowledgebrain-docreader:local
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "-m", "docreader.integrations.cli", "init"]
+    environment: *python-env
+    volumes: ["python-tender-artifacts:/artifacts"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  python-tender-worker:
+    container_name: kb_python_tender_worker
+    profiles: ["python-tender"]
+    image: knowledgebrain-docreader:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.docreader
+      network: host
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "dramatiq", "docreader.jobs.tasks", "--processes", "1", "--threads", "4"]
+    environment:
+      <<: [*python-env, *model-env, *queue-env]
+    volumes: ["python-tender-artifacts:/artifacts"]
+    depends_on:
+      python-tender-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  python-tender-dispatcher:
+    container_name: kb_python_tender_dispatcher
+    profiles: ["python-tender"]
+    image: knowledgebrain-docreader:local
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "-m", "docreader.jobs.dispatcher"]
+    environment:
+      <<: [*python-env, *queue-env]
+    volumes: ["python-tender-artifacts:/artifacts"]
+    depends_on:
+      python-tender-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   onlyoffice:
-    container_name: knowledgebrain-onlyoffice
+    container_name: kb_onlyoffice
     profiles: ["editing"]
     image: onlyoffice/documentserver:8.3.3
     environment:
@@ -302,7 +359,7 @@ services:
       ALLOW_PRIVATE_IP_ADDRESS: "true"
       ALLOW_META_IP_ADDRESS: "true"
     ports:
-      - "${ONLYOFFICE_HOST_PORT:-18081}:80"
+      - "${ONLYOFFICE_HOST_PORT:-28081}:80"
     volumes:
       - onlyoffice-data:/var/www/onlyoffice/Data
     restart: unless-stopped
@@ -326,3 +383,4 @@ volumes:
   minio-data:
   objects:
   onlyoffice-data:
+  python-tender-artifacts:

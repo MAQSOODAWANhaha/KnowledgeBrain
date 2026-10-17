@@ -16,7 +16,7 @@ RUN set -eux; \
     && apt-get install -y --no-install-recommends \
         gcc g++ pkg-config \
         libxml2-dev libxslt1-dev libjpeg62-turbo-dev zlib1g-dev \
-        libreoffice-writer-nogui default-jre-headless \
+        libreoffice-writer-nogui libreoffice-calc-nogui default-jre-headless \
         antiword catdoc \
         fonts-wqy-zenhei fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
@@ -25,7 +25,10 @@ COPY services/docreader /app
 ENV UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    DOCREADER_GRPC_PORT=50051
+    DOCREADER_GRPC_PORT=50051 \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken
 RUN uv sync --frozen --no-dev
+# Workers must not download the tokenizer at request time.
+RUN uv run --frozen --no-dev --no-sync python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 EXPOSE 50051
-CMD ["uv", "run", "--no-dev", "python", "main.py"]
+CMD ["uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "main.py"]

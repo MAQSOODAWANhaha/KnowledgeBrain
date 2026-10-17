@@ -39,6 +39,7 @@ dependencies = [
     "dramatiq[redis]>=1.18,<2",
     "openai>=2,<3",
     "httpx>=0.28,<1",
+    "tiktoken>=0.9,<1",
 ]
 
 [dependency-groups]

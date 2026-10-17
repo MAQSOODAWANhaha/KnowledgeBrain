@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Mapping, Sequence, get_args
 
@@ -13,7 +14,8 @@ class RequestBudget:
     """Conservative admission for decoded message content, not billed usage.
 
     No tokenizer is assumed for an unverified model name (including gpt-6-luna).
-    UTF8 bytes conservatively estimate text tokens for every configured model.
+    UTF8 bytes conservatively estimate text tokens unless an explicitly
+    verified tokenizer is configured; it then counts TOKENIZED_TASKS only.
     Actual image data is excluded from text estimation and charged a documented
     16384-token estimate per image. Body/support are marginal contributions of
     those fields to decoded message text; locators, schema and other context
@@ -21,19 +23,31 @@ class RequestBudget:
     """
 
     METHOD = "utf8_bytes_decoded_messages_v2"
-    BUILDER = "chat_json_object_stream_v2"
+    BUILDER = "chat_json_object_stream_short_refs_v2"
     IMAGE_TOKENS = 16384
     FRAMING_TOKENS = 32  # 16 + 8 per message for our two-message body.
+    TOKENIZERS = ("o200k_base",)
+    # Extract pack size stays bound by the byte estimate until its much larger
+    # output is calibrated; a token-accurate input would merge packs.
+    TOKENIZED_TASKS = frozenset({"verify"})
+    TOKENIZED_METHOD = "o200k_base_decoded_messages_v1"
+    TOKENIZED_FRAMING_TOKENS = 512  # The relay adds a fixed hidden prompt of about 306 tokens.
+    # Accurate input admits larger whole-ledger discovery requests whose output
+    # grows with items; capped at a quarter of smaller provider windows.
+    TOKENIZED_OUTPUT_RESERVE = 32768
 
     def __init__(self, context_tokens: int | None = 131072, model: str = "gpt-6-luna",
                  prompts: Mapping[str, str] | None = None, output_reserve: int = 16384,
-                 *, correction: bool = False):
+                 *, correction: bool = False, tokenizer: str | None = None):
         if context_tokens is not None and (type(context_tokens) is not int or context_tokens <= 0):
             raise ModelConfigurationError("request context capacity must be a positive integer")
         if type(output_reserve) is not int or output_reserve < 0:
             raise ModelConfigurationError("request output reserve must be a nonnegative integer")
         if type(correction) is not bool or (correction and context_tokens is None):
             raise ModelConfigurationError("correction input allowance requires a configured provider total context")
+        if tokenizer is not None and tokenizer not in self.TOKENIZERS:
+            raise ModelConfigurationError("unsupported request tokenizer")
+        self.tokenizer = tokenizer
         if prompts is None:
             from docreader.tender.prompts import get_prompt
             prompts = {task: get_prompt(task) for task in get_args(Task)}
@@ -43,21 +57,34 @@ class RequestBudget:
 
     @property
     def effective_input_budget_tokens(self) -> int:
+        return self._input_budget(self.output_reserve)
+
+    def _input_budget(self, output_reserve: int) -> int:
         limit = (self.limits.correction_input_budget_tokens if self.limits.correction
                  else self.limits.input_budget_tokens)
-        return min(limit, self.context_tokens - self.output_reserve - self.safety) if self.context_tokens is not None else limit
+        return min(limit, self.context_tokens - output_reserve - self.safety) if self.context_tokens is not None else limit
 
     @property
     def safety(self) -> int:
         return min(4096, self.context_tokens // 16) if self.context_tokens is not None else 4096
 
+    @property
+    def tokenized_output_reserve(self) -> int:
+        return (min(self.TOKENIZED_OUTPUT_RESERVE, self.context_tokens // 4) if self.context_tokens is not None
+                else self.TOKENIZED_OUTPUT_RESERVE)
+
     def spec(self) -> dict:
-        return {"method": self.METHOD, "builder": self.BUILDER, "model": self.model,
+        spec = {"method": self.METHOD, "builder": self.BUILDER, "model": self.model,
                 **self.limits.model_dump(), "output_reserve": self.output_reserve,
                 "safety": self.safety, "image_tokens_each": self.IMAGE_TOKENS,
                 "framing_tokens": self.FRAMING_TOKENS,
                 "prompts": {task: hashlib.sha256(prompt.encode()).hexdigest()
                             for task, prompt in sorted(self.prompts.items())}}
+        if self.tokenizer is not None:
+            spec["tokenized"] = {"tokenizer": self.tokenizer, "tasks": sorted(self.TOKENIZED_TASKS),
+                                 "method": self.TOKENIZED_METHOD, "framing_tokens": self.TOKENIZED_FRAMING_TOKENS,
+                                 "output_reserve": self.tokenized_output_reserve}
+        return spec
 
     def request(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
         if task not in get_args(Task):
@@ -66,63 +93,72 @@ class RequestBudget:
             prompt = self.prompts[task]
         except KeyError:
             raise ModelConfigurationError("model task has no configured prompt") from None
-        return build_request(self.model, prompt, payload, images)
+        from docreader.llm.wire import WirePayload
+
+        return build_request(self.model, prompt, WirePayload(task, payload).payload, images)
 
     def measure(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
-        return self.measure_request(self.request(task, payload, images))
+        return self.measure_request(self.request(task, payload, images), task)
 
-    def measure_request(self, request: dict) -> dict:
+    def measure_request(self, request: dict, task: Task | None = None) -> dict:
         """Count actual decoded text/schema/tools, without HTTP JSON escaping."""
+        tokenized = self.tokenizer is not None and task in self.TOKENIZED_TASKS
+        count = _o200k_tokens if tokenized else _utf8_bytes
+        framing = self.TOKENIZED_FRAMING_TOKENS if tokenized else self.FRAMING_TOKENS
+        output_reserve = self.tokenized_output_reserve if tokenized else self.output_reserve
         image_count = 0
         text_tokens = 0
         for message in request["messages"]:
             content = message["content"]
             if isinstance(content, str):
-                text_tokens += len(content.encode("utf-8"))
+                text_tokens += count(content)
             if isinstance(content, list):
                 for part in content:
                     if part.get("type") == "image_url":
                         image_count += 1
                     elif part.get("type") == "text":
-                        text_tokens += len(part["text"].encode("utf-8"))
+                        text_tokens += count(part["text"])
             for field in ("tool_calls", "function_call"):
                 if field in message:
-                    text_tokens += _json_bytes(message[field])
+                    text_tokens += count(_json(message[field]))
         for field in ("tools", "functions"):
             if field in request:
-                text_tokens += _json_bytes(request[field])
+                text_tokens += count(_json(request[field]))
         if "json_schema" in request.get("response_format", {}):
-            text_tokens += _json_bytes(request["response_format"]["json_schema"])
+            text_tokens += count(_json(request["response_format"]["json_schema"]))
         payload = json.loads(request["messages"][1]["content"][0]["text"])
         # This JSON is the message content itself, with only its own escaping.
+        source_views = payload.get("source_views", []) if isinstance(payload, dict) else []
+        views = [payload, *source_views] if isinstance(source_views, list) else [payload]
+
         def contribution(field):
-            if not isinstance(payload, dict) or field not in payload:
-                return 0
-            return max(0, _json_bytes(payload[field]) - _json_bytes([]))
+            return sum(max(0, count(_json(view[field])) - count(_json([])))
+                       for view in views if isinstance(view, dict) and field in view)
 
         body_tokens, support_tokens = contribution("body"), contribution("supporting")
         image_tokens = image_count * self.IMAGE_TOKENS
-        input_tokens = text_tokens + self.FRAMING_TOKENS + image_tokens
-        total = input_tokens + self.output_reserve + self.safety
+        input_tokens = text_tokens + framing + image_tokens
+        total = input_tokens + output_reserve + self.safety
+        input_budget = self._input_budget(output_reserve)
         return {"input_tokens": input_tokens, "text_tokens": text_tokens, "wire_bytes": _json_bytes(request),
                 "body_tokens": body_tokens, "support_tokens": support_tokens,
                 "overhead_tokens": text_tokens - body_tokens - support_tokens,
-                "framing_tokens": self.FRAMING_TOKENS, "image_tokens": image_tokens,
-                "image_count": image_count, "output_reserve": self.output_reserve,
+                "framing_tokens": framing, "image_tokens": image_tokens,
+                "image_count": image_count, "output_reserve": output_reserve,
                 "safety": self.safety, **self.limits.model_dump(), "total_context_tokens": total,
-                "effective_input_budget_tokens": self.effective_input_budget_tokens,
-                "fits": (input_tokens <= self.effective_input_budget_tokens if self.context_tokens is not None
-                         or input_tokens > self.effective_input_budget_tokens else None),
-                "method": self.METHOD}
+                "effective_input_budget_tokens": input_budget,
+                "fits": (input_tokens <= input_budget if self.context_tokens is not None
+                         or input_tokens > input_budget else None),
+                "method": self.TOKENIZED_METHOD if tokenized else self.METHOD}
 
     def fits(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> bool:
         return self.measure(task, payload, images)["fits"] is True
 
     def require(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
-        return self.require_request(self.request(task, payload, images))
+        return self.require_request(self.request(task, payload, images), task)
 
-    def require_request(self, request: dict) -> dict:
-        measured = self.measure_request(request)
+    def require_request(self, request: dict, task: Task | None = None) -> dict:
+        measured = self.measure_request(request, task)
         if measured["fits"] is False:
             raise ModelBudgetError("complete request exceeds the input budget or provider total context after reserves")
         # An independent VLM may have no configured capacity. Preserve that
@@ -130,5 +166,24 @@ class RequestBudget:
         return measured
 
 
+def _json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def _json_bytes(value) -> int:
-    return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+    return _utf8_bytes(_json(value))
+
+
+def _utf8_bytes(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+@lru_cache(maxsize=1)
+def _o200k():
+    import tiktoken
+
+    return tiktoken.get_encoding("o200k_base")
+
+
+def _o200k_tokens(text: str) -> int:
+    return len(_o200k().encode(text, disallowed_special=()))

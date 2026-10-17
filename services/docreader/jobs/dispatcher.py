@@ -2,8 +2,6 @@
 import asyncio
 import logging
 import psycopg
-from dramatiq.errors import ConnectionClosed
-from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 from docreader.integrations.store import Store
 from docreader.jobs.settings import Settings
@@ -19,9 +17,7 @@ async def dispatch_once(store, send, *, redeliver_seconds=60):
             await asyncio.to_thread(send, cmd["run_id"], cmd["command_id"], cmd["source_version"])
         except Exception as error:
             # Do not log arbitrary broker URLs/passwords contained in exception text.
-            retryable = isinstance(error, (ConnectionClosed, RedisConnectionError, RedisTimeoutError,
-                                           ConnectionError, TimeoutError))
-            await store.publish_failed(cmd["command_id"], cmd["claim_token"], type(error).__name__, retryable=retryable)
+            await store.publish_failed(cmd["command_id"], cmd["claim_token"], type(error).__name__, retryable=True)
             logger.warning("Command publish failed (%s) for command %s", type(error).__name__, cmd["command_id"])
         else:
             await store.mark_published(cmd["command_id"], cmd["claim_token"])

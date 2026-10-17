@@ -9,7 +9,7 @@ import pytest
 
 from docreader.llm import (
     ImageInput, ModelBudgetError, ModelConfig, ModelConfigurationError, ModelInfrastructureError,
-    ModelSemanticError, OpenAIModel, UncertainModelResponse,
+    ModelSemanticError, OpenAIModel,
 )
 from docreader.llm.budget import RequestBudget
 from docreader.llm.config import completions_url
@@ -59,30 +59,47 @@ def test_invalid_endpoint_does_not_echo_input(url):
     assert "secret" not in str(error.value)
 
 
-def test_vlm_validation_is_lazy_and_exact_image_capabilities_apply():
-    config = ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_MODEL="gpt-4o-unverified"))
-    assert config.chat.model == "gpt-4o-unverified"
-    with pytest.raises(ModelConfigurationError, match="confirmed Chat image support"):
+@pytest.mark.parametrize("chat_model", ["gpt-4o", "unlisted-chat-model"])
+def test_vlm_validation_is_lazy_and_does_not_inherit_chat(chat_model):
+    config = ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_MODEL=chat_model))
+    assert config.chat.model == chat_model
+    with pytest.raises(ModelConfigurationError, match="VLM base URL, API key and model"):
         config.for_images()
-    assert ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES="true")).for_images().context_tokens == 32768
-    config = ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES="false"))
-    with pytest.raises(ModelConfigurationError):
-        config.for_images()
-    with pytest.raises(ModelConfigurationError):
-        ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES="yes"))
 
 
-def test_vlm_never_inherits_credentials_for_independent_url():
-    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
+@pytest.mark.parametrize("url", ["https://vision.invalid/v1", "https://chat.invalid/v1/"])
+def test_vlm_never_inherits_chat_credentials(url):
+    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL=url,
                          KNOWLEDGEBRAIN_VLM_MODEL="vision-model")
-    with pytest.raises(ModelConfigurationError, match="its own API key"):
+    with pytest.raises(ModelConfigurationError, match="VLM base URL, API key and model"):
         ModelConfig.from_env(values).for_images()
     values["KNOWLEDGEBRAIN_VLM_API_KEY"] = "vision-key"
     vision = ModelConfig.from_env(values).for_images()
     assert vision.api_key == "vision-key"
     assert vision.context_tokens is None
-    values.update(KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1/", KNOWLEDGEBRAIN_VLM_API_KEY="")
-    assert ModelConfig.from_env(values).for_images().api_key == "synthetic-secret"
+
+
+def test_explicit_vlm_accepts_unlisted_model_even_when_chat_uses_same_model():
+    config = ModelConfig.from_env(environment(
+        KNOWLEDGEBRAIN_CHAT_MODEL="unlisted-vision-model",
+        KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1",
+        KNOWLEDGEBRAIN_VLM_API_KEY=" vision-key ",
+        KNOWLEDGEBRAIN_VLM_MODEL="unlisted-vision-model",
+    ))
+    assert config.for_images().model == "unlisted-vision-model"
+    assert config.for_images().api_key == " vision-key "
+    assert config.for_images().context_tokens == 32768
+
+
+@pytest.mark.parametrize("missing", ["BASE_URL", "API_KEY", "MODEL"])
+def test_partial_vlm_configuration_never_falls_back_to_chat(missing):
+    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1",
+                         KNOWLEDGEBRAIN_VLM_API_KEY="vision-key", KNOWLEDGEBRAIN_VLM_MODEL="gpt-4o")
+    del values[f"KNOWLEDGEBRAIN_VLM_{missing}"]
+    config = ModelConfig.from_env(values)
+    assert config.chat.model == "gpt-4o"
+    with pytest.raises(ModelConfigurationError, match="VLM base URL, API key and model"):
+        config.for_images()
 
 
 @pytest.mark.parametrize("url", ["https://chat.invalid/v1/chat/completions", "https://chat.invalid",
@@ -227,7 +244,7 @@ async def test_http_errors_are_classified_without_sdk_retry_or_provider_body(sta
     assert not issubclass(ModelSemanticError, ConnectionError)
 
 
-async def test_response_loss_is_uncertain_and_not_zero_usage():
+async def test_no_data_before_idle_deadline_is_a_retryable_failure_with_unknown_usage():
     calls = []
 
     def handler(request):
@@ -236,10 +253,12 @@ async def test_response_loss_is_uncertain_and_not_zero_usage():
 
     client, audit = model(handler)
     async with client:
-        with pytest.raises(UncertainModelResponse, match="billing are uncertain"):
+        with pytest.raises(ModelInfrastructureError) as error:
             await client.call("extract", {})
+    assert "private transport message" not in str(error.value)
     assert len(calls) == 1
-    assert audit.events[-1]["status"] == "uncertain"
+    assert audit.events[-1]["status"] == "failed"
+    assert audit.events[-1]["error"]["type"] == "first_data_idle_timeout"
     assert audit.events[-1]["usage"] is None
     assert client.usage.snapshot()["reported_tokens"] == {}
 
@@ -338,7 +357,8 @@ async def test_inline_image_selects_vlm_and_rejects_remote_urls():
     assert audit.events[0]["metadata"]["context_tokens"] is None
 
 
-async def test_concurrency_limits_in_flight_requests_and_ids_are_unique():
+@pytest.mark.parametrize("concurrency", [None, 2, 3])
+async def test_concurrency_limits_in_flight_requests_and_ids_are_unique(concurrency):
     active = 0
     maximum = 0
 
@@ -350,10 +370,10 @@ async def test_concurrency_limits_in_flight_requests_and_ids_are_unique():
         active -= 1
         return response()
 
-    client, audit = model(handler, concurrency=2)
+    client, audit = model(handler, **({"concurrency": concurrency} if concurrency is not None else {}))
     async with client:
         await asyncio.gather(*(client.call("extract", {"pack": number}) for number in range(6)))
-    assert maximum == 2
+    assert maximum == (2 if concurrency is None else concurrency)
     prepared = [event for event in audit.events if event["status"] == "prepared"]
     assert len({event["request_id"] for event in prepared}) == 6
     assert audit.pin_calls == 6
@@ -442,12 +462,14 @@ async def test_execution_drift_fails_before_request_audit_or_http(change):
     elif change == "endpoint":
         values["KNOWLEDGEBRAIN_CHAT_BASE_URL"] = "https://other.invalid/v1"
     elif change == "vlm":
-        values["KNOWLEDGEBRAIN_VLM_MODEL"] = "explicit-vision-model"
+        values.update(KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
+                      KNOWLEDGEBRAIN_VLM_API_KEY="vision-key",
+                      KNOWLEDGEBRAIN_VLM_MODEL="explicit-vision-model")
     elif change == "prompt":
         # Even a changed task not being called now changes this revision's plan.
         prompts["ocr"] = "changed OCR prompt"
     elif change == "concurrency":
-        kwargs["concurrency"] = 2
+        kwargs["concurrency"] = 3
     else:
         kwargs["timeout_seconds"] = 60
     second = OpenAIModel(ModelConfig.from_env(values), audit, object(), prompts,
@@ -590,10 +612,10 @@ async def test_no_response_records_empty_partial_response_once(tmp_path):
 
     client, audit = model(handler, artifacts=artifacts)
     async with client:
-        with pytest.raises(UncertainModelResponse):
+        with pytest.raises(ModelInfrastructureError):
             await client.call("extract", {})
     assert artifacts.writes == 1
-    assert audit.events[-1]["status"] == "uncertain"
+    assert audit.events[-1]["status"] == "failed"
     assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == ""
 
 

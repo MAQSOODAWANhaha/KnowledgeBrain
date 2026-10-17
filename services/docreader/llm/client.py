@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -23,11 +24,12 @@ from docreader.llm.request import (
 from docreader.llm.usage import UsageLedger, reported_usage
 from docreader.llm.streaming import ActiveResponseStream, IdleDeadline, StreamResponse, invalid_json_constant
 from docreader.tender.schema import ArtifactRef, ModelRequestStatus, Task
+from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
 class OpenAIModel:
     def __init__(self, config: ModelConfig, store, lease, prompts: Mapping[str, str] | None = None,
-                 concurrency: int = 4, timeout_seconds: float = 180,
+                 concurrency: int = 2, timeout_seconds: float = 180,
                  *, artifacts=None, transport: httpx.AsyncBaseTransport | None = None):
         if type(concurrency) is not int or concurrency < 1 or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ModelConfigurationError("model concurrency and timeout must be positive")
@@ -59,6 +61,7 @@ class OpenAIModel:
                     "context_tokens": endpoint.context_tokens}
 
         return {
+            "workflow_protocol": deepcopy(WORKFLOW_PROTOCOL),
             "chat": endpoint_spec(self.config.chat),
             "vlm": endpoint_spec(self.config.vision),
             "prompts": {task: hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -72,8 +75,10 @@ class OpenAIModel:
 
     def request_budget(self, *, images: bool = False, correction: bool = False) -> RequestBudget:
         endpoint = self.config.for_images() if images else self.config.chat
+        # Relay prompt_tokens equal o200k_base counts plus a fixed prompt for the chat model.
         return RequestBudget(context_tokens=endpoint.context_tokens, model=endpoint.model,
-                             prompts=self._prompt_snapshot(), correction=correction)
+                             prompts=self._prompt_snapshot(), correction=correction,
+                             tokenizer=None if images else "o200k_base")
 
     def _client(self, endpoint: ModelEndpoint) -> AsyncOpenAI:
         if endpoint not in self._clients:
@@ -97,20 +102,31 @@ class OpenAIModel:
         await self.close()
 
     async def call(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = (), *, correction: bool = False) -> dict:
+        from docreader.llm.wire import WirePayload
+
+        wire = WirePayload(task, payload)
         endpoint = self.config.for_images() if images else self.config.chat
         budget = self.request_budget(images=bool(images), correction=correction)
         request = budget.request(task, payload, images)
-        context = budget.require_request(request)
+        context = budget.require_request(request, task)
         digest = request_digest(endpoint.base_url, request)
 
         async with self._semaphore:
             await self.store.pin_execution_spec(self.lease, self.execution_spec())
+            if wire.enabled:
+                if self.artifacts is None:
+                    raise ModelConfigurationError("short references require a durable artifact store")
+                mapping_ref = await asyncio.to_thread(self.artifacts.put_json,
+                    {"protocol": wire.VERSION, "payload": payload, "mapping": wire.mapping})
+                await self.store.commit_artifact(self.lease, "model-wire", mapping_ref,
+                                                 scope=digest, input_digest=digest)
             request_id = uuid4().hex
             row = await self.store.begin_request(self.lease, request_id, endpoint.model, task, metadata={
                 **context, "request_digest": digest,
+                "operation": payload.get("operation", task), "work_unit_id": payload.get("work_unit_id", ""),
             })
             if row["status"] == "succeeded":
-                return await self._cached_response(row, digest)
+                return wire.decode(await self._cached_response(row, digest))
             # Durable send fencing and digest replay protection happen before HTTP.
             await self.store.finish_request(request_id, "sent")
             started = time.monotonic()
@@ -123,7 +139,7 @@ class OpenAIModel:
                 response = raw_response.http_response
                 response.stream = ActiveResponseStream(response.stream, deadline, stream.counts)
                 iterator = raw_response.iter_bytes().__aiter__()
-                while not stream.done:
+                while not stream.done and stream.provider_error is None:
                     try:
                         chunk = await iterator.__anext__()
                     except StopAsyncIteration:
@@ -132,7 +148,8 @@ class OpenAIModel:
                         # Before SSE decoding: comments, incomplete events, thinking,
                         # and tool arguments all keep the response alive.
                         stream.feed(chunk)
-                if response.headers.get("content-type", "").split(";", 1)[0].strip() != "text/event-stream":
+                if (stream.provider_error is None
+                        and response.headers.get("content-type", "").split(";", 1)[0].strip() != "text/event-stream"):
                     stream.failure = "invalid_stream_content_type"
                     raise ModelSemanticError("model endpoint did not return an SSE response")
                 result = stream.result()
@@ -156,13 +173,18 @@ class OpenAIModel:
                     await self._finish_stream(request_id, "failed", stream, digest, "connection_before_send", started)
                     raise ModelInfrastructureError("model connection failed before send") from None
                 if isinstance(cause, (TimeoutError, httpx.ReadTimeout)):
-                    failure = "between_data_idle_timeout" if stream.counts["raw_received_chunks"] else "first_data_idle_timeout"
+                    if not stream.counts["raw_received_chunks"]:
+                        # Owner-accepted risk: the relay may have billed an execution that sent no byte.
+                        await self._finish_stream(request_id, "failed", stream, digest, "first_data_idle_timeout", started)
+                        raise ModelInfrastructureError("model endpoint sent no data before the idle deadline") from None
+                    failure = "between_data_idle_timeout"
                 else:
                     failure = "transport_response_unknown"
                 await self._finish_stream(request_id, "uncertain", stream, digest, failure, started)
                 raise UncertainModelResponse("model response was lost after send; provider execution and billing are uncertain") from None
             except UncertainModelResponse:
-                await self._finish_stream(request_id, "uncertain", stream, digest, "stream_missing_done", started)
+                await self._finish_stream(request_id, "uncertain", stream, digest,
+                                          stream.failure or "stream_missing_done", started)
                 raise
             except httpx.DecodingError:
                 # HTTP decompression can fail after paid response bytes arrived.
@@ -183,7 +205,7 @@ class OpenAIModel:
                 if raw_response is not None:
                     await raw_response.close()
             await self._finish_stream(request_id, "succeeded", stream, digest, None, started)
-            return result
+            return wire.decode(result)
 
     async def _cached_response(self, row: dict, digest: str) -> dict:
         # ArtifactStore verifies size, path and SHA256 before decoding. A missing
@@ -212,7 +234,8 @@ class OpenAIModel:
 
     async def _finish_stream(self, request_id, status, stream, digest, error_type, started):
         response_ref = await self._save_response(stream.audit(digest, error_type or "completed"))
-        await self._finish(request_id, status, stream.usage, error_type, started, response_ref)
+        await self._finish(request_id, status, stream.usage, error_type, started, response_ref,
+                           provider_error=stream.provider_error)
 
     async def _received_rejection(self, response: httpx.Response, digest: str) -> tuple[dict | None, dict | None]:
         try:
@@ -224,8 +247,13 @@ class OpenAIModel:
                     "body": body, "usage": usage, "usage_status": "reported" if usage is not None else "unknown"}
         return await self._save_response(envelope), usage
 
-    async def _finish(self, request_id, status: ModelRequestStatus, usage, error_type, started, response_ref=None):
+    async def _finish(self, request_id, status: ModelRequestStatus, usage, error_type, started, response_ref=None,
+                      *, provider_error=None):
         error = {"type": error_type, "elapsed_seconds": round(time.monotonic() - started, 6)} if error_type else None
+        if error is not None and provider_error is not None:
+            secrets = tuple(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
+                            if endpoint is not None and endpoint.api_key)
+            error["provider_error"] = _redact_response(provider_error, secrets)
         await self.store.finish_request(request_id, status, usage=usage, error=error, response_ref=response_ref)
         self.usage.record(status, usage)
 

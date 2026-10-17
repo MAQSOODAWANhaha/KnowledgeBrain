@@ -395,8 +395,13 @@ async def test_cumulative_lot_and_consortium_conditions_survive_nested_packages(
     assert all(entry['scope_binding']['status'] == 'bound' for entry in conditions)
     assert all(len(entry['text']) < 100 for entry in conditions)
     body_by_id = {entry['range_id']: entry for pack in packs for entry in pack['body']}
+    canonical = EvidenceRepository(artifacts).source_index(
+        artifacts.read_json(frozen)['documents'][0]['source_index_ref']).by_id
     for entry in conditions:
-        parent = body_by_id[entry['parent_range_id']]
+        parent = canonical[entry['parent_range_id']]
+        fragments = sorted((part for part in body_by_id.values()
+                            if part['source_range_id'] == parent['range_id']), key=lambda part: part['start'])
+        assert ''.join(part['text'] for part in fragments) == parent['text']
         assert entry['text'] == parent['text'][entry['start'] - parent['start']:entry['end'] - parent['start']]
         assert entry['range_id'] not in body_by_id
     separate = next(pack for pack in packs if any('本章内容独立处理' in entry['text'] for entry in pack['body']))

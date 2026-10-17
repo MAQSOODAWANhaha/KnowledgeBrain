@@ -124,7 +124,7 @@ async def test_blank_row_compression_retains_disposition_and_partial_empty_cells
     checked = await verify_pack(frozen, result, model)
     assert result["dispositions"][0] == response["dispositions"][1]
     assert len(model.calls[0][1]["body"]) == 1
-    assert model.calls[0][1]["body"][0]["cells"][0] == {"column": 0, "start": 0, "end": 0}
+    assert model.calls[0][1]["body"][0]["cells"][0] == {"column": 0, "text": ""}
     assert model.calls[0][1]["blank_table_templates"] == [{"table_id": "table-1", "column_count": 2,
         "rows": [{"row_start": 1, "row_end": 2, "range_ids": ["blank"]}]}]
     assert model.calls[1][1]["blank_table_templates"] == model.calls[0][1]["blank_table_templates"]
@@ -346,7 +346,7 @@ async def test_plan_missing_duplicate_unknown_and_inapplicable_requirements():
 def test_versioned_prompt_resources_are_present_and_input_is_data():
     for task in ("extract", "verify", "plan", "ocr"):
         content = get_prompt(task)
-        assert "tender-phase1-v1" in content
+        assert ("tender-phase1-v2" if task in {"extract", "verify"} else "tender-phase1-v1") in content
         assert "source data" in content or "untrusted" in content
     with pytest.raises(ValueError):
         get_prompt("../../secrets")
@@ -805,9 +805,6 @@ def test_local_only_requires_source_backed_explanation_and_preserves_body():
     ({"target_range_ids": ["target-a", "target-a"]}, "scope_decision_schema_invalid"),
     ({"range_id": "not-an-active-scope-issue"}, "scope_issue_not_current"),
     ({"rationale": "   "}, "scope_decision_schema_invalid"),
-    ({"rationale": "已确认"}, "scope_rationale_unspecific"),
-    ({"decision": "local_only", "target_range_ids": [], "rationale": "误报"}, "scope_rationale_unspecific"),
-    ({"decision": "local_only", "target_range_ids": [], "rationale": "已认真查看原文件并同意结果"}, "scope_local_reason_missing"),
     ({"action": "bind"}, "scope_decision_schema_invalid"),
 ])
 def test_scope_decision_rejects_missing_fake_irrelevant_evidence_and_unbounded_targets(change, code):
@@ -818,6 +815,22 @@ def test_scope_decision_rejects_missing_fake_irrelevant_evidence_and_unbounded_t
         validate_scope_decisions(frozen, plan, [decision], repo)
     assert code in raised.value.codes
     assert "不存在的原文" not in str(raised.value)
+
+
+@pytest.mark.parametrize("change", [
+    {"rationale": "已确认"},
+    {"decision": "local_only", "target_range_ids": [], "rationale": "误报"},
+    {"decision": "local_only", "target_range_ids": [], "rationale": "已认真查看原文件并同意结果"},
+])
+def test_scope_reason_meaning_is_not_decided_by_a_host_vocabulary(change):
+    from docreader.tender.evidence.scope import validate_scope_decisions
+
+    _, frozen, plan, decision, repo = scope_review_case()
+    decision.update(change)
+    validated = validate_scope_decisions(frozen, plan, [decision], repo)["scope_decisions"][0]
+    assert validated["rationale"] == change["rationale"]
+    assert validated["evidence"] == decision["evidence"]
+    assert validated["target_range_ids"] == sorted(decision["target_range_ids"])
 
 
 def test_scope_bind_cannot_target_derived_partial_range_or_other_document():

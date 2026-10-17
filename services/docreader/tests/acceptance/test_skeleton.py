@@ -85,7 +85,7 @@ async def test_duplicate_pause_restart_confirm_and_cancel(setup):
     assert approval == again
     cmd = await command_for(store, run)
     await execute_command(run["run_id"], cmd["command_id"], 1, settings, SkeletonNodes)
-    assert (await store.get_run(run["run_id"]))["status"] == "response-plan-ready"
+    assert (await store.get_run(run["run_id"]))["status"] == "analysis-ready"
 
 
 async def test_redis_failure_claim_tokens_and_receipt_replay(setup):
@@ -149,8 +149,12 @@ async def test_artifact_initialization_error_has_terminal_receipt(setup, tmp_pat
     marker.write_text("not a directory")
     invalid = Settings(settings.dsn, settings.redis_url, marker / "artifacts")
     cmd = await command_for(store, run)
-    with pytest.raises(OSError):
-        await execute_command(run["run_id"], cmd["command_id"], 1, invalid, SkeletonNodes)
+    for attempt in range(4):
+        with pytest.raises(OSError):
+            await execute_command(run["run_id"], cmd["command_id"], 1, invalid, SkeletonNodes)
+        current = await store.get_run(run["run_id"])
+        assert current["status"] == ("pending" if attempt < 3 else "failed")
+        assert current["commands"][0]["infrastructure_failures"] == attempt + 1
     failed = await store.get_run(run["run_id"])
     assert failed["status"] == "failed"
     assert failed["commands"][0]["receipt"]["status"] == "failed"
@@ -253,7 +257,7 @@ async def test_worker_sigkill_redelivery_and_persistent_interrupt(setup, tmp_pat
         await store.confirm(run["run_id"], 1, row["checklist_digest"], "after-restart")
         proc = start()
         await dispatch_once(store, skeleton_command.send, redeliver_seconds=0.1)
-        await wait_status(store, run["run_id"], "response-plan-ready")
+        await wait_status(store, run["run_id"], "analysis-ready")
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)

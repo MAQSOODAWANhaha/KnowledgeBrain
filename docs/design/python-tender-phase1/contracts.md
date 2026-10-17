@@ -1,6 +1,12 @@
 # 独立入口与持久合同
 
-本合同先于实现提交。实现细节有必要变化时先更新本文件。
+本文件保留**历史 v1 六阶段** CLI、持久接口和实现依据。下文 `Requirement/Plan`、
+`base_requirements_digest` 及确认后生成计划等描述不是当前 CLI 合同，不应据此执行新任务。
+当前 v2 五节点 `register → freeze → extract → verify → confirm` 已在工作区实现，确认后
+到达 `analysis-ready`；当前命令与纠错示例见[运行手册](runbook.md)，字段与类型以
+[唯一字段字典](field-dictionary.md)为准，业务范围见[业务工作流](business-workflow.md)。
+当前运行容器仍是旧镜像，需新构建并更新角色才执行 v2 入口；本轮不部署。
+下文保留历史接口及共享执行机制供审计参考，不将旧运行记录转换为 v2 结果。
 
 ## 独立入口
 

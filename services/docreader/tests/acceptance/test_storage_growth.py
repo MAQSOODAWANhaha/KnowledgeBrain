@@ -32,7 +32,7 @@ from docreader.workflow.persistence import initialize_checkpoints
 from docreader.workflow.runner import execute_command
 
 sys.path.insert(0, str(Path(__file__).parent))
-from fixture_model import FixtureModel
+from fixture_analysis_model import AnalysisFixtureModel
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +41,7 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
-class AuditedFixtureModel(FixtureModel):
+class AuditedFixtureModel(AnalysisFixtureModel):
     """Record synthetic raw envelopes through exactly the production audit API."""
 
     def __init__(self, store, lease, artifacts, measurements):
@@ -58,8 +58,8 @@ class AuditedFixtureModel(FixtureModel):
 
     async def call(self, task, payload, images=()):
         request_id = uuid4().hex
-        body = payload.get("body", [])
-        supporting = payload.get("supporting", [])
+        body = [source for view in payload.get("source_views", []) for source in view["body"]]
+        supporting = [source for view in payload.get("source_views", []) for source in view["supporting"]]
         body_ids = {item["range_id"] for item in body}
         support_ids = {item["range_id"] for item in supporting}
         measurement = {
@@ -173,13 +173,11 @@ async def measurements(store, artifacts, row, calls):
     pack_plan = artifacts.read_json(stage_refs["pack-plan"])
     assert pack_plan["frozen_ref"] == stage_refs["freeze"]
     checked = artifacts.read_json(stage_refs["verify"])
-    assert "requirements" not in checked, "Verification summaries must reference, not echo, full requirements"
-    plan = artifacts.read_json(stage_refs["plan"])
-    assert "items" not in plan, "The final plan must index durable per-pack results"
-    plan_items = [item for entry in plan["packs"] for item in artifacts.read_json(entry["artifact_ref"])["items"]]
-    assert len(plan_items) == plan["counts"]["items"]
-    assert all("constraint_snapshot" not in item and "evidence" not in item
-               and item["requirement_ref"]["artifact_ref"] and item["constraint_digest"] for item in plan_items)
+    assert "items" not in checked, "Verification summaries must reference complete items"
+    items_index = artifacts.read_json(stage_refs["extract"])
+    items = [item for entry in items_index["packs"] for item in artifacts.read_json(entry["artifact_ref"])["items"]]
+    assert len(items) == checked["counts"]["items"]
+    assert not any(item["stage"] == "plan" for item in row["artifacts"])
     originals = unique_refs([document["original_ref"] for document in frozen["documents"]])
     raw_refs = unique_refs([document["raw_ref"] for document in frozen["documents"]])
     raw_documents = [artifacts.read_json(ref) for ref in raw_refs.values()]
@@ -221,9 +219,9 @@ async def measurements(store, artifacts, row, calls):
     state = latest.checkpoint["channel_values"]
     assert not list(forbidden_keys(state)), "Checkpoints cannot contain documents, messages, or growing pack history"
     state_refs = unique_refs([state])
-    assert len(state_refs) == 6  # register, native freeze, pack plan, extract, verify, response plan.
+    assert len(state_refs) == 5  # register, native freeze, source plan, items, verification.
     assert {key for key in state if key.endswith("_ref")} == {
-        "registered_ref", "frozen_ref", "pack_plan_ref", "requirements_ref", "verification_ref", "response_plan_ref",
+        "registered_ref", "frozen_ref", "pack_plan_ref", "items_ref", "verification_ref",
     }
     assert not {"version", "registered", "frozen", "requirements", "checked", "plan"} & state.keys()
     assert len(encoded(state)) < 8192
@@ -232,7 +230,7 @@ async def measurements(store, artifacts, row, calls):
         "documents": len(frozen["documents"]), "source_ranges": pack_plan["range_count"],
         "verified_ranges": checked["counts"]["ranges"], "packs": len(pack_plan["packs"]),
         "requests": len(calls), "original_unique_bytes": sum(ref["size"] for ref in originals.values()),
-        "actual_provider_usage": None, "response_plan_items": len(plan_items),
+        "actual_provider_usage": None, "analysis_items": len(items),
         "frozen_unique_bytes": sum(ref["size"] for ref in frozen_files.values()),
         "pack_plan_unique_bytes": sum(ref["size"] for ref in pack_plan_files.values()),
         "audit_response_unique_bytes": sum(ref["size"] for ref in response_refs.values()),
@@ -272,7 +270,7 @@ async def test_two_and_four_times_sources_have_linear_storage_and_constant_check
             resume = await store.confirm(run["run_id"], 1, paused["checklist_digest"], "approve-fixture", domain_revision=1)
             await execute_command(run["run_id"], resume["command_id"], 1, settings, factory)
             row = await store.get_run(run["run_id"])
-            assert row["status"] == "response-plan-ready"
+            assert row["status"] == "analysis-ready"
             reports.append(await measurements(store, artifacts, row, calls))
     report_path = tmp_path / "storage-growth.json"
     report_path.write_text(json.dumps(reports, ensure_ascii=False, sort_keys=True, indent=2))

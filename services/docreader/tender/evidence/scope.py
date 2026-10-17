@@ -1,7 +1,6 @@
 """Evidence-bound human scope decisions over immutable native source ranges."""
 
 from collections import Counter
-import re
 
 from pydantic import ValidationError
 
@@ -17,19 +16,12 @@ class ScopeDecisionValidationError(ValueError):
         super().__init__("Invalid scope decision: " + ", ".join(self.codes))
 
 
-_GENERIC_RATIONALE = re.compile(
-    r"(?:误报|局部条款|局部条件|无作用域|不适用|已确认|已审核|通过|正确|绑定|"
-    r"false positive|local(?: only| clause)?|approved|reviewed|confirmed|ok|bind)[。.! ]*", re.I,
-)
-_LOCAL_BOUNDARY = re.compile(r"句|行|列|字段|单元格|表单|条款|局部|该表|本表|clause|sentence|row|cell|field|form|local", re.I)
-_LOCAL_BASIS = re.compile(r"仅|只|未|不|没有|自身|针对|约束|因为|因此|only|does not|no |because|limited|constrain", re.I)
-
-
 def _range_origin(source: dict) -> str:
     return source.get("source_range_id", source.get("parent_range_id", source["range_id"]))
 
 
-def validate_scope_decisions(frozen_index: dict, pack_plan_index: dict, decisions: list[dict], repo) -> dict:
+def validate_scope_decisions(frozen_index: dict, pack_plan_index: dict, decisions: list[dict], repo,
+                             *, analysis=False, review_issues=()) -> dict:
     """Validate a finite review increment; the store binds its current plan/revision.
 
     Targets must be complete canonical native ranges, so subsequent structural
@@ -54,10 +46,12 @@ def validate_scope_decisions(frozen_index: dict, pack_plan_index: dict, decision
         canonical.update(source.by_id)
         _, conditions, _, _ = condition_context(source.ranges)
         candidates.update((candidate["range_id"], candidate) for values in conditions.values() for _, candidate in values)
-    unresolved = {finding["range_id"] for finding in pack_plan_index.get("issues", [])
-                  if finding.get("code") == "condition_scope_unresolved" and finding.get("range_id")}
+    unresolved = {finding["range_id"] for finding in [*pack_plan_index.get("issues", []), *review_issues]
+                  if finding.get("range_id") and finding.get("blocking") is not False
+                  and (analysis or finding.get("code") == "condition_scope_unresolved")}
     available = {**canonical, **candidates}
-    requested_evidence = {item["range_id"] for decision in normalized for item in decision["evidence"]}
+    requested_evidence = ({item["range_id"] for decision in normalized for item in decision["evidence"]}
+                          | {decision["range_id"] for decision in normalized})
     # Derived quote IDs can be supplied from the current review view. Load each
     # current pack at most once, only if canonical/context identities are insufficient.
     if requested_evidence - available.keys():
@@ -69,17 +63,11 @@ def validate_scope_decisions(frozen_index: dict, pack_plan_index: dict, decision
 
     errors = []
     for decision in normalized:
-        candidate = candidates.get(decision["range_id"])
+        candidate = available.get(decision["range_id"]) if analysis else candidates.get(decision["range_id"])
         if decision["range_id"] not in unresolved or candidate is None:
             errors.append("scope_issue_not_current")
             continue
         rationale = decision["rationale"].strip()
-        if _GENERIC_RATIONALE.fullmatch(rationale):
-            errors.append("scope_rationale_unspecific")
-        if decision["decision"] == "local_only" and (
-            not _LOCAL_BOUNDARY.search(rationale) or not _LOCAL_BASIS.search(rationale)
-        ):
-            errors.append("scope_local_reason_missing")
         anchored = False
         for evidence in decision["evidence"]:
             cited = available.get(evidence["range_id"])
@@ -88,9 +76,11 @@ def validate_scope_decisions(frozen_index: dict, pack_plan_index: dict, decision
                 errors.append("scope_evidence_mismatch")
                 continue
             # Citing unrelated words elsewhere in the same section is insufficient.
-            if (_range_origin(cited) == _range_origin(candidate)
-                    and cited["start"] <= candidate["start"] <= candidate["end"] <= cited["end"]
-                    and candidate["text"].strip() in quote):
+            if (_range_origin(cited) == _range_origin(candidate) and (
+                analysis and cited["start"] <= candidate["end"] and candidate["start"] <= cited["end"]
+                or not analysis and cited["start"] <= candidate["start"] <= candidate["end"] <= cited["end"]
+                and candidate["text"].strip() in quote
+            )):
                 anchored = True
         if not anchored:
             errors.append("scope_issue_evidence_missing")

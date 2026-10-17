@@ -4,9 +4,14 @@ Native parser protocols are adapted once at the evidence boundary. These
 unpublished workflow contracts deliberately accept no old internal aliases.
 """
 
+import json
+import math
 from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool,
+    StrictFloat, StrictInt, StrictStr, field_validator, model_validator,
+)
 
 
 Identity = Annotated[StrictStr, Field(min_length=1)]
@@ -14,7 +19,7 @@ Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 PositiveInt = Annotated[StrictInt, Field(ge=1)]
 NonnegativeInt = Annotated[StrictInt, Field(ge=0)]
 Task = Literal["extract", "verify", "plan", "ocr"]
-RunStatus = Literal["pending", "running", "waiting-confirmation", "response-plan-ready", "blocked", "failed", "cancelled"]
+RunStatus = Literal["pending", "running", "waiting-confirmation", "analysis-ready", "response-plan-ready", "blocked", "failed", "cancelled"]
 CommandStatus = Literal["pending", "claimed", "published", "running", "completed", "failed", "cancelled"]
 ModelRequestStatus = Literal["prepared", "sent", "succeeded", "failed", "uncertain"]
 OCRStatus = Literal["complete", "partial", "unresolved"]
@@ -29,6 +34,41 @@ class Model(Protocol):
 
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+def _meaningful_text(value: str) -> str:
+    if not value.strip():
+        raise ValueError("source-backed text cannot be blank")
+    return value
+
+
+def _finite_number(value: int | float) -> int | float:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("numeric facts must be finite")
+    return value
+
+
+def _version_two(value):
+    if type(value) is not int or value != 2:
+        raise ValueError("analysis schema_version must be integer 2")
+    return value
+
+
+Text = Annotated[StrictStr, Field(min_length=1), AfterValidator(_meaningful_text)]
+FiniteNumber = Annotated[StrictInt | StrictFloat, AfterValidator(_finite_number)]
+AnalysisVersion = Annotated[Literal[2], BeforeValidator(_version_two)]
+ItemKind = Literal["obligation", "scoring_rule", "consequence_rule", "submission_requirement"]
+
+
+class _AnalysisContract(Contract):
+    @model_validator(mode="before")
+    @classmethod
+    def omit_unknown_optional_fields(cls, value):
+        if isinstance(value, dict):
+            for name, field in cls.model_fields.items():
+                if not field.is_required() and name in value and value[name] is None:
+                    raise ValueError(f"omit optional {name} instead of providing null")
+        return value
 
 
 class RequestLimits(Contract):
@@ -89,8 +129,8 @@ class SourceRangeIdentity(DocumentIdentity):
 
 
 class Evidence(Contract):
-    range_id: StrictStr = Field(min_length=1)
-    quote: StrictStr = Field(min_length=1)
+    range_id: Text
+    quote: Text
 
 
 class ScopeDecision(Contract):
@@ -154,7 +194,7 @@ class ApplicabilityDecision(Contract):
 class Number(Contract):
     value: str | int | float
     unit: StrictStr
-    quote: StrictStr = Field(min_length=1)
+    quote: Text
 
     @field_validator("value")
     @classmethod
@@ -194,10 +234,39 @@ class Disposition(Contract):
 
 
 class Issue(Contract):
-    code: StrictStr = Field(min_length=1)
-    detail: StrictStr = Field(min_length=1)
+    code: Text
+    detail: Text
     blocking: StrictBool = True
-    range_id: StrictStr | None = None
+    range_id: Text | None = None
+    item_ids: Annotated[list[Text], Field(min_length=1)] | None = None
+    related_issue_ids: Annotated[list[Text], Field(min_length=1)] | None = None
+    needs_source: StrictBool | None = None
+
+    @field_validator("item_ids", mode="before")
+    @classmethod
+    def omit_absent_item_ids(cls, value):
+        if value is None:
+            raise ValueError("omit unknown item_ids instead of providing null")
+        return value
+
+
+def _explicit_analysis_issue(value):
+    if isinstance(value, Issue):
+        fields = value.model_fields_set
+        supplied = {name: getattr(value, name) for name in fields}
+    elif isinstance(value, dict):
+        fields, supplied = value.keys(), value
+    else:
+        return value
+    if not {"code", "detail", "blocking"}.issubset(fields):
+        raise ValueError("analysis issues require explicit code, detail and blocking")
+    for name in ("range_id", "item_ids", "related_issue_ids", "needs_source"):
+        if name in supplied and supplied[name] is None:
+            raise ValueError(f"omit optional issue {name} instead of providing null")
+    return value
+
+
+_AnalysisIssue = Annotated[Issue, BeforeValidator(_explicit_analysis_issue)]
 
 
 class Extraction(Contract):
@@ -209,6 +278,272 @@ class Extraction(Contract):
 class Verification(Contract):
     reviewed_range_ids: list[StrictStr]
     findings: list[Issue]
+
+
+class ItemRef(_AnalysisContract):
+    artifact_ref: ArtifactRef
+    item_id: Text
+
+
+class ScoringDetails(_AnalysisContract):
+    method: Text | None = None
+    points: FiniteNumber | None = None
+    max_points: Annotated[FiniteNumber, Field(ge=0)] | None = None
+
+    @model_validator(mode="after")
+    def explicit_details(self):
+        if not self.model_fields_set:
+            raise ValueError("scoring details require at least one source fact")
+        return self
+
+
+class ConsequenceDetails(_AnalysisContract):
+    effect: Text | None = None
+    trigger: Text | None = None
+
+    @model_validator(mode="after")
+    def explicit_details(self):
+        if not self.model_fields_set:
+            raise ValueError("consequence details require at least one source fact")
+        return self
+
+
+class SubmissionDetails(_AnalysisContract):
+    fields: Annotated[list[Text], Field(min_length=1)] | None = None
+    documents: Annotated[list[Text], Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def explicit_details(self):
+        if not self.model_fields_set:
+            raise ValueError("submission details require at least one source fact")
+        return self
+
+
+class TenderItem(_AnalysisContract):
+    item_id: Text
+    kind: ItemKind
+    text: Text
+    evidence: list[Evidence] = Field(min_length=1)
+    domains: Annotated[list[Text], Field(min_length=1)] | None = None
+    subject: Text | None = None
+    scope: Text | None = None
+    conditions: Annotated[list[Text], Field(min_length=1)] | None = None
+    exceptions: Annotated[list[Text], Field(min_length=1)] | None = None
+    numbers: Annotated[list[Number], Field(min_length=1)] | None = None
+    scoring: ScoringDetails | None = None
+    consequence: ConsequenceDetails | None = None
+    submission: SubmissionDetails | None = None
+
+    @field_validator("numbers")
+    @classmethod
+    def finite_quantities(cls, value):
+        for number in value:
+            if isinstance(number.value, float):
+                _finite_number(number.value)
+        return value
+
+    @model_validator(mode="after")
+    def details_match_kind(self):
+        for name, kind in (("scoring", "scoring_rule"), ("consequence", "consequence_rule"),
+                           ("submission", "submission_requirement")):
+            if getattr(self, name) is not None and self.kind != kind:
+                raise ValueError(f"{name} details are only valid for {kind}")
+        return self
+
+
+class Relation(_AnalysisContract):
+    relation_id: Text
+    from_item_id: Text
+    to_item_id: Text
+    relation: Text
+    evidence: list[Evidence] = Field(min_length=1)
+
+
+class ItemDisposition(_AnalysisContract):
+    range_id: Text
+    status: Literal["items", "non_item", "unresolved"]
+    reason: Text
+    item_ids: list[Text]
+
+    @model_validator(mode="after")
+    def explicit_item_coverage(self):
+        if (self.status == "items") != bool(self.item_ids):
+            raise ValueError("items disposition requires IDs; other dispositions require an empty list")
+        if len(set(self.item_ids)) != len(self.item_ids):
+            raise ValueError("disposition item IDs must be unique")
+        return self
+
+
+class ItemDispositionResponse(_AnalysisContract):
+    """LLM-response boundary, not a canonical disposition; the host derives IDs."""
+
+    range_id: Text
+    status: Literal["items", "non_item", "unresolved"]
+    reason: Text
+    item_ids: list[Text] = Field(default_factory=list)
+
+
+class EffectiveRule(_AnalysisContract):
+    text: Text
+    scope: Text
+    evidence: list[Evidence] = Field(min_length=1)
+
+
+class AmendmentEffect(_AnalysisContract):
+    target_item_id: Text
+    effect: Literal["replace", "delete"]
+    affected_scope: Text
+    retained_rules: list[EffectiveRule]
+    replacement_item_ids: list[Text]
+
+    @model_validator(mode="after")
+    def replacement_matches_effect(self):
+        if (self.effect == "replace") != bool(self.replacement_item_ids):
+            raise ValueError("replace requires replacement IDs; delete requires an empty list")
+        if len(set(self.replacement_item_ids)) != len(self.replacement_item_ids):
+            raise ValueError("replacement item IDs must be unique")
+        return self
+
+
+class Decision(_AnalysisContract):
+    decision_id: Text
+    issue_ids: list[Text]
+    reason: Text
+    evidence: list[Evidence] = Field(min_length=1)
+    relation_ids: Annotated[list[Text], Field(min_length=1)] | None = None
+    amendment: AmendmentEffect | None = None
+
+    @model_validator(mode="after")
+    def explicit_resolution_targets(self):
+        if not self.issue_ids and self.amendment is None:
+            raise ValueError("only an amendment decision may omit existing issue targets")
+        for name in ("issue_ids", "relation_ids"):
+            ids = getattr(self, name)
+            if ids is not None and len(set(ids)) != len(ids):
+                raise ValueError(f"decision {name} must be unique")
+        return self
+
+
+class SectionRef(_AnalysisContract):
+    document_id: Text
+    section_id: Text | None
+
+
+class PageRef(_AnalysisContract):
+    document_id: Text
+    page_ordinal: NonnegativeInt
+
+
+class Candidate(_AnalysisContract):
+    candidate_id: Text
+    issue_ids: list[Text]
+    range_ids: list[Text]
+    item_ids: list[Text]
+    reason: Text
+    section_refs: Annotated[list[SectionRef], Field(min_length=1)] | None = None
+    page_refs: Annotated[list[PageRef], Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def identifiable_targets(self):
+        if not self.range_ids and not self.item_ids and not self.section_refs and not self.page_refs:
+            raise ValueError("a candidate must select at least one source, item, section or page")
+        for name in ("issue_ids", "range_ids", "item_ids"):
+            ids = getattr(self, name)
+            if len(set(ids)) != len(ids):
+                raise ValueError(f"candidate {name} must be unique")
+        if self.section_refs:
+            sections = [(ref.document_id, ref.section_id) for ref in self.section_refs]
+            if len(set(sections)) != len(sections):
+                raise ValueError("candidate section references must be unique")
+        if self.page_refs:
+            pages = [(ref.document_id, ref.page_ordinal) for ref in self.page_refs]
+            if len(set(pages)) != len(pages):
+                raise ValueError("candidate page references must be unique")
+        return self
+
+
+class CatalogSection(_AnalysisContract):
+    section_id: Text | None
+    heading_path: StrictStr
+    range_ids: list[Text] | None = Field(default=None, min_length=1)
+
+
+class CatalogEntry(_AnalysisContract):
+    document_id: Text
+    document_version: Text
+    role: Text
+    sections: list[CatalogSection]
+    page_count: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def unique_section_identities(self):
+        identities = [section.section_id for section in self.sections]
+        if len(set(identities)) != len(identities):
+            raise ValueError("catalog section identities must be unique within a document")
+        return self
+
+
+class AnalysisExtraction(_AnalysisContract):
+    schema_version: AnalysisVersion
+    items: list[TenderItem]
+    dispositions: list[ItemDisposition]
+    relations: list[Relation]
+    issues: list[_AnalysisIssue]
+
+
+class AnalysisExtractionResponse(_AnalysisContract):
+    """LLM-response boundary, not an artifact; preserve local defects for review."""
+
+    schema_version: AnalysisVersion
+    items: list[Any]
+    dispositions: list[Any]
+    relations: list[Any]
+    issues: list[Any]
+
+
+class AnalysisReviewResponse(_AnalysisContract):
+    """Only semantic judgments cross the model boundary; coverage is host-owned."""
+
+    schema_version: AnalysisVersion
+    accepted_decision_ids: list[Text]
+    findings: list[_AnalysisIssue]
+
+
+class AnalysisVerification(_AnalysisContract):
+    schema_version: AnalysisVersion
+    reviewed_range_ids: list[Text]
+    reviewed_item_ids: list[Text]
+    reviewed_relation_ids: list[Text]
+    reviewed_decision_ids: list[Text]
+    accepted_decision_ids: list[Text]
+    findings: list[_AnalysisIssue]
+
+    @field_validator("reviewed_range_ids", "reviewed_item_ids", "reviewed_relation_ids",
+                     "reviewed_decision_ids", "accepted_decision_ids")
+    @classmethod
+    def unique_review_ids(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("reviewed and accepted identity lists must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def acceptance_requires_review(self):
+        if not set(self.accepted_decision_ids).issubset(self.reviewed_decision_ids):
+            raise ValueError("accepted decisions must have been independently reviewed")
+        return self
+
+
+class LocateResult(_AnalysisContract):
+    schema_version: AnalysisVersion
+    candidates: list[Candidate]
+    findings: list[_AnalysisIssue]
+
+
+class AssociationResult(_AnalysisContract):
+    schema_version: AnalysisVersion
+    relations: list[Relation]
+    decisions: list[Decision]
+    findings: list[_AnalysisIssue]
 
 
 class PlanItem(Contract):
@@ -311,8 +646,7 @@ class BlankTableTemplate(Contract):
 
 class SourceCellView(Contract):
     column: NonnegativeInt
-    start: NonnegativeInt
-    end: NonnegativeInt
+    text: StrictStr
     row: NonnegativeInt | None = None
     row_span: PositiveInt | None = None
     col_span: PositiveInt | None = None
@@ -325,7 +659,7 @@ class SourceCellView(Contract):
 
 class SourceRangeView(Contract):
     range_id: Identity
-    text: StrictStr
+    text: StrictStr | None = None
     kind: Identity | None = None
     unit_id: Identity | None = None
     source_range_id: Identity | None = None
@@ -347,6 +681,14 @@ class SourceRangeView(Contract):
     image_anchor: dict[str, Any] | None = None
     compound_parent: dict[str, Any] | None = None
     scope_binding: ScopeBinding | None = None
+
+    @model_validator(mode="after")
+    def supplied_original_text(self):
+        if "text" in self.model_fields_set and self.text is None:
+            raise ValueError("omit an unsupplied row text instead of providing null")
+        if self.text is None and not self.cells:
+            raise ValueError("a source range requires original text or cells")
+        return self
 
 
 class PendingScopeView(Contract):
@@ -376,6 +718,7 @@ class SourceView(Contract):
     pack_id: Identity
     document_id: Identity | None = None
     document_version: Identity | None = None
+    role: Identity | None = None
     body: list[SourceRangeView]
     supporting: list[SourceRangeView]
     sections: list[SectionView] = Field(default_factory=list)
@@ -499,6 +842,25 @@ def enforce_issue_policy(finding: dict) -> dict:
         **finding,
         "blocking": finding.get("blocking") is not False or finding.get("code") not in INFORMATIONAL_ISSUE_CODES,
     }
+
+
+def recover_issue_routing(value, allowed_ids: set[str], path: str, diagnostics: list):
+    """Keep a finding when its optional routing cannot bind to this input."""
+    if not isinstance(value, dict):
+        return value
+    result = dict(value)
+    links = result.get("related_issue_ids")
+    bad_links = "related_issue_ids" in result and (
+        not isinstance(links, list) or not links or any(not isinstance(i, str) or i not in allowed_ids for i in links))
+    bad_route = "needs_source" in result and type(result["needs_source"]) is not bool
+    if bad_links or bad_route:
+        fields = {key: result.pop(key) for key in ("related_issue_ids", "needs_source") if key in result}
+        diagnostics.append({"code": "issue_routing_unbound", "path": path, "fields": fields})
+        if isinstance(result.get("detail"), str):
+            result["detail"] += " 待核对的路由声明（不是证据）：" + json.dumps(fields, ensure_ascii=False, sort_keys=True)
+    elif links:
+        result["related_issue_ids"] = list(dict.fromkeys(links))
+    return result
 
 
 def source_ranges(pack: dict) -> dict:

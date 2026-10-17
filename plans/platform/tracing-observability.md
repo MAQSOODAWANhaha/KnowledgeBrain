@@ -123,7 +123,7 @@ ONLYOFFICE 保存/转换日志随接入切片实现：区分会话、新稿轮�
 ## Verification
 
 - `cargo test -p bidding -p worker -p api --offline` (existing tests; logging must not change behavior).
-- `docker logs -f knowledgebrain-worker` while uploading one knowledge docx: see convert start → parsed → chunk → (multimodal or hold) → postprocess.
+- `docker logs -f kb_worker` while uploading one knowledge docx: see convert start → parsed → chunk → (multimodal or hold) → postprocess.
 - Upload one tender docx in an authorized environment: correlate Request, conversion/source publication and bounded failures; do not equate queue ACK with business success.
 - With `RUST_LOG=info,bidding=debug,api=debug,worker=debug`, correlate Request/stage, SourceUnit and result-publication events by identity and bounded status; transport ACK is not publication success. Default info remains bounded and neither level exposes bodies or credentials.
 - Admin opens `http://localhost:28080/api/v1/ops/oxana/web` — queues still load.

@@ -1,12 +1,12 @@
 """Redis transports small commands; PostgreSQL owns receipts and business results."""
-import os
-
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.middleware import AsyncIO
 
+from docreader.jobs.settings import get_redis_url
+
 broker = RedisBroker(
-    url=os.environ.get("TENDER_REDIS_URL", "redis://127.0.0.1:16379/1"),
+    url=get_redis_url(),
     namespace="python-tender",
 )
 broker.add_middleware(AsyncIO())
