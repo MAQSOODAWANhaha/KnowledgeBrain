@@ -146,7 +146,7 @@ async def test_legacy_disposition_index_type_cannot_block_valid_status_and_reaso
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dispositions", [[], [None], [
+@pytest.mark.parametrize("dispositions", [[None], [
     {"range_id": "r1", "status": "non_item", "reason": "本段仅为说明。"},
 ]])
 async def test_incomplete_or_conflicting_disposition_keeps_items_for_review(dispositions):
@@ -156,6 +156,18 @@ async def test_incomplete_or_conflicting_disposition_keeps_items_for_review(disp
     assert extracted["dispositions"][0]["item_ids"] == ["p1:i1"]
     assert extracted["dispositions"][0]["status"] == "items"
     assert extracted["issues"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_omitted_item_range_disposition_is_derived_without_a_review_issue():
+    response = result(dispositions=[])
+    extracted = await extract_items(pack(), FixedModel(response), identity=IDENTITY)
+    assert extracted["items"] == response["items"] and extracted["issues"] == []
+    assert extracted["dispositions"] == [{
+        "range_id": "r1", "status": "items", "item_ids": ["p1:i1"],
+        "reason": "宿主按直接正文证据派生本范围处置。",
+    }]
 
 
 @pytest.mark.asyncio

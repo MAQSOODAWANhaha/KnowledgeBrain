@@ -16,6 +16,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
 from docreader.llm.budget import RequestBudget
+from docreader.llm.failures import http_failure
 from docreader.llm.config import ModelConfig, ModelEndpoint, completions_url
 from docreader.llm.request import (
     ImageInput, ModelConfigurationError, ModelInfrastructureError, ModelSemanticError,
@@ -147,6 +148,8 @@ class OpenAIModel:
                     if chunk:
                         # Before SSE decoding: comments, incomplete events, thinking,
                         # and tool arguments all keep the response alive.
+                        if "first_data_seconds" not in stream.counts:
+                            stream.counts["first_data_seconds"] = round(time.monotonic() - started, 3)
                         stream.feed(chunk)
                 if (stream.provider_error is None
                         and response.headers.get("content-type", "").split(";", 1)[0].strip() != "text/event-stream"):
@@ -162,9 +165,10 @@ class OpenAIModel:
                 status = error.status_code
                 response_ref, usage = await self._received_rejection(error.response, digest)
                 await self._finish(request_id, "failed", usage, f"http_{status}", started, response_ref)
-                if status in {408, 409, 425, 429} or status >= 500:
+                _, failure = http_failure(status)
+                if failure is ModelInfrastructureError:
                     raise ModelInfrastructureError(f"model endpoint returned HTTP {status}") from None
-                if status in {401, 403, 404} or 300 <= status < 400:
+                if failure is ModelConfigurationError:
                     raise ModelConfigurationError(f"model endpoint rejected its configuration (HTTP {status})") from None
                 raise ModelSemanticError(f"model endpoint rejected the request (HTTP {status})") from None
             except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
@@ -235,7 +239,8 @@ class OpenAIModel:
     async def _finish_stream(self, request_id, status, stream, digest, error_type, started):
         response_ref = await self._save_response(stream.audit(digest, error_type or "completed"))
         await self._finish(request_id, status, stream.usage, error_type, started, response_ref,
-                           provider_error=stream.provider_error)
+                           provider_error=stream.provider_error,
+                           activity=_first_data_activity(stream.counts))
 
     async def _received_rejection(self, response: httpx.Response, digest: str) -> tuple[dict | None, dict | None]:
         try:
@@ -248,14 +253,22 @@ class OpenAIModel:
         return await self._save_response(envelope), usage
 
     async def _finish(self, request_id, status: ModelRequestStatus, usage, error_type, started, response_ref=None,
-                      *, provider_error=None):
+                      *, provider_error=None, activity=None):
         error = {"type": error_type, "elapsed_seconds": round(time.monotonic() - started, 6)} if error_type else None
         if error is not None and provider_error is not None:
             secrets = tuple(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
                             if endpoint is not None and endpoint.api_key)
             error["provider_error"] = _redact_response(provider_error, secrets)
-        await self.store.finish_request(request_id, status, usage=usage, error=error, response_ref=response_ref)
+        await self.store.finish_request(request_id, status, usage=usage, error=error, response_ref=response_ref,
+                                        activity=activity)
         self.usage.record(status, usage)
+
+
+def _first_data_activity(counts) -> dict | None:
+    value = counts.get("first_data_seconds") if isinstance(counts, dict) else None
+    if type(value) not in {int, float} or isinstance(value, bool) or value < 0:
+        return None
+    return {"first_data_seconds": value}
 
 
 def _redact_response(value, secrets):

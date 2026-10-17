@@ -211,9 +211,9 @@ class ReplayAudit(Audit):
         self.rows[request_id] = deepcopy(row)
         return row
 
-    async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None):
-        await super().finish_request(request_id, status, usage, error, response_ref=response_ref)
-        self.rows[request_id].update(status=status, usage=usage, response_ref=response_ref)
+    async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None, activity=None):
+        await super().finish_request(request_id, status, usage, error, response_ref=response_ref, activity=activity)
+        self.rows[request_id].update(status=status, usage=usage, response_ref=response_ref, activity=activity)
 
 
 async def test_complete_response_cache_reused_without_new_request_or_usage(tmp_path):

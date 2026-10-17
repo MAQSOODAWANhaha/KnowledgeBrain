@@ -44,13 +44,12 @@ class FixedModel:
         return deepcopy(self.response)
 
 
-def test_item_payload_has_complete_versioned_envelope_and_host_problem_identity():
+def test_item_payload_has_complete_envelope_without_host_revision_fields():
     problem = {"issue_id": "issue-1", "code": "missing_source", "detail": "附件不可读。", "blocking": True}
     payload = item_payload(pack(), identity=IDENTITY, issues=[problem])
-    assert set(payload) == {"schema_version", "work_unit_id", "source_version", "domain_revision",
-                            "source_views", "issues"}
+    assert set(payload) == {"schema_version", "work_unit_id", "source_views", "issues"}
     assert payload["schema_version"] == 2 and payload["work_unit_id"] == "p1"
-    assert payload["source_version"] == 1 and payload["domain_revision"] == 2
+    assert "source_version" not in payload and "domain_revision" not in payload
     assert payload["source_views"][0]["body"][0]["text"] == "交付期限为30天。"
     assert "catalog" not in payload and payload["issues"] == [problem]
     payload["issues"][0]["detail"] = "changed"
@@ -155,8 +154,6 @@ async def test_all_four_business_kinds_accept_minimal_source_backed_items(kind, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", [
-    {"dispositions": []},
-    {"dispositions": [{"range_id": "outside", "status": "non_item", "reason": "说明。", "item_ids": []}]},
     {"dispositions": [{"range_id": "r1", "status": "non_item", "reason": "说明。", "item_ids": []}]},
     {"issues": [{"code": "unclear", "detail": "条件不清。", "blocking": "false"}]},
 ])
@@ -165,6 +162,17 @@ async def test_local_model_contract_defects_keep_items_and_record_review_problem
     assert extracted["items"] == result()["items"]
     assert extracted["dispositions"][0]["status"] == "items"
     assert extracted["issues"]
+
+
+@pytest.mark.asyncio
+async def test_disposition_outside_the_body_does_not_block_a_cited_range():
+    response = result(dispositions=[{
+        "range_id": "outside", "status": "non_item", "reason": "说明。", "item_ids": [],
+    }])
+    extracted = await extract_items(pack(), FixedModel(response), identity=IDENTITY)
+    assert extracted["issues"] == []
+    assert extracted["dispositions"][0]["status"] == "items"
+    assert extracted["diagnostics"][0]["code"] == "disposition_outside_model_body"
 
 
 @pytest.mark.asyncio
@@ -257,6 +265,13 @@ async def test_empty_table_template_has_contextual_disposition_without_fabricate
     model = FixedModel(response)
     extracted = await extract_items(pack([instruction, blank]), model, identity=IDENTITY)
     assert extracted["dispositions"] == response["dispositions"]
+    omitted = deepcopy(response)
+    omitted["dispositions"] = [omitted["dispositions"][1]]
+    derived = await extract_items(pack([instruction, blank]), FixedModel(omitted), identity=IDENTITY)
+    assert derived["issues"] == []
+    assert derived["dispositions"][0] == {"range_id": "header", "status": "items",
+                                          "reason": "宿主按直接正文证据派生本范围处置。", "item_ids": ["p1:i1"]}
+    assert derived["dispositions"][1] == response["dispositions"][1]
     sent = model.calls[0][1]["source_views"][0]
     assert sent["blank_table_templates"][0]["rows"][0]["range_ids"] == ["blank"]
     assert extracted["issues"] == []

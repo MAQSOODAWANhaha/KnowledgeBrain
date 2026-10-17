@@ -147,7 +147,7 @@ def reference_candidate(payload):
 
 
 def all_source_candidate(payload):
-    if payload["work_unit_id"] != "discovery-1":
+    if not payload["work_unit_id"].startswith("discovery-"):
         return []
     return [{"candidate_id": payload["work_unit_id"] + ":c1", "issue_ids": [],
              "range_ids": [], "section_refs": [
@@ -184,7 +184,7 @@ async def test_complete_source_analysis_keeps_four_business_kinds_and_original_a
     assert all(artifacts.read_json(result[key])["schema_version"] == 2 for key in (
         "review_plan_ref", "locate_plan_ref", "association_plan_ref", "joint_plan_ref"))
     assert len(result["operation_refs"]) == len(model.calls)
-    assert all(payload["source_version"] == 1 and payload["domain_revision"] == 1 for payload in model.calls)
+    assert all("source_version" not in payload and "domain_revision" not in payload for payload in model.calls)
 
 
 @pytest.mark.asyncio
@@ -285,10 +285,10 @@ def physical_pdf(index, *, unit_pages=(0,1), page_count=2, partial_unit=None, mi
 
 
 def page_candidate(payload, page=1, document="main"):
-    if payload["work_unit_id"] != "discovery-1":
+    if not payload["work_unit_id"].startswith("discovery-"):
         return []
-    return [{"candidate_id":"discovery-1:c1","issue_ids":[],"range_ids":[],"item_ids":[],
-             "page_refs":[{"document_id":document,"page_ordinal":page}], "reason":"核对明确物理PDF页原文。"}]
+    return [{"candidate_id": payload["work_unit_id"] + ":c1", "issue_ids": [], "range_ids": [], "item_ids": [],
+             "page_refs": [{"document_id": document, "page_ordinal": page}], "reason": "核对明确物理PDF页原文。"}]
 
 
 def pdf_image_page(index, *, missing=False, separate_list=False, status="complete", issues=()):
@@ -333,7 +333,7 @@ async def test_page_image_missing_or_incomplete_never_reaches_association(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_physical_page_candidate_loads_complete_page_and_reuses_it_for_joint_review(tmp_path):
+async def test_physical_page_candidate_loads_complete_page_for_association(tmp_path):
     data = await scenario(tmp_path, documents=[("main","main",[
         ("首物理页原文。", "obligation"),("第二物理页甲要求。", "obligation"),
         ("第二物理页补充说明。",None)])],
@@ -345,8 +345,7 @@ async def test_physical_page_candidate_loads_complete_page_and_reuses_it_for_joi
     associated = next(payload for payload in model.calls if payload["operation"] == "associate")
     assert [source["text"] for view in associated["source_views"] for source in view["body"]] == [
         "第二物理页甲要求。","第二物理页补充说明。"]
-    joint = next(payload for payload in model.calls if payload["work_unit_id"].startswith("joint-"))
-    assert joint["source_views"] == associated["source_views"]
+    assert not any(payload["work_unit_id"].startswith("joint-") for payload in model.calls)
     assert len(associated["dispositions"]) == 2 and result["blocking"] is False
 
 
@@ -433,9 +432,9 @@ async def test_section_candidate_loads_every_original_range_and_non_item_content
         sections=["same", "same", "other"])
 
     def candidate(payload):
-        if payload["work_unit_id"] != "discovery-1":
+        if not payload["work_unit_id"].startswith("discovery-"):
             return []
-        return [{"candidate_id": "discovery-1:c1", "issue_ids": [], "range_ids": [], "item_ids": [],
+        return [{"candidate_id": payload["work_unit_id"] + ":c1", "issue_ids": [], "range_ids": [], "item_ids": [],
                  "section_refs": [{"document_id": "main", "section_id": "same"}],
                  "reason": "联合补读本节原文和口径说明。"}]
 
@@ -446,8 +445,7 @@ async def test_section_candidate_loads_every_original_range_and_non_item_content
         "人员应持A证。", "本节说明证书审核口径。"}
     assert len(associated["items"]) == 1
     assert len(associated["dispositions"]) == 2
-    joint = next(payload for payload in model.calls if payload["work_unit_id"].startswith("joint-"))
-    assert associated["source_views"] == joint["source_views"]
+    assert not any(payload["work_unit_id"].startswith("joint-") for payload in model.calls)
     assert result["blocking"] is False
 
 
@@ -691,12 +689,14 @@ async def test_association_keeps_valid_siblings_and_sends_untraceable_declaratio
     model = Model(locate=all_source_candidate, associate=unsupported)
     result = await run(data, model)
     assert result["blocking"] is True and result["coverage"]["missing"] == {}
-    assert [r["relation"] for r in data[0].read_json(result["relations_ref"])] == ["有效的来源关联。"]
+    relations = data[0].read_json(result["relations_ref"])
+    assert [r["relation"] for r in relations] == ["有效的来源关联。"]
+    assert result["unverified_relation_ids"] == [relations[0]["relation_id"]]
     problem = next(p for p in result["issues"] if p["code"] == "analysis_association_unresolved")
     assert "relations[0]" in problem["detail"] and "需要核对的适用条件关联。" in problem["detail"]
-    joint = next(p for p in model.calls if p["work_unit_id"].startswith("joint-"))
-    assert any(p["code"] == "analysis_association_unresolved" for p in joint["issues"])
-    assert set(problem["item_ids"]) <= {item["item_id"] for item in joint["items"]}
+    # Without a decision there is nothing for a joint review to accept; the doubt goes to a human.
+    assert not any(p["work_unit_id"].startswith("joint-") for p in model.calls)
+    assert problem["issue_id"] in result["human_issue_ids"] and result["hard_blocking"] is False
     assert all(value == original for value, original in returned)
 
 
@@ -730,6 +730,28 @@ async def test_association_restores_linebreaks_in_relations_decisions_and_retain
 
 
 @pytest.mark.asyncio
+async def test_relation_only_association_skips_joint_and_keeps_relations_unverified(tmp_path):
+    data = await scenario(tmp_path)
+
+    def related(payload):
+        citation = deepcopy(payload["items"][0]["evidence"][0])
+        return {"schema_version": 2, "decisions": [], "findings": [], "relations": [{
+            "relation_id": payload["work_unit_id"] + ":l1", "from_item_id": payload["items"][0]["item_id"],
+            "to_item_id": payload["items"][1]["item_id"], "relation": "评分规则针对该资格要求。",
+            "evidence": [citation]}]}
+
+    model = Model(locate=all_source_candidate, associate=related)
+    result = await run(data, model)
+    operations = [p["work_unit_id"].split("-")[0] for p in model.calls]
+    assert "associate" in operations and "joint" not in operations
+    relations = data[0].read_json(result["relations_ref"])
+    associated = [r["relation_id"] for r in relations if r["relation"] == "评分规则针对该资格要求。"]
+    assert associated and result["unverified_relation_ids"] == associated
+    assert result["coverage"]["missing"] == {} and result["blocking"] is False
+    assert data[0].read_json(result["joint_plan_ref"])["requests"] == []
+
+
+@pytest.mark.asyncio
 async def test_untraceable_decision_cannot_close_existing_issue_and_joint_receives_pending_content(tmp_path):
     data = await scenario(tmp_path, analysis_issue=True)
 
@@ -742,9 +764,11 @@ async def test_untraceable_decision_cannot_close_existing_issue_and_joint_receiv
     result = await run(data, model)
     assert result["blocking"] is True and result["accepted_decision_ids"] == []
     assert result["resolved_issue_ids"] == [] and data[0].read_json(result["decisions_ref"]) == []
-    assert any(p["code"] == "condition_unclear" for p in result["issues"])
-    joint = next(p for p in model.calls if p["work_unit_id"].startswith("joint-"))
-    assert any("不存在的决议引文" in p["detail"] for p in joint["issues"])
+    original = next(p for p in result["issues"] if p["code"] == "condition_unclear")
+    pending = next(p for p in result["issues"] if "不存在的决议引文" in p["detail"])
+    # The rejected proposal leaves no decision to accept, so no joint call; a human sees both records.
+    assert not any(p["work_unit_id"].startswith("joint-") for p in model.calls)
+    assert {original["issue_id"], pending["issue_id"]} <= set(result["human_issue_ids"])
 
 
 @pytest.mark.asyncio
@@ -881,7 +905,7 @@ async def test_shared_rule_does_not_merge_independent_candidates_into_an_oversiz
     expected = []
 
     def candidates(payload):
-        if payload["work_unit_id"] != "discovery-1":
+        if not payload["work_unit_id"].startswith("discovery-"):
             return []
         common, first, second = payload["items"][:3]
         expected.extend([{common["item_id"], target["item_id"]} for target in (first, second)])
@@ -981,3 +1005,18 @@ async def test_recovery_reuses_completed_review_and_localization_receipts(tmp_pa
     assert [payload for payload in model.calls if payload["operation"] != "associate"
             and payload["work_unit_id"].startswith(("review-", "discovery-"))] == completed
     assert sum(payload["operation"] == "associate" for payload in model.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_analysis_payloads_are_content_stable_across_host_revisions(tmp_path):
+    data = await scenario(tmp_path)
+    first = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
+    other = _Analysis(data[1], data[2], data[0], {**IDENTITY, "domain_revision": 2}, budget())
+    left, right = first.review_requests(), other.review_requests()
+    assert left == right
+    assert all(payload["work_unit_id"].startswith("review-") for payload in left)
+    assert all("source_version" not in payload and "domain_revision" not in payload for payload in left)
+    locate_left, locate_right = first.locate_requests(), other.locate_requests()
+    assert [payload["work_unit_id"] for payload in locate_left] == [payload["work_unit_id"] for payload in locate_right]
+    assert all(payload["work_unit_id"].startswith(("discovery-", "reference-")) for payload in locate_left)
+    assert all(len(payload["work_unit_id"].split("-", 1)[-1]) == 12 for payload in left)

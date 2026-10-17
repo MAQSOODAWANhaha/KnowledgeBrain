@@ -21,6 +21,10 @@ def test_observation_keeps_missing_usage_and_failed_outputs_visible():
     assert extract["reported_tokens"] == {"prompt_tokens": 1200, "completion_tokens": 36680, "total_tokens": 37880}
     assert extract["completion"]["max"] == 36660 and extract["completion"]["p95"] == 36660
     assert extract["completion"]["exceeds_reserve"] == 1
+    assert report["deviations"] == [{
+        "task": "extract", "marks": ["completion_above_reserve"],
+        "output_reserve": 16384, "prompt_tokens": 1000, "completion_tokens": 36660,
+    }]
     assert extract["context"] == {"observations": 2, "max_reported_total": 37660,
                                   "capacity_comparisons": 1, "exceeds_context": 0}
     assert report["tasks"]["verify"]["completion"]["observations"] == 0
@@ -61,3 +65,19 @@ def test_operation_samples_exclude_failed_outputs_and_unplanned_stages_are_unkno
     assert result["planning"]["unplanned_phases"] == ["extract", "locate", "associate", "joint"]
     assert result["planning"]["total_planned_requests"] is None
     assert result["planning"]["known_planned_requests"] == 0
+
+
+def test_deviation_marks_keep_expected_overestimates_and_fast_first_bytes_quiet():
+    rows = [
+        {"request_id": "under", "task": "verify", "status": "succeeded",
+         "metadata": {"input_tokens": 100, "output_reserve": 16384, "first_data_seconds": 2},
+         "usage": {"prompt_tokens": 140, "completion_tokens": 10}},
+        {"request_id": "slow", "task": "extract", "status": "succeeded",
+         "metadata": {"input_tokens": 8000, "output_reserve": 16384, "first_data_seconds": 60},
+         "usage": {"prompt_tokens": 2000, "completion_tokens": 100}},
+        {"request_id": "byte-overestimate", "task": "extract", "status": "succeeded",
+         "metadata": {"input_tokens": 9000, "output_reserve": 16384, "first_data_seconds": 1},
+         "usage": {"prompt_tokens": 2000, "completion_tokens": 100}},
+    ]
+    marks = {item["request_id"]: item["marks"] for item in usage.budget_observation(rows)["deviations"]}
+    assert marks == {"under": ["estimate_below_prompt"], "slow": ["slow_first_data"]}

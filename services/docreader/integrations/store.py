@@ -185,7 +185,17 @@ CREATE TABLE IF NOT EXISTS tender_model_requests (
 CREATE INDEX IF NOT EXISTS tender_model_requests_replay_idx
     ON tender_model_requests(run_id, source_version, domain_revision, task, (metadata->>'request_digest'))
     WHERE status IN ('sent', 'uncertain', 'succeeded');
+CREATE INDEX IF NOT EXISTS tender_model_requests_source_reuse_idx
+    ON tender_model_requests(run_id, source_version, task, (metadata->>'request_digest'))
+    WHERE status = 'succeeded';
 """
+
+
+def _recorded_first_data(activity: dict[str, Any] | None) -> dict[str, float] | None:
+    value = activity.get("first_data_seconds") if isinstance(activity, dict) else None
+    if type(value) not in {int, float} or isinstance(value, bool) or value < 0:
+        return None
+    return {"first_data_seconds": value}
 
 
 def _safe_metadata(value: Any) -> Any:
@@ -916,6 +926,13 @@ class Store:
                 # after a worker died between model audit and artifact/checkpoint.
                 # No new audit row is created and the caller must not contact the provider.
                 return prior[0]
+            reused = await self._reusable_source_requests(
+                conn, lease.run_id, lease.source_version, task, digest,
+            )
+            if reused:
+                # Same source, same complete request: reuse the paid success. sent/uncertain
+                # still fence only the current domain_revision.
+                return reused[0]
             return await (await conn.execute(
                 "INSERT INTO tender_model_requests(request_id, run_id, source_version, domain_revision, epoch, model, task, metadata) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
@@ -934,9 +951,19 @@ class Store:
             (run_id, source_version, domain_revision, task, digest),
         )).fetchall()
 
+    async def _reusable_source_requests(
+        self, conn: AsyncConnection, run_id: str, source_version: int, task: Task, digest: str,
+    ) -> list[dict[str, Any]]:
+        return await (await conn.execute(
+            "SELECT * FROM tender_model_requests WHERE run_id = %s AND source_version = %s "
+            "AND task = %s AND metadata->>'request_digest' = %s AND status = 'succeeded' "
+            "AND response_ref IS NOT NULL ORDER BY created_at, request_id FOR UPDATE",
+            (run_id, source_version, task, digest),
+        )).fetchall()
+
     async def finish_request(
         self, request_id: str, status: str, usage: dict[str, Any] | None = None, error: Any = None,
-        *, response_ref: dict[str, Any] | None = None,
+        *, response_ref: dict[str, Any] | None = None, activity: dict[str, Any] | None = None,
     ) -> None:
         if status not in {"sent", "succeeded", "failed", "uncertain"}:
             raise ValueError("invalid model request status")
@@ -982,11 +1009,16 @@ class Store:
                         (Jsonb(response_ref), request_id),
                     )
                 return
+            observed = _recorded_first_data(activity)
             await conn.execute(
                 "UPDATE tender_model_requests SET status = %s, usage = COALESCE(%s, usage), error = %s, "
                 "response_ref = COALESCE(%s, response_ref), "
+                "metadata = CASE WHEN %s IS NULL THEN metadata ELSE metadata || %s END, "
                 "sent_at = CASE WHEN %s = 'sent' THEN COALESCE(sent_at, clock_timestamp()) ELSE sent_at END, "
                 "finished_at = CASE WHEN %s != 'sent' THEN clock_timestamp() ELSE finished_at END WHERE request_id = %s",
                 (status, Jsonb(usage) if usage is not None else None, Jsonb(_safe_metadata(error)),
-                 Jsonb(response_ref) if response_ref is not None else None, status, status, request_id),
+                 Jsonb(response_ref) if response_ref is not None else None,
+                 Jsonb(observed) if observed is not None else None,
+                 Jsonb(observed) if observed is not None else None,
+                 status, status, request_id),
             )

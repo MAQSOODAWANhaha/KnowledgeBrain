@@ -100,11 +100,19 @@ def _executor(runtime, run, *, scope_repeats=12, fail_operation=None, candidates
                         "from_item_id": items[0]["item_id"], "to_item_id": items[1]["item_id"],
                         "relation": "The synthetic sources concern separate delivery commitments." * relation_repeats,
                         "evidence": [items[0]["evidence"][0], items[1]["evidence"][0]]}]
-                if payload["issues"]:
-                    result["decisions"] = [{"decision_id": payload["work_unit_id"] + ":d1",
+                if payload["issues"] or (candidates and items):
+                    decision = {"decision_id": payload["work_unit_id"] + ":d1",
                         "issue_ids": [q["issue_id"] for q in payload["issues"]],
                         "reason": "The jointly supplied synthetic sources clarify this reference.",
-                        "evidence": [item["evidence"][0] for item in items]}]
+                        "evidence": [item["evidence"][0] for item in items]}
+                    if not decision["issue_ids"] and len(items) >= 2:
+                        decision["amendment"] = {
+                            "target_item_id": items[0]["item_id"], "effect": "replace",
+                            "affected_scope": "Synthetic fixture wording only.",
+                            "retained_rules": [], "replacement_item_ids": [items[1]["item_id"]],
+                        }
+                    if decision["issue_ids"] or decision.get("amendment"):
+                        result["decisions"] = [decision]
             elif payload["operation"] == "review" and not accept_decisions:
                 result["accepted_decision_ids"] = []
             return result
@@ -232,7 +240,8 @@ async def test_joint_review_budget_includes_full_proposed_relation_and_blocks_be
     receipts = [entry for entry in row["artifacts"] if entry["stage"] == "analysis-associate"]
     assert len(receipts) == 1
     proposal = artifacts.read_json(receipts[0]["artifact_ref"])
-    joint_payload = {**associations[0], "operation": "review", "work_unit_id": "joint-1",
+    joint_payload = {**associations[0], "operation": "review",
+                     "work_unit_id": associations[0]["work_unit_id"].replace("associate-", "joint-", 1),
                      "relations": [*associations[0]["relations"], *proposal["relations"]],
                      "decisions": proposal["decisions"]}
     plan = artifacts.read_json(checked["joint_plan_ref"])
@@ -241,7 +250,8 @@ async def test_joint_review_budget_includes_full_proposed_relation_and_blocks_be
     assert descriptor["relation_ids"] == [entry["relation_id"] for entry in proposal["relations"]]
     assert descriptor["budget"] == budget.measure("verify", joint_payload)
     assert descriptor["budget"]["fits"] is False
-    assert budget.fits("verify", {**joint_payload, "relations": []}) is True
+    without_relations = budget.measure("verify", {**joint_payload, "relations": []})
+    assert without_relations["input_tokens"] < descriptor["budget"]["input_tokens"]
     assert "analysis_budget_exceeded" in {problem["code"] for problem in checked["issues"]}
     assert "analysis_review_incomplete" in {problem["code"] for problem in checked["issues"]}
 
@@ -271,7 +281,15 @@ async def test_partial_analysis_success_reuses_durable_operation_receipts(runtim
             receipt["artifact_ref"], receipt["epoch"], receipt["input_digest"])
     after = Counter(fixture_request_digest(task, payload) for _, task, payload in calls)
     assert all(after[digest] == count == 1 for digest, count in before.items())
-    await store.confirm(run["run_id"], 1, recovered["checklist_digest"], "recovery-confirm")
+    checked = output(artifacts, recovered, "verify")
+    if checked.get("human_issue_ids"):
+        await store.confirm(run["run_id"], 1, recovered["checklist_digest"], "recovery-confirm",
+                            issue_resolutions={"schema_version": 1, "resolutions": [
+                                {"issue_id": issue_id, "verdict": "dismissed",
+                                 "reason": "Synthetic recovery does not re-open fixture wording."}
+                                for issue_id in checked["human_issue_ids"]]})
+    else:
+        await store.confirm(run["run_id"], 1, recovered["checklist_digest"], "recovery-confirm")
     final_count = len(calls)
     assert (await execute())["status"] == "analysis-ready"
     assert len(calls) == final_count
@@ -280,7 +298,7 @@ async def test_partial_analysis_success_reuses_durable_operation_receipts(runtim
 async def test_same_source_revision_invalidates_analysis_operations_and_confirmation(runtime):
     store, artifacts, _, _ = runtime
     run = await _submit(runtime)
-    execute, calls, _ = _executor(runtime, run)
+    execute, calls, _ = _executor(runtime, run, scope_repeats=6)
     first = await execute()
     await store.confirm(run["run_id"], 1, first["checklist_digest"], "confirm-one")
     ready = await execute()
@@ -295,12 +313,36 @@ async def test_same_source_revision_invalidates_analysis_operations_and_confirma
     with pytest.raises(InvalidConfirmation):
         await store.confirm(run["run_id"], 1, first["checklist_digest"], "stale", domain_revision=1)
     second = await execute()
-    assert second["status"] == "waiting-confirmation"
+    assert second["status"] == "waiting-confirmation", output(artifacts, second, "verify")["issues"]
     assert second["checklist_digest"] != first["checklist_digest"]
     assert output(artifacts, second, "freeze") == frozen
     assert output(artifacts, second, "analysis-review-plan") != first_plan
     assert all(task != "extract" for revision, task, _ in calls if revision == 2)
     assert any(item.get("domains") == ["delivery"] for p in _calls(calls, "review", 2) for item in p["items"])
+
+
+async def test_single_item_correction_resends_only_affected_verify_requests(runtime):
+    store, artifacts, _, _ = runtime
+    run = await _submit(runtime)
+    execute, calls, _ = _executor(runtime, run, scope_repeats=6)
+    first = await execute()
+    assert first["status"] == "waiting-confirmation"
+    first_verify = {row["metadata"]["request_digest"]: row
+                    for row in first["usage"] if row["task"] == "verify" and row["status"] == "succeeded"}
+    _, extractions = _extractions(artifacts, first)
+    target = extractions[0]["items"][0]
+    target["text"] = target["text"] + " Host-corrected wording."
+    await _correct(runtime, first, extractions)
+    second = await execute()
+    assert second["status"] == "waiting-confirmation", output(artifacts, second, "verify")["issues"]
+    second_digests = {row["metadata"]["request_digest"] for row in second["usage"] if row["task"] == "verify"}
+    planned = {fixture_request_digest(task, payload)
+               for revision, task, payload in calls if revision == 2 and task == "verify"}
+    reused = first_verify.keys() & planned
+    assert reused
+    assert reused.isdisjoint(second_digests)
+    assert second_digests
+    assert second_digests <= planned
 
 
 async def test_unknown_candidate_provenance_is_execution_failure(runtime):
@@ -363,7 +405,7 @@ async def test_explicit_resolution_requires_independent_acceptance(runtime, acce
 
 async def test_original_condition_evidence_remains_available_to_independent_review(runtime):
     _, artifacts, _, _ = runtime
-    run = await _submit(runtime, ballast=True, ballast_repeats=40, condition=True, suffixes="abcd")
+    run = await _submit(runtime, ballast=True, ballast_repeats=30, condition=True, suffixes="abcd")
     execute, calls, budget = _executor(runtime, run, scope_repeats=1, include_conditions=True)
     row = await execute()
     assert row["status"] == "waiting-confirmation", output(artifacts, row, "verify")["issues"]

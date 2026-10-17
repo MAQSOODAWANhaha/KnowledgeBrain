@@ -6,10 +6,48 @@ import math
 from typing import Any
 
 
+# A first byte this late is still inside the 180s idle deadline, but it is the
+# range worth seeing before the request is failed as a timeout. It does not
+# change admission or retry.
+SLOW_FIRST_DATA_SECONDS = 60
+
+
+def _request_marks(row: dict, usage: dict) -> list[str]:
+    """Flag a request whose measured result fell outside its recorded budget."""
+    metadata = row.get("metadata") or {}
+    marks = []
+    estimate, prompt = metadata.get("input_tokens"), usage.get("prompt_tokens")
+    if type(estimate) is int and type(prompt) is int and prompt > estimate:
+        marks.append("estimate_below_prompt")
+    completion, reserve = usage.get("completion_tokens"), metadata.get("output_reserve")
+    if type(completion) is int and type(reserve) is int and completion > reserve:
+        marks.append("completion_above_reserve")
+    first = metadata.get("first_data_seconds")
+    if type(first) in {int, float} and not isinstance(first, bool) and first >= SLOW_FIRST_DATA_SECONDS:
+        marks.append("slow_first_data")
+    return marks
+
+
 def budget_observation(requests: list[dict], plans=()) -> dict:
     """Read-only calibration evidence; unknown usage is never zero billed cost."""
     summaries = {"tasks": {}, "operations": {}}
     buckets = {}
+    deviations = []
+    for row in requests:
+        usage = reported_usage(row.get("usage")) or {}
+        marks = _request_marks(row, usage)
+        if marks:
+            noted = {"task": row.get("task"), "marks": marks}
+            if row.get("request_id"):
+                noted["request_id"] = row["request_id"]
+            metadata = row.get("metadata") or {}
+            for key in ("input_tokens", "output_reserve", "first_data_seconds"):
+                if key in metadata:
+                    noted[key] = metadata[key]
+            for key in ("prompt_tokens", "completion_tokens"):
+                if key in usage:
+                    noted[key] = usage[key]
+            deviations.append(noted)
     for row in requests:
         metadata = row.get("metadata", {})
         operation = row["task"]
@@ -59,7 +97,8 @@ def budget_observation(requests: list[dict], plans=()) -> dict:
     unplanned = [phase for phase in ("extract", "review", "locate", "associate", "joint")
                  if phase not in {plan["phase"] for plan in planned}]
     known_requests = sum(plan["planned_requests"] for plan in planned)
-    return {"calibration_status": "observations_only", "requests": len(requests), **summaries,
+    return {"calibration_status": "observations_only", "requests": len(requests),
+            "deviations": deviations, **summaries,
             "planning": {"unplanned_phases": unplanned, "known_planned_requests": known_requests,
                          "total_planned_requests": None if unplanned else known_requests},
             "plans": planned, "limits": ["Estimates and reserves are not billed usage or provider output limits.",

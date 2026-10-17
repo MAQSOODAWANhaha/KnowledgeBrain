@@ -143,10 +143,14 @@ def validate_correction(pack: dict, corrected: dict) -> dict:
 
 
 def item_payload(pack: dict, *, identity: dict, issues=(), scope_decisions=(), role=None) -> dict:
-    """The complete v2 request, also used by structural admission probes."""
+    """The complete v2 request, also used by structural admission probes.
+
+    Host source_version/domain_revision stay on receipts and execution snapshots.
+    """
+    if not identity.get("source_version") or not identity.get("domain_revision"):
+        raise ValueError("host identity belongs on the receipt, not the model payload")
     return {
         "schema_version": 2, "work_unit_id": pack["pack_id"],
-        "source_version": identity["source_version"], "domain_revision": identity["domain_revision"],
         "source_views": [source_view({**pack, **({"role": role} if role is not None else {})})],
         "issues": deepcopy(list(issues)),
         **({"scope_decisions": deepcopy(list(scope_decisions))} if scope_decisions else {}),
@@ -414,10 +418,14 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
         entries = given.get(range_id, [])
         supported = [value["item_id"] for value in items
                      if any(citation["range_id"] == range_id for citation in value["evidence"])]
-        if len(entries) != 1:
+        if not entries and supported:
+            # Item coverage is evidence, not a second index the model must copy.
+            value = {"range_id": range_id, "status": "items",
+                     "reason": "宿主按直接正文证据派生本范围处置。"}
+        elif len(entries) != 1:
             pending_dispositions.add(range_id)
             pending("range_disposition_incomplete", "dispositions", {"range_id": range_id},
-                    "原文处置缺失或重复，保留已知事项并独立检查遗漏。")
+                    "原文既无直接事项证据，也没有唯一的 non_item 或 unresolved 声明，保留已知事项并独立检查遗漏。")
             value = {"range_id": range_id, "status": "items" if supported else "unresolved",
                      "reason": "抽取处置缺失或重复，须独立核对本范围。"}
         else:

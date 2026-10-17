@@ -143,3 +143,27 @@ async def test_replay_identity_is_scoped_to_task_revision_and_full_request_diges
     row = await store.get_run(run["run_id"])
     newer = await store.acquire(run["run_id"], row["commands"][0]["command_id"], 1)
     assert (await store.begin_request(newer, "explicit-new-revision", "fixture", "extract", metadata))["domain_revision"] == 2
+
+
+async def test_succeeded_receipt_is_reused_across_domain_revisions(store):
+    run, _, lease = await leased(store)
+    metadata = request_metadata("stable complete request")
+    response_ref = store.test_artifacts.put_json({"synthetic_stream": ["complete JSON"], "complete": True})
+    await store.begin_request(lease, "paid-success", "fixture", "extract", metadata)
+    await store.finish_request("paid-success", "sent")
+    await store.finish_request("paid-success", "succeeded", {"input_tokens": 3}, response_ref=response_ref)
+    baseline = store.test_artifacts.put_json({"packs": []})
+    await store.commit_artifact(lease, "freeze", baseline)
+    await store.commit_artifact(lease, "extract", baseline)
+    correction = store.test_artifacts.put_json({"packs": [], "correction": "one host item edit"})
+    await store.correct(run["run_id"], 1, 1, baseline["sha256"], correction, "reuse-correction",
+                        "Correct one item without resending identical requests")
+    row = await store.get_run(run["run_id"])
+    newer = await store.acquire(run["run_id"], row["commands"][0]["command_id"], 1)
+    reused = await store.begin_request(newer, "must-not-send", "fixture", "extract", metadata)
+    assert reused["request_id"] == "paid-success"
+    assert reused["domain_revision"] == 1
+    assert reused["status"] == "succeeded" and reused["response_ref"] == response_ref
+    current = await store.get_run(run["run_id"])
+    assert not any(item["domain_revision"] == 2 and item["metadata"]["request_digest"] == metadata["request_digest"]
+                   for item in current["usage"])

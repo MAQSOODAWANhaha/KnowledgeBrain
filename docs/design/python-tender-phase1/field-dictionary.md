@@ -71,7 +71,7 @@
 
 | 字段/类型 | 目标定义 |
 | --- | --- |
-| `work_unit_id` | 宿主固定、当前修订内唯一的子操作身份，复用现有 stage/scope 回执，不另建任务系统；抽取时由本包身份提供 |
+| `work_unit_id` | 宿主固定的子操作身份，按请求内容稳定编号（前缀+内容摘要），复用现有 stage/scope 回执，不另建任务系统；抽取时由本包身份提供 |
 | `item_id` | 模型使用 `<work_unit_id>:i1` 等格式，正整数后缀不要求连续；宿主检查当前台账内唯一 |
 | `ItemRef` | `{artifact_ref, item_id}`，持久引用不可变事项；同名 ID 不代表跨修订语义相同 |
 | `Relation` | `{relation_id, from_item_id, to_item_id, relation, evidence}`；relation 为非空的来源关系说明，evidence 为非空 Evidence[] |
@@ -127,9 +127,9 @@ scoring.max_points 在保留片段中重新生效，也不为此把 EffectiveRul
 
 | 字段/协议 | 目标定义 |
 | --- | --- |
-| 抽取输出 | `{schema_version: 2, items: TenderItem[], dispositions: Disposition[], relations: Relation[], issues: Issue[]}`，五项均必填；模型返回的 Disposition 仅需 `{range_id,status,reason}` |
-| `Disposition` | 持久化为 `{range_id, status, reason, item_ids}`；status 为 `items/non_item/unresolved`，reason 为有来源依据的非空说明 |
-| `item_ids` | 宿主按事项的有效直接 evidence 派生反向索引，模型不再重复生成。规范产物中 items 处置非空，non_item/unresolved 时为 `[]`；每个 body 范围均有一条规范处置 |
+| 抽取输出 | `{schema_version: 2, items: TenderItem[], dispositions: Disposition[], relations: Relation[], issues: Issue[]}`，五项均必填。模型只为 `non_item` 和 `unresolved` 返回 `{range_id,status,reason}`；被事项证据引用的范围省略，由宿主派生 `items` 处置 |
+| `Disposition` | 持久化为 `{range_id, status, reason, item_ids}`；status 为 `items/non_item/unresolved`，reason 为有来源依据的非空说明。规范产物仍覆盖每个 body 范围 |
+| `item_ids` | 宿主按事项的有效直接 evidence 派生反向索引，模型不再生成。规范产物中 items 处置非空，non_item/unresolved 时为 `[]`。既未被引用也未声明的范围由宿主记问题并交 review |
 | 核验模型输出 | `{schema_version: 2, accepted_decision_ids: string[], findings: Issue[]}`，三字段必填；接受集合只能选择本次输入决议 |
 | 核验接受回执 | 宿主添加`reviewed_range_ids/reviewed_item_ids/reviewed_relation_ids/reviewed_decision_ids`，来自实际发送的输入；表示执行覆盖，不是模型声明或语义完整性证明 |
 | 核验覆盖 | 宿主按成功接受的请求记录已提供的来源、事项、关系和决议；全局核对必要覆盖并集及候选联合核验回执，共享上下文可重复送审，不计为新增正文归属；ID 覆盖不证明语义正确 |
@@ -195,9 +195,10 @@ Verify 和人工确认收口。不新增流程节点、业务正则或改写内�
 
 ### 模型输入与 verify 内子操作
 
-抽取及 verify 子操作的输入均带 `schema_version: 2`、`work_unit_id`、`source_version`、
-`domain_revision`；run 身份、输入引用和 ID 到不可变产物的映射由宿主回执固定。
-实际协议、操作及版本绑定 input_digest/request_digest，不能只凭 task 相同复用。
+抽取及 verify 子操作的输入均带 `schema_version: 2`、`work_unit_id`；`source_version` 与
+`domain_revision` 只留在宿主回执和执行快照，不进入模型 payload。run 身份、输入引用和
+ID 到不可变产物的映射由宿主回执固定。实际协议、操作及内容绑定 input_digest/request_digest，
+不能只凭 task 相同复用。
 
 | 输入字段/类型 | 唯一定义 |
 | --- | --- |
@@ -234,11 +235,11 @@ verify 各操作的必需输入和回包如下，
 
 容量验收必须使用实际发送视图，逐包核对规划与运行时测量一致，并记录正文/上下文/其余开销、
 处置条数及输出 JSON 结构下限、各阶段已知调用数。UTF-8 字节估算和输出预留不是真实计费
-Token，结构下限也不是完整输出预测；`fits` 不证明输出能完整生成。当前16384输出预留只用于
-准入，未作为 wire 输出上限。真实联调需同时检查实际 usage、结束原因和完整 JSON/覆盖校验；
-usage 缺失保留未知，sent/uncertain 不通过换身份重发。后续关联调用数随真实候选产生再核定。
-已部署目录压缩版的首轮真实抽取出现单次43709 completion Token（详见交接），说明不得把
-16384当作真实输出上界。更换发送格式后的请求必须重新测量，旧估算不能直接套用。
+Token，结构下限也不是完整输出预测；`fits` 不证明输出能完整生成。131072 窗口保持不变。
+字节估算的输出预留仍是 16384，只用于准入，不是 wire 输出上限；verify 在 token 计数下用
+32768。真实联调需同时检查实际 usage、结束原因和完整 JSON/覆盖校验；usage 缺失保留未知，
+sent/uncertain 不通过换身份重发。已记录的抽取 completion 曾到 43709，不能把 16384 当成
+真实输出上界，也不据此改默认窗口。更换发送格式后的请求必须重新测量，旧估算不能直接套用。
 
 当前修订有 scope_decisions 时，抽取与核验同时携带该列表，并将原文、实际目标及关联事项
 共同送入独立 review。不能仅凭 domain_revision 变化假定人工解释已送达或已通过。
@@ -445,6 +446,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `context` | observations、max_reported_total、capacity_comparisons、exceeds_context；只比较实际报告total与该请求记录的容量，无观测时最大值为null |
 | `plans` | 已生成的extract/review/locate/associate/joint计划；各phase的planned_requests、input_estimate、max_input_estimate、output_reserve_total、over_budget_requests；全为计划统计，不能与实际Token相加 |
 | `planning` | unplanned_phases列出尚未生成的阶段；known_planned_requests只计已知计划；有未知阶段时total_planned_requests为null。此计数不含OCR、重试和纠正，不能充当全程付费调用上限 |
+| `deviations` | 逐请求标记，不含原文。`estimate_below_prompt`：实际 prompt_tokens 大于记录的输入估算；`completion_above_reserve`：completion 大于该请求 output_reserve；`slow_first_data`：首个原始字节等待达到 60 秒。字节估算偏高、首包更快、缺字段都不标记。标记不改变 131072 默认窗口、262144 纠错上限、预留或重试 |
 | `limits` | 估算、未知用量及小样本分位数的解释限制 |
 
 ### 运行状态
@@ -621,7 +623,7 @@ findings=[] 不能解决 q1。原文/版本变化或任一必要核验未接受�
 | `input_budget_tokens`, `correction_input_budget_tokens` | positive int，普通输入131072、显式纠错最多262144 token | 共享预算合同；普通verify/plan和新domain_revision不自动使用纠错额度 |
 | `correction` | bool，明确标记一次修复请求可使用纠错输入额度 | 不改变provider总窗口或wire输出参数；未知总窗口不授权双倍 |
 | `effective_input_budget_tokens` | int或null，当前输入预算与总窗口扣预留后的较小值 | planner/client使用同一测量；UTF8保守估算不是provider实测token |
-| `request_digest` | SHA256，完整无鉴权模型请求的摘要 | 模型审计与发送重放身份；包括图片、消息、模型和协议参数，不是仅payload文本hash；同运行修订/task下sent或uncertain阻止自动重付费，完整成功响应可复用 |
+| `request_digest` | SHA256，完整无鉴权模型请求的摘要 | 模型审计与发送重放身份；包括图片、消息、模型和协议参数，不是仅payload文本hash；同运行当前domain_revision/task下sent或uncertain阻止自动重付费；同run同source_version下摘要相同的成功回执可跨领域修订复用 |
 | `plan_digest` | sha256，task+input_digest+budget_digest+selectors/决议的规范摘要 | 新预算或作用域绑定生成新计划，规范来源身份不变 |
 | `requirement_id` | string，当前要求清单内义务身份 | 验证决议、计划项引用同一身份；内容修正产生新domain_revision |
 | `evidence` | Evidence[]，range_id+原文quote | 不更名为另一种引用；quote必须能在规范范围重放 |

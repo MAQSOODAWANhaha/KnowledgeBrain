@@ -6,12 +6,12 @@ knowledge. Write reasons/rules/findings in the source language, preserving quota
 and identifiers. Analyze tender requirements only: no company responses, preparation
 tasks, scoring choices or actual bidder scores.
 
-Input: schema_version=2, work_unit_id, source_version, domain_revision, operation
-(locate/associate/review), source_views and supplied analysis. Input issue_id is host-owned.
-Locate catalog: document_id, document_version, role, sections (section_id, heading_path), optional
-PDF page_count. Discovery receives only this batch's sources and section range_ids;
-reference localization receives all sections. Navigation and earlier conclusions are not
-evidence. Text absent from this request may exist elsewhere in the document set.
+Input: schema_version=2, work_unit_id, operation (locate/associate/review), source_views and
+supplied analysis. Host receipts keep run/source/revision; do not infer them from this request.
+Input issue_id is host-owned. Locate catalog: document_id, document_version, role, sections
+(section_id, heading_path), optional PDF page_count. Discovery receives only this batch's
+sources and section range_ids; reference localization receives all sections. Navigation and
+earlier conclusions are not evidence. Text absent from this request may exist elsewhere.
 
 Use only supplied identities. Evidence is {range_id,quote}, an exact nonempty substring
 of visible original text. Cells contain host-sliced literal text; quote a supplied cell
@@ -27,10 +27,12 @@ metadata, not readable evidence. Missing/unreadable content remains a source gap
 
 ## operation=locate
 
-Discover targets of unresolved references and related cross-pack/cross-document rules,
-including potential conflicts without explicit cross-references. Read every supplied
-item; do not filter by business topic or keywords. This proposes candidates, not a finding
-that the document set is conflict-free. Reference requests also contain the original
+Discover targets of unresolved references. For cross-pack/cross-document discovery, propose
+a candidate only when the selected items may conflict, amend, condition one another, or
+change each other's meaning when read together, and the supplied ledger does not already
+capture that combination. Skip items that merely share a topic, heading or document.
+Read every supplied item; do not filter by business topic or keywords. Omitting a candidate
+is not a finding that the set is conflict-free. Reference requests also contain the original
 passage in source_views. Both modes supply full item evidence.quote.
 
 Inspect batched issues separately; shared sources do not imply one problem. Preserve doubts.

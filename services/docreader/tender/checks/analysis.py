@@ -34,6 +34,11 @@ def _digest(value):
                                      separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _stable_unit(prefix, content):
+    """Content-stable work-unit identity; host receipts keep run/source/revision."""
+    return f"{prefix}-{_digest(content)[:12]}"
+
+
 def assign_issues(issues, namespace: str) -> list[dict]:
     """Host identities are stable and idempotent, including across receipt reuse."""
     result = {}
@@ -220,13 +225,17 @@ class _Analysis:
 
     def payload(self, operation, work_unit, **fields):
         return {"schema_version": 2, "operation": operation, "work_unit_id": work_unit,
-                "source_version": self.identity["source_version"],
-                "domain_revision": self.identity["domain_revision"],
                 **({"catalog": self.catalog} if operation == "locate" else {}), "source_views": [],
                 "items": [], "relations": [], "decisions": [], "dispositions": [],
                 "issues": [], "candidates": [],
                 **({"scope_decisions": deepcopy(self.plan["scope_decisions"])} if self.plan.get("scope_decisions") else {}),
                 **fields}
+
+    def stable_payload(self, operation, prefix, **fields):
+        draft = self.payload(operation, prefix, **fields)
+        draft["work_unit_id"] = _stable_unit(prefix, {key: value for key, value in draft.items()
+                                                     if key != "work_unit_id"})
+        return draft
 
     def views(self, ranges, *, complete=False):
         """Load original targets and their actual bound conditions, never a fake document."""
@@ -275,7 +284,7 @@ class _Analysis:
         return (self.document_order[document],self.positions[document][canonical],
                 source["start"],source["end"],source["range_id"])
 
-    def review_payload(self, ranges, work_unit):
+    def review_payload(self, ranges, work_unit=None):
         selected = set(ranges)
         ids = set()
         while True:
@@ -294,9 +303,11 @@ class _Analysis:
             if expanded == ids and sources == selected:
                 break
             ids, selected = expanded, sources
-        return self.payload("review", work_unit, source_views=views, items=items,
-                            relations=relations, dispositions=[self.dispositions[r] for r in ranges],
-                            issues=_public_issues(problems))
+        fields = dict(source_views=views, items=items, relations=relations,
+                      dispositions=[self.dispositions[r] for r in ranges], issues=_public_issues(problems))
+        if work_unit is None:
+            return self.stable_payload("review", "review", **fields)
+        return self.payload("review", work_unit, **fields)
 
     def findings(self, values, payload):
         allowed = _view_ids(payload["source_views"])
@@ -574,16 +585,16 @@ class _Analysis:
             ranges = [r["range_id"] for r in pack["body"] if r["range_id"] not in host_reviewed_ranges(pack)]
             current = []
             for range_id in ranges:
-                trial = self.review_payload([*current, range_id], f"review-{len(payloads) + 1}")
+                trial = self.review_payload([*current, range_id])
                 measured = self.budget.measure("verify", trial)
                 if current and (measured["fits"] is False or (
                         measured["method"] == RequestBudget.TOKENIZED_METHOD
                         and measured["input_tokens"] > self.REVIEW_INPUT_TOKENS)):
-                    payloads.append(self.review_payload(current, f"review-{len(payloads) + 1}"))
+                    payloads.append(self.review_payload(current))
                     current = []
                 current.append(range_id)
             if current:
-                payloads.append(self.review_payload(current, f"review-{len(payloads) + 1}"))
+                payloads.append(self.review_payload(current))
         reviewed_relations = {r["relation_id"] for p in payloads for r in p["relations"]}
         for relation_id, relation in self.relations.items():
             if relation_id in reviewed_relations:
@@ -593,7 +604,7 @@ class _Analysis:
                              if e["range_id"] in self.dispositions})
             # Relationship semantics require both endpoints and all evidence in
             # one request, even when ordinary source reviews were repartitioned.
-            payloads.append(self.review_payload(ranges, f"review-{len(payloads) + 1}"))
+            payloads.append(self.review_payload(ranges))
             reviewed_relations.update(r["relation_id"] for r in payloads[-1]["relations"])
         for decision in self.plan.get("scope_decisions", []):
             # Human scope interpretation, including local_only, must actually
@@ -607,7 +618,7 @@ class _Analysis:
             ids = {i["item_id"] for i in items}
             relations = [r for r in self.relations.values() if {r["from_item_id"], r["to_item_id"]} <= ids]
             ranges.update(e["range_id"] for r in relations for e in r["evidence"])
-            payloads.append(self.payload("review", f"scope-review-{len(payloads) + 1}",
+            payloads.append(self.stable_payload("review", "scope-review",
                 source_views=self.views(ranges, complete=True), items=items, relations=relations,
                 dispositions=[d for r, d in self.dispositions.items() if self.source_identity(r) in canonical],
                 issues=_public_issues(self.problems)))
@@ -615,7 +626,7 @@ class _Analysis:
 
     def locate_requests(self):
         """Cover every item pair with block unions; never keyword filtering."""
-        def discovery(items, work_unit):
+        def discovery(items, work_unit=None):
             selected = {}
             for item in items:
                 for evidence in item["evidence"]:
@@ -629,11 +640,13 @@ class _Analysis:
                             if (key := (document["document_id"], section["section_id"])) in selected]
                 if sections:
                     catalog.append({**document, "sections": sections})
+            if work_unit is None:
+                return self.stable_payload("locate", "discovery", items=items, catalog=catalog)
             return self.payload("locate", work_unit, items=items, catalog=catalog)
 
         all_items = list(self.items.values())
-        if all_items and self.budget.measure("verify", discovery(all_items, "discovery-1"))["fits"] is not False:
-            requests = [discovery(all_items, "discovery-1")]
+        if all_items and self.budget.measure("verify", discovery(all_items))["fits"] is not False:
+            requests = [discovery(all_items)]
         else:
             blocks, current = [], []
             for item in all_items:
@@ -650,14 +663,14 @@ class _Analysis:
                 blocks.append(current)
             # With multiple blocks, their unions already cover every within-block pair.
             groups = [a + b for a, b in itertools.combinations(blocks, 2)] if len(blocks) > 1 else blocks
-            requests = [discovery(group, f"discovery-{n + 1}") for n, group in enumerate(groups)]
-        def reference(problems, work_unit):
+            requests = [discovery(group) for group in groups]
+        def reference(problems):
             ids = {identity for problem in problems for identity in problem.get("item_ids", [])}
             ranges = {problem["range_id"] for problem in problems if problem.get("range_id")}
             items = [i for i in all_items if i["item_id"] in ids or any(e["range_id"] in ranges for e in i["evidence"])]
             ranges.update(e["range_id"] for i in items for e in i["evidence"])
-            return self.payload("locate", work_unit, source_views=self.views(ranges), items=items,
-                                issues=_public_issues(problems))
+            return self.stable_payload("locate", "reference", source_views=self.views(ranges), items=items,
+                                       issues=_public_issues(problems))
 
         # Freeze routing before localization. Later findings cannot recursively
         # reschedule the phase; successful receipts rebuild this exact plan.
@@ -681,7 +694,8 @@ class _Analysis:
                     route, reason = "unresolved", "没有可绑定的原文或事项，保留问题待核对。"
                 else:
                     route, reason = "local", "模型判断现有原文足够，核对本地问题及续报。"
-                    self.local_candidates.append({"candidate_id": f"local-{len(self.local_candidates) + 1}:c1",
+                    local = _stable_unit("local", {"issue_ids": identities, "range_ids": ranges, "item_ids": ids})
+                    self.local_candidates.append({"candidate_id": f"{local}:c1",
                         "issue_ids": identities, "range_ids": ranges, "item_ids": ids, "reason": reason})
             if route == "reference":
                 reference_groups.append(group)
@@ -694,11 +708,11 @@ class _Analysis:
             if current and len(current) + len(group) > 8:
                 requests.append(batch)
                 current = []
-            trial = reference([*current, *group], f"reference-{len(requests) + 1}")
+            trial = reference([*current, *group])
             if current and self.budget.measure("verify", trial)["fits"] is False:
                 requests.append(batch)
                 current = []
-                trial = reference(group, f"reference-{len(requests) + 1}")
+                trial = reference(group)
             current.extend(group)
             batch = trial
         if current:
@@ -728,28 +742,32 @@ class _Analysis:
                 keys |= prior_keys
             groups = [*rest, (group, keys)]
         requests = []
-        for number, (group, issue_ids) in enumerate(groups):
+        for group, issue_ids in groups:
             ranges = {r for c in group for r in c["range_ids"]}
             selected_pages = [(ref["document_id"],ref["page_ordinal"])
                               for candidate in group for ref in candidate.get("page_refs", [])]
             if any(page not in self.pages or page in self.unreadable_pages for page in selected_pages):
+                unit = _stable_unit("associate", {"candidates": [c["candidate_id"] for c in group],
+                                                 "pages": selected_pages})
                 problems = assign_issues([issue("analysis_page_source_unavailable",
                     "The selected complete physical PDF page has missing or partial source; source revision is required.")],
-                    f"associate-{number + 1}")
+                    unit)
                 self.problems.extend(problems)
                 self.protected.update(problem["issue_id"] for problem in problems)
-                self.incomplete_requests.append(f"associate-{number + 1}")
+                self.incomplete_requests.append(unit)
                 continue
             ranges.update(range_id for page in selected_pages for range_id in self.pages[page])
             selected_sections = [self.sections.get((ref["document_id"], ref["section_id"]), set())
                                  for candidate in group for ref in candidate.get("section_refs", [])]
             if any(not selected for selected in selected_sections):
+                unit = _stable_unit("associate", {"candidates": [c["candidate_id"] for c in group],
+                                                 "sections": [ref for c in group for ref in c.get("section_refs", [])]})
                 problems = assign_issues([issue("analysis_section_source_unavailable",
                     "The selected complete section has no readable frozen source; source revision is required.")],
-                    f"associate-{number + 1}")
+                    unit)
                 self.problems.extend(problems)
                 self.protected.update(problem["issue_id"] for problem in problems)
-                self.incomplete_requests.append(f"associate-{number + 1}")
+                self.incomplete_requests.append(unit)
                 continue
             ranges.update(range_id for selected in selected_sections for range_id in selected)
             ids = {i for c in group for i in c["item_ids"]}
@@ -769,7 +787,7 @@ class _Analysis:
             # disposition whose item identities are absent from this request.
             dispositions = [d for r, d in self.dispositions.items()
                             if r in ranges and r in supplied and set(d["item_ids"]) <= ids]
-            requests.append(self.payload("associate", f"associate-{number + 1}", source_views=views,
+            requests.append(self.stable_payload("associate", "associate", source_views=views,
                 items=items, relations=relations, candidates=group, issues=_public_issues(problems),
                 dispositions=dispositions))
         return requests
@@ -786,11 +804,17 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     associations = await asyncio.to_thread(context.association_requests, candidates)
     association_plan_ref, associated = await context.execute("associate", associations, model, save)
     joint, decisions, relations = [], [], list(context.relations.values())
+    unverified, associated_only = set(), set()
     for payload, result in zip(associations, associated, strict=True):
         if result is None:
             continue
         decisions.extend(result["decisions"])
         relations.extend(result["relations"])
+        if not result["decisions"]:
+            # No proposal to accept: its relations stay visible but unverified, and its findings go to a human.
+            unverified.update(r["relation_id"] for r in result["relations"])
+            associated_only.update(c["candidate_id"] for c in payload["candidates"])
+            continue
         joint.append({**payload, "operation": "review", "work_unit_id": payload["work_unit_id"].replace("associate-", "joint-"),
                       "relations": [*payload["relations"], *result["relations"]], "decisions": result["decisions"],
                       "issues": _public_issues(assign_issues([*payload["issues"], *result["findings"]],
@@ -800,15 +824,15 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     required_ranges = {r["range_id"] for pack in context.packs.values() for r in pack["body"]
                        if r["range_id"] not in host_reviewed_ranges(pack)}
     required = {"range": required_ranges, "item": set(context.items),
-                "relation": {r["relation_id"] for r in relations},
+                "relation": {r["relation_id"] for r in relations} - unverified,
                 "decision": {d["decision_id"] for d in decisions}}
     coverage = {name: {identity for result in completed for identity in result[f"reviewed_{name}_ids"]}
                 for name in required}
     missing = {name: sorted(ids - coverage[name]) for name, ids in required.items() if ids - coverage[name]}
     joint_candidates = {c["candidate_id"] for payload, result in zip(joint, reviewed, strict=True)
                         if result for c in payload["candidates"]}
-    if {c["candidate_id"] for c in candidates} - joint_candidates:
-        missing["candidate"] = sorted({c["candidate_id"] for c in candidates} - joint_candidates)
+    if unreviewed := {c["candidate_id"] for c in candidates} - joint_candidates - associated_only:
+        missing["candidate"] = sorted(unreviewed)
     if missing:
         context.problems.extend(assign_issues([issue("analysis_review_incomplete",
             "Necessary source, item, relation, decision or joint-candidate coverage is incomplete.")], "coverage"))
@@ -846,6 +870,7 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     candidates_ref = await asyncio.to_thread(artifacts.put_json, candidates)
     return {"schema_version": 2, "blocking": bool(missing or context.incomplete_requests) or any(p["blocking"] for p in active),
             "hard_blocking": bool(missing or context.incomplete_requests or hard), "human_issue_ids": human,
+            "unverified_relation_ids": sorted(unverified),
             "issues": active, "all_issues": all_issues, "resolved_issue_ids": sorted(resolved),
             "accepted_decision_ids": sorted(accepted), "item_refs": context.item_refs,
             "relations_ref": relations_ref, "decisions_ref": decisions_ref, "candidates_ref": candidates_ref,

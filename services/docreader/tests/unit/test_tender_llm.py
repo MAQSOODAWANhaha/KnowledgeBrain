@@ -151,11 +151,11 @@ class Audit:
                             "kind": kind, "metadata": metadata})
         return self.events[-1]
 
-    async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None):
+    async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None, activity=None):
         if status == "sent" and self.fail_sent:
             raise ConnectionError("audit unavailable")
         self.events.append({"request_id": request_id, "status": status, "usage": usage, "error": error,
-                            "response_ref": response_ref})
+                            "response_ref": response_ref, "activity": activity})
 
 
 def sse_response(envelopes):

@@ -65,7 +65,7 @@ def test_resolutions_must_cover_exactly_the_pending_semantic_issues():
 @pytest.mark.asyncio
 async def test_model_finding_waits_for_a_human_verdict_but_budget_overflow_stays_hard(tmp_path):
     def flag(payload, value):
-        if payload["operation"] == "review" and payload["work_unit_id"] == "review-1":
+        if payload["operation"] == "review" and payload["work_unit_id"].startswith("review-"):
             value["findings"].append({"code": "OMITTED_REQUIREMENT", "detail": "疑似漏抽一项资格要求。", "blocking": True})
 
     semantic = await run(await scenario(tmp_path / "semantic"), Model(mutate=flag))

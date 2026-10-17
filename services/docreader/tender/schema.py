@@ -375,7 +375,11 @@ class ItemDisposition(_AnalysisContract):
 
 
 class ItemDispositionResponse(_AnalysisContract):
-    """LLM-response boundary, not a canonical disposition; the host derives IDs."""
+    """LLM-response boundary. New extracts declare only non_item or unresolved.
+
+    status=items remains accepted so an older complete packet can be replayed.
+    The host derives item coverage and item_ids from evidence.
+    """
 
     range_id: Text
     status: Literal["items", "non_item", "unresolved"]

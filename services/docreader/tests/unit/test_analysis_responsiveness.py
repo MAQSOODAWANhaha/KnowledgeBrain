@@ -8,7 +8,7 @@ import pytest
 
 from docreader.llm.budget import RequestBudget
 from docreader.tender.checks.analysis import _Analysis
-from test_analysis_checks import IDENTITY, Model, Receipts, all_source_candidate, budget, run, scenario
+from test_analysis_checks import Model, Receipts, all_source_candidate, budget, run, scenario
 
 
 @pytest.mark.asyncio
@@ -70,8 +70,7 @@ async def test_planning_keeps_loop_responsive_and_preserves_request_receipts(tmp
     assert responses, "the selected synchronous planning path must actually execute"
     assert actual == expected
     assert model.calls == expected_model.calls
-    assert all(payload["source_version"] == IDENTITY["source_version"]
-               and payload["domain_revision"] == IDENTITY["domain_revision"] for payload in model.calls)
+    assert all("source_version" not in payload and "domain_revision" not in payload for payload in model.calls)
     before_calls, before_responses = len(model.calls), len(responses)
     assert await run(fresh, model, admission) == actual
     assert len(model.calls) == before_calls

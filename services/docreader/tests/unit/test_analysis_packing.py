@@ -32,12 +32,12 @@ def test_v2_extraction_excludes_global_navigation_without_losing_source_coverage
         assert measured["fits"]
         assert measured == pack["planning_details"]["budget"]
         assert "catalog" not in payload and payload["issues"] == problems
-        assert payload["source_version"] == 1 and payload["domain_revision"] == 2
+        assert "source_version" not in payload and "domain_revision" not in payload
         assert not admission.measure("extract", {**payload, "catalog": catalog})["fits"]
 
 
 @pytest.mark.asyncio
-async def test_versioned_payload_content_binds_plan_even_with_identical_measured_size(tmp_path):
+async def test_payload_content_not_revision_binds_plan_when_measured_size_matches(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     index = source([{"text": "The delivery obligation is explicit."}])
     original_ref = artifacts.put_bytes(b"native source", "text/plain")
@@ -57,8 +57,8 @@ async def test_versioned_payload_content_binds_plan_even_with_identical_measured
         reference = await plan_sources(frozen, artifacts, budget=admission, payload_builder=builder)
         plans.append(artifacts.read_json(reference))
     assert plans[0]["frozen_ref"] == plans[1]["frozen_ref"]
-    assert plans[0]["input_digest"] != plans[1]["input_digest"]
-    assert plans[0]["plan_digest"] != plans[1]["plan_digest"]
+    assert plans[0]["input_digest"] == plans[1]["input_digest"]
+    assert plans[0]["plan_digest"] == plans[1]["plan_digest"]
     first = artifacts.read_json(plans[0]["packs"][0]["artifact_ref"])
     second = artifacts.read_json(plans[1]["packs"][0]["artifact_ref"])
     assert first["body"] == second["body"]
