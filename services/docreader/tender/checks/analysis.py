@@ -24,7 +24,8 @@ from docreader.tender.evidence.view import (
     host_reviewed_ranges, resolve_evidence_quote, source_view, supplied_evidence_texts,
 )
 from docreader.tender.schema import (
-    AssociationResult, Decision, LocateResult, Relation, enforce_issue_policy, issue, recover_issue_routing,
+    AssociationResult, Decision, LocateResult, Relation, enforce_issue_policy, is_hard_blocking, issue,
+    recover_issue_routing,
 )
 
 
@@ -160,6 +161,8 @@ class _Analysis:
         self.items, self.item_refs, self.relations, self.dispositions = {}, [], {}, {}
         self.problems = assign_issues(source_plan["issues"], "source")
         self.protected = {problem["issue_id"] for problem in self.problems}
+        # Registration/freeze/OCR codes can be parser-defined; any of them leaves the analysis incomplete.
+        self.source_issue_ids = set(self.protected)
         for pack in self.packs.values():
             for entry in [*pack["body"], *pack["supporting"]]:
                 self.sources[entry["range_id"]] = entry
@@ -542,7 +545,8 @@ class _Analysis:
         for payload, descriptor in zip(payloads, descriptors, strict=True):
             if descriptor["budget"]["fits"] is False:
                 problems = assign_issues([issue("analysis_budget_exceeded",
-                    "Complete indivisible analysis input exceeds the admission budget; human/source revision is required.")],
+                    "Complete indivisible analysis input exceeds the admission budget; the host request grouping "
+                    "must be fixed before rerunning, a source revision cannot shrink it.")],
                     payload["work_unit_id"])
                 self.problems.extend(problems)
                 self.protected.update(p["issue_id"] for p in problems)
@@ -834,10 +838,14 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     resolved = {q for d in decisions if d["decision_id"] in accepted for q in d["issue_ids"]}
     all_issues = assign_issues(context.problems, "analysis")
     active = [p for p in all_issues if p["issue_id"] not in resolved]
+    hard = {p["issue_id"] for p in active
+            if p["blocking"] and (p["issue_id"] in context.source_issue_ids or is_hard_blocking(p))}
+    human = sorted(p["issue_id"] for p in active if p["blocking"] and p["issue_id"] not in hard)
     relations_ref = await asyncio.to_thread(artifacts.put_json, relations)
     decisions_ref = await asyncio.to_thread(artifacts.put_json, decisions)
     candidates_ref = await asyncio.to_thread(artifacts.put_json, candidates)
     return {"schema_version": 2, "blocking": bool(missing or context.incomplete_requests) or any(p["blocking"] for p in active),
+            "hard_blocking": bool(missing or context.incomplete_requests or hard), "human_issue_ids": human,
             "issues": active, "all_issues": all_issues, "resolved_issue_ids": sorted(resolved),
             "accepted_decision_ids": sorted(accepted), "item_refs": context.item_refs,
             "relations_ref": relations_ref, "decisions_ref": decisions_ref, "candidates_ref": candidates_ref,

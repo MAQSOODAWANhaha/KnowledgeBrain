@@ -362,13 +362,15 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
     registered = register_manifest({"documents": [{"document_id": "scope-form", "document_version": "one",
                                                   "role": "main", "path": str(path)}]}, artifacts)
     run = await store.submit(artifacts.put_json(registered), "scope-form")
-    blocked = await execute(store, settings, run, scope_ambiguity=True)
-    assert blocked["status"] == "blocked"
-    first_plan = output(artifacts, blocked, "pack-plan")
-    frozen = next(item["artifact_ref"] for item in blocked["artifacts"] if item["stage"] == "freeze")
+    flagged = await execute(store, settings, run, scope_ambiguity=True)
+    # A model scope doubt waits for a human: confirm a verdict or use the explicit scope review below.
+    assert flagged["status"] == "waiting-confirmation"
+    first_plan = output(artifacts, flagged, "pack-plan")
+    frozen = next(item["artifact_ref"] for item in flagged["artifacts"] if item["stage"] == "freeze")
     assert not any(item["code"] == "condition_scope_unresolved" for item in first_plan["issues"])
-    problem = next(item for item in output(artifacts, blocked, "verify")["issues"]
+    problem = next(item for item in output(artifacts, flagged, "verify")["issues"]
                    if item["code"] == "semantic_scope_unresolved")
+    assert problem["issue_id"] in output(artifacts, flagged, "verify")["human_issue_ids"]
     repo = EvidenceRepository(artifacts)
     source = repo.source_index(first_plan["documents"][0]["source_index_ref"])
     source_range = next(entry for entry in source.ranges if condition in entry["text"])
@@ -378,7 +380,7 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
                      "it does not limit the following supplier commitment or the entire section.",
         "evidence": [{"range_id": source_range["range_id"], "quote": condition}],
     }]}
-    review_ref = _scope_review_ref(artifacts, blocked, 1, 1, first_plan["plan_digest"], submitted)
+    review_ref = _scope_review_ref(artifacts, flagged, 1, 1, first_plan["plan_digest"], submitted)
     second = await store.review_scope(run["run_id"], 1, 1, first_plan["plan_digest"], review_ref,
                                      "scope-reviewed-r2", "Review the form field boundary")
     replay = await store.review_scope(run["run_id"], 1, 1, first_plan["plan_digest"], review_ref,
@@ -397,7 +399,7 @@ async def test_evidence_backed_scope_review_creates_revision_replans_and_revalid
     assert not any(item["code"] == "condition_scope_unresolved" for item in updated_plan["issues"])
     assert any(item["task"] == "extract" and item["domain_revision"] == 2 for item in reviewed["usage"])
     with pytest.raises(InvalidConfirmation):
-        await store.confirm(run["run_id"], 1, blocked["checklist_digest"], "old-scope-confirm", domain_revision=1)
+        await store.confirm(run["run_id"], 1, flagged["checklist_digest"], "old-scope-confirm", domain_revision=1)
     await store.confirm(run["run_id"], 1, reviewed["checklist_digest"], "scope-confirm-r2", domain_revision=2)
     ready = await execute(store, settings, run)
     assert ready["status"] == "analysis-ready"

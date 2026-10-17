@@ -871,7 +871,7 @@ async def test_connected_candidate_is_not_split_when_its_complete_source_exceeds
     result = await run(data, model, admission)
     plan = data[0].read_json(result["association_plan_ref"])
     assert len(plan["requests"]) == 1 and plan["requests"][0]["budget"]["fits"] is False
-    assert result["blocking"] is True
+    assert result["blocking"] is True and result["hard_blocking"] is True
     assert not any(payload["operation"] == "associate" for payload in model.calls)
 
 

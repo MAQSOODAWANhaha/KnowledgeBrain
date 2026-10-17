@@ -81,7 +81,7 @@
 | 未解析引用 | 使用 Issue，必须以 range_id 定位引用处，detail 保留原文引用及未决原因；目标未知时不填虚假 item_id，不新增引用状态机 |
 | `Decision` | `{decision_id, issue_ids: string[], reason: 非空string, evidence: 非空Evidence[]}`，可附非空 `relation_ids: string[]` 和一个 `amendment: AmendmentEffect`；是待独立核验的决议提案，不是模型自行解除阻断的指令 |
 | `decision_id` | `<work_unit_id>:d1` 等当前台账内唯一身份；issue_ids 只引用输入中宿主已赋号且本提案拟完整解决的问题，只有不解除既有问题的补遗决议才允许为 `[]` |
-| 问题决议 | 通过 Decision 绑定具体 issue_id、当前来源/领域版本、证据和理由，使用现有不可变修订/审议回执；独立核验明确接受后才生效，确认本身不解决问题 |
+| 问题决议 | 通过 Decision 绑定具体 issue_id、当前来源/领域版本、证据和理由，使用现有不可变修订/审议回执；独立核验明确接受后才生效。仍未解决的语义疑点只能在确认时由人工逐条处理（见[问题分级与人工处理](#问题分级与人工处理)），硬阻断不能由确认处理 |
 
 关联只表达源文事实，例如评分作用对象、证明文件对应义务、否决触发条件或补遗修改对象。
 抽取先记录本包已知关联；后续补读形成独立不可变的关联决议并接受核验，不改写已保存回包。
@@ -450,9 +450,37 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 ### 运行状态
 
 目标 RunStatus 为 `pending/running/blocked/waiting-confirmation/analysis-ready/failed/cancelled`。
-blocked 表示必要来源缺口或业务未决；failed 表示执行/协议失败；waiting-confirmation 只用于
-独立核验完成且无阻断后的确认等待；analysis-ready 表示当前版本已核验且确认有效。
+blocked 表示存在硬阻断（分析本身不完整）；failed 表示执行/协议失败；waiting-confirmation 表示
+独立核验完成、无硬阻断，剩余语义疑点待人工在确认时逐条处理；analysis-ready 表示当前版本已核验、
+语义疑点均有人工处理结论且确认有效。
 不增加按业务类别的状态；模型请求 succeeded、子操作有回执或命令 completed 均不证明分析完成。
+
+### 问题分级与人工处理
+
+宿主产生的每个问题code在`tender/schema.py`的`HOST_ISSUE_EXITS`登记出口，单元测试保证新流程
+源码中出现的宿主code均已登记。模型finding的code不登记，阻断时一律为语义疑点。
+
+| 出口 | 含义 | 例子 |
+| --- | --- | --- |
+| `revise` | 补充或替换来源，新建source_version | 缺件、不可读、章节/物理页来源不可用 |
+| `review-scope` | 显式作用域审议 | scope_context_pending、condition_scope_unresolved |
+| `correct` | 显式纠错修订 | 处置覆盖不完整、正文范围重复、整包抽取失败 |
+| `host-fix` | 宿主组包或执行缺陷，修复后重跑 | 各类预算超限、核验覆盖不完整 |
+| `human` | 语义疑点，确认时人工处理 | 事项/关联/问题声明待核对、决议未被接受 |
+
+前四类为硬阻断：当前修订存在阻断的此类记录，或必要覆盖/工作单元不完整时，运行为blocked，
+人工不能驳回。verification产物在原`blocking`（存在任何阻断问题）之外增加`hard_blocking: bool`
+和`human_issue_ids: string[]`（仍阻断、需人工处理的问题身份，升序）。
+
+确认时提交`IssueResolutions`：`{schema_version: 1, resolutions: [{issue_id, verdict, reason}]}`。
+verdict为`dismissed`（误报）或`acknowledged`（属实，作为已知问题保留展示）；reason为非空string；
+issue_id集合必须恰好等于`human_issue_ids`，没有待处理问题时省略；CLI为`confirm --resolutions`。
+进入waiting-confirmation时，命令回执metadata记录`human_issue_ids`；Store在写入确认前据此校验，
+不完整的处理不会落库，避免幂等确认记录阻挡后续正确提交。通过后按issue_id排序的处理结论写入
+确认记录的`issue_resolutions`及resume命令，confirm节点按verification产物重新核对并写入确认回执。
+处理不修改事项、不删除Issue，需改事项仍走`correct`。同一处理文件可在新修订复用，但只对身份
+不变的问题有效。
+
 
 ### 模型发送协议修订：短引用与拒收纠正
 

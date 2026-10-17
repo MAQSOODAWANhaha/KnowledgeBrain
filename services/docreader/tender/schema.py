@@ -844,6 +844,67 @@ def enforce_issue_policy(finding: dict) -> dict:
     }
 
 
+ISSUE_EXITS = frozenset({"revise", "review-scope", "correct", "host-fix", "human"})
+# Every host code raised on the analysis path is registered (enforced by a unit
+# test). Any exit other than "human" is a hard blocker: the analysis itself is
+# incomplete, so a confirmation verdict cannot clear it. Model findings are not
+# registered and are semantic doubts that a human resolves at confirmation.
+HOST_ISSUE_EXITS = {
+    **dict.fromkeys((
+        "missing_document", "missing_document_id", "missing_expected_document", "missing_document_version",
+        "unreadable_document", "unsupported_document", "document_parse_failed", "empty_document",
+        "empty_document_set", "duplicate_document_id", "duplicate_document_content", "invalid_document_role",
+        "invalid_image_dispositions", "image_disposition_identity_mismatch", "no_source_ranges",
+        "spreadsheet_display_incomplete", "analysis_section_source_unavailable", "analysis_page_source_unavailable",
+    ), "revise"),
+    **dict.fromkeys(("scope_context_pending", "condition_scope_unresolved"), "review-scope"),
+    **dict.fromkeys((
+        "range_disposition_incomplete", "duplicate_body_range", "extraction_semantic_failure",
+        "invalid_disposition", "unknown_disposition_range", "duplicate_requirement_id",
+    ), "correct"),
+    **dict.fromkeys((
+        "analysis_budget_exceeded", "extraction_budget_exceeded", "indivisible_source_context_exceeded",
+        "analysis_review_incomplete",
+    ), "host-fix"),
+    **dict.fromkeys((
+        "unresolved_source_range", "extraction_item_unresolved", "extraction_optional_fields_unresolved",
+        "evidence_quote_mismatch", "missing_body_evidence",
+        "extraction_relation_unresolved", "extraction_issue_unresolved", "decision_not_accepted",
+        "amendment_effect_unresolved", "analysis_association_unresolved",
+    ), "human"),
+}
+
+
+def is_hard_blocking(finding: dict) -> bool:
+    return finding["blocking"] is True and HOST_ISSUE_EXITS.get(finding["code"], "human") != "human"
+
+
+class IssueResolution(Contract):
+    issue_id: Identity
+    verdict: Literal["dismissed", "acknowledged"]
+    reason: Text
+
+
+class IssueResolutions(Contract):
+    schema_version: Literal[1]
+    resolutions: list[IssueResolution]
+
+
+def validate_issue_resolutions(pending_issue_ids, submitted) -> dict | None:
+    """One human verdict per pending semantic issue; none when nothing is pending."""
+    if submitted is None and not pending_issue_ids:
+        return None
+    if submitted is None:
+        raise ValueError("pending semantic issues require human resolutions")
+    value = IssueResolutions.model_validate(submitted).model_dump(mode="json")
+    identities = [entry["issue_id"] for entry in value["resolutions"]]
+    if len(identities) != len(set(identities)) or set(identities) != set(pending_issue_ids):
+        raise ValueError("resolutions must cover exactly the pending semantic issues")
+    if not identities:
+        return None
+    return {**value, "resolutions": sorted(value["resolutions"], key=lambda entry: entry["issue_id"])}
+
+
 def recover_issue_routing(value, allowed_ids: set[str], path: str, diagnostics: list):
     """Keep a finding when its optional routing cannot bind to this input."""
     if not isinstance(value, dict):

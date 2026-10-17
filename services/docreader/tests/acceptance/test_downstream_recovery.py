@@ -353,9 +353,11 @@ async def test_explicit_resolution_requires_independent_acceptance(runtime, acce
     await _correct(runtime, first, extractions)
     row = await execute()
     checked = output(artifacts, row, "verify")
-    assert row["status"] == ("waiting-confirmation" if accept else "blocked"), checked["issues"]
+    assert row["status"] == "waiting-confirmation", checked["issues"]
     assert bool(checked["accepted_decision_ids"]) == accept
     assert bool(checked["resolved_issue_ids"]) == accept
+    target = next(p["issue_id"] for p in checked["all_issues"] if p["code"] == "reference_target_unresolved")
+    assert (target in checked["human_issue_ids"]) is not accept
     assert _calls(calls, "joint", 2)[-1]["decisions"]
 
 

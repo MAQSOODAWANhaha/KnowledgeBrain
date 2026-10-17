@@ -11,8 +11,10 @@ P0源码已完成且未提交、未部署：verify按o200k_base计数（BUG-027�
 零字节首包超时可重试（BUG-019）。单元916项、临时PG/Redis上workflow/acceptance 116项通过。
 候选镜像`knowledgebrain-docreader:tiktoken`
 （`sha256:2013e6f9d571bdf8b85d3a789304a41cf51bb42d89e91f7e1c65cf3ddc8e2367`）。
-本机git未配置提交身份，提交待用户确认。证据目录改为`/opt/workspace/kb-tender-evidence/`。
-下一步为P1问题分级与人工出口；部署及真实运行需用户另行确认。
+已在`pr-24`本地提交为`e85cd2f`（未推送）。证据目录改为`/opt/workspace/kb-tender-evidence/`。
+P1问题分级与确认时人工处理（BUG-028）已在源码实现，单元925项、隔离workflow/acceptance 116项
+通过，已在`pr-24`本地单独提交（未推送），未重建镜像或部署。下一步为P2降低调用量；
+部署及真实运行需用户另行确认。
 
 ## 发现请求去冗余（2026-10-16，源码完成，未部署）
 

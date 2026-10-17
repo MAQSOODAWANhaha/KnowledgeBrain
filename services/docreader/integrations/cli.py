@@ -31,6 +31,8 @@ def parse_args():
     command.add_argument("--domain-revision", required=True, type=int)
     command.add_argument("--digest", required=True)
     command.add_argument("--request-key", required=True)
+    command.add_argument("--resolutions", type=Path,
+                         help="IssueResolutions JSON with one human verdict per pending semantic issue")
     command = commands.add_parser("retry")
     command.add_argument("run_id")
     command.add_argument("--source-version", required=True, type=int)
@@ -113,6 +115,7 @@ async def run(args):
     if args.command == "confirm":
         row = await store.confirm(
             args.run_id, args.source_version, args.digest, args.request_key, domain_revision=args.domain_revision,
+            issue_resolutions=json.loads(args.resolutions.read_text()) if args.resolutions else None,
         )
         return {"command_id": row["command_id"], "status": row["status"]}
     if args.command == "retry":

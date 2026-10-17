@@ -9,6 +9,7 @@ from docreader.integrations.store import Cancelled, InvalidConfirmation, Request
 from docreader.llm import UncertainModelResponse
 from docreader.llm.request import ModelCorrectionStalled
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
+from docreader.tender.schema import validate_issue_resolutions
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
@@ -317,7 +318,7 @@ class TenderNodes:
             "items_ref": state["items_ref"], "verification_ref": ref,
         }, sort_keys=True).encode()).hexdigest()
         return {"verification_ref": ref, "checklist_digest": digest,
-                "status": "blocked" if checked["blocking"] else "waiting-confirmation"}
+                "status": "blocked" if checked["hard_blocking"] else "waiting-confirmation"}
 
     async def confirm(self, state):
         approved = interrupt({"run_id": self.lease.run_id, "source_version": self.lease.source_version,
@@ -333,8 +334,14 @@ class TenderNodes:
                    and item["domain_revision"] == self.lease.domain_revision for item in row["confirmations"]):
             raise InvalidConfirmation("confirmation was not persisted")
         checked = await self._read(state["verification_ref"])
-        if checked["blocking"] or checked.get("items_ref") != state["items_ref"]:
+        if checked["hard_blocking"] or checked.get("items_ref") != state["items_ref"]:
             raise InvalidConfirmation("analysis confirmation requires the verified current items")
+        try:
+            resolutions = validate_issue_resolutions(checked["human_issue_ids"], approved.get("issue_resolutions"))
+        except ValueError:
+            raise InvalidConfirmation("confirmation must resolve exactly the pending semantic issues") from None
+        if resolutions != approved.get("issue_resolutions"):
+            raise InvalidConfirmation("confirmation resolutions were not persisted in canonical form")
 
         async def produce():
             return approved

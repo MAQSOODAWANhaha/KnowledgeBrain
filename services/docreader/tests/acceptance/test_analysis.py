@@ -207,13 +207,33 @@ async def test_optional_response_recovery_completes_five_nodes_without_paid_repa
     assert all(artifacts.read_json(reference) == response for reference, response in raw)
 
 
-async def test_business_issue_blocks_confirmation_and_preserves_partial_results(analysis_runtime):
-    store, artifacts, _, run, _ = analysis_runtime
-    blocked = await execute_analysis(analysis_runtime, blocked=True)
-    assert blocked["status"] == "blocked"
-    assert result(artifacts, blocked, "extract")["packs"]
-    with pytest.raises(InvalidConfirmation):
-        await store.confirm(run["run_id"], 1, blocked["checklist_digest"], "cannot-force")
+async def test_semantic_issue_needs_human_verdicts_before_ready_without_new_model_calls(analysis_runtime):
+    store, artifacts, _, run, calls = analysis_runtime
+    waiting = await execute_analysis(analysis_runtime, blocked=True)
+    assert waiting["status"] == "waiting-confirmation"
+    assert result(artifacts, waiting, "extract")["packs"]
+    verification = result(artifacts, waiting, "verify")
+    pending = verification["human_issue_ids"]
+    assert verification["blocking"] is True and verification["hard_blocking"] is False
+    assert pending and {p["code"] for p in verification["issues"] if p["issue_id"] in pending} == {"semantic_ambiguity"}
+    digest = waiting["checklist_digest"]
+
+    def verdicts(ids):
+        return {"schema_version": 1, "resolutions": [
+            {"issue_id": issue_id, "verdict": "acknowledged", "reason": "人工核对原文，保留为已知问题。"} for issue_id in ids]}
+
+    for key, submitted in [("missing", None), ("partial", verdicts(pending[1:])),
+                           ("extra", verdicts([*pending, "unrelated-issue"]))]:
+        with pytest.raises(InvalidConfirmation):
+            await store.confirm(run["run_id"], 1, digest, key, domain_revision=1, issue_resolutions=submitted)
+    assert not (await store.get_run(run["run_id"]))["confirmations"]
+    before = len(calls)
+    await store.confirm(run["run_id"], 1, digest, "resolved", domain_revision=1, issue_resolutions=verdicts(pending))
+    ready = await execute_analysis(analysis_runtime)
+    assert ready["status"] == "analysis-ready" and len(calls) == before
+    confirmed = result(artifacts, ready, "confirm")
+    assert confirmed["checklist_digest"] == digest
+    assert confirmed["issue_resolutions"] == verdicts(sorted(pending))
 
 
 async def test_partial_extraction_recovery_reuses_successful_receipts(analysis_runtime):

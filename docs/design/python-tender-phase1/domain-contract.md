@@ -63,13 +63,14 @@ associate 只提交有证据的 Decision 提案；独立 review 须逐条审阅�
 ### 状态、确认与回执
 
 目标沿用 `pending/running/blocked/waiting-confirmation/failed/cancelled`，成功终态改为
-`analysis-ready`。`failed` 表示执行或协议失败，`blocked` 表示分析产物存在业务未决或必要
-来源缺口；`waiting-confirmation` 仅表示独立核验完成且无阻断，等待对当前分析结果正式确认。
+`analysis-ready`。`failed` 表示执行或协议失败，`blocked` 表示必要来源缺口、作用域未审议、
+覆盖或预算不完整等硬阻断；`waiting-confirmation` 表示独立核验完成且无硬阻断，等待人工处理语义疑点并正式确认。
 新主线成功终态为`analysis-ready`；旧`response-plan-ready`记录及历史类型保持原义。
 
 确认绑定当前 `source_version`、`domain_revision` 和包含来源、台账、关系/决议及核验结果的
-`checklist_digest`。确认不能解决或覆盖问题；内容修订使旧确认失效，必须重验。目标确认后
-即结束分析，不再进入计划生成。
+`checklist_digest`。确认不能处理硬阻断；剩余语义疑点须在确认时逐条给出驳回或保留的人工
+结论（见[问题分级与人工处理](field-dictionary.md#问题分级与人工处理)），不修改事项或删除问题。
+内容修订使旧确认失效，必须重验。目标确认后即结束分析，不再进入计划生成。
 
 主阶段、问题处理子操作和模型请求分别保留回执，成功请求不等于语义通过，命令完成也不
 等于分析就绪。子操作进度、事项适用性及运行状态各自表达，不增加业务分类状态机。成功

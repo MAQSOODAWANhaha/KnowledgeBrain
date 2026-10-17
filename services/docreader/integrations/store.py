@@ -17,7 +17,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from docreader.tender.schema import Task
+from docreader.tender.schema import Task, validate_issue_resolutions
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
@@ -157,11 +157,13 @@ CREATE TABLE IF NOT EXISTS tender_confirmations (
     checklist_digest text NOT NULL,
     request_key text NOT NULL,
     command_id text NOT NULL REFERENCES tender_commands(command_id),
+    issue_resolutions jsonb,
     confirmed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (run_id, source_version, domain_revision),
     UNIQUE (run_id, request_key),
     FOREIGN KEY (run_id, source_version, domain_revision) REFERENCES tender_revisions(run_id, source_version, domain_revision)
 );
+ALTER TABLE tender_confirmations ADD COLUMN IF NOT EXISTS issue_resolutions jsonb;
 CREATE TABLE IF NOT EXISTS tender_model_requests (
     request_id text PRIMARY KEY,
     run_id text NOT NULL,
@@ -655,7 +657,7 @@ class Store:
 
     async def confirm(
         self, run_id: str, source_version: int, checklist_digest: str, idempotency_key: str,
-        *, domain_revision: int | None = None,
+        *, domain_revision: int | None = None, issue_resolutions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not idempotency_key:
             raise ValueError("idempotency_key is required")
@@ -666,13 +668,26 @@ class Store:
                     or run["cancel_requested"]):
                 raise InvalidConfirmation("confirmation refers to a cancelled or replaced source/domain revision")
             await self._assert_analysis_revision(conn, run)
+            # Validate before persisting: a stored confirmation is idempotent and
+            # an incomplete one would otherwise block every later correct attempt.
+            waiting = await (await conn.execute(
+                "SELECT receipt FROM tender_commands WHERE run_id = %s AND source_version = %s AND domain_revision = %s "
+                "AND status = 'completed' AND receipt->>'status' = 'waiting-confirmation' "
+                "ORDER BY completed_at DESC, command_id DESC LIMIT 1",
+                (run_id, source_version, revision),
+            )).fetchone()
+            pending = ((waiting or {}).get("receipt") or {}).get("metadata", {}).get("human_issue_ids", [])
+            try:
+                resolutions = validate_issue_resolutions(pending, issue_resolutions)
+            except ValueError:
+                raise InvalidConfirmation("confirmation must resolve exactly the pending semantic issues") from None
             prior = await (await conn.execute(
                 "SELECT * FROM tender_confirmations WHERE run_id = %s AND ((source_version = %s AND domain_revision = %s) OR request_key = %s)",
                 (run_id, source_version, revision, idempotency_key),
             )).fetchall()
             for item in prior:
                 if (item["source_version"] != source_version or item["domain_revision"] != revision
-                        or item["checklist_digest"] != checklist_digest):
+                        or item["checklist_digest"] != checklist_digest or item["issue_resolutions"] != resolutions):
                     raise InvalidConfirmation("confirmation key or checklist is stale")
             if prior:
                 return await (await conn.execute(
@@ -682,13 +697,15 @@ class Store:
                 raise InvalidConfirmation("run is not waiting for this checklist")
             command = await self._command(
                 conn, run_id, source_version, "resume",
-                {"source_version": source_version, "domain_revision": revision, "checklist_digest": checklist_digest},
+                {"source_version": source_version, "domain_revision": revision, "checklist_digest": checklist_digest,
+                 **({"issue_resolutions": resolutions} if resolutions is not None else {})},
                 domain_revision=revision,
             )
             await conn.execute(
-                "INSERT INTO tender_confirmations(run_id, source_version, domain_revision, checklist_digest, request_key, command_id) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (run_id, source_version, revision, checklist_digest, idempotency_key, command["command_id"]),
+                "INSERT INTO tender_confirmations(run_id, source_version, domain_revision, checklist_digest, request_key, "
+                "command_id, issue_resolutions) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (run_id, source_version, revision, checklist_digest, idempotency_key, command["command_id"],
+                 Jsonb(resolutions) if resolutions is not None else None),
             )
             await conn.execute(
                 "UPDATE tender_runs SET status = 'pending', updated_at = clock_timestamp() WHERE run_id = %s", (run_id,),

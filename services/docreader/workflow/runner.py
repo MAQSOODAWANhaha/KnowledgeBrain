@@ -50,7 +50,12 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
             status = "waiting-confirmation" if paused else state.get("status", "failed")
             if status not in {"waiting-confirmation", "analysis-ready", "blocked", "failed"}:
                 raise RuntimeError("graph ended without an explicit terminal state")
-            await store.release(lease, status, checklist_digest=state.get("checklist_digest"))
+            metadata = None
+            if status == "waiting-confirmation" and state.get("verification_ref"):
+                # Store.confirm validates human verdicts against this before persisting them.
+                checked = await asyncio.to_thread(artifacts.read_json, state["verification_ref"])
+                metadata = {"human_issue_ids": checked.get("human_issue_ids", [])}
+            await store.release(lease, status, checklist_digest=state.get("checklist_digest"), metadata=metadata)
 
     async def heartbeat():
         while True:
