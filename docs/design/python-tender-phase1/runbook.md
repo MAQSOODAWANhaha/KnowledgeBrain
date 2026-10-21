@@ -73,9 +73,10 @@ uv run --frozen python -m docreader.jobs.dispatcher
 AsyncIO 每 worker 进程一个事件循环；4 threads 最多承载4条并发消息。原生解析隔离到线程/
 现有解析器进程池，分包调度与模型默认并发每 run 为2；4 threads 是消息并发，多个 run
 以及其他应用仍会共享同一模型 Key 的服务端额度。取消通过数据库心跳/节点围栏观察，不等队列排队。
-执行失败默认首次加最多3次重试，连接、服务拒绝、JSON/宿主合同及普通异常共享4次命令
-失败上限，不叠加SDK重试；失租由接管方一次结算进同一预算。旧Worker在取消或版本/租约
-失效后停止写入，sent/uncertain停止付费重放。业务未决不队列重试；
+每个模型工作单元的所有失败默认首次加最多3次重试，普通重发与反馈纠正共享持久四次额度，
+包括uncertain，可能重复计费；原回执和未知用量保留，不叠加SDK或队列模型重试。
+发布、数据库及执行器丢失等外层故障保留命令四次兜底。旧Worker在取消或版本/租约
+失效后停止执行，仍在途的sent禁止并发重发。业务未决不队列重试；
 原件改变走 revise，同来源事项补漏/纠正走 correct 并重新核查。
 dispatcher 数据库断连会退避后继续，Redis 发布失败保留命令并按相同上限结算。
 核验分包和完整请求预算测量在线程中运行，避免同步规划阻塞事件循环与租约心跳。
@@ -120,12 +121,14 @@ resume 命令，完成后 status=`analysis-ready`。`results.current_items` 从�
 uv run --frozen python -m docreader.integrations.cli retry <run_id> --source-version 1 --domain-revision 1 --failed-command-id <latest-failed-command-id> --reason '重试已完整返回但JSON无效的抽取包' --request-key retry-001
 ```
 
-dispatcher 按原入口调度，新命令继续同一个 checkpoint，复用成功产物，只对明确 failed 的
-请求允许再次付费。原失败命令、回包及用量保留；相同 request-key 和参数重复提交返回
+dispatcher 按原入口调度，新命令继续同一个 checkpoint，复用成功产物，失败及uncertain的
+新版逻辑请求允许在新命令额度内再次付费。原失败命令、回包及用量保留；相同 request-key 和参数重复提交返回
 同一恢复命令，不产生额外调用。恢复已提交确认的失败执行时，保留原 resume 和确认参数。
-当前修订含 sent/uncertain、已取消、版本过期或目标不是最新失败命令时拒绝恢复。
+已取消、版本过期或目标不是最新失败命令时拒绝恢复。新版在无活动租约的事务中把遗留
+sent结算为uncertain后恢复；缺少logical_request_digest的旧冻结请求保留原付费围栏。
 blocked 的业务未决走证据裁决或 correct，不用 retry 清除。若请求审计 succeeded 而宿主
-业务合同拒收，仍复用原响应；本入口不改回包、不改摘要，也不自动修复任意语义错误。
+业务合同拒收，先保留原响应，再按真实反馈及拒收次数构造纠正请求，共用工作单元额度；
+本入口不改原回包或通过随机盐绕过缓存，也不自动解决业务语义问题。
 
 ## 同来源业务纠错
 
@@ -182,13 +185,14 @@ correct 拒绝过期基线和 cancelled run，已冻结来源保持不变。旧�
 独立验证后再次等待确认。相同 request key/相同内容幂等；不能以 unchanged manifest
 调用 revise 伪造来源变更。非秘密模型/提示配置恢复时必须与固定快照一致，密钥轮换允许。
 模型并发也属于固定执行快照；默认值从4改为2后，已有修订不会被静默改写。
-`uncertain` 回执继续阻止自动重发；修改并发不能解除该围栏或授权再次付费。
+新版`uncertain`按工作单元统一重试，可能重复计费；修改并发不能重置额度。
 
 ## 同镜像不同角色
 
 以下为已有 PostgreSQL/Redis 且主迁移已完成时的 Python 角色更新入口；须保留当前安装实际
 使用的私有网络 overlay，并先核对[交接中的网络与发送围栏](handoff.md)，不因更新镜像而
-重发旧 uncertain 请求。构建只选择 Python target，启动使用 `--no-deps`，不重建或重启
+重发旧冻结协议的uncertain请求；新版恢复规则只用于新运行。构建只选择 Python target，
+启动使用 `--no-deps`，不重建或重启
 Rust、数据库和原 DocReader 服务。当前 overlay 路径如下，换安装环境时须对应核实。
 
 ```sh

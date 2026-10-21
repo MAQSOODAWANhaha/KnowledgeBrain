@@ -7,7 +7,7 @@ from time import monotonic
 
 import httpx
 
-from docreader.llm.request import ModelSemanticError, UncertainModelResponse
+from docreader.llm.request import ModelJSONError, ModelSemanticError, UncertainModelResponse
 from docreader.llm.usage import reported_usage
 
 
@@ -180,13 +180,21 @@ class StreamResponse:
         if self.counts["tool_deltas"] or self.finish_reason != "stop":
             self.failure = "tool_call_response" if self.counts["tool_deltas"] else "incomplete_finish"
             raise ModelSemanticError("model refused or did not finish its JSON response")
+        source = "".join(self.content)
         try:
-            value = json.loads("".join(self.content), parse_constant=invalid_json_constant)
-            if not isinstance(value, dict):
-                raise ValueError
-            return value
+            value = json.loads(source, parse_constant=invalid_json_constant)
+        except json.JSONDecodeError as error:
+            raise ModelJSONError("json_syntax_error", error.msg, source,
+                                 line=error.lineno, column=error.colno, offset=error.pos) from None
         except (ValueError, TypeError):
             raise ModelSemanticError("model response is not a complete JSON object") from None
+        if not isinstance(value, dict):
+            offset = len(source) - len(source.lstrip())
+            line = source.count("\n", 0, offset) + 1
+            column = offset - source.rfind("\n", 0, offset)
+            raise ModelJSONError("json_object_required", "JSON response must be an object", source,
+                                 line=line, column=column, offset=offset)
+        return value
 
     def audit(self, digest: str, outcome: str) -> dict:
         return {"protocol": self.PROTOCOL, "request_digest": digest,

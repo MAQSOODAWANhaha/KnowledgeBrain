@@ -71,6 +71,8 @@ class AnalysisModel:
                         if self.options.get("missing_number_quote") and kind == "scoring_rule":
                             items[-1]["numbers"] = [{"value": 2, "unit": "分"}]
                         selected.append(item_id)
+                if not selected and self.options.get("omit_non_item_dispositions"):
+                    continue
                 dispositions.append({"range_id": source["range_id"],
                                      "status": "items" if selected else "non_item",
                                      "reason": "本段给出源文规则。" if selected else "本段为章节名称。",
@@ -114,6 +116,9 @@ async def analysis_runtime(tmp_path):
         path = tmp_path / f"{document_id}.docx"
         document = Document()
         document.add_paragraph(text)
+        if document_id == "main":
+            document.add_heading("阅读说明", level=1)
+            document.add_paragraph("本节为阅读说明。")
         document.save(path)
         documents.append({"document_id": document_id, "document_version": "one",
                           "role": "main" if document_id == "main" else "attachment", "path": str(path)})
@@ -236,21 +241,54 @@ async def test_semantic_issue_needs_human_verdicts_before_ready_without_new_mode
     assert confirmed["issue_resolutions"] == verdicts(sorted(pending))
 
 
+async def test_omitted_non_item_disposition_reaches_confirmation_after_complete_independent_review(analysis_runtime):
+    store, artifacts, _, run, calls = analysis_runtime
+    waiting = await execute_analysis(analysis_runtime, omit_non_item_dispositions=True)
+    assert waiting["status"] == "waiting-confirmation"
+    index = result(artifacts, waiting, "extract")
+    packs = [artifacts.read_json(entry["artifact_ref"]) for entry in index["packs"]]
+    assert sum(len(pack["items"]) for pack in packs) == 5
+    unresolved = [d for pack in packs for d in pack["dispositions"] if d["status"] == "unresolved"]
+    assert len(unresolved) == 1 and unresolved[0]["item_ids"] == []
+    verification = result(artifacts, waiting, "verify")
+    pending = verification["human_issue_ids"]
+    assert verification["blocking"] is True and verification["hard_blocking"] is False
+    assert verification["coverage"]["missing"] == {}
+    assert unresolved[0]["range_id"] in verification["coverage"]["reviewed"]["range"]
+    assert pending and set(pending) == {p["issue_id"] for p in verification["issues"]
+                                       if p["code"] == "extraction_disposition_unresolved"}
+    with pytest.raises(InvalidConfirmation):
+        await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "missing-resolution", domain_revision=1)
+    assert not (await store.get_run(run["run_id"]))["confirmations"]
+
+    resolutions = {"schema_version": 1, "resolutions": [
+        {"issue_id": identity, "verdict": "dismissed", "reason": "合成验收处理：该段仅为阅读说明，未新增事项。"}
+        for identity in pending]}
+    before = len(calls)
+    await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "fixture-resolved", domain_revision=1,
+                        issue_resolutions=resolutions)
+    ready = await execute_analysis(analysis_runtime)
+    assert ready["status"] == "analysis-ready" and len(calls) == before
+    assert len(ready["usage"]) == len(waiting["usage"])
+    assert all(request["metadata"]["external_request"] is False for request in ready["usage"])
+    assert result(artifacts, ready, "confirm")["issue_resolutions"] == resolutions
+
+
 async def test_partial_extraction_recovery_reuses_successful_receipts(analysis_runtime):
     store, _, _, run, calls = analysis_runtime
-    with pytest.raises(ModelInfrastructureError):
-        await execute_analysis(analysis_runtime, fail_annex_once=True)
-    partial = await store.get_run(run["run_id"])
-    assert partial["status"] == "pending"
-    saved = [item for item in partial["artifacts"] if item["stage"] == "extract-pack"]
-    assert len(saved) == 1
+    partial = await execute_analysis(analysis_runtime, fail_annex_once=True)
+    assert partial["status"] == "waiting-confirmation"
+    assert partial["commands"][-1]["infrastructure_failures"] == 0
+    saved = partial["artifacts"]
+    assert len([item for item in saved if item["stage"] == "extract-pack"]) == 2
+    before = len(calls)
     recovered = await execute_analysis(analysis_runtime)
     assert recovered["status"] == "waiting-confirmation"
-    old = saved[0]
-    assert next(item for item in recovered["artifacts"]
-                if (item["stage"], item["scope"]) == (old["stage"], old["scope"])) == old
+    assert recovered["artifacts"] == saved and len(calls) == before
     assert sum(task == "extract" and payload["source_views"][0]["document_id"] == "main"
                for task, payload in calls) == 1
+    assert sum(task == "extract" and payload["source_views"][0]["document_id"] == "annex"
+               for task, payload in calls) == 2
 
 
 async def test_confirmation_commit_failure_never_reports_ready_and_replays_safely(analysis_runtime, monkeypatch):

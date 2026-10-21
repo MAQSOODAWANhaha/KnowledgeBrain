@@ -1,15 +1,15 @@
 import dramatiq
 
-from docreader.integrations.store import Cancelled, RequestReplayBlocked, StaleExecution
+from docreader.integrations.store import Cancelled, StaleExecution
 from docreader.jobs.broker import broker
 from docreader.jobs.settings import Settings
-from docreader.llm.request import ModelCorrectionStalled, UncertainModelResponse
+from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.workflow.runner import execute_command
 
 
 def execution_retry(retries, exception):
     return retries < 3 and isinstance(exception, Exception) and not isinstance(
-        exception, (Cancelled, StaleExecution, UncertainModelResponse, RequestReplayBlocked, ModelCorrectionStalled)
+        exception, (Cancelled, StaleExecution, ModelWorkUnitExhausted)
     )
 
 

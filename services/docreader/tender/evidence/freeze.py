@@ -13,7 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 from copy import deepcopy
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.llm.request import ModelSemanticError
+from docreader.llm.request import ModelCorrectionStalled, ModelSemanticError, ModelWorkUnitExhausted
 from docreader.llm.budget import RequestBudget
 from docreader.tender.evidence.native import canonical_image_keys, compact_native_snapshot, parse_native
 from docreader.tender.evidence.planner import make_packs
@@ -137,6 +137,8 @@ async def freeze_sources(registration: dict, artifacts: ArtifactStore, ocr: Call
                     result = ocr(image_ref, context)
                     if inspect.isawaitable(result):
                         result = await result
+                except (ModelCorrectionStalled, ModelWorkUnitExhausted):
+                    raise
                 except ModelSemanticError:
                     result = {"text": "", "status": "unresolved", "issues": ["ocr_response_invalid"]}
                 # Only a response contract violation is a document/model issue.

@@ -19,7 +19,8 @@ from psycopg.conninfo import make_conninfo
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import InvalidConfirmation, Store
 from docreader.jobs.settings import Settings
-from docreader.llm import ModelInfrastructureError, ModelSemanticError, UncertainModelResponse
+from docreader.llm import UncertainModelResponse
+from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender.evidence import register_manifest
 from docreader.workflow.nodes import TenderNodes
 from docreader.workflow.persistence import initialize_checkpoints
@@ -131,13 +132,20 @@ async def test_mixed_formats_confirm_to_analysis_ready(runtime):
 
 async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sources(runtime):
     store, artifacts, settings, run = runtime
-    with pytest.raises(ModelInfrastructureError):
+    with pytest.raises(ModelWorkUnitExhausted):
         await execute(store, settings, run, fail_document="annex")
     failed = await store.get_run(run["run_id"])
-    assert failed["status"] == "pending"
+    command = failed["commands"][-1]
+    assert failed["status"] == "failed"
+    assert command["status"] == "completed" and command["receipt"]["status"] == "failed"
+    assert command["infrastructure_failures"] == 0
+    assert len([request for request in failed["usage"] if request["status"] == "failed"]) == 4
     saved = {(a["stage"], a["scope"]): a for a in failed["artifacts"]}
     assert any(stage == "extract-pack" for stage, _ in saved)
     assert ("freeze", "") in saved
+    retried = await store.retry(run["run_id"], 1, 1, command["command_id"], "retry-failed-pack",
+                                "Retry the failed pack after infrastructure recovery")
+    assert retried["command_id"] != command["command_id"]
     recovered = await execute(store, settings, run)
     assert recovered["status"] == "waiting-confirmation"
     for item in recovered["artifacts"]:
@@ -150,7 +158,7 @@ async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sou
     assert successful_initial
 
 
-async def test_uncertain_sibling_prevents_queue_replay_even_when_refusal_is_first(runtime):
+async def test_uncertain_and_refused_siblings_each_stop_after_four_attempts(runtime):
     store, _, settings, run = runtime
 
     class MixedFailureModel(AnalysisFixtureModel):
@@ -159,46 +167,50 @@ async def test_uncertain_sibling_prevents_queue_replay_even_when_refusal_is_firs
                 request_id = uuid4().hex
                 await self.store.begin_request(self.lease, request_id, "deterministic-contract-fixture", task, {
                     "request_digest": fixture_request_digest(task, payload, images),
+                    "logical_request_digest": fixture_request_digest(task,
+                        {key: value for key, value in payload.items() if key != "contract_feedback"}, images),
                     "test_double": True, "external_request": False,
                 })
                 await self.store.finish_request(request_id, "sent")
-                await self.store.finish_request(request_id, "uncertain", error={"type": "injected_partial_stream_loss"})
+                await self.store.finish_request(request_id, "uncertain", error={"type": "injected_partial_stream_loss"},
+                    response_ref=self.artifacts.put_json({"partial_content": "{", "done": False}))
                 raise UncertainModelResponse("injected partial stream loss")
             return await super().call(task, payload, images)
 
     cmd = (await store.get_run(run["run_id"]))["commands"][-1]
     def factory(s, a, lease):
         return TenderNodes(s, a, lease, MixedFailureModel(s, lease, artifacts=a, fail_document="main"))
-    with pytest.raises(UncertainModelResponse):
+    with pytest.raises(ModelWorkUnitExhausted):
         await execute_command(run["run_id"], cmd["command_id"], 1, settings, factory)
     row = await store.get_run(run["run_id"])
     assert row["status"] == "failed"
     assert row["commands"][-1]["status"] == "completed"
     assert row["commands"][-1]["receipt"]["status"] == "failed"
-    assert any(request["status"] == "uncertain" for request in row["usage"])
+    assert row["commands"][-1]["infrastructure_failures"] == 0
+    uncertain = [request for request in row["usage"] if request["status"] == "uncertain"]
+    assert len(uncertain) == 4 and all(request["response_ref"] for request in uncertain)
+    assert len([request for request in row["usage"] if request["status"] == "failed"]) == 4
     assert any(item["stage"] == "extract-pack" for item in row["artifacts"])
-    previous_requests = len(row["usage"])
     await execute_command(run["run_id"], cmd["command_id"], 1, settings, factory)
-    assert len((await store.get_run(run["run_id"]))["usage"]) == previous_requests
+    assert (await store.get_run(run["run_id"]))["usage"] == row["usage"]
 
 
 async def test_protocol_failure_is_failed_and_successful_siblings_survive_source_revision(runtime):
-    from docreader.llm.request import ModelCorrectionStalled
-
     store, artifacts, settings, run = runtime
-    for attempt in range(2):
-        with pytest.raises(ModelSemanticError):
-            await execute(store, settings, run, malformed_document="annex")
-        current = await store.get_run(run["run_id"])
-        assert current["status"] == "pending"
-        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
-    before = len(current["usage"])
-    with pytest.raises(ModelCorrectionStalled):
+    with pytest.raises(ModelWorkUnitExhausted):
         await execute(store, settings, run, malformed_document="annex")
     row = await store.get_run(run["run_id"])
     assert row["status"] == "failed"
-    assert len(row["usage"]) == before and row["commands"][-1]["infrastructure_failures"] == 2
-    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 2
+    assert row["commands"][-1]["status"] == "completed"
+    assert row["commands"][-1]["receipt"]["status"] == "failed"
+    assert row["commands"][-1]["infrastructure_failures"] == 0
+    await execute(store, settings, run, malformed_document="annex")
+    assert (await store.get_run(run["run_id"]))["usage"] == row["usage"]
+    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 4
+    rejected_digests = {request["metadata"]["request_digest"] for request in row["usage"]
+                        if request["task"] == "extract" and artifacts.read_json(request["response_ref"]) == {
+                            "not_an_extraction": True}}
+    assert len(rejected_digests) == 4
     assert any(item["stage"] == "extract-pack" for item in row["artifacts"])
     assert not any(item["stage"] == "verify" for item in row["artifacts"])
     with pytest.raises(InvalidConfirmation):
@@ -305,16 +317,21 @@ async def test_partial_recovery_refuses_changed_native_parser_configuration(runt
     from docreader.parser import pdf_parser
 
     store, _, settings, run = runtime
-    with pytest.raises(ModelInfrastructureError):
+    with pytest.raises(ModelWorkUnitExhausted):
         await execute(store, settings, run, fail_document="annex")
     before = await store.get_run(run["run_id"])
+    command = before["commands"][-1]
+    assert before["status"] == "failed" and command["infrastructure_failures"] == 0
+    retried = await store.retry(run["run_id"], 1, 1, command["command_id"], "retry-with-parser-guard",
+                                "Retry the failed pack while preserving the frozen parser configuration")
+    assert retried["command_id"] != command["command_id"]
     monkeypatch.setattr(pdf_parser, "SCAN_MIN_CHARS_PER_PAGE", pdf_parser.SCAN_MIN_CHARS_PER_PAGE + 1)
-    for attempt in range(1, 4):
+    for attempt in range(1, 5):
         with pytest.raises(Conflict):
             await execute(store, settings, run)
         current = await store.get_run(run["run_id"])
-        assert current["status"] == ("pending" if attempt < 3 else "failed")
-        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
+        assert current["status"] == ("pending" if attempt < 4 else "failed")
+        assert current["commands"][-1]["infrastructure_failures"] == attempt
     after = await store.get_run(run["run_id"])
     assert after["status"] == "failed"
     assert len(after["usage"]) == len(before["usage"])

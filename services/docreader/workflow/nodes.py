@@ -3,23 +3,39 @@ import asyncio
 import hashlib
 import json
 import time
+from typing import get_args
 
 from langgraph.types import interrupt
-from docreader.integrations.store import Cancelled, InvalidConfirmation, RequestReplayBlocked, StaleExecution
-from docreader.llm import UncertainModelResponse
-from docreader.llm.request import ModelCorrectionStalled
+from docreader.integrations.store import Cancelled, InvalidConfirmation, StaleExecution
+from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
-from docreader.tender.schema import validate_issue_resolutions
+from docreader.tender.schema import OCRStatus, validate_issue_resolutions
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
 def _raise_failures(results):
     failures = [result for result in results if isinstance(result, BaseException)]
     if failures:
-        # Successful siblings have already committed. Uncertain payment or a
-        # lost execution fence must not be hidden by another retryable failure.
-        stop = (UncertainModelResponse, RequestReplayBlocked, Cancelled, StaleExecution, ModelCorrectionStalled)
-        raise next((failure for failure in failures if isinstance(failure, stop)), failures[0])
+        # Successful siblings have already committed. Cancellation and a lost
+        # execution fence stop the worker; exhausted units cannot gain queue retries.
+        stop = (Cancelled, StaleExecution)
+        fallback = next((failure for failure in failures if isinstance(failure, ModelWorkUnitExhausted)), failures[0])
+        raise next((failure for failure in failures if isinstance(failure, stop)), fallback)
+
+
+def _ocr_response(value):
+    if not isinstance(value, dict):
+        raise ModelContractError([{'path': [], 'code': 'object_type', 'detail': 'Expected an OCR object'}])
+    checks = (
+        ('text', isinstance(value.get('text'), str), 'Expected literal transcription text'),
+        ('status', value.get('status') in get_args(OCRStatus), 'Expected complete, partial or unresolved'),
+        ('issues', isinstance(value.get('issues', []), list), 'Expected an array of OCR issues'),
+    )
+    errors = [{'path': [key], 'code': 'ocr_response_invalid', 'detail': detail}
+              for key, valid, detail in checks if not valid]
+    if errors:
+        raise ModelContractError(errors)
+    return value
 
 
 class TenderNodes:
@@ -98,7 +114,11 @@ class TenderNodes:
                 raise Conflict("request budget changed within an immutable domain revision")
 
     async def call(self, task, payload, images=()):
-        return await self._ensure_model().call(task, payload, images=images)
+        from docreader.llm.recovery import call_validated
+
+        validate = _ocr_response if task == "ocr" else lambda response: response
+        return await call_validated(self._ensure_model(), self.store, self.artifacts,
+                                    self.lease, task, payload, validate, images=images)
 
     async def call_validated(self, task, payload, validate):
         from docreader.llm.recovery import call_validated

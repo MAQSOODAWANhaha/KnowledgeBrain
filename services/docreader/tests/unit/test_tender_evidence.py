@@ -443,6 +443,19 @@ async def test_ocr_storage_corruption_propagates_as_technical_failure(tmp_path, 
         await freeze_sources(registered, artifacts, corrupting_ocr)
 
 
+@pytest.mark.parametrize('error_type', ['ModelWorkUnitExhausted', 'ModelCorrectionStalled'])
+async def test_ocr_model_stop_propagates_instead_of_becoming_source_issue(tmp_path, artifacts, error_type):
+    from docreader.llm import request
+
+    error = getattr(request, error_type)('ocr')
+    async def stopped_ocr(image_ref, source):
+        raise error
+    registered = registration(tmp_path, artifacts, [('image.png', png())])
+    with pytest.raises(type(error)) as caught:
+        await freeze_sources(registered, artifacts, stopped_ocr)
+    assert caught.value is error
+
+
 async def test_incomplete_long_condition_is_pending_reference_not_repeated_text(tmp_path, artifacts):
     document = Document()
     document.add_heading('第一章 范围', 1)

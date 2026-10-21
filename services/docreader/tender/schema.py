@@ -4,6 +4,8 @@ Native parser protocols are adapted once at the evidence boundary. These
 unpublished workflow contracts deliberately accept no old internal aliases.
 """
 
+from copy import deepcopy
+import hashlib
 import json
 import math
 from typing import Annotated, Any, Literal, Protocol
@@ -851,8 +853,8 @@ def enforce_issue_policy(finding: dict) -> dict:
 ISSUE_EXITS = frozenset({"revise", "review-scope", "correct", "host-fix", "human"})
 # Every host code raised on the analysis path is registered (enforced by a unit
 # test). Any exit other than "human" is a hard blocker: the analysis itself is
-# incomplete, so a confirmation verdict cannot clear it. Model findings are not
-# registered and are semantic doubts that a human resolves at confirmation.
+# incomplete, so a confirmation verdict cannot clear it. Model findings remain
+# semantic doubts even when they use a registered code; callers check provenance.
 HOST_ISSUE_EXITS = {
     **dict.fromkeys((
         "missing_document", "missing_document_id", "missing_expected_document", "missing_document_version",
@@ -873,14 +875,31 @@ HOST_ISSUE_EXITS = {
     **dict.fromkeys((
         "unresolved_source_range", "extraction_item_unresolved", "extraction_optional_fields_unresolved",
         "evidence_quote_mismatch", "missing_body_evidence",
-        "extraction_relation_unresolved", "extraction_issue_unresolved", "decision_not_accepted",
+        "extraction_relation_unresolved", "extraction_issue_unresolved", "extraction_disposition_unresolved",
+        "decision_not_accepted",
         "amendment_effect_unresolved", "analysis_association_unresolved",
     ), "human"),
 }
 
 
 def is_hard_blocking(finding: dict) -> bool:
+    """Classify a trusted host finding; establish its provenance before calling."""
     return finding["blocking"] is True and HOST_ISSUE_EXITS.get(finding["code"], "human") != "human"
+
+
+def assign_issues(issues, namespace: str) -> list[dict]:
+    """Host identities are stable and idempotent, including across receipt reuse."""
+    result = {}
+    for original in issues:
+        problem = enforce_issue_policy(deepcopy(original))
+        digest = hashlib.sha256(json.dumps(problem, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        identity = problem.get("issue_id") or f"{namespace}:q:{digest}"
+        problem["issue_id"] = identity
+        if identity in result and result[identity] != problem:
+            raise ValueError("one issue identity refers to different facts")
+        result[identity] = problem
+    return list(result.values())
 
 
 class IssueResolution(Contract):

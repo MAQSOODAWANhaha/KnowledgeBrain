@@ -8,6 +8,7 @@ from docreader.llm import ModelInfrastructureError, UncertainModelResponse
 from docreader.tender.requirements import (
     CorrectionValidationError, extract_items, item_payload, validate_item_correction,
 )
+from docreader.tender.schema import HOST_ISSUE_EXITS, is_hard_blocking
 
 
 IDENTITY = {"run_id": "run-1", "source_version": 1, "domain_revision": 2}
@@ -182,7 +183,36 @@ async def test_duplicate_disposition_is_reviewed_without_discarding_items():
     extracted = await extract_items(pack(), FixedModel(response), identity=IDENTITY)
     assert extracted["items"] == response["items"]
     assert len(extracted["dispositions"]) == 1
-    assert any(p["code"] == "range_disposition_incomplete" for p in extracted["issues"])
+    assert any(p["code"] == "extraction_disposition_unresolved" for p in extracted["issues"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["missing", "malformed", "duplicate", "contradictory"])
+async def test_disposition_defects_preserve_items_and_complete_unresolved_source_for_semantic_review(defect):
+    declaration = {"range_id": "r2", "status": "non_item", "reason": "本段仅说明评审程序。"}
+    dispositions = {
+        "missing": [],
+        "malformed": [{"range_id": "r2", "status": "non_item"}],
+        "duplicate": [declaration, deepcopy(declaration)],
+        "contradictory": [{**declaration, "status": "items"}],
+    }[defect]
+    response = result(dispositions=dispositions)
+    extracted = await extract_items(pack([source(), source("r2", "本段说明评审程序。")]),
+                                    FixedModel(response), identity=IDENTITY)
+
+    assert extracted["items"] == response["items"]
+    assert [(d["range_id"], d["status"], d["item_ids"]) for d in extracted["dispositions"]] == [
+        ("r1", "items", ["p1:i1"]), ("r2", "unresolved", [])]
+    problems = extracted["issues"]
+    assert problems and all(p["code"] == "extraction_disposition_unresolved" and p["blocking"] for p in problems)
+    assert HOST_ISSUE_EXITS.get("extraction_disposition_unresolved") == "human"
+    assert not any(is_hard_blocking(p) for p in problems)
+
+
+def test_strict_correction_still_rejects_a_missing_source_disposition():
+    frozen = pack([source(), source("r2", "本段说明评审程序。")])
+    with pytest.raises(CorrectionValidationError, match="range_disposition_incomplete"):
+        validate_item_correction(frozen, result())
 
 
 @pytest.mark.parametrize("change", [

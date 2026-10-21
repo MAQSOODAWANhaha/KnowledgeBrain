@@ -1,4 +1,4 @@
-"""Known failures retry three times; uncertain payment and stopped leases do not."""
+"""Every failure retries three times; cancellation, stale leases and exhaustion stop."""
 
 import asyncio
 import json
@@ -20,6 +20,8 @@ from docreader.llm.request import (
     json.JSONDecodeError("invalid JSON", "{", 1),
     ModelSemanticError("invalid_json_response"), ModelBudgetError("request too large"),
     ModelConfigurationError("configuration unavailable"), ModelInfrastructureError("service rejected"),
+    ModelCorrectionStalled("no progress"), UncertainModelResponse("provider may have executed"),
+    RequestReplayBlocked("request", "sent"), RequestReplayBlocked("request", "uncertain"),
     ConnectionError("connection failed"), TimeoutError("timed out"),
     psycopg.OperationalError("database unavailable"), psycopg.InterfaceError("connection closed"),
     Conflict("immutable inputs changed"),
@@ -30,18 +32,23 @@ def test_known_failures_get_at_most_three_retries(error, retries, expected):
 
 
 @pytest.mark.parametrize("error", [
-    Cancelled("cancel requested"), StaleExecution("lease expired"), ModelCorrectionStalled("no progress"),
-    UncertainModelResponse("provider may have executed"), RequestReplayBlocked("request", "sent"),
-    RequestReplayBlocked("request", "uncertain"), asyncio.CancelledError(), KeyboardInterrupt(),
+    Cancelled("cancel requested"), StaleExecution("lease expired"), asyncio.CancelledError(), KeyboardInterrupt(),
 ])
 @pytest.mark.parametrize("retries", [0, 2])
-def test_stopped_execution_and_uncertain_payment_never_retry(error, retries):
+def test_stopped_execution_never_retries(error, retries):
     assert execution_retry(retries, error) is False
 
 
 def test_actor_uses_three_retries_and_the_common_policy():
     assert tender_command.options["max_retries"] == 3
     assert tender_command.options["retry_when"] is execution_retry
+
+
+@pytest.mark.parametrize("retries", [0, 2, 3])
+def test_exhausted_model_work_unit_never_gets_another_queue_retry(retries):
+    from docreader.llm.request import ModelWorkUnitExhausted
+
+    assert execution_retry(retries, ModelWorkUnitExhausted("verify")) is False
 
 
 class ClaimedCommands:

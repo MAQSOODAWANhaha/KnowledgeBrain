@@ -24,7 +24,7 @@ from docreader.tender.evidence.view import (
     host_reviewed_ranges, resolve_evidence_quote, source_view, supplied_evidence_texts,
 )
 from docreader.tender.schema import (
-    AssociationResult, Decision, LocateResult, Relation, enforce_issue_policy, is_hard_blocking, issue,
+    AssociationResult, Decision, LocateResult, Relation, assign_issues, enforce_issue_policy, is_hard_blocking, issue,
     recover_issue_routing,
 )
 
@@ -37,19 +37,6 @@ def _digest(value):
 def _stable_unit(prefix, content):
     """Content-stable work-unit identity; host receipts keep run/source/revision."""
     return f"{prefix}-{_digest(content)[:12]}"
-
-
-def assign_issues(issues, namespace: str) -> list[dict]:
-    """Host identities are stable and idempotent, including across receipt reuse."""
-    result = {}
-    for original in issues:
-        problem = enforce_issue_policy(deepcopy(original))
-        identity = problem.get("issue_id") or f"{namespace}:q:{_digest(problem)}"
-        problem["issue_id"] = identity
-        if identity in result and result[identity] != problem:
-            raise ValueError("one issue identity refers to different facts")
-        result[identity] = problem
-    return list(result.values())
 
 
 def _pdf_pages(source) -> dict:
@@ -168,6 +155,7 @@ class _Analysis:
         self.protected = {problem["issue_id"] for problem in self.problems}
         # Registration/freeze/OCR codes can be parser-defined; any of them leaves the analysis incomplete.
         self.source_issue_ids = set(self.protected)
+        self.host_issue_ids = set(self.protected)
         for pack in self.packs.values():
             for entry in [*pack["body"], *pack["supporting"]]:
                 self.sources[entry["range_id"]] = entry
@@ -192,10 +180,14 @@ class _Analysis:
             self.dispositions.update({d["range_id"]: d for d in value["dispositions"]})
             problems = assign_issues(value["issues"], pack["pack_id"])
             self.problems.extend(problems)
+            # Old artifacts lack provenance; keep their conservative classification.
+            self.host_issue_ids.update(value.get("host_issue_ids", [p["issue_id"] for p in problems]))
             unresolved = {d["range_id"] for d in value["dispositions"] if d["status"] == "unresolved"}
             self.protected.update(p["issue_id"] for p in problems
                                   if p["code"] == "unresolved_source_range" and p.get("range_id") in unresolved)
             self.protected.update(p["issue_id"] for p in assign_issues(pack.get("issues", []), pack["pack_id"]))
+            self.protected.update(p["issue_id"] for p in problems
+                                  if p["issue_id"] in self.host_issue_ids and is_hard_blocking(p))
         self.problems = assign_issues(self.problems, "analysis")
         self.sections = {}
         for entry in self.sources.values():
@@ -561,6 +553,7 @@ class _Analysis:
                     payload["work_unit_id"])
                 self.problems.extend(problems)
                 self.protected.update(p["issue_id"] for p in problems)
+                self.host_issue_ids.update(p["issue_id"] for p in problems)
                 self.incomplete_requests.append(payload["work_unit_id"])
                 results.append(None)
                 continue
@@ -754,6 +747,7 @@ class _Analysis:
                     unit)
                 self.problems.extend(problems)
                 self.protected.update(problem["issue_id"] for problem in problems)
+                self.host_issue_ids.update(problem["issue_id"] for problem in problems)
                 self.incomplete_requests.append(unit)
                 continue
             ranges.update(range_id for page in selected_pages for range_id in self.pages[page])
@@ -767,6 +761,7 @@ class _Analysis:
                     unit)
                 self.problems.extend(problems)
                 self.protected.update(problem["issue_id"] for problem in problems)
+                self.host_issue_ids.update(problem["issue_id"] for problem in problems)
                 self.incomplete_requests.append(unit)
                 continue
             ranges.update(range_id for selected in selected_sections for range_id in selected)
@@ -834,8 +829,10 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     if unreviewed := {c["candidate_id"] for c in candidates} - joint_candidates - associated_only:
         missing["candidate"] = sorted(unreviewed)
     if missing:
-        context.problems.extend(assign_issues([issue("analysis_review_incomplete",
-            "Necessary source, item, relation, decision or joint-candidate coverage is incomplete.")], "coverage"))
+        problems = assign_issues([issue("analysis_review_incomplete",
+            "Necessary source, item, relation, decision or joint-candidate coverage is incomplete.")], "coverage")
+        context.problems.extend(problems)
+        context.host_issue_ids.update(problem["issue_id"] for problem in problems)
     accepted = set()
     for payload, result in zip(joint, reviewed, strict=True):
         if result and not any(enforce_issue_policy(p)["blocking"] for p in result["findings"]):
@@ -863,7 +860,8 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     all_issues = assign_issues(context.problems, "analysis")
     active = [p for p in all_issues if p["issue_id"] not in resolved]
     hard = {p["issue_id"] for p in active
-            if p["blocking"] and (p["issue_id"] in context.source_issue_ids or is_hard_blocking(p))}
+            if p["blocking"] and (p["issue_id"] in context.source_issue_ids
+                                 or p["issue_id"] in context.host_issue_ids and is_hard_blocking(p))}
     human = sorted(p["issue_id"] for p in active if p["blocking"] and p["issue_id"] not in hard)
     relations_ref = await asyncio.to_thread(artifacts.put_json, relations)
     decisions_ref = await asyncio.to_thread(artifacts.put_json, decisions)

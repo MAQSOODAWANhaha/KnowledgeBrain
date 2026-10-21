@@ -12,7 +12,7 @@ from docreader.llm.request import ModelContractError
 from docreader.tender.evidence.view import (
     host_reviewed_ranges, resolve_evidence_quote, source_view, supplied_evidence_texts,
 )
-from docreader.tender.schema import Extraction, Model, enforce_issue_policy, issue, recover_issue_routing, source_ranges
+from docreader.tender.schema import Extraction, Model, assign_issues, enforce_issue_policy, issue, recover_issue_routing, source_ranges
 
 
 def _unresolved(source: dict, reason: str) -> dict:
@@ -171,7 +171,7 @@ def _item_issues(pack: dict, issues=(), model_issues=()) -> list[dict]:
     return problems
 
 
-def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositions=()) -> dict:
+def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositions=(), host_issues=()) -> dict:
     """Reject malformed declarations; preserve legitimate unresolved analysis."""
     body = {source["range_id"]: source for source in pack["body"]}
     sources = {source["range_id"]: source for source in [*pack["supporting"], *pack["body"]]}
@@ -237,17 +237,21 @@ def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositi
     if errors:
         raise CorrectionValidationError(errors)
     dispositions = {disposition["range_id"]: deepcopy(disposition) for disposition in response["dispositions"]}
-    problems = _item_issues(pack, issues, response["issues"])
+    host_problems = _item_issues(pack, [*issues, *host_issues])
+    problems = _item_issues(pack, host_problems, response["issues"])
     for range_id, source in body.items():
         if range_id in host_reviewed:
             dispositions[range_id] = {"range_id": range_id, "status": "non_item",
                                       "reason": source["non_requirement_reason"], "item_ids": []}
         elif dispositions[range_id]["status"] == "unresolved" and range_id not in pending_dispositions:
-            problems.append(issue("unresolved_source_range", dispositions[range_id]["reason"], range_id))
+            problem = issue("unresolved_source_range", dispositions[range_id]["reason"], range_id)
+            problems.append(problem)
+            host_problems.append(problem)
     return {
         "schema_version": 2, "pack_id": pack["pack_id"], "items": response["items"],
         "dispositions": [dispositions[range_id] for range_id in body], "relations": response["relations"],
         "issues": problems, "source_ranges": source_ranges(pack),
+        "host_issue_ids": sorted(p["issue_id"] for p in assign_issues(host_problems, pack["pack_id"])),
         **({"pending_scope_context": deepcopy(pack["pending_scope_context"])} if pack.get("pending_scope_context") else {}),
     }
 
@@ -402,7 +406,7 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
                            if isinstance(original, dict) else original)
             value = ItemDispositionResponse.model_validate(declaration).model_dump(exclude_unset=True)
         except ValidationError:
-            pending("invalid_disposition", path, original, "处置声明不完整，对应原文仍需独立核验。")
+            pending("extraction_disposition_unresolved", path, original, "处置声明不完整，对应原文仍需独立核验。")
             continue
         if "item_ids" in original:
             value["item_ids"] = original["item_ids"]
@@ -424,7 +428,7 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
                      "reason": "宿主按直接正文证据派生本范围处置。"}
         elif len(entries) != 1:
             pending_dispositions.add(range_id)
-            pending("range_disposition_incomplete", "dispositions", {"range_id": range_id},
+            pending("extraction_disposition_unresolved", "dispositions", {"range_id": range_id},
                     "原文既无直接事项证据，也没有唯一的 non_item 或 unresolved 声明，保留已知事项并独立检查遗漏。")
             value = {"range_id": range_id, "status": "items" if supported else "unresolved",
                      "reason": "抽取处置缺失或重复，须独立核对本范围。"}
@@ -435,11 +439,12 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
                                     "range_id": range_id})
             if (value["status"] == "items") != bool(supported):
                 pending_dispositions.add(range_id)
-                pending("invalid_disposition", "dispositions", value,
+                pending("extraction_disposition_unresolved", "dispositions", value,
                         "处置状态与有效直接证据矛盾，保留已知事项并独立核对。")
                 value = {**value, "status": "items" if supported else "unresolved"}
         dispositions.append({**value, "item_ids": supported})
 
+    model_issues = []
     for number, original in enumerate(response["issues"]):
         path = f"issues[{number}]"
         try:
@@ -455,7 +460,7 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
                 raise ValueError("unknown issue range")
             if not set(value.get("item_ids", [])) <= known_items:
                 raise ValueError("unknown issue item")
-            problems.append(value)
+            model_issues.append(value)
         except (ValidationError, ValueError):
             pending("extraction_issue_unresolved", path, original, "问题声明不完整或引用无效，不能静默忽略原始疑点。")
 
@@ -464,8 +469,8 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
         if known:
             problem["item_ids"] = known
     normalized = _normalize_items(pack, {"schema_version": 2, "items": items, "relations": relations,
-                                        "dispositions": dispositions, "issues": problems}, issues,
-                                  pending_dispositions=pending_dispositions)
+                                        "dispositions": dispositions, "issues": model_issues}, issues,
+                                  pending_dispositions=pending_dispositions, host_issues=problems)
     if diagnostics:
         normalized["diagnostics"] = diagnostics
     return normalized
@@ -517,10 +522,11 @@ async def extract_items(pack: dict, model: Model, *, identity: dict, issues=(), 
     host_reviewed = host_reviewed_ranges(pack)
     if pack.get("planning_details", {}).get("budget", {}).get("fits") is False:
         reason = "Complete extraction input exceeds the admission budget; no model analysis was performed."
+        issues = [*issues, issue("extraction_budget_exceeded", reason)]
         result = {"schema_version": 2, "items": [], "relations": [], "dispositions": [
             {"range_id": source["range_id"], "status": "unresolved", "reason": reason, "item_ids": []}
             for source in pack["body"] if source["range_id"] not in host_reviewed
-        ], "issues": [issue("extraction_budget_exceeded", reason)]}
+        ], "issues": []}
     elif all(source["range_id"] in host_reviewed for source in pack["body"]):
         result = {"schema_version": 2, "items": [], "dispositions": [], "relations": [], "issues": []}
     else:

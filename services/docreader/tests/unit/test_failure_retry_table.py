@@ -1,4 +1,4 @@
-"""Each recorded model failure has one audit status and one queue-retry decision."""
+"""Audit status preserves uncertainty while every call failure can retry."""
 
 from pathlib import Path
 
@@ -21,7 +21,7 @@ def test_every_failure_row_matches_the_queue_retry_policy():
         if not error_type.startswith("http_"):
             assert error_type in CLIENTS
         if status == "uncertain":
-            assert retries is False
+            assert retries is (error_type != "cancelled_after_send")
 
 
 def test_received_http_status_uses_the_same_rows():

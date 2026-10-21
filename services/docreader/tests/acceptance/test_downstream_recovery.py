@@ -5,14 +5,17 @@ All model answers are synthetic contract fixtures, with no external requests.
 from collections import Counter
 from copy import deepcopy
 from itertools import combinations
+import json
 from uuid import uuid4
 
 from docx import Document
+import httpx
+import psycopg
 import pytest
 
-from docreader.integrations.store import InvalidConfirmation
-from docreader.llm import ModelInfrastructureError, ModelSemanticError, RequestBudget
-from docreader.llm.request import ModelCorrectionStalled
+from docreader.integrations.store import InvalidConfirmation, Store
+from docreader.llm import ModelConfig, ModelInfrastructureError, OpenAIModel, RequestBudget
+from docreader.llm.request import ModelJSONError, ModelWorkUnitExhausted
 from docreader.tender.evidence import EvidenceRepository, register_manifest
 from docreader.workflow.nodes import TenderNodes
 from docreader.workflow.runner import execute_command
@@ -48,10 +51,11 @@ async def _submit(runtime, *, ballast=False, ballast_repeats=70, document_ids=("
 
 def _executor(runtime, run, *, scope_repeats=12, fail_operation=None, candidates=False,
               unknown_candidate=False, include_conditions=False, accept_decisions=True, relation_repeats=1,
-              reason_repeats=10):
+              reason_repeats=10, scattered_failures=False):
     store, artifacts, settings, _ = runtime
     budget = RequestBudget(context_tokens=32768)
     calls, attempts = [], Counter()
+    work_units, unit_attempts = {}, Counter()
     failed = False
 
     class CompleteInputModel(AnalysisFixtureModel):
@@ -124,16 +128,38 @@ def _executor(runtime, run, *, scope_repeats=12, fail_operation=None, candidates
             if operation == "review" and payload["work_unit_id"].startswith("joint-"):
                 operation = "joint"
             attempts[operation] += 1
+            calls.append((self.lease.domain_revision, task, deepcopy(payload)))
+            error = None
             if operation == fail_operation and attempts[operation] == 2 and not failed:
                 failed = True
+                error = ModelInfrastructureError("confirmed fixture rejection after a durable sibling result")
+            if scattered_failures:
+                key = (operation, payload.get("work_unit_id"))
+                if key not in work_units:
+                    work_units[key] = 1 + sum(unit[0] == operation for unit in work_units)
+                unit_attempts[key] += 1
+                ordinal = work_units[key]
+                limit = {("extract", 1): 2, ("extract", 2): 1,
+                         ("review", 1): 1, ("review", 2): 1}.get((operation, ordinal), 0)
+                if unit_attempts[key] <= limit:
+                    error = (ModelInfrastructureError("confirmed fixture HTTP 500")
+                             if (operation, ordinal) == ("review", 1) else
+                             ModelJSONError("json_syntax_error", "Extra data", '{"schema_version":2}]}',
+                                            line=1, column=21, offset=20))
+            if error is not None:
                 request_id = uuid4().hex
                 await self.store.begin_request(self.lease, request_id, "synthetic-analysis-fixture", task, {
                     "request_digest": fixture_request_digest(task, payload, images),
                     "test_double": True, "external_request": False,
                 })
-                await self.store.finish_request(request_id, "failed", error={"type": "injected_confirmed_service_rejection"})
-                raise ModelInfrastructureError("confirmed fixture rejection after a durable sibling result")
-            calls.append((self.lease.domain_revision, task, deepcopy(payload)))
+                await self.store.finish_request(request_id, "sent")
+                response_ref = (self.artifacts.put_json({"content": '{"schema_version":2}]}',
+                                "finish_reason": "stop", "stream_complete": True})
+                                if isinstance(error, ModelJSONError) else None)
+                await self.store.finish_request(request_id, "failed", response_ref=response_ref,
+                    error={"type": "invalid_json_response" if isinstance(error, ModelJSONError) else
+                                    "injected_confirmed_service_rejection"})
+                raise error
             return await super().call(task, payload, images)
 
     async def execute():
@@ -264,23 +290,21 @@ async def test_partial_analysis_success_reuses_durable_operation_receipts(runtim
     execute, calls, _ = _executor(runtime, run, scope_repeats=2 if operation in {"associate", "joint"} else 12,
                                   fail_operation=operation, candidates=operation in {"associate", "joint"},
                                   reason_repeats=1 if operation in {"associate", "joint"} else 10)
-    with pytest.raises(ModelInfrastructureError):
-        await execute()
-    failed = await store.get_run(run["run_id"])
-    assert failed["status"] == "pending"
-    stage = "analysis-" + operation
-    saved = [item for item in failed["artifacts"] if item["stage"] == stage]
-    assert saved
-    before = Counter(fixture_request_digest(task, payload) for _, task, payload in calls)
     recovered = await execute()
     assert recovered["status"] == "waiting-confirmation", output(artifacts, recovered, "verify")["issues"]
-    current = {(item["stage"], item["scope"]): item for item in recovered["artifacts"]}
-    for receipt in saved:
-        kept = current[(receipt["stage"], receipt["scope"])]
-        assert (kept["artifact_ref"], kept["epoch"], kept["input_digest"]) == (
-            receipt["artifact_ref"], receipt["epoch"], receipt["input_digest"])
-    after = Counter(fixture_request_digest(task, payload) for _, task, payload in calls)
-    assert all(after[digest] == count == 1 for digest, count in before.items())
+    assert recovered["commands"][-1]["execution_count"] == 1
+    assert recovered["commands"][-1]["infrastructure_failures"] == 0
+    assert len([request for request in recovered["usage"] if request["status"] == "failed"]) == 1
+    stage = "analysis-" + operation
+    saved = [item for item in recovered["artifacts"] if item["stage"] == stage]
+    assert len(saved) >= 2
+    counts = Counter(payload["work_unit_id"] for payload in _calls(calls, operation))
+    assert sorted(counts.values()) == [1] * (len(saved) - 1) + [2]
+    before = len(calls)
+    unchanged = await execute()
+    assert len(calls) == before
+    assert unchanged["artifacts"] == recovered["artifacts"]
+    assert unchanged["usage"] == recovered["usage"]
     checked = output(artifacts, recovered, "verify")
     if checked.get("human_issue_ids"):
         await store.confirm(run["run_id"], 1, recovered["checklist_digest"], "recovery-confirm",
@@ -345,24 +369,146 @@ async def test_single_item_correction_resends_only_affected_verify_requests(runt
     assert second_digests <= planned
 
 
-async def test_unknown_candidate_provenance_is_execution_failure(runtime):
+async def test_unknown_candidate_provenance_exhausts_four_attempts_without_outer_retries(runtime):
     store, _, _, _ = runtime
     run = await _submit(runtime, suffixes="ab")
     execute, calls, _ = _executor(runtime, run, scope_repeats=1, unknown_candidate=True)
-    for attempt in range(2):
-        with pytest.raises(ModelSemanticError):
-            await execute()
-        row = await store.get_run(run["run_id"])
-        assert row["status"] == "pending"
-        assert row["commands"][-1]["infrastructure_failures"] == attempt + 1
-    before = len(calls)
-    with pytest.raises(ModelCorrectionStalled):
+    with pytest.raises(ModelWorkUnitExhausted):
         await execute()
     row = await store.get_run(run["run_id"])
-    assert row["status"] == "failed" and len(calls) == before
-    assert row["commands"][-1]["infrastructure_failures"] == 2
-    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 2
+    assert row["status"] == "failed"
+    assert row["commands"][-1]["infrastructure_failures"] == 0
+    assert row["commands"][-1]["execution_count"] == 1
+    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 4
+    assert len(_calls(calls, "locate")) == 4
+    assert len([request for request in row["usage"] if request["task"] == "verify"
+                and request["metadata"]["request_digest"] in {
+                    fixture_request_digest("verify", payload) for payload in _calls(calls, "locate")}]) == 4
     assert _calls(calls, "review") and not _calls(calls, "associate")
+    before = len(calls)
+    await execute()
+    assert len(calls) == before
+    assert (await store.get_run(run["run_id"]))["usage"] == row["usage"]
+
+
+@pytest.mark.parametrize("interruptions", [1, 4], ids=["retry-and-restart", "four-attempt-limit"])
+async def test_interrupted_sse_retries_preserve_receipts_and_completed_response_cache(runtime, monkeypatch, interruptions):
+    store, artifacts, settings, _ = runtime
+    run = await _submit(runtime, suffixes="ab")
+    sent, fixture, failed_commit = [], AnalysisFixtureModel(), False
+    prompts = {"extract": "Synthetic extraction fixture.", "verify": "Synthetic verification fixture."}
+    config = ModelConfig.from_env({
+        "KNOWLEDGEBRAIN_CHAT_BASE_URL": "https://synthetic.invalid/v1",
+        "KNOWLEDGEBRAIN_CHAT_API_KEY": "synthetic-key",
+        "KNOWLEDGEBRAIN_CHAT_MODEL": "synthetic-contract-fixture",
+        "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS": "131072",
+    })
+
+    def event(content=None, *, finish=None):
+        return ("data: " + json.dumps({"choices": [{"index": 0, "finish_reason": finish,
+            "delta": {} if content is None else {"content": content}}]}) + "\n\n").encode()
+
+    class InterruptedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield event('{"schema_version":')
+            raise httpx.ReadError("injected SSE interruption after response data")
+
+        async def aclose(self):
+            pass
+
+    def handler(request):
+        payload = json.loads(json.loads(request.content)["messages"][1]["content"][0]["text"])
+        task = "verify" if "operation" in payload else "extract"
+        sent.append((task, payload))
+        headers = {"content-type": "text/event-stream"}
+        if task == "extract" and sum(task == "extract" for task, _ in sent) <= interruptions:
+            return httpx.Response(200, stream=InterruptedStream(), headers=headers)
+        result = ({"schema_version": 2, "candidates": [], "findings": []}
+                  if payload.get("operation") == "locate" else fixture.response(task, payload))
+        content = json.dumps(result, ensure_ascii=False)
+        return httpx.Response(200, content=event(content) + event(finish="stop") + b"data: [DONE]\n\n",
+                              headers=headers)
+
+    commit = Store.commit_artifact
+
+    async def lose_commit_once(self, lease, stage, *args, **kwargs):
+        nonlocal failed_commit
+        if stage == "extract-pack" and not failed_commit and interruptions == 1:
+            failed_commit = True
+            raise psycopg.OperationalError("injected loss after complete provider response")
+        return await commit(self, lease, stage, *args, **kwargs)
+
+    monkeypatch.setattr(Store, "commit_artifact", lose_commit_once)
+
+    def factory(s, a, lease):
+        model = OpenAIModel(config, s, lease, prompts, artifacts=a, transport=httpx.MockTransport(handler))
+        # Keep this HTTP recovery test independent of external tokenizer assets.
+        model.request_budget = lambda **kwargs: RequestBudget(
+            context_tokens=131072, model=config.chat.model, prompts=prompts,
+            correction=kwargs.get("correction", False))
+        return TenderNodes(s, a, lease, model)
+
+    async def execute():
+        command = (await store.get_run(run["run_id"]))["commands"][-1]
+        await execute_command(run["run_id"], command["command_id"], 1, settings, factory)
+        return await store.get_run(run["run_id"])
+
+    with pytest.raises(psycopg.OperationalError if interruptions == 1 else ModelWorkUnitExhausted):
+        await execute()
+    first = await store.get_run(run["run_id"])
+    unknown = [request for request in first["usage"] if request["status"] == "uncertain"]
+    assert len(unknown) == interruptions and all(request["response_ref"] for request in unknown)
+    receipts = {request["request_id"]: artifacts.read_json(request["response_ref"]) for request in unknown}
+    assert all(not response["done"] and response["usage"] is None for response in receipts.values())
+    assert all(response["activity"]["raw_received_chunks"] > 0 and response["activity"]["content_deltas"] == 1
+               for response in receipts.values())
+    expected_sends = 2 if interruptions == 1 else 4
+    assert sum(task == "extract" for task, _ in sent) == expected_sends
+    if interruptions == 4:
+        assert first["status"] == "failed"
+        assert first["commands"][-1]["infrastructure_failures"] == 0
+        await execute()
+        assert (await store.get_run(run["run_id"]))["usage"] == first["usage"]
+        assert len(sent) == 4
+        return
+
+    assert first["status"] == "pending" and first["commands"][-1]["infrastructure_failures"] == 1
+    waiting = await execute()
+    assert waiting["status"] == "waiting-confirmation"
+    assert sum(task == "extract" for task, _ in sent) == 2
+    for request in first["usage"]:
+        assert next(current for current in waiting["usage"] if current["request_id"] == request["request_id"]) == request
+    for request in unknown:
+        assert artifacts.read_json(request["response_ref"]) == receipts[request["request_id"]]
+    assert all(count <= 4 for count in Counter(
+        (request["task"], request["metadata"]["logical_request_digest"]) for request in waiting["usage"]).values())
+    before_confirm = len(sent)
+    await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "confirm-interrupted-sse-recovery")
+    assert (await execute())["status"] == "analysis-ready"
+    assert len(sent) == before_confirm
+
+
+async def test_scattered_extract_and_verify_failures_recover_in_one_command(runtime):
+    _, artifacts, _, _ = runtime
+    run = await _submit(runtime, document_ids=("first-extract", "second-extract"))
+    execute, calls, _ = _executor(runtime, run, scope_repeats=6, reason_repeats=2, scattered_failures=True)
+    row = await execute()
+    checked = output(artifacts, row, "verify")
+    assert row["status"] == "waiting-confirmation", checked["issues"]
+    assert len(row["commands"]) == 1
+    assert row["commands"][0]["execution_count"] == 1
+    assert row["commands"][0]["infrastructure_failures"] == 0
+    extracts = Counter(payload["work_unit_id"] for _, task, payload in calls if task == "extract")
+    reviews = Counter(payload["work_unit_id"] for payload in _calls(calls, "review"))
+    assert len(extracts) >= 2 and sorted(extracts.values()) == [1] * (len(extracts) - 2) + [2, 3]
+    assert len(reviews) >= 2 and sorted(reviews.values()) == [1] * (len(reviews) - 2) + [2, 2]
+    failed = [request for request in row["usage"] if request["status"] == "failed"]
+    assert Counter(request["task"] for request in failed) == {"extract": 3, "verify": 2}
+    assert all(request["sent_at"] for request in failed)
+    assert sum(request["error"]["type"] == "invalid_json_response" for request in failed) == 4
+    assert len([entry for entry in row["artifacts"] if entry["stage"] == "model-rejection"]) == 4
+    assert not any(request["status"] in {"sent", "uncertain"} for request in row["usage"])
+    assert all(request["metadata"]["external_request"] is False for request in row["usage"])
 
 
 async def test_cross_document_candidate_has_full_sources_and_independent_joint_review(runtime):

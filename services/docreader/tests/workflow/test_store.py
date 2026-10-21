@@ -261,7 +261,7 @@ async def test_model_usage_and_recovery_preserve_actual_and_uncertain_records(st
     records = {row["request_id"]: row for row in (await store.get_run(run["run_id"]))["usage"]}
     assert records["sent"]["status"] == "uncertain"
     assert records["prepared"]["status"] == "failed"
-    assert records["sent"]["metadata"] == request_metadata("sent", input_tokens=4)
+    assert records["sent"]["metadata"] == request_metadata("sent", input_tokens=4, command_id=command["command_id"])
     with pytest.raises(StaleExecution):
         await store.finish_request("sent", "sent")
     await store.begin_request(replacement, "new", "model", "extract", request_metadata("new"))

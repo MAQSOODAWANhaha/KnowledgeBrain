@@ -175,7 +175,7 @@ async def test_missing_disposition_without_items_stays_unresolved_instead_of_non
     extracted = await extract_items(pack(), FixedModel(result(items=[], dispositions=[])), identity=IDENTITY)
     assert extracted["dispositions"][0]["status"] == "unresolved"
     assert extracted["dispositions"][0]["item_ids"] == [] and extracted["issues"]
-    assert any(p["code"] == "range_disposition_incomplete" for p in extracted["issues"])
+    assert any(p["code"] == "extraction_disposition_unresolved" for p in extracted["issues"])
     assert not any(p["code"] == "unresolved_source_range" for p in extracted["issues"])
 
 

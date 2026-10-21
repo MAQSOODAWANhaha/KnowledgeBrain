@@ -1,9 +1,9 @@
-"""Recorded model-call outcomes and whether the queue may send them again.
+"""Recorded model-call outcomes and whether bounded recovery may retry them.
 
-The client records these error types. Queue retry follows the exception class
-through execution_retry: infrastructure, configuration and semantic failures
-may be sent again; uncertain payment and cancellation may not. This table does
-not change the 131072 default window.
+The client preserves failed versus uncertain audit status. All call failures
+share the work unit's initial attempt and three retries; uncertain retries can
+be billed again. Cancellation stops execution. This table does not change the
+131072 default window or grant additional queue retries after unit exhaustion.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from docreader.llm.request import (
     ModelConfigurationError, ModelInfrastructureError, ModelSemanticError, UncertainModelResponse,
 )
 
-# error_type, audit status, exception raised to the queue, queue may retry
+# error_type, audit status, exception raised to recovery, recovery may retry
 FAILURES = (
     ("connection_before_send", "failed", ModelInfrastructureError, True),
     ("first_data_idle_timeout", "failed", ModelInfrastructureError, True),
@@ -32,11 +32,11 @@ FAILURES = (
     ("tool_call_response", "failed", ModelSemanticError, True),
     ("incomplete_finish", "failed", ModelSemanticError, True),
     ("invalid_stream_envelope", "failed", ModelSemanticError, True),
-    ("between_data_idle_timeout", "uncertain", UncertainModelResponse, False),
-    ("transport_response_unknown", "uncertain", UncertainModelResponse, False),
-    ("stream_missing_done", "uncertain", UncertainModelResponse, False),
-    ("provider_stream_error", "uncertain", UncertainModelResponse, False),
-    ("invalid_stream_encoding", "uncertain", UncertainModelResponse, False),
+    ("between_data_idle_timeout", "uncertain", UncertainModelResponse, True),
+    ("transport_response_unknown", "uncertain", UncertainModelResponse, True),
+    ("stream_missing_done", "uncertain", UncertainModelResponse, True),
+    ("provider_stream_error", "uncertain", UncertainModelResponse, True),
+    ("invalid_stream_encoding", "uncertain", UncertainModelResponse, True),
     ("cancelled_after_send", "uncertain", asyncio.CancelledError, False),
 )
 

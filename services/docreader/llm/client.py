@@ -19,7 +19,8 @@ from docreader.llm.budget import RequestBudget
 from docreader.llm.failures import http_failure
 from docreader.llm.config import ModelConfig, ModelEndpoint, completions_url
 from docreader.llm.request import (
-    ImageInput, ModelConfigurationError, ModelInfrastructureError, ModelSemanticError,
+    ImageInput, ModelConfigurationError, ModelCorrectionStalled, ModelInfrastructureError,
+    ModelJSONError, ModelSemanticError,
     UncertainModelResponse, request_digest,
 )
 from docreader.llm.usage import UsageLedger, reported_usage
@@ -111,6 +112,10 @@ class OpenAIModel:
         request = budget.request(task, payload, images)
         context = budget.require_request(request, task)
         digest = request_digest(endpoint.base_url, request)
+        logical_digest = digest
+        if "contract_feedback" in payload:
+            baseline = {key: value for key, value in payload.items() if key != "contract_feedback"}
+            logical_digest = request_digest(endpoint.base_url, budget.request(task, baseline, images))
 
         async with self._semaphore:
             await self.store.pin_execution_spec(self.lease, self.execution_spec())
@@ -123,12 +128,12 @@ class OpenAIModel:
                                                  scope=digest, input_digest=digest)
             request_id = uuid4().hex
             row = await self.store.begin_request(self.lease, request_id, endpoint.model, task, metadata={
-                **context, "request_digest": digest,
+                **context, "request_digest": digest, "logical_request_digest": logical_digest,
                 "operation": payload.get("operation", task), "work_unit_id": payload.get("work_unit_id", ""),
             })
             if row["status"] == "succeeded":
                 return wire.decode(await self._cached_response(row, digest))
-            # Durable send fencing and digest replay protection happen before HTTP.
+            # Durable attempt limits and active-send fencing happen before HTTP.
             await self.store.finish_request(request_id, "sent")
             started = time.monotonic()
             stream = StreamResponse()
@@ -197,10 +202,15 @@ class OpenAIModel:
                 try:
                     await self._finish_stream(request_id, "uncertain", stream, digest, stream.failure, started)
                 except Exception:
-                    # An unavailable response/audit store leaves the durable sent
-                    # fence in place; do not turn uncertainty into a queue retry.
+                    # An unavailable audit store leaves the active sent fence in
+                    # place. Recovery cannot send concurrently with that attempt.
                     raise UncertainModelResponse("model response decoding and audit failed; provider execution and billing are uncertain") from None
                 raise UncertainModelResponse("model response decoding failed after send; provider execution and billing are uncertain") from None
+            except ModelJSONError as error:
+                await self._finish_stream(request_id, "failed", stream, digest, "invalid_json_response", started)
+                error.redact(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
+                             if endpoint is not None)
+                raise
             except ModelSemanticError:
                 await self._finish_stream(request_id, "failed", stream, digest,
                                           stream.failure or "invalid_json_response", started)
@@ -212,8 +222,8 @@ class OpenAIModel:
             return wire.decode(result)
 
     async def _cached_response(self, row: dict, digest: str) -> dict:
-        # ArtifactStore verifies size, path and SHA256 before decoding. A missing
-        # or corrupt cache must never become permission to pay for another call.
+        # ArtifactStore verifies size, path and SHA256 before decoding. Recovery
+        # receives the cache error and can request a correction with real feedback.
         try:
             if self.artifacts is None:
                 raise ValueError
@@ -226,7 +236,7 @@ class OpenAIModel:
             stream.feed(envelope["raw_body"].encode("utf-8"))
             return stream.result()
         except (OSError, ValueError, TypeError, KeyError, AttributeError, UncertainModelResponse):
-            raise ModelSemanticError("cached model response cannot be verified; provider was not called") from None
+            raise ModelCorrectionStalled("cached model response cannot be verified; provider was not called") from None
 
     async def _save_response(self, envelope: dict) -> dict | None:
         if self.artifacts is None:

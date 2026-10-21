@@ -7,6 +7,7 @@ import pytest
 
 from docreader.integrations.store import Store
 from docreader.llm import ModelSemanticError
+from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.workflow.nodes import TenderNodes
 from docreader.workflow.runner import execute_command
 
@@ -60,21 +61,16 @@ async def test_explicit_retry_reuses_successful_packs_after_three_automatic_retr
     store, artifacts, _, run = runtime
     execute, calls, failed_requests = _executor(runtime, 4)
     initial = (await store.get_run(run["run_id"]))["commands"][-1]
-    saved = None
-    for attempt in range(4):
-        with pytest.raises(ModelSemanticError):
-            await execute(initial)
-        current = await store.get_run(run["run_id"])
-        assert current["status"] == ("pending" if attempt < 3 else "failed")
-        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
-        if saved is None:
-            saved = {(item["stage"], item["scope"]): item for item in current["artifacts"]}
-        else:
-            assert {(item["stage"], item["scope"]): item for item in current["artifacts"]} == saved
+    with pytest.raises(ModelWorkUnitExhausted):
+        await execute(initial)
     failed = await store.get_run(run["run_id"])
     assert failed["status"] == "failed"
+    assert failed["commands"][-1]["execution_count"] == 1
+    assert failed["commands"][-1]["infrastructure_failures"] == 0
     assert failed["commands"][-1]["status"] == "completed"
     assert failed["commands"][-1]["receipt"]["status"] == "failed"
+    assert failed["commands"][-1]["receipt"]["metadata"]["reason"] == "model_work_unit_retries_exhausted"
+    saved = {(item["stage"], item["scope"]): item for item in failed["artifacts"]}
     successful_packs = {scope for stage, scope in saved if stage == "extract-pack"}
     plan = output(artifacts, failed, "pack-plan")
     assert successful_packs and len(successful_packs) == len(plan["packs"]) - 1
@@ -146,26 +142,21 @@ async def test_temporary_invalid_json_recovers_on_automatic_retry_without_new_co
     store, artifacts, _, run = runtime
     execute, calls, failed_requests = _executor(runtime, 1)
     command = (await store.get_run(run["run_id"]))["commands"][-1]
-    with pytest.raises(ModelSemanticError):
-        await execute(command)
-    pending = await store.get_run(run["run_id"])
-    assert pending["status"] == "pending"
-    assert pending["commands"][-1]["status"] == "pending"
-    saved = {(item["stage"], item["scope"]): item for item in pending["artifacts"]}
-    successful = {scope for stage, scope in saved if stage == "extract-pack"}
-    assert successful
     waiting = await execute(command)
     assert waiting["status"] == "waiting-confirmation", output(artifacts, waiting, "verify")["issues"]
     assert len(waiting["commands"]) == 1
     assert waiting["commands"][0]["command_id"] == command["command_id"]
-    assert waiting["commands"][0]["infrastructure_failures"] == 1
+    assert waiting["commands"][0]["execution_count"] == 1
+    assert waiting["commands"][0]["infrastructure_failures"] == 0
     assert len(failed_requests) == 1
     attempts = Counter(payload["work_unit_id"] for task, payload in calls if task == "extract")
-    assert all(attempts[pack_id] == 1 for pack_id in successful)
-    assert sorted(attempts.values()) == [1] * len(successful) + [2]
-    for item in waiting["artifacts"]:
-        if (item["stage"], item["scope"]) in saved:
-            assert item == saved[(item["stage"], item["scope"])]
+    plan = output(artifacts, waiting, "pack-plan")
+    assert sorted(attempts.values()) == [1] * (len(plan["packs"]) - 1) + [2]
+    await execute(command)
+    unchanged = await store.get_run(run["run_id"])
+    assert unchanged["artifacts"] == waiting["artifacts"]
+    assert unchanged["usage"] == waiting["usage"]
+    assert unchanged["commands"] == waiting["commands"]
     assert not waiting["confirmations"]
     assert all(request["metadata"]["external_request"] is False for request in waiting["usage"])
 
@@ -213,9 +204,7 @@ async def test_explicit_retry_preserves_failed_resume_confirmation_without_model
     assert result(artifacts, ready, "confirm") == approved["payload"]
 
 
-async def test_complete_host_rejection_uses_shared_command_retry_budget(runtime):
-    from docreader.llm.request import ModelContractError
-
+async def test_complete_host_rejection_uses_shared_work_unit_retry_budget(runtime):
     store, artifacts, settings, run = runtime
     replies, calls = iter([None, {}, 'invalid', False]), []
 
@@ -232,22 +221,19 @@ async def test_complete_host_rejection_uses_shared_command_retry_budget(runtime)
         model.calls = calls
         return TenderNodes(s, a, lease, model)
 
-    first_extract = None
-    for attempt in range(4):
-        with pytest.raises(ModelContractError):
-            await execute_command(run['run_id'], command['command_id'], command['source_version'], settings, factory)
-        current = await store.get_run(run['run_id'])
-        assert current['commands'][-1]['infrastructure_failures'] == attempt + 1
-        assert current['status'] == ('pending' if attempt < 3 else 'failed')
-        extracted = [row for row in current['artifacts'] if row['stage'] == 'extract-pack']
-        if first_extract is None:
-            first_extract = extracted
-        assert extracted == first_extract
+    with pytest.raises(ModelWorkUnitExhausted):
+        await execute_command(run['run_id'], command['command_id'], command['source_version'], settings, factory)
+    current = await store.get_run(run['run_id'])
+    assert current['commands'][-1]['infrastructure_failures'] == 0
+    assert current['commands'][-1]['execution_count'] == 1
+    assert current['status'] == 'failed'
+    assert [row for row in current['artifacts'] if row['stage'] == 'extract-pack']
+    extractions = Counter(payload['work_unit_id'] for task, payload in calls if task == 'extract')
+    assert all(count == 1 for count in extractions.values())
     reviews = [payload for task, payload in calls if task == 'verify']
     assert len(reviews) == 4
     assert 'contract_feedback' not in reviews[0]
     assert all(value['contract_feedback']['errors'][0]['path'] == ['findings'] for value in reviews[1:])
-    current = await store.get_run(run['run_id'])
     assert len([row for row in current['artifacts'] if row['stage'] == 'model-rejection']) == 4
     assert all(row['status'] == 'succeeded' for row in current['usage'])
 
@@ -292,21 +278,13 @@ async def test_sse_success_rejection_correction_and_restart_cache(runtime):
                'source_views': [], 'items': [], 'relations': [], 'decisions': []}
     first = nodes(lease)
     try:
-        with pytest.raises(ModelContractError):
-            await first.call_validated('verify', payload, validate)
+        result = await first.call_validated('verify', payload, validate)
+        assert result['findings'] == []
     finally:
         await first.close()
     before = await store.get_run(run['run_id'])
     original = before['usage'][0]
     assert original['status'] == 'succeeded' and original['response_ref']
-    await store.release(lease, 'retry')
-    lease = await store.acquire(run['run_id'], command['command_id'], run['source_version'])
-    second = nodes(lease)
-    try:
-        result = await second.call_validated('verify', payload, validate)
-        assert result['findings'] == []
-    finally:
-        await second.close()
     restarted = nodes(lease)
     try:
         assert await restarted.call_validated('verify', payload, validate) == result
@@ -317,4 +295,6 @@ async def test_sse_success_rejection_correction_and_restart_cache(runtime):
     assert next(row for row in after['usage'] if row['request_id'] == original['request_id']) == original
     assert sent[1]['contract_feedback']['fragments'] == [{'path': ['findings'], 'value': None}]
     assert len([row for row in after['artifacts'] if row['stage'] == 'model-wire']) == 2
-    assert after['commands'][-1]['infrastructure_failures'] == 1
+    assert after['commands'][-1]['infrastructure_failures'] == 0
+    assert after['commands'][-1]['execution_count'] == 1
+    assert len({row['metadata']['logical_request_digest'] for row in after['usage']}) == 1

@@ -17,6 +17,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender.schema import Task, validate_issue_resolutions
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
@@ -649,9 +650,22 @@ class Store:
             if (not failed or failed["command_id"] != failed_command_id or failed["status"] != "completed"
                     or (failed["receipt"] or {}).get("status") != "failed"):
                 raise Conflict("retry must identify the current latest failed command")
+            # A finished executor can leave a durable send without its final
+            # audit. Preserve that uncertainty before continuing the new protocol.
+            await conn.execute(
+                "UPDATE tender_model_requests SET status = 'uncertain', finished_at = clock_timestamp(), "
+                "error = COALESCE(error, '{\"type\":\"executor_lost\"}'::jsonb) "
+                "WHERE run_id = %s AND source_version = %s AND domain_revision = %s AND status = 'sent' "
+                "AND jsonb_typeof(metadata->'logical_request_digest') = 'string' "
+                "AND metadata->>'logical_request_digest' ~ '^[0-9a-f]{64}$'",
+                (run_id, source_version, domain_revision),
+            )
             uncertain = await (await conn.execute(
                 "SELECT request_id, status FROM tender_model_requests WHERE run_id = %s AND source_version = %s "
-                "AND domain_revision = %s AND status IN ('sent', 'uncertain') ORDER BY created_at, request_id LIMIT 1",
+                "AND domain_revision = %s AND status IN ('sent', 'uncertain') "
+                "AND (status = 'sent' OR jsonb_typeof(metadata->'logical_request_digest') IS DISTINCT FROM 'string' "
+                "OR metadata->>'logical_request_digest' !~ '^[0-9a-f]{64}$') "
+                "ORDER BY created_at, request_id LIMIT 1",
                 (run_id, source_version, domain_revision),
             )).fetchone()
             if uncertain:
@@ -910,14 +924,26 @@ class Store:
     async def begin_request(
         self, lease: Lease, request_id: str, model: str, task: Task, metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        digest = (metadata or {}).get("request_digest")
+        metadata = {**(metadata or {}), "command_id": lease.command_id}
+        digest = metadata.get("request_digest")
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise ValueError("model audit requires a lowercase SHA-256 request_digest")
+        if "logical_request_digest" in metadata:
+            logical_digest = metadata["logical_request_digest"]
+            if not isinstance(logical_digest, str) or re.fullmatch(r"[0-9a-f]{64}", logical_digest) is None:
+                raise ValueError("model audit requires a lowercase SHA-256 logical_request_digest")
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
             prior = await self._matching_model_requests(
                 conn, lease.run_id, lease.source_version, lease.domain_revision, task, digest,
             )
+            logical_digest = metadata.get("logical_request_digest")
+            if logical_digest is not None:
+                cached = next((row for row in prior if row["status"] == "succeeded" and row["response_ref"] is not None), None)
+                if cached is not None:
+                    return cached
+                prior = [row for row in prior if not (row["status"] == "uncertain"
+                         and row["metadata"].get("logical_request_digest") == logical_digest)]
             for row in prior:
                 if row["status"] in {"sent", "uncertain"} or row["response_ref"] is None:
                     raise RequestReplayBlocked(row["request_id"], row["status"])
@@ -931,7 +957,7 @@ class Store:
             )
             if reused:
                 # Same source, same complete request: reuse the paid success. sent/uncertain
-                # still fence only the current domain_revision.
+                # fences for active or legacy requests were checked in this revision above.
                 return reused[0]
             return await (await conn.execute(
                 "INSERT INTO tender_model_requests(request_id, run_id, source_version, domain_revision, epoch, model, task, metadata) "
@@ -994,8 +1020,28 @@ class Store:
                     conn, row["run_id"], row["source_version"], row["domain_revision"], row["task"],
                     row["metadata"]["request_digest"],
                 )
+                logical_digest = row["metadata"].get("logical_request_digest")
+                if logical_digest is not None:
+                    prior = [attempt for attempt in prior if not (attempt["status"] == "uncertain"
+                             and attempt["metadata"].get("logical_request_digest") == logical_digest)]
                 if prior:
                     raise RequestReplayBlocked(prior[0]["request_id"], prior[0]["status"])
+                if logical_digest is not None:
+                    # The run lock serializes sends across executors and feedback
+                    # digests. Preparations and cache reads do not consume attempts.
+                    attempts = await (await conn.execute(
+                        "SELECT request_id, status, metadata->>'command_id' AS command_id "
+                        "FROM tender_model_requests WHERE run_id = %s AND source_version = %s "
+                        "AND domain_revision = %s AND task = %s AND metadata->>'logical_request_digest' = %s "
+                        "AND (sent_at IS NOT NULL OR status IN ('sent', 'uncertain')) "
+                        "ORDER BY created_at, request_id FOR UPDATE",
+                        (row["run_id"], row["source_version"], row["domain_revision"], row["task"], logical_digest),
+                    )).fetchall()
+                    for attempt in attempts:
+                        if attempt["status"] == "sent":
+                            raise RequestReplayBlocked(attempt["request_id"], attempt["status"])
+                    if sum(attempt["command_id"] == row["metadata"]["command_id"] for attempt in attempts) >= 4:
+                        raise ModelWorkUnitExhausted(row["task"])
             if response_ref is not None and row["response_ref"] is not None and row["response_ref"] != response_ref:
                 raise Conflict("model request already identifies a different immutable response")
             if row["status"] in {"succeeded", "failed"}:

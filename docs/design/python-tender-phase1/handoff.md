@@ -3,10 +3,208 @@
 问题台账统一见[问题与修复记录](bug-fix.md)：每次发现问题追加或更新根因、方案和验证状态；
 本文保留运行时间线及证据位置，字段定义仍以[字段字典](field-dictionary.md)为准。
 
-## 当前状态（2026-10-17）
+## 当前状态（2026-10-21 UTC）
+
+normalization_version=6 已于2026-10-21 02:59 UTC部署。三个Python角色统一镜像
+`knowledgebrain-docreader:20261021-retry-v6`，镜像ID
+`sha256:578de027146e21279cf90a29e735574460617a6c8ff5295b3517e60a33878bbb`；
+53份运行源码/Prompt指纹与工作区一致，init退出0，worker/dispatcher运行。
+复用现有PG/Redis及`knowledgebrain_default`，健康预检通过，无新增宿主端口；
+并发仍为客户端默认2，窗口131072，Chat/VLM沿用各自既有配置。
+
+用户调整环境变量后，2026-10-21 03:01 UTC重新force-recreate三个Python角色。
+Chat/VLM现均为各自显式配置的`gpt-6.1-sol`，窗口仍为131072；
+标准`/models`探测均200且模型在列表中，PG/Redis正常，53份运行指纹仍一致。
+没有关闭TLS校验或修改用户配置；此结果不证明旧端点已经续期。
+新独立运行`e28605cb-468f-46ed-b2cf-e22530ce7025`已正式提交，
+source_version/domain_revision均1，request_key=`real-v6-full-20261021-0302`。
+自动分析已完成，停在`waiting-confirmation`；尚未人工确认，未到`analysis-ready`。
+
+04:19:34 UTC自动执行结束：2 OCR、4 extract、16 review、37 locate、104 associate、
+22 joint全部完成，共185次成功、实际188次发送；3次早期抽取中断通过工作单元重试恢复，
+未知用量仍保留，无在途请求。command执行一次、基础设施失败0，租约已释放。
+最终363事项、188关系、796原生范围全部覆盖，执行/来源覆盖缺口0，hard_blocking=false。
+关系中117条进入独立核验，71条仍标记unverified；进入核验不等于语义已通过。
+22条决议最终仅接受2条、解决2问题；累计639问题中637条仍active并进入人工出口，
+其中70条原始明确未决仍保留。问题数不是去重后的独立业务缺口数，不能据此宣称语义验收。
+尚无人工确认或事项修订，不自动代替用户裁决。已报告3193067输入、235165输出、
+3428232总Token，另3次中断用量未知，不能据此计算完整费用。
+
+最终阅读版及完整JSON/Markdown已从实际产物只读导出到私有证据目录
+`/opt/workspace/kb-tender-evidence/2026-10-21-full-run/output/`：
+`final-analysis.html`可按类别和关键词查看事项、原文引文及页码、关系、处置、问题及决议；
+`final-analysis.json`保留实际字段，`final-analysis.md`为完整文本，`source.pdf`为同SHA原件。
+导出逐项核对363事项及637待确认问题与终态一致，796处置无重漏，2008条展示记录完整；
+报告见`export-validation.json`。导出未触发模型调用、语义合并或人工确认。
+
+03:09 UTC快照：登记、冻结及2次去重OCR完成，796个原生范围进入4个抽取包，
+全部请求通过现有输入准入。尚无抽取包接受，2个请求在途；已有3份uncertain回执，
+两份在约108秒持续输出后传输中断，另一份在约44秒收到供应商
+`server_error/request_timeout`。三份均无完整JSON/DONE/usage，不能统计实际用量。
+两包分别已实际发送2次、3次，logical_request_digest与command保持不变，
+execution_count=1、infrastructure_failures=0，工作单元重试未被外层失败预算抵消。
+worker租约与心跳正常；不得将`/models`200或OCR成功宣称为完整文件验收。
+已报告用量仅OCR的535输入、127输出、662总Token；不含在途或中断调用未知用量。
+问题机制、根因边界与处理见BUG-031，原始流完整保存在新目录CAS，未提交人工确认。
+
+03:23 UTC：抽取4/4包及总索引全部提交，363事项、796处置、202待核验问题，
+正在准备独立核验。前两包分别在第2次、第3次实际发送后成功，后两包首次成功；
+command始终execution_count=1、infrastructure_failures=0，无失租或外层重投。
+累计已报告93133输入、102884输出、196017总Token（含2次OCR），3份中断用量仍未知。
+首包只读审查确认187个正文范围对应187个唯一处置，95事项与15关系的197条引文均可定位；
+模型声明47 non_item、24 unresolved，宿主按事项证据派生116个items处置，无恢复丢弃或诊断。
+该包17个模型问题加24个明确未决范围问题=41；这是来源明确的宿主派生，不是模型重复输出。
+首包实际26110输入/27548输出，输入估算110058约为实际4.22倍，输出超过16384预留。
+完整回包正常接受；该结构与引用检查不证明全文件语义召回或五节点验收。
+
+03:26 UTC：完整抽取只读审查确认4包正文796个唯一范围，796处置exactly1，
+无缺失/额外/重复；363事项、87关系均与原模型数量一致，832条事项/关系引文可在发送内容定位。
+事项类型为152 obligation、114 submission_requirement、80 consequence_rule、17 scoring_rule。
+处置460 items、221 non_item、115 unresolved；未决中70由模型明确声明、45由宿主恢复缺失处置。
+另1处non_item与已有事项证据矛盾，保留事项并记问题；46个extraction_disposition_unresolved
+不代表丢弃46个事项。202问题=86模型+116宿主，3条诊断均为evidence_quote_restored。
+抽取输出102757，比4包预留多56.8%，前三包超预留；容量参数尚未调整。
+独立原文review计划16包，累计输入估算344108，最大32656，0超限；5/16接受、1个在途，
+无新增失败，累计已报告214885输入/106833输出/321718总Token，3次中断用量仍未知。
+locate/associate/joint尚未规划，不能把review16包当成全部核验调用量或最终语义验收。
+
+03:43 UTC：原文review16/16、locate37/37均首次接受，无新增失败。
+review真实输入336076、输出11674；review产生67个问题，与抽取合并为269个唯一问题。
+locate计划1 discovery+36 reference；discovery发送全部363事项，输入估算86431≤94208，
+本文件没有启用两两分块组合，65703事项对由同一发现请求覆盖。
+补读累计输入估算709692，单包17562–24361；259问题进入补读，10问题进入本地关联，
+依赖组保持完整，36批中12/9问题的两批未为了8条偏好拆开。
+已生成associate104次，累计输入估算1541123、单包最大51384、0超限，第1次在途。
+joint尚未规划；正常总调用量目前为2 OCR+4 extract+16 review+37 locate+104 associate+J，
+另已有3次中断重发，J未知，不能记作0。累计已报告1206758输入、146312输出、1353070总Token。
+运行仍同一command/epoch，未自动提交人工确认或宣称analysis-ready。
+
+04:12 UTC：associate104/104全部首次接受；review16/16、locate37/37保持完整，
+核验阶段尚无失败或纠正发送。joint已生成22次，首个在途；正常整文件计划调用量现为
+2+4+16+37+104+22=185，另有3次早期中断重发，若余下请求均首次成功则实际188次。
+累计已报告2695673输入、215572输出、2911245总Token；3次中断用量仍未知。
+关联计划来源为locate101候选+7本地候选=108；5个共享issue依赖候选合为1组，故104请求。
+未按共享range/item串为巨包，候选无遗漏；最大192范围/102事项/51384输入估算，0超限。
+独立来源在多个候选间重复读取仍是主要累计开销，未因本轮监控热改分组或冻结配置。
+locate新增104问题，连同前269合为373，保留未决、无递归重启定位；最终解决数等待joint。
+
+本次最初预检的BUG-030已确认：`api.kunkun-gpt.com:8317`服务端叶证书于
+2026-10-21 02:08:32 UTC过期，02:57 UTC新旧容器均在TLS握手报verify_code=10；
+公开证书链同样在depth=0报过期，非新版代码回归。后续配置调整及恢复情况如上。
+同一106页原件SHA已核对；旧运行、CAS和全部付费回执保留在原目录。
+新部署覆盖、预检、指纹及`tls-diagnosis.log`位于
+`/opt/workspace/kb-tender-evidence/2026-10-21-full-run/`，没有密钥落盘。
+本次通过该目录compose.py及既有
+`/opt/workspace/kb-tender-evidence/2026-10-17-full-run/input/manifest.json`
+提交独立v6运行；不要把新协议热套旧v4运行，不自动提交人工确认。
+
+工作单元的普通重发及合同纠正统一
+首次加三次，以现有请求审计的command_id/logical_request_digest/sent_at持久限额；
+按用户最新要求，已补齐所有失败统一重试，包括uncertain、重复拒收及缓存不可验证。
+未知付费重发可能重复计费，原回执/状态/未知用量保留，活动sent仍禁止并发重发。
+外层基础设施预算独立，完整JSON语法失败提供有界脱敏反馈。反馈首次发送即采用CAS
+规范字段顺序，重启继续命中成功缓存；OCR结构校验也在接受前进入同一恢复入口，
+有效partial/unresolved仍保留业务问题。相同合同错误继续按真实rejection_count纠正。
+最新完整单元1002项通过（171.29秒），统一策略110项、OCR结构4项及异常分类3项包含其中，
+不重复累加。此前999项为分类修复前基线（161.03秒）。
+完整workflow86项通过（111.34秒），报告为
+`test-results/recovery-contract/workflow-unified-final.xml`，包含隔离PG定向49项及增强工作单元16项。
+完整acceptance新合同52项通过（419.54秒），报告为
+`test-results/acceptance-final/all-failures-final.xml`；最终单元报告为`test-results/unit-complete-final.xml`。
+acceptance进程在耗尽异常基类最后调整前启动；该调整的旧领域传播由完整unit及随后完整
+workflow验证，未因这处分类修复重跑无关的acceptance用例。
+实际OpenAIModel+模拟SSE+隔离PG已验证中断后第二次成功、落盘失败重启复用成功缓存并
+在夹具确认后analysis-ready，以及连续四次中断耗尽，5项定向通过。均非真实模型调用。
+耗尽异常已改为执行类RuntimeError，旧extract/verify/plan不再吞为领域问题；三项失败
+回归及领域/恢复/冻结/队列306项关联回归通过，包含在上述最终整套unit中。
+本轮测试环境曾缺/docs挂载，补齐后原985项基线通过；acceptance基线49通过/1项因
+导入时Redis地址缺失失败，补齐容器级TENDER_REDIS_URL后该项单独通过，原失败报告保留。
+上述离线测试不含模型付费调用；新真实运行已到人工确认入口，终态及待裁决边界见本文顶部。
+真实失败SSE按整块、7/17/8191字节分块禁网回放一致，均报offset1939/column1940，
+新版含rejection_count的反馈243字符（此前无计数为223）；未接受修补前缀或改写原回执。证据：
+`/opt/workspace/kb-tender-evidence/2026-10-21-retry-fix/test-results/`。
+新版回放报告为`real-json-replay-unified.json`。所有修改Python的Ruff及diff检查通过。
+测试执行容器已退出，本轮专用`kb_tender_fix_pg`、`kb_tender_fix_redis`及`kb-tender-fix-test`
+网络已清理；私有报告、真实回执及镜像保留。v6镜像及运行服务已更新，新真实任务已提交。
+
+最近查询2026-10-21 01:45 UTC：run `979ab808-1db3-411e-932c-73ca4a10567c` 已于
+2026-10-20 14:27 UTC结束为failed，无在途或uncertain请求。抽取4/4、原文review9/9、
+locate25/25接受，associate67/103接受，joint尚未规划；人工确认和analysis-ready未发生。
+301事项、45关系、796处置及所有成功回执保留。累计已报告prompt1586409、completion229065、
+total1815474 Token，另有一份HTTP500的用量未知。
+
+停止原因：抽取两次invalid_json_response之后，关联`associate-25829aa83789`收到HTTP500，
+重试后该单元成功；随后`associate-e6fc49149a18`收到完整DONE/stop但JSON无效，
+16914输入/2679输出Token。命令execution_count=4、infrastructure_failures=4，
+首次加3次的跨阶段共享失败预算耗尽，回执原因为infrastructure_retries_exhausted。
+原始SSE诊断进一步确认：最后两个content事件逐字相同，均为`]}`；完整JSON对象后
+多出第二组闭合符，在第1940列报Extra data。独立重建与四种分块回放一致，宿主拼接
+未制造错误；上游模型生成还是中转重复发送仍待查。该请求输入估算17120/预算94208，
+输出2679/预留32768，无截断或预算不足证据。最后工作单元只失败一次便耗尽command
+剩余额度；JSON解析错误也未进入contract_feedback。这两处是上述v6修复针对的恢复缺口。
+诊断报告：`/opt/workspace/kb-tender-evidence/2026-10-20-recovery/full-run/live/associate-848d-diagnosis-20261021T015235Z.json`。
+本轮完成原回包回放、源码修复及隔离回归，零模型调用，未接受或提交修补后的前缀。
+尚未提交新的retry、校正或部署；旧运行冻结于v4，v5镜像仅用于挂载源码测试。
+v6不能热套旧run，需以独立新版运行验证；若正式恢复原v4，沿用原合同并复用成功回执，
+175条处置的旧版错误出口仍需按下文既定方式处理。
+
+### 前次执行中快照
+
+13:15 UTC：正式运行`979ab808-1db3-411e-932c-73ca4a10567c`仍在执行，原件SHA与下述106页文件
+一致；来源/领域修订均为1，request_key=`real-v2-full-20261020-001`。登记、冻结和2次OCR已完成，
+抽取4/4包接受：301事项（义务132/提交100/后果53/评分16）、45关系、796处置、214问题。
+处置items337/non_item284/unresolved175；完整JSON接受不代表语义通过。失败包前两次返回
+无效JSON，第三次正式执行成功，另外3包未重发；execution_count=3、infrastructure_failures=2。
+已报告prompt207152、completion116910、total324062 Token（含两次失败），在途用量未知。
+独立review计划9包、累计输入218731 o200k Token、最大32726、0超限；2/9接受，第3包在途。
+discovery固定部分可完整容纳301事项及引文：1包、67709输入Token、0超限，无需两两组合；
+reference、associate、joint依赖真实review回包，调用量仍未知。人工处理及analysis-ready未发生。
+
+本次真实回包另暴露BUG-028处置恢复出口错误：175条宿主恢复问题被错误归为
+correct硬阻断。最小修复已完成；保留unresolved及有效事项，后续独立决议/人工
+处理，真实来源和执行缺口仍硬阻断。当前v4运行继续使用冻结镜像，不热改回执或切换协议。
+若结束后因此blocked，可在原v4通过正式correct把缺省处置明确保留unresolved后重新核验；
+不重新OCR/抽取，同摘要成功请求可复用，但变更的核验请求仍付费。此路径不能冒充新code实测。
+
+源码normalization_version=5：96项定向及949项完整单元通过，Ruff/diff通过；完整单元首轮
+940通过/9项缺语料文件，补齐一次性容器的只读docs挂载后949项通过，前后报告均保留。
+真实PG上`test_analysis.py`整文件12项通过（合成模型），新增用例覆盖独立无事项正文的
+处置漏报、完整review、human出口、缺处理拒绝确认及夹具处理后analysis-ready且零新增调用。
+首轮11通过/1项失败是DOCX同章合并导致夹具未形成独立范围，补充分章后整文件通过。
+本轮未重新跑v5全部workflow/acceptance，不与下述v4的118项合并宣称全套通过。
+四份真实已付费回包禁网回放通过：301事项/45关系/796处置逐字段不变，214问题全部保留，
+仅175条恢复问题code及宿主问题身份变化，完整台账中均不再protected；真实来源/预算仍hard。
+回放0模型调用、0生产及旧产物写入，不当作v5真实调用或语义召回验收。
+新候选`knowledgebrain-docreader:20261020-disposition`，镜像
+`sha256:a844d96a75abad7f3aa8014f0eeb1ca21c0a19dd755bfa1ae09e0f7eef8d5399`；
+53份源码/Prompt指纹与工作区一致、断网tokenizer通过，尚未替换在途v4容器。
+
+BUG-028的可信问题来源修复已部署，normalization_version=4。单元941项通过，隔离PG/Redis的
+workflow/acceptance共118个独立用例通过（117项首轮通过、1项修正测试Redis启动环境后通过），
+Ruff及diff检查通过。三个Python角色统一镜像
+`sha256:85d7d16ed2da9e1841ebdef4d76f7b72077200e268e1abc12cd85d138eb1b3a5`，
+部署时53份运行源码/Prompt指纹一致，tokenizer断网检查通过；本轮v5源码修复尚未热替换。
+`kb_python_tender_worker`、`kb_python_tender_dispatcher`运行，init正常退出0；未新增宿主端口。
+复用`knowledgebrain_default`上的现有PG/Redis；仓库PG账号与共享栈不一致，本次执行在内存中
+读取现有API的有效DATABASE_URL，未改共享账号或用户`.env`，私有覆盖文件不保存凭据。
+窗口131072、并发2、Chat/VLM沿用已配置模型；worker容器`/models`探测200。
+证据、部署覆盖、指纹和只读`poll.py`：
+`/opt/workspace/kb-tender-evidence/2026-10-20-recovery/full-run/`；
+测试证据在其上级`test-results/`。自动执行到确认前，保留全部付费回执，人工确认不自动提交。
+
+### 恢复现场核对
+
+恢复前现场已无Python招标容器，共享PostgreSQL也没有`tender_*`运行回执表，不能续跑旧run。
+`2026-10-17-full-run/artifacts`仍保留：2次OCR成功、1个抽取包接受（67事项/187处置/14问题），
+另有3份HTTP401回执；没有完整抽取台账和verify产物。旧运行不能视为仍在执行。
+预检确认仓库`.env`与现有API容器Chat Key一致，供应商`/models`只读探测返回200，当时尚未发送生成请求。
+BUG-028来源分级遗漏的失败基线为4失败/4通过，修复后状态见上文；隔离证据保存于
+`/opt/workspace/kb-tender-evidence/2026-10-20-recovery/`。
+
+## 上次提交状态（2026-10-17，已停止）
 
 真实原件 `BiddingFile.pdf` SHA `4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc`。
-运行 `bdcf6dac-73b2-4ef5-bb3a-a34019df82f4` 已提交并在跑：106页已解析，分包计划已写出，模型调用已返回。
+运行 `bdcf6dac-73b2-4ef5-bb3a-a34019df82f4` 当时已提交：106页已解析，分包计划已写出，模型调用已返回。
 首次执行在 freeze 因未定类型的空 metadata 更新失败，修复提交 `92a1bc1` 后用命令 `30de0a63-5048-4eb9-98bc-092a0e2e8921` 续跑。
 产物在 `/opt/workspace/kb-tender-evidence/2026-10-17-full-run/artifacts`。窗口 131072，并发 2。
 完整五节点尚未结束。

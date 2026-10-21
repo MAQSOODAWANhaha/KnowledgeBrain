@@ -16,6 +16,43 @@ class ModelSemanticError(ValueError):
     """A complete response or its domain contract was rejected."""
 
 
+class ModelJSONError(ModelSemanticError):
+    """A completed stream has invalid JSON; only bounded wire feedback escapes."""
+
+    def __init__(self, code: str, message: str, source: str, *, line: int, column: int, offset: int):
+        self.code, self.message = code, message
+        self.line, self.column, self.offset = line, column, offset
+        self._source = source
+        super().__init__("Model response is not a complete JSON object")
+
+    def redact(self, secrets):
+        # Mask before clipping, including JSON escapes, so a fragment boundary
+        # cannot expose part of a credential. Equal length preserves positions.
+        literals = {literal for secret in secrets if secret for literal in (
+            secret, json.dumps(secret, ensure_ascii=False)[1:-1], json.dumps(secret)[1:-1])}
+        for literal in sorted(literals, key=len, reverse=True):
+            self._source = self._source.replace(literal, "*" * len(literal))
+
+    @property
+    def feedback(self):
+        feedback = {"code": self.code, "message": self.message,
+                    "line": self.line, "column": self.column, "offset": self.offset}
+        radius = 64
+        while True:
+            feedback["fragment"] = self._source[max(0, self.offset - radius):self.offset + radius]
+            if len(json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))) <= 384:
+                return feedback
+            radius //= 2
+
+
+class ModelWorkUnitExhausted(RuntimeError):
+    """A logical work unit has used its initial call and three retries."""
+
+    def __init__(self, task=None):
+        self.task = task
+        super().__init__("Model work unit exhausted its automatic attempts")
+
+
 class ModelContractError(ModelSemanticError):
     """Durable feedback for an unaccepted response; details stay out of logs."""
 
@@ -25,7 +62,7 @@ class ModelContractError(ModelSemanticError):
 
 
 class ModelCorrectionStalled(ModelSemanticError):
-    """The proposed correction is itself an already rejected request."""
+    """A cached response or historical correction cannot be reused as accepted."""
 
 
 class ModelBudgetError(ValueError):
@@ -33,7 +70,7 @@ class ModelBudgetError(ValueError):
 
 
 class ModelInfrastructureError(ConnectionError):
-    """The single queue retry policy may retry this failure."""
+    """The bounded work-unit recovery policy may retry this failure."""
 
 
 class UncertainModelResponse(RuntimeError):

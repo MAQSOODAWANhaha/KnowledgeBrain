@@ -183,6 +183,24 @@ async def test_semantic_failure_is_unresolved_but_infrastructure_failure_propaga
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('task', ['extract', 'verify', 'plan'])
+async def test_work_unit_exhaustion_is_not_converted_to_a_domain_result(task):
+    from docreader.llm.request import ModelWorkUnitExhausted
+
+    exhausted = ModelWorkUnitExhausted(task)
+    model = FixedModel(**{task: exhausted})
+    with pytest.raises(ModelWorkUnitExhausted) as raised:
+        if task == 'extract':
+            await extract_pack(pack(), model)
+        elif task == 'verify':
+            await verify_pack(pack(), extraction_response(), model)
+        else:
+            await build_plan([requirement()], model)
+    assert raised.value is exhausted
+    assert len(model.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_schema_failure_never_silently_drops_body():
     result = await extract_pack(pack(), FixedModel(extract={"requirements": []}))
     assert result["dispositions"][0]["status"] == "unresolved"

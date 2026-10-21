@@ -7,7 +7,7 @@
 工作区`tender/schema.py`、抽取/核验提示和五节点主线已实现v2；下文单列的v1合同仍供
 历史独立工具使用，不自动转换旧回包。v2压缩、回包容错和默认重试已部署，两类审阅身份修复后真实独立核验已恢复，新协议语义验收未完成；
 测试及部署事实以[交接](handoff.md)为准。
-下文“问题续报与按需补读”已在源码实现，normalization_version=3，部署及实测状态见交接；不改变旧执行的冻结协议。
+下文“问题续报与按需补读”已在源码实现；可信问题来源为normalization_version=4，处置恢复出口及覆盖分级修复为5，工作单元重试与JSON反馈升为6。部署及实测状态见交接，不改变旧执行的冻结协议。
 
 第一阶段完整分析招标文件，目标为 `register → freeze → extract → verify → confirm`，
 确认后到 `analysis-ready`。输入为招标文件、附件、澄清和补遗；不引入企业响应数据、响应计划、
@@ -238,7 +238,8 @@ verify 各操作的必需输入和回包如下，
 Token，结构下限也不是完整输出预测；`fits` 不证明输出能完整生成。131072 窗口保持不变。
 字节估算的输出预留仍是 16384，只用于准入，不是 wire 输出上限；verify 在 token 计数下用
 32768。真实联调需同时检查实际 usage、结束原因和完整 JSON/覆盖校验；usage 缺失保留未知，
-sent/uncertain 不通过换身份重发。已记录的抽取 completion 曾到 43709，不能把 16384 当成
+同一逻辑单元的重试不通过换身份重置额度；uncertain保留原审计并计入四次上限，仍在途的
+sent不可并发重发。已记录的抽取 completion 曾到 43709，不能把 16384 当成
 真实输出上界，也不据此改默认窗口。更换发送格式后的请求必须重新测量，旧估算不能直接套用。
 
 当前修订有 scope_decisions 时，抽取与核验同时携带该列表，并将原文、实际目标及关联事项
@@ -466,13 +467,25 @@ blocked 表示存在硬阻断（分析本身不完整）；failed 表示执行/�
 | --- | --- | --- |
 | `revise` | 补充或替换来源，新建source_version | 缺件、不可读、章节/物理页来源不可用 |
 | `review-scope` | 显式作用域审议 | scope_context_pending、condition_scope_unresolved |
-| `correct` | 显式纠错修订 | 处置覆盖不完整、正文范围重复、整包抽取失败 |
+| `correct` | 显式纠错修订 | 严格校正处置覆盖不完整、正文范围重复、整包抽取失败 |
 | `host-fix` | 宿主组包或执行缺陷，修复后重跑 | 各类预算超限、核验覆盖不完整 |
-| `human` | 语义疑点，确认时人工处理 | 事项/关联/问题声明待核对、决议未被接受 |
+| `human` | 语义疑点，确认时人工处理 | 事项/关联/问题/局部处置声明待核对、决议未被接受 |
 
 前四类为硬阻断：当前修订存在阻断的此类记录，或必要覆盖/工作单元不完整时，运行为blocked，
 人工不能驳回。verification产物在原`blocking`（存在任何阻断问题）之外增加`hard_blocking: bool`
 和`human_issue_ids: string[]`（仍阻断、需人工处理的问题身份，升序）。
+
+抽取CAS产物另含宿主生成的`host_issue_ids: string[]`（升序），记录真实来源及宿主检查所产生的
+问题身份；模型输出、模型输入及人工校正合同不增加此字段。核验按宿主可信问题集合
+（抽取`host_issue_ids`及核验自身检查）应用宿主code的硬阻断出口，模型自报同名code仍是
+语义疑点。来源阶段问题继续全部硬阻断。
+旧产物缺此字段时保守保留原分级；同协议可正式校正重建，旧协议运行只读并新建运行，
+不改写旧产物及回执。
+
+模型回包局部恢复生成的`extraction_disposition_unresolved`为human类阻断问题，覆盖处置缺失、
+重复、格式错误及与有效证据矛盾；有效事项及完整原文保留，无事项证据的范围保持unresolved。
+完整review覆盖不会自动消除疑点，须有独立接受的明确决议或人工处理；严格校正仍要求完整处置。
+宿主最终发现的`analysis_review_incomplete`为hard类，不能进入human_issue_ids。
 
 确认时提交`IssueResolutions`：`{schema_version: 1, resolutions: [{issue_id, verdict, reason}]}`。
 verdict为`dismissed`（误报）或`acknowledged`（属实，作为已知问题保留展示）；reason为非空string；
@@ -501,22 +514,30 @@ issue_id集合必须恰好等于`human_issue_ids`，没有待处理问题时省�
   `path/code/detail`。正文不进入普通异常日志。传输succeeded及原回包审计保持不变。
 - 下次执行从拒收记录构造`contract_feedback`，包含真实错误及相关回包片段；原任务所需
   输入完整保留。纠正请求按实际完整消息预算准入并使用真实内容摘要，不加随机盐。
-  一次执行对一个工作包最多调用一次，不在节点内重试；失败由现有命令层统一计入首次加
-  三次重试。已拒收的同一纠正内容再次出现时停止，不能反复读取同一缓存耗尽次数。
+  模型恢复入口统一执行工作包的首次加三次重试；普通重发与反馈纠正共用同一持久额度，
+  不叠加SDK或队列模型重试。反馈记录真实的rejection_count；相同合同错误再次出现也
+  使用剩余额度纠正，不能反复读取同一成功坏缓存。完整DONE/stop后的JSON语法错误也进入反馈，错误位置及附近脱敏文本
+  合计不超过512字符；原回包保持不变，不以截前缀或删除符号作为接受依据。
 - 响应纠正只处理尚未接受的工作包合同，不修改已接受事项或自动解除业务问题。
-  sent/uncertain继续阻止自动重付费；不增加状态、环境变量或计数表。
+  uncertain允许在同一额度内重发，原回执及未知用量保留，可能重复计费；仍在途的sent
+  阻止并发发送，租约接管先按既有规则结算为uncertain。不增加状态、环境变量或计数表。
 
 ### 失败执行的显式恢复
 
 核验分包、完整请求预算测量等同步规划在工作线程执行，事件循环持续处理租约心跳；
 线程调度不改变请求内容、摘要或回执身份，也不扩大上下文预算。
 
-明确的执行失败默认首次加最多3次重试，包括连接、服务拒绝、JSON/宿主合同和普通代码
-异常；同命令共享4次失败预算，成功子产物不重做，不叠加SDK或节点内部重试。历史SQL字段
-`infrastructure_failures`继续保存该共享执行计数，不新增状态、配置项或计数表。预算耗尽
-才到failed。过期执行由接管方结算一次失租失败，也计入同一预算；重复投递不重复计数。
-旧Worker取消/版本或租约失效后停止写入；并发兄弟中出现sent/uncertain相关异常时优先停止，
-不能被另一个格式错误掩盖。业务blocked不是执行异常，继续走独立核验与现有裁决入口。
+模型工作单元的所有失败默认首次加最多3次重试，包括连接、服务拒绝、配置、JSON、
+宿主校验、缓存不可验证及响应结果不确定；恢复入口
+统一调度，现有请求台账以`command_id`和`logical_request_digest`持久计次。逻辑摘要移除
+顶层contract_feedback，保留其余完整请求身份；完整request_digest仍用于缓存和付费围栏。
+Store在转sent的同一事务检查已发送意图次数，最多4次；缓存复用不计次，重启不重置，
+普通重发及合同纠正共用额度。发送前错误也受入口四次上限约束。单元耗尽明确failed，
+队列不再叠加模型重试；成功子产物不重做。发布、数据库、普通代码异常和执行器丢失保留
+同命令四次外层兜底，历史SQL字段`infrastructure_failures`仅用于该执行计数，不新增状态、
+配置项或计数表。过期执行由接管方结算一次失租失败；重复投递不重复计数。
+旧Worker取消/版本或租约失效后停止执行；并发兄弟中取消或失租优先传播，其次是单元
+额度耗尽，不能被另一个可重试错误掩盖。业务blocked不是执行异常，继续走独立核验与现有裁决入口。
 
 `retry` 只恢复当前来源/领域修订的执行失败，不做业务纠错，不增加节点或状态。操作绑定
 `run_id/source_version/domain_revision/failed_command_id/request_key/reason`；首次申请须指向
@@ -526,9 +547,12 @@ issue_id集合必须恰好等于`human_issue_ids`，没有待处理问题时省�
 恢复新建同修订命令，继承原命令的 start/resume 和业务参数，在 payload.retry 中记录
 `failed_command_id/request_key/reason`。该审计元数据不进入确认业务内容，也不发给模型。
 原失败命令、回包及用量不改写；沿用同一执行快照和 checkpoint，复用成功产物及成功模型
-响应，只允许明确 failed 的请求重新付费。当前修订存在 sent/uncertain 时仍禁止该恢复，
-不以换版本、改摘要或清状态绕过围栏。语义未决的 blocked 继续走现有证据裁决或显式纠错，
-恢复命令不代表独立核验或人工确认完成；合同纠正只在上述共享重试上限内执行。
+响应，失败及uncertain的新版逻辑请求可重新付费。正式retry在无活动租约的事务中把
+新版遗留sent结算为uncertain，不改原回包或用量；旧无逻辑摘要的冻结请求保留原围栏，
+不以换版本、改摘要或清状态绕过额度。语义未决的 blocked 继续走现有证据裁决或显式纠错，
+恢复命令不代表独立核验或人工确认完成；新command给予失败工作单元新的四次额度，
+合同纠正仍与该单元普通重发共享上限。所有反馈摘要共用该command逻辑单元额度，
+不能通过修改反馈摘要绕过；未知付费尝试仍完整计入请求台账。
 
 ### 最小事项与复合条款示例
 
@@ -623,7 +647,9 @@ findings=[] 不能解决 q1。原文/版本变化或任一必要核验未接受�
 | `input_budget_tokens`, `correction_input_budget_tokens` | positive int，普通输入131072、显式纠错最多262144 token | 共享预算合同；普通verify/plan和新domain_revision不自动使用纠错额度 |
 | `correction` | bool，明确标记一次修复请求可使用纠错输入额度 | 不改变provider总窗口或wire输出参数；未知总窗口不授权双倍 |
 | `effective_input_budget_tokens` | int或null，当前输入预算与总窗口扣预留后的较小值 | planner/client使用同一测量；UTF8保守估算不是provider实测token |
-| `request_digest` | SHA256，完整无鉴权模型请求的摘要 | 模型审计与发送重放身份；包括图片、消息、模型和协议参数，不是仅payload文本hash；同运行当前domain_revision/task下sent或uncertain阻止自动重付费；同run同source_version下摘要相同的成功回执可跨领域修订复用 |
+| `request_digest` | SHA256，完整无鉴权模型请求的摘要 | 模型审计与发送重放身份；包括图片、消息、模型和协议参数，不是仅payload文本hash；同修订task下仍在途的sent阻止并发发送，uncertain按逻辑单元额度恢复；同run同source_version下摘要相同的成功回执可跨领域修订复用 |
+| `logical_request_digest` | SHA256，移除顶层contract_feedback后的完整请求摘要 | 仅宿主请求审计使用，普通重发及合同纠正共用每command最多四次发送，uncertain仍计次；改变反馈不能重置额度，缺少此字段的旧冻结请求保留原防重放合同 |
+| `metadata.command_id` | string，当前命令身份 | Store从lease写入模型请求审计，与logical_request_digest一起限定四次发送；不发送给模型，不由调用方或模型指定 |
 | `plan_digest` | sha256，task+input_digest+budget_digest+selectors/决议的规范摘要 | 新预算或作用域绑定生成新计划，规范来源身份不变 |
 | `requirement_id` | string，当前要求清单内义务身份 | 验证决议、计划项引用同一身份；内容修正产生新domain_revision |
 | `evidence` | Evidence[]，range_id+原文quote | 不更名为另一种引用；quote必须能在规范范围重放 |

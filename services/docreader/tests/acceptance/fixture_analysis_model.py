@@ -84,6 +84,8 @@ class AnalysisFixtureModel:
             prior = await self.store.begin_request(self.lease, request_id, "synthetic-analysis-fixture", task, {
                 "test_double": True, "external_request": False,
                 "request_digest": fixture_request_digest(task, payload, images),
+                "logical_request_digest": fixture_request_digest(task,
+                    {key: value for key, value in payload.items() if key != "contract_feedback"}, images),
             })
             if prior["status"] == "succeeded":
                 return self.artifacts.read_json(prior["response_ref"])

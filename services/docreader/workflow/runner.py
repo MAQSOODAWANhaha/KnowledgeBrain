@@ -7,9 +7,8 @@ from langgraph.types import Command
 from psycopg.rows import dict_row
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.integrations.store import Cancelled, RequestReplayBlocked, StaleExecution, Store
-from docreader.llm import UncertainModelResponse
-from docreader.llm.request import ModelCorrectionStalled
+from docreader.integrations.store import Cancelled, StaleExecution, Store
+from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.workflow.graph import build_graph
 from docreader.workflow.persistence import FencedPostgresSaver
 
@@ -71,9 +70,10 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
         await graph_task
     except (Cancelled, StaleExecution):
         return
-    except (UncertainModelResponse, RequestReplayBlocked, ModelCorrectionStalled) as error:
+    except ModelWorkUnitExhausted as error:
         with suppress(StaleExecution, psycopg.Error):
-            await store.release(lease, "failed", error=type(error).__name__)
+            await store.release(lease, "failed", error=type(error).__name__,
+                                metadata={"reason": "model_work_unit_retries_exhausted"})
         raise
     except Exception as error:
         with suppress(StaleExecution, psycopg.Error):
