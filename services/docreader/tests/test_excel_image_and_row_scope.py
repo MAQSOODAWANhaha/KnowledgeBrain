@@ -90,3 +90,36 @@ def test_image_only_sheet_preserves_each_occurrence_with_shared_payload(placemen
     assert len(identities) == placements
     assert all(u['section_id'] == 'sheet:0' and u['rendered_spans'] for u in identities)
     assert len({u['rendered_spans'][0]['start_byte'] for u in identities}) == placements
+
+
+@pytest.mark.parametrize('merge', ['A1:A2', 'A4:C4', 'A3:C4'])
+def test_row_preserves_complete_intersecting_merges_outside_defined_table(merge):
+    from openpyxl.worksheet.table import Table
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for address, value in {'D1': '项目', 'E1': '响应', 'D2': '表内合并',
+                           'D3': '服务', 'E3': '提供'}.items():
+        sheet[address] = value
+    sheet.merge_cells('D2:E2')
+    sheet.add_table(Table(displayName='DefinedForm', ref='D1:E3'))
+    anchor = merge.split(':')[0]
+    sheet[anchor] = '必须保留合并格式的证明说明。'
+    sheet.merge_cells(merge)
+    row_number = sheet[anchor].row
+    # This blank merge shares the row but lies beyond its physical columns.
+    sheet.merge_cells(f'G{row_number}:H{row_number}')
+    document = ExcelParser(file_name='merge.xlsx', file_type='xlsx').parse(workbook_bytes(workbook))
+    row = next(unit for unit in document.structured_source_units if unit.key == f'sheet:0:row:{row_number}')
+    assert [region.a1_range for region in row.locator.merged_ranges] == [merge]
+    assert row.locator.region.start_row == row.locator.region.end_row == row_number
+    assert row.locator.region.end_column == (1 if row_number == 4 else 5)
+    identity = next(unit for unit in json.loads(document.metadata['source_contract'])['units']
+                    if unit['unit_id'] == row.key)
+    assert identity['physical_locator']['merged_ranges'] == [region.model_dump() for region in row.locator.merged_ranges]
+    table = next(unit for unit in document.structured_source_units if unit.grid)
+    assert [region.a1_range for region in table.locator.merged_ranges] == ['D2:E2']
+    assert (table.grid.row_count, table.grid.column_count) == (3, 2)
+    merged = next(cell for cell in table.grid.cells if (cell.row, cell.column) == (1, 0))
+    assert merged.col_span == 2 and merged.text == '表内合并'
+    assert not any((cell.row, cell.column) == (1, 1) for cell in table.grid.cells)

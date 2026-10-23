@@ -6,11 +6,13 @@ import json
 
 
 _FIELDS = {
+    'rule_id': 'e', 'rule_ids': 'e', 'from_rule_ids': 'e', 'to_rule_ids': 'e',
     'range_id': 'r', 'range_ids': 'r', 'target_range_ids': 'r', 'applies_to_range_ids': 'r',
     'reviewed_target_range_ids': 'r', 'decision_range_id': 'r',
     'item_id': 'i', 'item_ids': 'i', 'from_item_id': 'i', 'to_item_id': 'i',
     'target_item_id': 'i', 'replacement_item_ids': 'i',
-    'relation_id': 'l', 'relation_ids': 'l', 'decision_id': 'd', 'accepted_decision_ids': 'd',
+    'relation_id': 'l', 'relation_ids': 'l', 'unverified_relation_ids': 'l',
+    'decision_id': 'd', 'accepted_decision_ids': 'd',
     'candidate_id': 'c', 'issue_id': 'q', 'issue_ids': 'q', 'related_issue_ids': 'q',
     'document_id': 'doc', 'section_id': 's', 'parent_section_id': 's',
     'work_unit_id': 'w', 'pack_id': 'p', 'table_id': 't', 'table_ids': 't',
@@ -22,7 +24,7 @@ class WirePayload:
     VERSION = 'tender_short_refs_v2'
 
     def __init__(self, task, payload):
-        self.enabled = task in {'extract', 'verify'} and payload.get('schema_version') == 2
+        self.enabled = task in {'extract', 'verify', 'outline'} and payload.get('schema_version') == 2
         self.mapping = {}
         self.original_work_unit = payload.get('work_unit_id')
         self.payload = deepcopy(payload)

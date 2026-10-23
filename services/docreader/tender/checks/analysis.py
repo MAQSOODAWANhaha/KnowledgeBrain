@@ -15,9 +15,10 @@ import re
 
 from pydantic import ValidationError
 
+from docreader.integrations.store import Cancelled, StaleExecution
 from docreader.llm import ModelSemanticError
 from docreader.llm.budget import RequestBudget
-from docreader.llm.request import ModelContractError
+from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.evidence.packing import SupportingIndex
 from docreader.tender.evidence.references import EvidenceRepository
 from docreader.tender.evidence.view import (
@@ -304,7 +305,8 @@ class _Analysis:
     def findings(self, values, payload):
         allowed = _view_ids(payload["source_views"])
         if payload["operation"] == "locate":
-            allowed |= {e["range_id"] for item in payload["items"] for e in item["evidence"]}
+            allowed |= {e["range_id"] for field in ("items", "relations")
+                        for entry in payload[field] for e in entry["evidence"]}
         allowed |= {p["range_id"] for p in payload["issues"] if p.get("range_id")}
         items = {item["item_id"] for item in payload["items"]}
         for index, finding in enumerate(values):
@@ -417,7 +419,8 @@ class _Analysis:
                 value[f"reviewed_{name}_ids"] = sorted(identities)
         elif operation == "locate":
             allowed_ranges = (_view_ids(payload["source_views"])
-                | {e["range_id"] for item in payload["items"] for e in item["evidence"]}
+                | {e["range_id"] for field in ("items", "relations")
+                   for entry in payload[field] for e in entry["evidence"]}
                 | {p["range_id"] for p in payload["issues"] if p.get("range_id")})
             allowed_sections = {(document["document_id"], section["section_id"])
                                 for document in payload["catalog"] for section in document["sections"]}
@@ -543,10 +546,45 @@ class _Analysis:
             return plan
 
         plan_ref = await save(f"analysis-{phase}-plan", planned, inputs={"plan_digest": plan_digest})
-        results = []
+        semaphore = getattr(model, "semaphore", None) or asyncio.Semaphore(2)
+        scope_locks = {payload["work_unit_id"]: asyncio.Lock() for payload in payloads}
+        stopped = asyncio.Event()
+
         # Each call is a bounded sibling with its own immutable paid-call receipt.
-        for payload, descriptor in zip(payloads, descriptors, strict=True):
+        async def worker(payload, descriptor):
             if descriptor["budget"]["fits"] is False:
+                return None
+            async with scope_locks[payload["work_unit_id"]], semaphore:
+                if stopped.is_set():
+                    return None  # The stage raises before these skipped slots are aggregated.
+                try:
+                    async def produce():
+                        if hasattr(model, "call_validated"):
+                            return await model.call_validated("verify", payload, lambda value: self.validate(value, payload))
+                        value = await model.call("verify", payload)
+                        return await asyncio.to_thread(self.validate, value, payload)
+
+                    ref = await save(f"analysis-{phase}", produce, scope=payload["work_unit_id"],
+                                     inputs={"plan_ref": plan_ref, "payload_digest": descriptor["input_digest"]}, model=True)
+                    return ref, await asyncio.to_thread(self.artifacts.read_json, ref)
+                except BaseException:
+                    # Stop new units before releasing capacity; started siblings
+                    # retain their existing retries and settle independently.
+                    stopped.set()
+                    raise
+
+        # Settle successful siblings before propagating a failure. External
+        # cancellation still cancels and awaits all workers through gather.
+        settled = await asyncio.gather(*(worker(payload, descriptor)
+            for payload, descriptor in zip(payloads, descriptors, strict=True)), return_exceptions=True)
+        failures = [result for result in settled if isinstance(result, BaseException)]
+        if failures:
+            stop = (asyncio.CancelledError, Cancelled, StaleExecution)
+            fallback = next((failure for failure in failures if isinstance(failure, ModelWorkUnitExhausted)), failures[0])
+            raise next((failure for failure in failures if isinstance(failure, stop)), fallback)
+        results = []
+        for payload, result in zip(payloads, settled, strict=True):
+            if result is None:
                 problems = assign_issues([issue("analysis_budget_exceeded",
                     "Complete indivisible analysis input exceeds the admission budget; the host request grouping "
                     "must be fixed before rerunning, a source revision cannot shrink it.")],
@@ -558,15 +596,7 @@ class _Analysis:
                 results.append(None)
                 continue
 
-            async def produce(payload=payload):
-                if hasattr(model, "call_validated"):
-                    return await model.call_validated("verify", payload, lambda value: self.validate(value, payload))
-                value = await model.call("verify", payload)
-                return await asyncio.to_thread(self.validate, value, payload)
-
-            ref = await save(f"analysis-{phase}", produce, scope=payload["work_unit_id"],
-                             inputs={"plan_ref": plan_ref, "payload_digest": descriptor["input_digest"]}, model=True)
-            value = await asyncio.to_thread(self.artifacts.read_json, ref)
+            ref, value = result
             self.operation_refs.append({"operation": phase, "work_unit_id": payload["work_unit_id"], "artifact_ref": ref})
             self.problems.extend(self.findings(value["findings"], payload))
             results.append(value)
@@ -620,9 +650,11 @@ class _Analysis:
     def locate_requests(self):
         """Cover every item pair with block unions; never keyword filtering."""
         def discovery(items, work_unit=None):
+            ids = {item["item_id"] for item in items}
+            relations = [r for r in self.relations.values() if {r["from_item_id"], r["to_item_id"]} <= ids]
             selected = {}
-            for item in items:
-                for evidence in item["evidence"]:
+            for entry in [*items, *relations]:
+                for evidence in entry["evidence"]:
                     source = self.sources[evidence["range_id"]]
                     key = (source["document_id"], source.get("section_id"))
                     selected.setdefault(key, {})[evidence["range_id"]] = None
@@ -634,8 +666,8 @@ class _Analysis:
                 if sections:
                     catalog.append({**document, "sections": sections})
             if work_unit is None:
-                return self.stable_payload("locate", "discovery", items=items, catalog=catalog)
-            return self.payload("locate", work_unit, items=items, catalog=catalog)
+                return self.stable_payload("locate", "discovery", items=items, relations=relations, catalog=catalog)
+            return self.payload("locate", work_unit, items=items, relations=relations, catalog=catalog)
 
         all_items = list(self.items.values())
         if all_items and self.budget.measure("verify", discovery(all_items))["fits"] is not False:
@@ -643,8 +675,8 @@ class _Analysis:
         else:
             blocks, current = [], []
             for item in all_items:
-                # Reserve both items and local navigation for an arbitrary
-                # counterpart whose documents/sections may all be different.
+                # Initial estimate reserves both sides' items and navigation;
+                # actual unions below also account for cross-block relations.
                 trial = discovery([*current, item], "discovery-capacity")
                 trial["items"] *= 2
                 trial["catalog"] *= 2
@@ -654,9 +686,25 @@ class _Analysis:
                 current.append(item)
             if current:
                 blocks.append(current)
-            # With multiple blocks, their unions already cover every within-block pair.
-            groups = [a + b for a, b in itertools.combinations(blocks, 2)] if len(blocks) > 1 else blocks
-            requests = [discovery(group) for group in groups]
+            requests = []
+            while blocks:
+                # Repartition globally so splitting an oversized union never
+                # loses pairs between the two halves of a split block.
+                groups = (itertools.combinations(range(len(blocks)), 2) if len(blocks) > 1
+                          else [(0,)])
+                requests = []
+                for group in groups:
+                    payload = discovery([item for index in group for item in blocks[index]])
+                    splittable = [index for index in group if len(blocks[index]) > 1]
+                    if self.budget.measure("verify", payload)["fits"] is False and splittable:
+                        index = max(splittable, key=lambda index: len(blocks[index]))
+                        block = blocks[index]
+                        middle = len(block) // 2
+                        blocks[index:index + 1] = [block[:middle], block[middle:]]
+                        break
+                    requests.append(payload)
+                else:
+                    break
         def reference(problems):
             ids = {identity for problem in problems for identity in problem.get("item_ids", [])}
             ranges = {problem["range_id"] for problem in problems if problem.get("range_id")}
@@ -811,6 +859,7 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
             associated_only.update(c["candidate_id"] for c in payload["candidates"])
             continue
         joint.append({**payload, "operation": "review", "work_unit_id": payload["work_unit_id"].replace("associate-", "joint-"),
+                      "dispositions": [],
                       "relations": [*payload["relations"], *result["relations"]], "decisions": result["decisions"],
                       "issues": _public_issues(assign_issues([*payload["issues"], *result["findings"]],
                                                              payload["work_unit_id"]))})

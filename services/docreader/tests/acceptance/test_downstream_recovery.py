@@ -49,7 +49,7 @@ async def _submit(runtime, *, ballast=False, ballast_repeats=70, document_ids=("
     return await store.submit(artifacts.put_json(registered), uuid4().hex)
 
 
-def _executor(runtime, run, *, scope_repeats=12, fail_operation=None, candidates=False,
+def _executor(runtime, run, *, scope_repeats=11, fail_operation=None, candidates=False,
               unknown_candidate=False, include_conditions=False, accept_decisions=True, relation_repeats=1,
               reason_repeats=10, scattered_failures=False):
     store, artifacts, settings, _ = runtime
@@ -268,6 +268,7 @@ async def test_joint_review_budget_includes_full_proposed_relation_and_blocks_be
     proposal = artifacts.read_json(receipts[0]["artifact_ref"])
     joint_payload = {**associations[0], "operation": "review",
                      "work_unit_id": associations[0]["work_unit_id"].replace("associate-", "joint-", 1),
+                     "dispositions": [],
                      "relations": [*associations[0]["relations"], *proposal["relations"]],
                      "decisions": proposal["decisions"]}
     plan = artifacts.read_json(checked["joint_plan_ref"])
@@ -287,7 +288,7 @@ async def test_partial_analysis_success_reuses_durable_operation_receipts(runtim
     store, artifacts, _, _ = runtime
     run = await _submit(runtime)
     # Association/joint need complete candidate components that fit together.
-    execute, calls, _ = _executor(runtime, run, scope_repeats=2 if operation in {"associate", "joint"} else 12,
+    execute, calls, _ = _executor(runtime, run, scope_repeats=2 if operation in {"associate", "joint"} else 11,
                                   fail_operation=operation, candidates=operation in {"associate", "joint"},
                                   reason_repeats=1 if operation in {"associate", "joint"} else 10)
     recovered = await execute()

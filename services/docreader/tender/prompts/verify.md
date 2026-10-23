@@ -33,7 +33,8 @@ change each other's meaning when read together, and the supplied ledger does not
 capture that combination. Skip items that merely share a topic, heading or document.
 Read every supplied item; do not filter by business topic or keywords. Omitting a candidate
 is not a finding that the set is conflict-free. Reference requests also contain the original
-passage in source_views. Both modes supply full item evidence.quote.
+passage in source_views. Both modes supply full item evidence.quote. Discovery also supplies
+existing relations between the selected items, including their evidence.
 
 Inspect batched issues separately; shared sources do not imply one problem. Preserve doubts.
 Return exactly:
@@ -51,7 +52,7 @@ The host loads their complete original passages before association. page_ordinal
 zero-based physical PDF page index below page_count, never a printed page label. Use it
 only when that mapping is known; ambiguous "see page N" stays unresolved. The host loads
 the whole selected page and necessary context. range_ids may select only visible ranges,
-item evidence ranges or input issue locations; do not invent ranges for catalog chapters.
+item or relation evidence ranges or input issue locations; do not invent ranges for catalog chapters.
 Do not invent items, create relations, settle amendments or resolve issues from navigation.
 
 ## operation=associate

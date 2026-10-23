@@ -585,6 +585,108 @@ async def test_joint_blocking_findings_prevent_acceptance_even_if_model_lists_th
 
 
 @pytest.mark.asyncio
+async def test_joint_skips_omission_targets_and_preserves_complete_review_context(tmp_path):
+    data = await scenario(tmp_path, analysis_issue=True)
+    artifacts, plan, index, _ = data
+    extracted = artifacts.read_json(index["packs"][0]["artifact_ref"])
+    first, second = extracted["items"][:2]
+    original_relation = {"relation_id": "original:l1", "from_item_id": first["item_id"],
+        "to_item_id": second["item_id"], "relation": "评分规则涉及人员资质。",
+        "evidence": deepcopy(first["evidence"])}
+    extracted["relations"].append(original_relation)
+    index["packs"][0]["artifact_ref"] = artifacts.put_json(extracted)
+    plan["scope_decisions"] = [{"range_id": first["evidence"][0]["range_id"],
+        "decision": "local_only", "target_range_ids": [], "rationale": "该条件仅限定本项人员资质。",
+        "evidence": deepcopy(first["evidence"])}]
+    proposed = []
+
+    def candidate(payload):
+        candidates = reference_candidate(payload)
+        for entry in candidates:
+            entry["section_refs"] = [{"document_id": document["document_id"], "section_id": section["section_id"]}
+                for document in payload["catalog"] if document["document_id"] == "main"
+                for section in document["sections"]]
+        return candidates
+
+    def associated(payload):
+        value = resolution(payload)
+        relation = {**deepcopy(original_relation), "relation_id": payload["work_unit_id"] + ":l1"}
+        value["relations"] = [relation]
+        value["decisions"][0]["relation_ids"] = [relation["relation_id"]]
+        value["findings"] = [{"code": "source_formatting_note", "detail": "原文换行不影响本项含义。",
+                              "blocking": False, "range_id": first["evidence"][0]["range_id"]}]
+        proposed.append(deepcopy(value))
+        return value
+
+    model = Model(locate=candidate, associate=associated)
+    result = await run(data, model)
+    association, = [p for p in model.calls if p["operation"] == "associate"]
+    joint, = [p for p in model.calls if p["work_unit_id"].startswith("joint-")]
+    source_reviews = [p for p in model.calls if p["operation"] == "review" and not p["decisions"]]
+    expected_dispositions = {d["range_id"]: d for descriptor in index["packs"]
+        for d in artifacts.read_json(descriptor["artifact_ref"])["dispositions"]}
+    reviewed_dispositions = {d["range_id"]: d for p in source_reviews for d in p["dispositions"]}
+    assert reviewed_dispositions == expected_dispositions
+    assert association["dispositions"], "association retains its original source ledger"
+    assert joint["source_views"] == association["source_views"]
+    assert joint["items"] == association["items"]
+    assert joint["candidates"] == association["candidates"]
+    assert joint["scope_decisions"] == association["scope_decisions"] == plan["scope_decisions"]
+    assert joint["relations"] == [*association["relations"], *proposed[0]["relations"]]
+    assert joint["decisions"] == proposed[0]["decisions"]
+    assert joint["issues"] == assign_issues([*association["issues"], *proposed[0]["findings"]],
+                                           association["work_unit_id"])
+    assert result["accepted_decision_ids"] == [proposed[0]["decisions"][0]["decision_id"]]
+    assert joint["dispositions"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("facts,reason,detail,amendment", [
+    (["仅代理商须提供证明。", "制造商不适用该要求。"], "全部投标人均须提供证明。", "提案扩大了仅适用于代理商的条件。", False),
+    (["未提交证明应否决投标。", "制造商可以承诺函替代证明。"], "没有提交证明的一律否决。", "提案遗漏制造商的替代证明例外。", False),
+    (["交付期限30天，保修期2年。", "补遗仅将交付期限改为60天，保修期不变。"],
+     "补遗将原要求整体替换。", "提案未保留补遗没有修改的2年保修规则。", True),
+])
+async def test_joint_without_omission_targets_still_preserves_and_reports_counterevidence(tmp_path, facts, reason, detail, amendment):
+    data = await scenario(tmp_path, documents=[("main", "main", [(text, "obligation") for text in facts])],
+                          analysis_issue=True)
+
+    def associated(payload):
+        value = resolution(payload)
+        value["decisions"][0]["reason"] = reason
+        if amendment:
+            original, replacement = payload["items"]
+            value["decisions"][0].update(issue_ids=[], evidence=[*deepcopy(original["evidence"]),
+                *deepcopy(replacement["evidence"])], amendment={"target_item_id": original["item_id"],
+                    "effect": "replace", "affected_scope": "交付期限", "retained_rules": [],
+                    "replacement_item_ids": [replacement["item_id"]]})
+        return value
+
+    def counterevidence(payload, value):
+        if payload["operation"] == "locate":
+            for candidate in value["candidates"]:
+                candidate["section_refs"] = [{"document_id": document["document_id"], "section_id": section["section_id"]}
+                    for document in payload["catalog"] for section in document["sections"]]
+        elif payload["work_unit_id"].startswith("joint-"):
+            visible = [entry for view in payload["source_views"] for key in ("body", "supporting") for entry in view[key]]
+            assert {entry["text"] for entry in visible} == set(facts)
+            contrary = next(entry for entry in visible if entry["text"] == facts[1])
+            value["findings"] = [{"code": "condition_unclear", "detail": detail, "blocking": True,
+                                  "range_id": contrary["range_id"]}]
+
+    model = Model(locate=reference_candidate, associate=associated, mutate=counterevidence)
+    result = await run(data, model)
+    joint, = [p for p in model.calls if p["work_unit_id"].startswith("joint-")]
+    assert result["accepted_decision_ids"] == []
+    assert result["resolved_issue_ids"] == []
+    assert any(problem["detail"] == detail for problem in result["issues"])
+    assert any(problem["code"] == "decision_not_accepted" for problem in result["issues"])
+    if amendment:
+        assert {entry["item"]["text"] for entry in current_items(data[0], result)} == set(facts)
+    assert joint["dispositions"] == []
+
+
+@pytest.mark.asyncio
 async def test_accepted_decision_cannot_erase_a_host_source_blocker(tmp_path):
     host = {"code": "source_partial", "detail": "必要附件仍不可读。", "blocking": True}
     data = await scenario(tmp_path, source_issues=[host])

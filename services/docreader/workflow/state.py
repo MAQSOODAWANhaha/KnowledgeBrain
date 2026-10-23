@@ -18,4 +18,4 @@ class TenderState(TypedDict, total=False):
 
 
 STAGES = ("register", "freeze", "extract", "verify", "confirm")
-WORKFLOW_PROTOCOL = {"schema_version": 2, "normalization_version": 6, "stages": list(STAGES)}
+WORKFLOW_PROTOCOL = {"schema_version": 2, "normalization_version": 8, "stages": list(STAGES)}

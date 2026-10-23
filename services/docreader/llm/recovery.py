@@ -51,7 +51,7 @@ def _rejection_feedback(feedback, count, response_kind):
     return json.loads(json.dumps(feedback, sort_keys=True, ensure_ascii=False))
 
 
-async def call_validated(model, store, artifacts, lease, task, payload, validate, *, images=()):
+async def call_validated(model, store, artifacts, lease, task, payload, validate, *, images=(), owner_metadata=None):
     inputs = {'task': task, 'payload': payload}
     if images:
         inputs['images'] = [hashlib.sha256(image_data_url(image).encode()).hexdigest() for image in images]
@@ -113,9 +113,9 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         errors = feedback['errors']
         request_ref = await asyncio.to_thread(artifacts.put_json, current)
         response_ref = await asyncio.to_thread(artifacts.put_json, response)
+        owner = owner_metadata if owner_metadata is not None else {'command_id': lease.command_id, 'epoch': lease.epoch}
         rejection = {'task': task, 'input_digest': identity, 'request_ref': request_ref,
-                     'response_ref': response_ref, 'errors': errors,
-                     'command_id': lease.command_id, 'epoch': lease.epoch,
+                     'response_ref': response_ref, 'errors': errors, **owner,
                      'response_kind': response_kind, 'feedback': feedback}
         ref = await asyncio.to_thread(artifacts.put_json, rejection)
         scope = f'{identity}:{sequence}'

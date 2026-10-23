@@ -7,7 +7,7 @@
 工作区`tender/schema.py`、抽取/核验提示和五节点主线已实现v2；下文单列的v1合同仍供
 历史独立工具使用，不自动转换旧回包。v2压缩、回包容错和默认重试已部署，两类审阅身份修复后真实独立核验已恢复，新协议语义验收未完成；
 测试及部署事实以[交接](handoff.md)为准。
-下文“问题续报与按需补读”已在源码实现；可信问题来源为normalization_version=4，处置恢复出口及覆盖分级修复为5，工作单元重试与JSON反馈升为6。部署及实测状态见交接，不改变旧执行的冻结协议。
+下文“问题续报与按需补读”已在源码实现；可信问题来源为normalization_version=4，处置恢复出口及覆盖分级修复为5，工作单元重试与JSON反馈升为6，joint职责与阶段内调度升为7，discovery已有关系及完整并集准入升为8。部署及实测状态见交接，不改变旧执行的冻结协议。
 
 第一阶段完整分析招标文件，目标为 `register → freeze → extract → verify → confirm`，
 确认后到 `analysis-ready`。输入为招标文件、附件、澄清和补遗；不引入企业响应数据、响应计划、
@@ -206,13 +206,13 @@ ID 到不可变产物的映射由宿主回执固定。实际协议、操作及�
 | `SourceRangeView` 正文 | 普通段落保留 `text` 原文。表格行用 `cells: SourceCellView[]` 直接提供单元格原文；当各单元格及原生行分隔符完整表达本范围时省略重复的整行 `text`。不能完整表达的范围保留 `text`，不得丢掉未被单元格覆盖的原文；宿主的规范行全文、字符偏移与定位保持不变 |
 | `SourceCellView` | `{column: 非负int, text: string, row?: 非负int, row_span?: 正int, col_span?: 正int, formula?: string, ...}`；text为当前范围实际可见的单元格原文，允许空字符串，保留换行、Unicode与合并/公式等原有语义字段。不发送cell的start/end让模型切片；片段由代码按规范字符区间切好。证据按本次实际可见的text或单元格原文逐条引用，不能引用未发送的单元格剩余内容 |
 | `source_aliases` | SourceView内的既有引用身份及实际已发segments映射，不新增正文副本。引文须受原别名区间约束且由本次实际可见文本证明；普通段落的连续已发片段可还原引文，cells-only片段不能借规范整行全文或分隔符拼接成引文。若整行text实际已发，可引用其原文子串 |
-| `catalog` | CatalogEntry[]，仅 locate 携带；discovery 为本批事项证据所在文档/章节的局部目录，reference 为完整章节定位目录。抽取不携带全目录，associate/review 使用已装载原文。目录不表示正文已经装载或审阅 |
+| `catalog` | CatalogEntry[]，仅 locate 携带；discovery 为本批事项及已提供关系的证据所在文档/章节的局部目录，reference 为完整章节定位目录。抽取不携带全目录，associate/review 使用已装载原文。目录不表示正文已经装载或审阅 |
 | `CatalogEntry` | `{document_id: string, document_version: string, role: string, sections: CatalogSection[], page_count?: 正int}`；文档身份只发送一次，role 沿用登记角色。仅冻结PDF有完整、连续的0基物理页清单且页数一致时提供page_count；不发送全量页码定位表 |
-| `CatalogSection` | `{section_id: string或null, heading_path: string, range_ids?: 非空string[]}`；discovery 的 range_ids 仅映射本批事项实际引用的来源，不附全章范围清单、页码、坐标或存储引用，也不扩大证据引用权限。宿主通过当前冻结索引的 `(document_id, section_id)` 装载全部章节原文；无章节为null，不得按标题文本猜测或去重 |
+| `CatalogSection` | `{section_id: string或null, heading_path: string, range_ids?: 非空string[]}`；discovery 的 range_ids 仅映射本批事项及已提供关系实际引用的来源，不附全章范围清单、页码、坐标或存储引用，也不扩大证据引用权限。宿主通过当前冻结索引的 `(document_id, section_id)` 装载全部章节原文；无章节为null，不得按标题文本猜测或去重 |
 | `items`, `dispositions`, `relations`, `decisions` | 对应本字典的完整对象数组；由宿主按实际引用装载，不发送内容摘要冒充原对象 |
 | 输入 `issues` | 已持久化 Issue[]，每项额外带宿主赋予的 issue_id；相关来源缺口也须显式提供 |
 | 输入 `scope_decisions` | 可选的现有 ScopeDecision[]；当前修订有显式人工作用域审议时发送完整 decision、rationale、evidence 和 target_range_ids，包括 local_only。是需结合原文复核的解释/绑定依据，不自动解除独立核验或来源阻断；无审议时省略 |
-| `Candidate` | `{candidate_id: string, issue_ids: string[], range_ids: string[], item_ids: string[], reason: 非空string, section_refs?: SectionRef[], page_refs?: PageRef[]}`；至少一个来源、事项、章节或物理页引用；前三个 ID 数组必填，无值的可选引用数组省略。range_ids 仅引用实际提供的来源或完整事项证据，section_refs 仅引用目录中已提供的章节，page_refs仅引用目录声明支持的物理页。未指向既有问题时 issue_ids 为 `[]`。共享来源或事项不自动合并独立候选；同一具体 issue_id 的多个候选须联合核对，单个候选不得拆分 |
+| `Candidate` | `{candidate_id: string, issue_ids: string[], range_ids: string[], item_ids: string[], reason: 非空string, section_refs?: SectionRef[], page_refs?: PageRef[]}`；至少一个来源、事项、章节或物理页引用；前三个 ID 数组必填，无值的可选引用数组省略。range_ids 仅引用实际提供的来源或完整事项/关系证据，section_refs 仅引用目录中已提供的章节，page_refs仅引用目录声明支持的物理页。未指向既有问题时 issue_ids 为 `[]`。共享来源或事项不自动合并独立候选；同一具体 issue_id 的多个候选须联合核对，单个候选不得拆分 |
 | `SectionRef` | `{document_id: string, section_id: string或null}`；同一候选内不得重复。宿主解析引用并加载该章节全部原文及必要表头/条件后才能 associate 和联合 review；目录或引用本身不能作为原文证据，装载后超预算须阻断，不能静默截断章节 |
 | `PageRef` | `{document_id: string, page_ordinal: 非负int}`；page_ordinal为PDF文件0基物理页序号，须小于该文档catalog.page_count，同一候选内不得重复。宿主用冻结页清单/原生物理定位装载该页全部原文、图片OCR及必要条件；缺失、部分解析、OCR未完成或预算不足保持阻断。印刷页码与PDF物理页序号不能默认等同；仅写“见第N页”且映射不明时保留未决，不用正则或模型猜测映射 |
 | `candidate_id` | `<work_unit_id>:c1` 等身份；只表示待联合核对的候选组，不证明存在冲突或关系 |
@@ -247,7 +247,7 @@ sent不可并发重发。已记录的抽取 completion 曾到 43709，不能把 
 
 | operation | 输入（除公共版本身份外） | 输出 |
 | --- | --- | --- |
-| `locate` | catalog、issues、items；引用定位须带原引用的 source_views，跨源候选发现须带计划覆盖的完整事项及来源身份 | `{schema_version: 2, candidates: Candidate[], findings: Issue[]}`；只能提出来源定位或跨源候选，不能解决问题或判定全局无冲突 |
+| `locate` | catalog、issues、items；引用定位须带原引用的 source_views，跨源候选发现须带计划覆盖的完整事项、两端事项均在场的已有完整relations及来源身份 | `{schema_version: 2, candidates: Candidate[], findings: Issue[]}`；只能提出来源定位或跨源候选，不能解决问题或判定全局无冲突 |
 | `associate` | candidates、source_views、items、relations、issues；宿主装载引用处、候选目标、条件及表头的全部必要原文 | `{schema_version: 2, relations: Relation[], decisions: Decision[], findings: Issue[]}`；只生成待验关系/决议，不得修改已保存事项或解除问题 |
 | `review` | source_views、items、dispositions、relations、decisions、issues，以及本次联合核验的 candidates | 上文核验输出；独立读取原文核对事项、关系及每条决议，不沿用 associate 的结论当作证据 |
 
@@ -290,9 +290,11 @@ locate 除处理已知引用外，还须对当前完整事项台账发现跨包/
 - 首轮复用完整 TenderItem，所有字段及 evidence.quote 保持原值，暂不引入 LocateItemView。
   将 quote 延后装载的投影虽有进一步节省，但事项 text 不保证与引文语义完全等价，
   需后续语义对照验证后再决定。associate/review 继续装载完整事项、证据与必要来源上下文。
-- 事项间 discovery 的 catalog 仅包含本批事项证据所在的文档和章节，保留 document_version、
+- 事项间 discovery 提供本批事项两端均在场的完整已有relations及evidence，供模型判断台账
+  是否已表达某组合，不由宿主按关系存在跳过候选。catalog仅包含本批事项及这些关系证据
+  所在的文档和章节，保留 document_version、
   role、heading_path 及已声明的 PDF page_count。各章节可附 `range_ids: string[]`，仅列出
-  本批事项实际引用的来源，用于建立证据身份到文档/章节的映射，不扩充可引用来源。
+  本批事项及已提供关系实际引用的来源，用于建立证据身份到文档/章节的映射，不扩充可引用来源。
   复用现有目录结构，不新增定位节点；完整 heading_path 保留章节及标段上下文，不根据
   标题正则推断适用性。reference 合批保留全目录和原引用 source_views，允许选章节/页。
   两者仍属既有 locate 子操作，不增加工作流主节点或状态。
@@ -305,6 +307,9 @@ locate 除处理已知引用外，还须对当前完整事项台账发现跨包/
   输出容量及用量复核批大小。早期原型为23包/16包；生产实现保留局部语义目录并限制8题，
   同一文件离线为40包。均不是固定请求上限或语义验收；不能只按输入上限塞满问题，
   也不能直接外推为多文档容量结果。块间容量试算同时为两侧事项和局部目录预留空间。
+- 初始块试算不能界定跨块关系体积，最终须按含完整关系及目录的真实块并集重新准入。
+  超限则确定性二分其中最大的可拆事项块，重建全部块对；不可分事项对仍超限走原预算
+  修复出口，不删关系或事项对。全量事项、关系和目录不因规划修改而变动。
 - 修改后的请求和计划使用实际新摘要；已有成功产物及原回包保留，不原地改写旧执行快照。
   当前固定协议的运行如何切换需在实施时明确，不能直接把旧计划的回执视为新计划完成。
 现有 ArtifactRef、来源定位、输入/请求摘要、预算及发送围栏继续使用下文同名合同，
@@ -609,6 +614,242 @@ Store在转sent的同一事务检查已发送意图次数，最多4次；缓存�
 此对象只是 associate 回包中的待验 Decision。后续独立 review 须实际装载两份原文和两项事项，
 在 accepted_decision_ids 中明确接受本次实际提供的 a1:d1；只返回
 findings=[] 不能解决 q1。原文/版本变化或任一必要核验未接受时，旧提案不授权当前结果。
+
+## 核验职责与共读（最小修改已实现）
+
+三轮评审后的[当前方案](bug-fix.md#核验职责与共读修复方案最小修改已实现)沿用现有字段，
+不新增groups/group_results、Issue/Decision字段或第二套任务身份。此前的分组包装设想
+暂缓，不是待直接实施的协议；当前v2回包结构保持不变。职责与调度修改引入于冻结执行
+版本7，当前连同discovery关系供给使用版本8，
+旧版本运行保持原合同，不热切换；部署和真实模型验证状态以交接为准。
+
+| 现有字段或合同 | 最小方案 |
+| --- | --- |
+| source review的dispositions | 不变，仍按目标范围检查全源漏项 |
+| joint的dispositions | 仅在发送投影覆盖为[]，停止再次发起通用查漏，不修改全局台账处置 |
+| joint的source_views/items/relations/candidates/decisions/issues及scope_decisions | 完整保留原单组输入及关联产物，不裁原文、条件、例外、对象或旧问题 |
+| 核验输出 | 继续schema_version、accepted_decision_ids、findings；不新增结果包装或覆盖名单 |
+| 接受与人工出口 | 保留原整组blocking、protected、补遗冲突及确认规则，不增加运行门禁 |
+
+现有verify Prompt已区分“原文支持下的语义核验”和“dispositions目标查漏”；review
+职责指令未改，locate已补充已有关系和证据引用说明，因此共享Prompt摘要已改变。
+joint空列表是否足够仍待定向真实调用。即使无通用查漏目标，仍须发现影响决议的条件、
+例外、数值归属、证明边界和补遗保留规则错误。新观察正常保留，不能靠压制finding通过。
+旧问题不因未被再次提及而解决；续报仍用现有related_issue_ids。protected仅限制自动
+决议，不把原有human类问题改成硬阻断。同组多决议尚无精细部分接受，明确保留该局限。
+
+共读仅是待证明收益的备选：未显式引用的上下文也可能影响结论，不能让associate先读
+共享并集、joint再仅按引文裁回旧组来源。首批试验须保留associate实际可见公共证据及
+必要对象；若因此超预算或抵消收益，不采用该合批。后续选择性缩小依赖需独立论证，
+不能从缺少quote推定无依赖，也不能提前给备选字段赋予正式协议含义。
+调用公式、预算、修订及重试范围见方案；实际状态和观察值只在交接维护。
+
+## Python编制输入（T0/T1）
+
+后续编制先在Python独立执行，业务范围及任务顺序见[编制任务规划](implementation.md#python投标编制闭环任务规划独立于一期)。
+本轮先固化编制输入；大纲、模板、响应位置、知识资料及正文的新增字段在对应任务编码前
+继续在本字典定义，不提前为尚未验证的用例建立完整字段体系。原五节点、模型回包和确认
+协议保持原义，不复用历史v1响应计划。下列输入由宿主产生，不发送给LLM要求其回填。
+
+### AuthoringInput
+
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `schema_version` | 整数2 | 是 | 当前统一分析合同的引用输入，不另加编制输入版本配置 |
+| `run_id` | Identity | 是 | 所消费的分析运行 |
+| `source_version` | PositiveInt | 是 | 所消费的来源版本 |
+| `domain_revision` | PositiveInt | 是 | 所消费的领域修订 |
+| `checklist_digest` | Digest | 是 | 分析与确认的既有清单摘要，算法沿用verify，不重新定义摘要序列化 |
+| `frozen_ref` | ArtifactRef | 是 | 当前来源冻结产物；原文、原表格及必要背景按引用读取 |
+| `pack_plan_ref` | ArtifactRef | 是 | 当前分析分包索引及scope_decisions；片段定位须经过既有selector还原 |
+| `items_ref` | ArtifactRef | 是 | 全部抽取产物索引，不代表全部原事项仍然有效 |
+| `verification_ref` | ArtifactRef | 是 | 有效决议、关系核验状态、问题及覆盖的既有核验产物 |
+| `confirmation_ref` | ArtifactRef | 是 | 当前修订的既有confirm产物；人工意见从中读取，不新增确认状态 |
+
+`read_authoring_input(store, artifacts, *, run_id, source_version, domain_revision, checklist_digest)`
+是Python内部只读函数。调用者显式固定预期版本和摘要；当前运行须已analysis-ready、未取消，
+且与预期一致。只从该运行的当前修订回执取根产物，冻结来源取领域修订0；历史产物和
+相同stage的子包不替代根产物。各引用经现有CAS校验，分包来源及run_identity、核验的
+items_ref、原算法复算的清单摘要、确认产物和持久确认记录须一致。
+核验hard_blocking须为false，但不因已由人工处理的语义问题仍有blocking=true而拒绝读取。
+frozen、pack-plan、extract索引及verify根产物须为schema_version=2；confirm沿既有payload，
+没有schema_version。不要求兼容v2产物的normalization_version等于当前执行版本。
+
+读取错误沿现有InvalidConfirmation或ArtifactIntegrityError返回，不修改分析状态或添加
+业务门禁。未确认时先完成既有确认；版本过期时重新获取当前分析，尚未确认时完成既有确认；产物缺失或损坏
+时从原产物恢复后重读，不能让LLM重写来源或用历史回执代替。只读结果是绑定版本的快照，
+不是执行租约；将来启动编制时仍须核对当前版本，不能凭一次读取长期授权旧稿。
+
+### 按需装载与事实保留
+
+- 有效事项复用`current_items`。其既有条目为`{item_ref,item,decision_ids?}`或
+  `{item_ref,decision_id,effective_rule}`；二者均须保留。effective_rule只携带已接受决议明确
+  保留的text/scope/evidence，不继承原项的numbers/scoring等可选值，不重造item_id。
+- 关系从verification的relations_ref读取，并保留unverified_relation_ids；决议从decisions_ref
+  读取，并保留accepted_decision_ids。只有既有接受规则决定补遗投影，读取和人工确认不改变核验状态。
+- 问题保留issues/all_issues及确认中的issue_resolutions；acknowledged表示知悉并保留，
+  dismissed为人工驳回，二者都不改写原问题或变成模型已解决。
+- 原文和表格复用EvidenceRepository。evidence.range_id可能是片段身份，须沿pack_plan的
+  body/supporting selector装载原区间及定位；不能直接用片段ID索引原生范围，也不能只把
+  原文引文当成完整项目背景。此输入不复制正文、事项、运维命令或模型费用流水。
+
+本轮读取新增模型调用为0、模型输入输出为0；调用次数不随文件规模增长。宿主只读工作
+随现有索引及所需产物规模增加。来源或领域修订沿既有重验/确认规则处理，读取本身可重做
+且不消耗付费重试；后续生成的重跑量按实际依赖确定。模型无需誊写任何本输入字段。
+
+## Python大纲与响应位置（T2）
+
+本批先实现可注入执行端的Python内部领域函数`organize_outline`：调用T1核对当前已确认版本，
+装载有效规则及必要原文，向执行端交付完整请求和回包校验函数，保存CAS大纲产物。
+不接旧v1 Plan，不修改分析Task、提示快照或五节点；领域函数不持有付费执行及恢复上下文，
+由下节独立执行入口负责，不能借用已完成分析的租约。执行端负责完整请求发送及首次加三次的统一
+失败/纠正重试；本函数不再套一层重试。测试执行端不能替代真实持久执行验收。
+
+### 持久引用与产物
+
+| 结构 | 字段 | 含义 |
+| --- | --- | --- |
+| EffectiveItemRef | item_ref: ItemRef；decision_id?: Identity；rule_index?: NonnegativeInt | 原项直接引用；局部保留分支同时提供decision_id和retained_rules的零起始rule_index，不复制规则正文；同一决议可保留多条规则 |
+| SourceUnitRef | source_index_ref: ArtifactRef；unit_id: Identity | 指向冻结原生unit，含完整固定文字、原表格grid及定位；document_id、原件和raw_ref由索引读取，不重复保存 |
+| ResponseTarget | target_id: Identity；kind: narrative/form/attachment；purpose: Text；rule_refs: EffectiveItemRef[]；source_refs: SourceUnitRef[] | 正文、规定格式/表格或证明附件位置。kind不代表业务领域或完成状态；同一规则可对应多个位置，评分规则也用同一引用 |
+| OutlineChapter | chapter_id: Identity；title: Text；targets: ResponseTarget[]；children: OutlineChapter[] | 有序章节树。章节和位置身份由宿主按路径产生，不要求模型生成或回抄；分组标题可没有targets |
+| OutlineIssue | code: Text；detail: Text；rule_refs: EffectiveItemRef[]；target_id?: Identity | 具体待处理事项；不新增blocking状态或再次确认流程，语义疑点、未分配规则及模板定位缺口都不能因保存大纲而视为解决 |
+| AuthoringOutline | schema_version: 整数2；authoring_input: AuthoringInput；chapters: OutlineChapter[]；issues: OutlineIssue[] | 绑定本次已确认分析。原分析问题、人工意见、关系核验状态继续从输入引用读取，不复制或改写台账 |
+
+上述字段除`?`外均必填；数组可以为空，空rule_refs的响应位置须有具体未绑定问题，不伪造要求。
+局部保留引用不继承旧项scoring等字段。章节/位置身份只在本产物内有效，不能跨大纲修订按
+同一路径假定同一内容；持久消费须绑定产物CAS。源表格按原unit装载，不由模型重写后保存。
+空白页等没有原生unit的虚拟范围不作为可选模板来源。XLSX的行范围按table_id/table_ids
+绑定真实表格unit；同一物理行横跨多表时保留全部原表引用，不用table_row载体冒充完整grid。
+若该原生行还有选中表格区域之外的单元格，同时保留该行引用，避免丢失同行说明或公式；
+完全由原表覆盖的行不额外保存行引用，重复选择仍按原生unit去重。
+
+`load_outline_source`是宿主只读装载函数，返回`document`及原样`unit`，按需补齐下列冻结依赖；
+这些是读取结果，不新增SourceUnitRef或大纲产物字段，不发给模型誊写：
+
+| 返回字段 | 含义 |
+| --- | --- |
+| ocr? | 该图像unit的完整冻结OCR记录，包含text/status/issues及已有disposition；不以空unit.text替代OCR，不重新识别 |
+| image_ref? | unit.locator.image_key对应的冻结图片ArtifactRef，不复制图片内容 |
+| image_anchor? | 该unit已有的冻结图片锚点，保持原坐标及偏移 |
+| spreadsheet_cells? | unit.locator.cell_refs所指单元格的映射；在副本中按grid_cell_ref恢复grid_value_fields，保留公式、缓存、显示及类型元数据，不重新计算公式。原生locator.cells未压缩时仍随unit原样返回 |
+
+grid与row使用相同的单元格依赖装载；原grid、合并范围、原生unit及CAS均不修改。
+原生Excel行的locator.merged_ranges保留与该行物理矩形相交的完整原始范围；跨行或
+超出非空单元格边界时仍保留完整坐标，不裁剪、不扩张行region、不复制主单元格文本。
+定义表格grid仍只接收完整包含的合并范围，保持原有稀疏铺满约束。冻结压缩及装载均保留
+上述坐标；无原生正文行的纯空白表外合并仍以原件为准，本批不承诺完整Excel布局重建。
+此处恢复宿主结构，不新增模型merged_ranges字段，也不宣称模型已读到表外合并关系。
+不存在的OCR/图片/锚点保持缺省，不伪造已完成；原分析问题继续沿原确认和后续核对出口处理。
+来源引用损坏沿既有ArtifactIntegrityError出口处理，不要求模型修复存储引用。
+本次装载修复新增模型调用为0，T2仍为正常1次、同执行最多4次；请求语义视图、输入输出
+结构、预算及超限出口沿用原合同。目录可能补充含表外格的行锚点，最坏仍为O(S)目录，
+原文不重复发送；新增row引用由宿主保存，不增加模型回抄。索引读取沿用既有全文件
+完整性核对；返回结果只补齐所选unit的OCR、
+图片引用和单元格，不复制全文件raw，依赖展开随相关单元格及原grid线性增长。
+修订依旧重做T1及T2，纯重新装载不重跑付费调用。
+
+BUG-038的原生解析修复新增模型调用同样为0：全文件调用数C_new=C_existing，随文件规模
+增长的模型分包公式、单次最坏输入/输出及预算出口均不改变，不要求模型回抄定位数据。
+每行仍扫描既有合并集合，最坏O(原生行数×合并数)，仅冻结中的相交定位元数据增加。
+原生parser_version按源码摘要变化，新解析生成新CAS；旧冻结及大纲可读但不会自动补齐。
+已有运行继续读取原产物；如需补齐旧文件，须沿既有来源修订重新冻结、分包和分析确认，
+模型调用量为该修订原有分析调用数及后续T2最多4次，不热换旧快照或重置失败额度。
+不新增问题类型或状态，结构超限/解析失败继续走原技术重试及来源修订出口。
+
+### 模型发送与回包
+
+发送`schema_version=2、rules、relations、unverified_relation_ids、issues、issue_resolutions、scope_decisions、source_views、source_catalog`。
+关系的既有未核验身份随输入保留，不把候选关系当成已确认语义事实。
+每条rules使用宿主rule_id，加`item`或`effective_rule`以及原item_id关联关系；只发送语义值，
+不发送CAS、确认摘要、版本、原件路径及费用流水。规则来源及相关关系/问题所需原文按
+完整原生unit装载，同一unit只发送一次，保留既有表格明文、空行压缩和必要supporting；
+不重新抽取全文件。其他来源仅发送可用性目录，目录不是已阅读原文。
+
+大纲使用独立outline提示，短引用继续由WirePayload映射，unverified_relation_ids与关系
+身份使用相同映射；新增rule_id/rule_ids和关系中的
+from_rule_ids/to_rule_ids；分析原有映射及默认Task提示集合保持不变。只有模型需要选择的
+语义引用才回传，不要求覆盖名单、宿主身份或评分数值回抄。
+
+回包`OutlineResponse{schema_version:2, chapters, findings}`：chapters递归使用
+`{title,targets,children}`；targets为`{kind,purpose,rule_ids,range_ids}`；findings为
+`{code,detail,rule_ids}`。所有字段必填，列表允许为空。range_ids可以选择已读原文或
+目录中的锚点，宿主映射至完整SourceUnitRef并去重。目录来源尚未读入模型时保留具体
+`outline_source_not_read`问题，后续生成前须读取核对，不宣称模板含义已验证。
+`scope_bindings`及`pending_scope_context`内的可见锚点同样经原selector映射；正文去重
+不能丢掉引用身份。仅有pending元数据仍不算已阅读，选择时沿用同一未读问题出口。
+
+未知引用或无效结构通过ModelContractError交执行端纠正；完全重复的选择由宿主去重。
+未分配规则派生`outline_rule_unassigned`，无规则绑定的位置派生`outline_target_unbound`，
+form没有源模板派生`outline_template_missing`；这些问题随产物保留，其他位置继续，
+由用户或后续编制核对补齐。模型语义findings原样保留，不以标题或映射存在宣称已满足。
+人工保留的原问题及未核验关系仍保持原状态，来源错误沿现有分析修订出口处理。
+
+### 本批容量及修订边界
+
+设有效规则R、原生范围S、实际响应位置T。全文件T2在完整输入能准入时为1次组织请求，
+领域函数不按事项/候选发请求，也不做两两组合；执行端最多首次加3次，共不超过4次。
+输入规模为O(R+相关关系/问题+S目录+被装载原文)，输出为O(章节+T+映射数+findings)，
+一规则多位置使映射数可能大于R，不承诺输出恒定或默认16384足够。
+
+预算由调用方显式传入；按独立outline提示、完整短引用请求及显式正数output_reserve准入，
+不默认套用核验tokenizer或输出预留，也不设供应商输出硬上限。窗口及输入上限沿RequestBudget；
+实际输出仍需样例校准。不可分完整请求超限时发送0次，返回既有ModelBudgetError，
+调用方须使用经核实的容量重新规划，不能截断要求、目录或原文来通过，也不声称已支持超限
+全文件分批合成。纠正请求新增反馈后的预算须由执行端再次检查。
+
+同修订同完整请求的成功复用由下节独立执行上下文负责，领域函数的CAS产物不等于付费缓存。
+分析修订后重做T1、组织请求及其受影响下游，组织最多4次；纯样式修改不触发分析。
+返回前再次核对当前确认版本，运行中来源被替换时不发布旧版本新产物；这仍不是长期执行租约。
+
+### T2独立持久执行
+
+Python内部入口`execute_outline(analysis_store, artifacts, config, budget, *, execution_id,
+run_id, source_version, domain_revision, checklist_digest)`调用上述组织函数；execution_id由
+宿主显式固定，相同身份恢复同一执行，不自动生成新身份绕开失败额度。不新增CLI或队列节点。
+本批恢复由调用方以同execution_id再次调用；尚未接dispatcher，不代表进程退出后无人值守续跑。
+使用独立AuthoringStore和AuthoringLease，不领取或更改父分析运行的租约、状态及确认。
+
+| 结构 | 字段与含义 |
+| --- | --- |
+| AuthoringLease | execution_id、epoch；只授权当前编制执行，epoch单调递增，失效后不可发送或发布 |
+| 编制执行根 | execution_id；authoring_input: AuthoringInput；execution_spec: 非秘密配置；status: pending/running/succeeded/failed/cancelled；epoch、lease_until、cancel_requested；result_ref?: ArtifactRef；receipts: 小型宿主回执列表；error?: 错误类型；created_at、updated_at |
+| 编制请求回执 | request_id、execution_id、epoch、model、task=outline；status沿prepared/sent/succeeded/failed/uncertain；metadata含request_digest、logical_request_digest及预算测量；usage?、response_ref?、error?、created_at、sent_at?、finished_at? |
+| 编制宿主回执 | stage、scope、input_digest、artifact_ref、epoch、metadata（宿主非秘密诊断）；只保存完整请求及最多四次拒收等少量CAS引用，不复制请求正文 |
+
+字段沿用已有含义。执行状态只描述内部执行生命周期，不增加业务审批状态。PG只新增
+`tender_authoring_executions`和`tender_authoring_model_requests`两表，完整请求、响应、
+反馈及结果仍存CAS。执行配置固定独立协议、规范Chat地址/模型/窗口、实际outline提示摘要、
+实际准入预算及超时策略，不包含密钥、密钥摘要或默认分析提示集合。相同execution_id的
+输入或非秘密配置变更须显式报冲突，不能静默复用；轮换密钥不改变请求身份。
+首次建表使用当前schema内的PG事务级advisory lock串行初始化，避免并发启动时
+CREATE TABLE IF NOT EXISTS仍出现系统目录唯一冲突；不锁父分析或其他schema的执行。
+
+共享客户端新增完整请求发送入口，原分析call继续原有构造/短引用/预算再委托；编制只用
+Chat及显式预算，不扩分析Task，不继承VLM或verify tokenizer。拒收恢复复用既有
+call_validated，编制拒收元数据写execution_id/epoch，不伪造分析command_id。
+contract_feedback放入用户消息JSON，并对纠正后的完整请求重新准入；逻辑摘要固定为原始
+完整请求，具体发送摘要包括反馈。短引用只在组织边界解码一次，模型不回抄执行身份。
+本批同execution_id只执行outline这一逻辑请求，恢复时基准逻辑摘要改变须报冲突；不得
+借同一执行内换摘要重置额度。已prepared的并行副本在另一份成功后也不能再次发送。
+
+正常全文件仍1次组织调用，失败共用首次加3次，上限为同execution_id整个逻辑单元4次
+真实发送，跨进程恢复不重置；prepared、缓存读取及预算拒发不计付费发送。最坏输入为
+完整原请求加具体反馈，并须再次符合窗口；输出沿上节显式预留，尚未实测的容量不假定。
+失败回包保留真实反馈，成功传输缓存不等于领域接受；完整成功响应从校验CAS恢复后重新
+核对领域合同，不能删除缓存重付费。最终产物成功时直接复用同一结果引用。
+
+发送前原子检查独立租约、取消、全部逻辑尝试、在途sent及四次额度；变更反馈不能绕过
+在途围栏。过期接管将旧sent记uncertain、旧prepared记failed，保留实际或未知用量；
+uncertain按用户已接受的重复计费风险在剩余额度内重试，不承诺远端exactly-once。
+所有调用失败共用额度；取消、失租立即退出，数据库不可用由调用方恢复，不用新付费调用
+修数据库。预算/配置不满足明确返回，保留成功产物；耗尽后保留全部回执和具体错误，
+用户可修输入或配置后显式发起新执行，不自动重新跑分析。父分析修订仍重做T1及受影响
+组织请求，样式不变更父分析；最终发布须再次核对父确认并通过独立租约围栏。
+工作只负责组织和关闭模型客户端，关闭期间保持心跳；工作完成后须停止并等待心跳，
+再由原事务核对父确认及独立租约并发布成功，发布后直接返回，不留下心跳竞争窗口。
+心跳实际错误、客户端关闭失败及调用方取消不发布成功；等待子任务取消不能吞掉调用方取消。
+成功模型回执仍保留，同ID恢复复用；此顺序不改变调用次数、请求预算或修订重跑范围。
 
 ## 历史v1字段、共享来源合同与实现依据
 

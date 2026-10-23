@@ -111,6 +111,7 @@ class OpenAIModel:
         budget = self.request_budget(images=bool(images), correction=correction)
         request = budget.request(task, payload, images)
         context = budget.require_request(request, task)
+        context.update(operation=payload.get("operation", task), work_unit_id=payload.get("work_unit_id", ""))
         digest = request_digest(endpoint.base_url, request)
         logical_digest = digest
         if "contract_feedback" in payload:
@@ -126,100 +127,121 @@ class OpenAIModel:
                     {"protocol": wire.VERSION, "payload": payload, "mapping": wire.mapping})
                 await self.store.commit_artifact(self.lease, "model-wire", mapping_ref,
                                                  scope=digest, input_digest=digest)
-            request_id = uuid4().hex
-            row = await self.store.begin_request(self.lease, request_id, endpoint.model, task, metadata={
-                **context, "request_digest": digest, "logical_request_digest": logical_digest,
-                "operation": payload.get("operation", task), "work_unit_id": payload.get("work_unit_id", ""),
-            })
-            if row["status"] == "succeeded":
-                return wire.decode(await self._cached_response(row, digest))
-            # Durable attempt limits and active-send fencing happen before HTTP.
-            await self.store.finish_request(request_id, "sent")
-            started = time.monotonic()
-            stream = StreamResponse()
-            deadline = IdleDeadline(self._timeout)
-            raw_response = None
-            try:
-                manager = self._client(endpoint).chat.completions.with_streaming_response.create(**request)
-                raw_response = await deadline.wait(manager.__aenter__)
-                response = raw_response.http_response
-                response.stream = ActiveResponseStream(response.stream, deadline, stream.counts)
-                iterator = raw_response.iter_bytes().__aiter__()
-                while not stream.done and stream.provider_error is None:
-                    try:
-                        chunk = await iterator.__anext__()
-                    except StopAsyncIteration:
-                        break
-                    if chunk:
-                        # Before SSE decoding: comments, incomplete events, thinking,
-                        # and tool arguments all keep the response alive.
-                        if "first_data_seconds" not in stream.counts:
-                            stream.counts["first_data_seconds"] = round(time.monotonic() - started, 3)
-                        stream.feed(chunk)
-                if (stream.provider_error is None
-                        and response.headers.get("content-type", "").split(";", 1)[0].strip() != "text/event-stream"):
-                    stream.failure = "invalid_stream_content_type"
-                    raise ModelSemanticError("model endpoint did not return an SSE response")
-                result = stream.result()
-            except asyncio.CancelledError:
-                await asyncio.shield(self._finish_stream(request_id, "uncertain", stream, digest,
-                                                         "cancelled_after_send", started))
-                raise
-            except APIStatusError as error:
-                # A received HTTP rejection is distinct from a lost response.
-                status = error.status_code
-                response_ref, usage = await self._received_rejection(error.response, digest)
-                await self._finish(request_id, "failed", usage, f"http_{status}", started, response_ref)
-                _, failure = http_failure(status)
-                if failure is ModelInfrastructureError:
-                    raise ModelInfrastructureError(f"model endpoint returned HTTP {status}") from None
-                if failure is ModelConfigurationError:
-                    raise ModelConfigurationError(f"model endpoint rejected its configuration (HTTP {status})") from None
-                raise ModelSemanticError(f"model endpoint rejected the request (HTTP {status})") from None
-            except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
-                cause = error.__cause__ if isinstance(error, APIConnectionError) else error
-                if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-                    await self._finish_stream(request_id, "failed", stream, digest, "connection_before_send", started)
-                    raise ModelInfrastructureError("model connection failed before send") from None
-                if isinstance(cause, (TimeoutError, httpx.ReadTimeout)):
-                    if not stream.counts["raw_received_chunks"]:
-                        # Owner-accepted risk: the relay may have billed an execution that sent no byte.
-                        await self._finish_stream(request_id, "failed", stream, digest, "first_data_idle_timeout", started)
-                        raise ModelInfrastructureError("model endpoint sent no data before the idle deadline") from None
-                    failure = "between_data_idle_timeout"
-                else:
-                    failure = "transport_response_unknown"
-                await self._finish_stream(request_id, "uncertain", stream, digest, failure, started)
-                raise UncertainModelResponse("model response was lost after send; provider execution and billing are uncertain") from None
-            except UncertainModelResponse:
-                await self._finish_stream(request_id, "uncertain", stream, digest,
-                                          stream.failure or "stream_missing_done", started)
-                raise
-            except httpx.DecodingError:
-                # HTTP decompression can fail after paid response bytes arrived.
-                # It is not a complete semantic rejection or permission to resend.
-                stream.failure = "invalid_stream_encoding"
-                try:
-                    await self._finish_stream(request_id, "uncertain", stream, digest, stream.failure, started)
-                except Exception:
-                    # An unavailable audit store leaves the active sent fence in
-                    # place. Recovery cannot send concurrently with that attempt.
-                    raise UncertainModelResponse("model response decoding and audit failed; provider execution and billing are uncertain") from None
-                raise UncertainModelResponse("model response decoding failed after send; provider execution and billing are uncertain") from None
-            except ModelJSONError as error:
-                await self._finish_stream(request_id, "failed", stream, digest, "invalid_json_response", started)
-                error.redact(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
-                             if endpoint is not None)
-                raise
-            except ModelSemanticError:
-                await self._finish_stream(request_id, "failed", stream, digest,
-                                          stream.failure or "invalid_json_response", started)
-                raise ModelSemanticError("model endpoint returned an invalid or incomplete JSON stream") from None
-            finally:
-                if raw_response is not None:
-                    await raw_response.close()
-            await self._finish_stream(request_id, "succeeded", stream, digest, None, started)
+            result = await self._send_request(endpoint, request, task, context, digest, logical_digest)
             return wire.decode(result)
+
+    async def call_request(self, request: dict, budget: RequestBudget, *, task: str,
+                           execution_spec: dict, logical_request: dict | None = None) -> dict:
+        """Send an already constructed Chat request under its own execution owner.
+
+        No analysis Task, prompt snapshot, tokenizer or wire conversion is added.
+        The caller provides the pinned non-secret spec and logical base request.
+        """
+        endpoint = self.config.chat
+        if request.get("model") != endpoint.model or budget.model != endpoint.model:
+            raise ModelConfigurationError("prepared request model does not match its configured endpoint")
+        context = budget.require_request(request)
+        digest = request_digest(endpoint.base_url, request)
+        logical_digest = request_digest(endpoint.base_url, logical_request if logical_request is not None else request)
+        async with self._semaphore:
+            await self.store.pin_execution_spec(self.lease, execution_spec)
+            return await self._send_request(endpoint, request, task, context, digest, logical_digest)
+
+    async def _send_request(self, endpoint, request, task, context, digest, logical_digest):
+        request_id = uuid4().hex
+        row = await self.store.begin_request(self.lease, request_id, endpoint.model, task, metadata={
+            **context, "request_digest": digest, "logical_request_digest": logical_digest,
+            "operation": context.get("operation", task), "work_unit_id": context.get("work_unit_id", ""),
+        })
+        if row["status"] == "succeeded":
+            return await self._cached_response(row, digest)
+        # Durable attempt limits and active-send fencing happen before HTTP.
+        await self.store.finish_request(request_id, "sent")
+        started = time.monotonic()
+        stream = StreamResponse()
+        deadline = IdleDeadline(self._timeout)
+        raw_response = None
+        try:
+            manager = self._client(endpoint).chat.completions.with_streaming_response.create(**request)
+            raw_response = await deadline.wait(manager.__aenter__)
+            response = raw_response.http_response
+            response.stream = ActiveResponseStream(response.stream, deadline, stream.counts)
+            iterator = raw_response.iter_bytes().__aiter__()
+            while not stream.done and stream.provider_error is None:
+                try:
+                    chunk = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                if chunk:
+                    # Before SSE decoding: comments, incomplete events, thinking,
+                    # and tool arguments all keep the response alive.
+                    if "first_data_seconds" not in stream.counts:
+                        stream.counts["first_data_seconds"] = round(time.monotonic() - started, 3)
+                    stream.feed(chunk)
+            if (stream.provider_error is None
+                    and response.headers.get("content-type", "").split(";", 1)[0].strip() != "text/event-stream"):
+                stream.failure = "invalid_stream_content_type"
+                raise ModelSemanticError("model endpoint did not return an SSE response")
+            result = stream.result()
+        except asyncio.CancelledError:
+            await asyncio.shield(self._finish_stream(request_id, "uncertain", stream, digest,
+                                                     "cancelled_after_send", started))
+            raise
+        except APIStatusError as error:
+            # A received HTTP rejection is distinct from a lost response.
+            status = error.status_code
+            response_ref, usage = await self._received_rejection(error.response, digest)
+            await self._finish(request_id, "failed", usage, f"http_{status}", started, response_ref)
+            _, failure = http_failure(status)
+            if failure is ModelInfrastructureError:
+                raise ModelInfrastructureError(f"model endpoint returned HTTP {status}") from None
+            if failure is ModelConfigurationError:
+                raise ModelConfigurationError(f"model endpoint rejected its configuration (HTTP {status})") from None
+            raise ModelSemanticError(f"model endpoint rejected the request (HTTP {status})") from None
+        except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
+            cause = error.__cause__ if isinstance(error, APIConnectionError) else error
+            if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                await self._finish_stream(request_id, "failed", stream, digest, "connection_before_send", started)
+                raise ModelInfrastructureError("model connection failed before send") from None
+            if isinstance(cause, (TimeoutError, httpx.ReadTimeout)):
+                if not stream.counts["raw_received_chunks"]:
+                    # Owner-accepted risk: the relay may have billed an execution that sent no byte.
+                    await self._finish_stream(request_id, "failed", stream, digest, "first_data_idle_timeout", started)
+                    raise ModelInfrastructureError("model endpoint sent no data before the idle deadline") from None
+                failure = "between_data_idle_timeout"
+            else:
+                failure = "transport_response_unknown"
+            await self._finish_stream(request_id, "uncertain", stream, digest, failure, started)
+            raise UncertainModelResponse("model response was lost after send; provider execution and billing are uncertain") from None
+        except UncertainModelResponse:
+            await self._finish_stream(request_id, "uncertain", stream, digest,
+                                      stream.failure or "stream_missing_done", started)
+            raise
+        except httpx.DecodingError:
+            # HTTP decompression can fail after paid response bytes arrived.
+            # It is not a complete semantic rejection or permission to resend.
+            stream.failure = "invalid_stream_encoding"
+            try:
+                await self._finish_stream(request_id, "uncertain", stream, digest, stream.failure, started)
+            except Exception:
+                # An unavailable audit store leaves the active sent fence in
+                # place. Recovery cannot send concurrently with that attempt.
+                raise UncertainModelResponse("model response decoding and audit failed; provider execution and billing are uncertain") from None
+            raise UncertainModelResponse("model response decoding failed after send; provider execution and billing are uncertain") from None
+        except ModelJSONError as error:
+            await self._finish_stream(request_id, "failed", stream, digest, "invalid_json_response", started)
+            error.redact(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
+                         if endpoint is not None)
+            raise
+        except ModelSemanticError:
+            await self._finish_stream(request_id, "failed", stream, digest,
+                                      stream.failure or "invalid_json_response", started)
+            raise ModelSemanticError("model endpoint returned an invalid or incomplete JSON stream") from None
+        finally:
+            if raw_response is not None:
+                await raw_response.close()
+        await self._finish_stream(request_id, "succeeded", stream, digest, None, started)
+        return result
 
     async def _cached_response(self, row: dict, digest: str) -> dict:
         # ArtifactStore verifies size, path and SHA256 before decoding. Recovery

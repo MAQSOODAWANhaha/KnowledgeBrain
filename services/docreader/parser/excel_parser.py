@@ -715,7 +715,10 @@ def _extract_xlsx_structured_units(content: bytes, images: dict[str, str] | None
                             region=row_region,
                             cells=row_cells,
                             merged_ranges=[
-                                region for region in merged if contains(row_region, region)
+                                region for region in merged
+                                if region.start_row <= row_number <= region.end_row
+                                and region.start_column <= row_region.end_column
+                                and row_region.start_column <= region.end_column
                             ],
                             defined_tables=[],
                         ),

@@ -206,13 +206,14 @@ async def test_explicit_retry_preserves_failed_resume_confirmation_without_model
 
 async def test_complete_host_rejection_uses_shared_work_unit_retry_budget(runtime):
     store, artifacts, settings, run = runtime
-    replies, calls = iter([None, {}, 'invalid', False]), []
+    replies, calls = {}, []
 
     class RejectedReview(AnalysisFixtureModel):
         def response(self, task, payload, images):
             result = super().response(task, payload, images)
             if task == 'verify' and payload['operation'] == 'review':
-                result['findings'] = next(replies)
+                responses = replies.setdefault(payload['work_unit_id'], iter([None, {}, 'invalid', False]))
+                result['findings'] = next(responses)
             return result
 
     command = (await store.get_run(run['run_id']))['commands'][-1]
@@ -231,10 +232,27 @@ async def test_complete_host_rejection_uses_shared_work_unit_retry_budget(runtim
     extractions = Counter(payload['work_unit_id'] for task, payload in calls if task == 'extract')
     assert all(count == 1 for count in extractions.values())
     reviews = [payload for task, payload in calls if task == 'verify']
-    assert len(reviews) == 4
-    assert 'contract_feedback' not in reviews[0]
-    assert all(value['contract_feedback']['errors'][0]['path'] == ['findings'] for value in reviews[1:])
-    assert len([row for row in current['artifacts'] if row['stage'] == 'model-rejection']) == 4
+    plan = output(artifacts, current, 'analysis-review-plan')
+    planned_units = {entry['work_unit_id'] for entry in plan['requests'] if entry['budget']['fits'] is not False}
+    units = set(replies)
+    assert units <= planned_units and 1 <= len(units) <= 2
+    assert Counter(value['work_unit_id'] for value in reviews) == Counter({unit: 4 for unit in units})
+    for unit in units:
+        attempts = [value for value in reviews if value['work_unit_id'] == unit]
+        assert 'contract_feedback' not in attempts[0]
+        assert all(value['contract_feedback']['errors'][0]['path'] == ['findings'] for value in attempts[1:])
+        assert [value['contract_feedback']['rejection_count'] for value in attempts[1:]] == [1, 2, 3]
+    rejections = [row for row in current['artifacts'] if row['stage'] == 'model-rejection']
+    assert len(rejections) == 4 * len(units)
+    rejected_units = Counter(artifacts.read_json(artifacts.read_json(row['artifact_ref'])['request_ref'])['work_unit_id']
+                             for row in rejections)
+    assert rejected_units == Counter({unit: 4 for unit in units})
+    review_usage = [row for row in current['usage'] if row['task'] == 'verify']
+    logical_digests = {fixture_request_digest('verify', next(value for value in reviews
+        if value['work_unit_id'] == unit)) for unit in units}
+    assert Counter(row['metadata']['logical_request_digest'] for row in review_usage) == Counter({
+        digest: 4 for digest in logical_digests})
+    assert len(current['usage']) == len(calls)
     assert all(row['status'] == 'succeeded' for row in current['usage'])
 
 

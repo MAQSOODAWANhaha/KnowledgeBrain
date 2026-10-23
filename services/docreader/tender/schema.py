@@ -107,6 +107,16 @@ class RunIdentity(SourceIdentity):
     domain_revision: PositiveInt
 
 
+class AuthoringInput(RunIdentity):
+    schema_version: AnalysisVersion
+    checklist_digest: Digest
+    frozen_ref: ArtifactRef
+    pack_plan_ref: ArtifactRef
+    items_ref: ArtifactRef
+    verification_ref: ArtifactRef
+    confirmation_ref: ArtifactRef
+
+
 class SourceReceiptIdentity(SourceIdentity):
     """Revision zero is reserved for immutable source receipts, not domain work."""
     domain_revision: Annotated[StrictInt, Field(ge=0, le=0)] = 0
@@ -285,6 +295,80 @@ class Verification(Contract):
 class ItemRef(_AnalysisContract):
     artifact_ref: ArtifactRef
     item_id: Text
+
+
+class EffectiveItemRef(_AnalysisContract):
+    item_ref: ItemRef
+    decision_id: Identity | None = None
+    rule_index: NonnegativeInt | None = None
+
+    @model_validator(mode="after")
+    def retained_rule_identity(self):
+        if (self.decision_id is None) != (self.rule_index is None):
+            raise ValueError("a retained rule requires both decision_id and rule_index")
+        return self
+
+
+class SourceUnitRef(Contract):
+    source_index_ref: ArtifactRef
+    unit_id: Identity
+
+
+ResponseTargetKind = Literal["narrative", "form", "attachment"]
+
+
+class OutlineTargetResponse(Contract):
+    kind: ResponseTargetKind
+    purpose: Text
+    rule_ids: list[Identity]
+    range_ids: list[Identity]
+
+
+class OutlineChapterResponse(Contract):
+    title: Text
+    targets: list[OutlineTargetResponse]
+    children: list["OutlineChapterResponse"]
+
+
+class OutlineFinding(Contract):
+    code: Text
+    detail: Text
+    rule_ids: list[Identity]
+
+
+class OutlineResponse(Contract):
+    schema_version: AnalysisVersion
+    chapters: list[OutlineChapterResponse]
+    findings: list[OutlineFinding]
+
+
+class ResponseTarget(Contract):
+    target_id: Identity
+    kind: ResponseTargetKind
+    purpose: Text
+    rule_refs: list[EffectiveItemRef]
+    source_refs: list[SourceUnitRef]
+
+
+class OutlineChapter(Contract):
+    chapter_id: Identity
+    title: Text
+    targets: list[ResponseTarget]
+    children: list["OutlineChapter"]
+
+
+class OutlineIssue(_AnalysisContract):
+    code: Text
+    detail: Text
+    rule_refs: list[EffectiveItemRef]
+    target_id: Identity | None = None
+
+
+class AuthoringOutline(Contract):
+    schema_version: AnalysisVersion
+    authoring_input: AuthoringInput
+    chapters: list[OutlineChapter]
+    issues: list[OutlineIssue]
 
 
 class ScoringDetails(_AnalysisContract):
