@@ -64,6 +64,11 @@ def document_text(artifacts, result):
                      [cell.text for table in document.tables for row in table.rows for cell in row.cells])
 
 
+def submission_notes(artifacts, result):
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
+        return package.read("提交要求与待办.md").decode()
+
+
 def executor(mode, calls, *, manual=False, source_only=False):
     async def execute(stage, request, validate):
         value = payload(request)
@@ -129,7 +134,10 @@ async def test_requirement_snapshot_and_docx_survive_response_failure_or_rejecti
     units = [artifacts.read_json(ref) for ref in result["unit_refs"]]
     assert all(unit["status"] == "placeholder" and unit["blocks"] == [] for unit in units)
     text = document_text(artifacts, result)
-    assert REQUIREMENT in text and CONDITION in text and EXCEPTION in text
+    assert all(value not in text for value in (REQUIREMENT, CONDITION, EXCEPTION,
+        "招标要求依据（企业应答另行填写）", "分析整理（待确认）"))
+    notes = submission_notes(artifacts, result)
+    assert REQUIREMENT in notes and CONDITION in notes and EXCEPTION in notes
     assert INVENTED not in text and "待补" in text and result["package_ref"]
     if mode == "no_material":
         assert calls == [("outline", False), ("assemble", False), ("structure", False)]
@@ -148,6 +156,7 @@ async def test_unassigned_rule_remains_in_requirement_snapshot_without_false_tar
     pending = next(record for record in records if record["rule"]["text"] == UNASSIGNED)
     assert pending["rule"] == expected[1] and pending["target_ids"] == []
     assert UNASSIGNED not in document_text(artifacts, result), "The host must not assign unknown semantic placement."
+    assert UNASSIGNED in submission_notes(artifacts, result)
     assert any(gap["code"] == "export_requirement_unassigned" for gap in result["gaps"])
     outline = artifacts.read_json(result["outline_ref"])
     assert any(issue["code"] == "outline_rule_unassigned" for issue in outline["issues"])
@@ -163,6 +172,8 @@ async def test_exhausted_organization_still_delivers_all_requirements_in_the_ind
     assert any(gap["code"] == "outline_batch_unavailable" for gap in result["gaps"])
     assert all(operation not in {"authoring_write", "authoring_basis"} for operation, _ in calls)
     assert INVENTED not in document_text(artifacts, result) and result["package_ref"]
+    notes = submission_notes(artifacts, result)
+    assert all(value in notes for value in (REQUIREMENT, CONDITION, EXCEPTION, UNASSIGNED))
 
 
 async def test_manual_position_keeps_requirements_without_automatic_bidder_response(tmp_path):
@@ -172,7 +183,9 @@ async def test_manual_position_keeps_requirements_without_automatic_bidder_respo
                                                          executor("no_material", calls, manual=True)))
     assert [record["rule"] for record in preserved(artifacts, result)["rules"]] == expected
     text = document_text(artifacts, result)
-    assert QUOTE_REQUIREMENT in text and "人工填写" in text and "________" in text
+    assert QUOTE_REQUIREMENT not in text and "人工填写" in text and "________" in text
+    assert "招标要求依据（企业应答另行填写）" not in text and "分析整理（待确认）" not in text
+    assert QUOTE_REQUIREMENT in submission_notes(artifacts, result)
     assert calls == [("outline", False), ("assemble", False), ("structure", False)]
     assert all(not artifacts.read_json(ref)["cell_fills"] for ref in result["unit_refs"])
 
@@ -189,7 +202,10 @@ async def test_effective_partial_rule_does_not_restore_old_conditions_from_origi
     assert active["rule"] == retained[0] and active["rule_ref"]["decision_id"] == "accepted-partial"
     assert "conditions" not in active["rule"] and "exceptions" not in active["rule"]
     text = document_text(artifacts, result)
-    assert retained[0]["text"] in text and CONDITION not in text and EXCEPTION not in text
+    assert retained[0]["text"] not in text and CONDITION not in text and EXCEPTION not in text
+    notes = submission_notes(artifacts, result)
+    assert retained[0]["text"] in notes and CONDITION not in notes and EXCEPTION not in notes
+    assert all(entry["quote"] in notes for entry in retained[0]["evidence"])
 
 
 async def test_source_only_context_is_retained_as_reference_without_becoming_response_text(tmp_path):

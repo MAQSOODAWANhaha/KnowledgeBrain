@@ -7,6 +7,7 @@ const phases: Record<string, string> = {
   "analysis-associate": "关联要求", "analysis-joint": "联合核验", verify: "核验分析",
   confirm: "确认分析", materials: "准备编制资料", knowledge: "检索证明资料", outline: "编排大纲",
   authoring_basis: "整理写作依据", authoring_write: "编写正文", authoring_review: "复核内容",
+  authoring_structure: "核对提交结构",
   result: "保存产物", other: "处理任务",
 };
 const phaseName = (phase: string) => phases[phase] ?? "处理任务";

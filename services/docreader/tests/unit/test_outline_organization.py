@@ -6,10 +6,9 @@ import json
 import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.llm.budget import RequestBudget
-from docreader.llm.request import ModelBudgetError, ModelConfigurationError, ModelContractError
+from docreader.llm.request import ModelContractError
 from docreader.llm.wire import WirePayload
-from docreader.tender.authoring import _OutlineContext, load_outline_source, organize_outline
+from docreader.tender.authoring import _OutlineContext, load_outline_source
 from docreader.tender.authoring_templates import prepare_template_parts
 from docreader.tender.evidence.references import SourceIndex
 from docreader.tender.schema import AuthoringOutline
@@ -288,79 +287,6 @@ def test_unverified_relationships_use_the_same_wire_identity_as_relations():
     wire = WirePayload("outline", payload)
     assert wire.payload["relations"][0]["relation_id"] == "l1"
     assert wire.payload["unverified_relation_ids"] == ["l1"]
-
-
-@pytest.mark.parametrize("capacity,reserve,error", [(100, 32, ModelBudgetError),
-                                                    (131072, 0, ModelConfigurationError)])
-async def test_unsendable_outline_never_calls_executor_or_writes_artifacts(tmp_path, monkeypatch, capacity, reserve, error):
-    artifacts, value, _ = await context(tmp_path)
-    before = {p for p in artifacts.root.rglob("*") if p.is_file()}
-    calls = []
-
-    async def confirmed(*args, **kwargs):
-        return value
-
-    async def execute(*args):
-        calls.append(args)
-        pytest.fail("An unadmitted outline must not reach the executor")
-
-    monkeypatch.setattr("docreader.tender.authoring.read_authoring_input", confirmed)
-    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", confirmed)
-    budget = RequestBudget(context_tokens=capacity, model="synthetic", prompts={}, output_reserve=reserve)
-    with pytest.raises(error):
-        await organize_outline(None, artifacts, execute, budget, **IDENTITY, checklist_digest=value["checklist_digest"])
-    assert calls == [] and {p for p in artifacts.root.rglob("*") if p.is_file()} == before
-
-
-async def test_organizer_uses_the_execution_prompt_snapshot(tmp_path, monkeypatch):
-    artifacts, value, _ = await context(tmp_path)
-    calls = []
-
-    async def confirmed(*args, **kwargs):
-        return value
-
-    async def execute(request, validate):
-        calls.append(request)
-        assert request["messages"][0]["content"] == "本次执行固定的编制提示"
-        return validate({"schema_version": 2, "chapters": [], "findings": []})
-
-    monkeypatch.setattr("docreader.tender.authoring.read_authoring_input", confirmed)
-    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", confirmed)
-    budget = RequestBudget(context_tokens=131072, model="synthetic", output_reserve=32768,
-                           prompts={"outline": "本次执行固定的编制提示"})
-    reference = await organize_outline(None, artifacts, execute, budget, **IDENTITY,
-                                      checklist_digest=value["checklist_digest"])
-    assert len(calls) == 1 and artifacts.read_json(reference)["authoring_input"] == value
-
-
-async def test_independent_outline_entry_binds_new_intents_from_actual_wire_refs(tmp_path, monkeypatch):
-    artifacts, value, ctx = await context(tmp_path)
-    prepare_template_parts(artifacts, ctx)
-
-    async def confirmed(*args, **kwargs):
-        return value
-
-    async def execute(request, validate):
-        sent = json.loads(request["messages"][1]["content"][0]["text"])
-        assert sent["grounding_policy"] == "knowledge_required_v2"
-        rule_id = sent["rules"][0]["rule_id"]
-        assert "source_views" not in sent
-        range_id = sent["sources"][0]["range_id"]
-        assert all(set(part["range_ids"]) <= {entry["range_id"] for entry in sent["sources"]}
-                   for part in sent["template_parts"])
-        raw = response([target([rule_id], range_ids=[range_id])])
-        raw["search_intents"] = [{"query": "技术实施服务", "for_ids": [rule_id, range_id]}]
-        return validate(raw)
-
-    monkeypatch.setattr("docreader.tender.authoring.read_authoring_input", confirmed)
-    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", confirmed)
-    reference = await organize_outline(None, artifacts, execute,
-        RequestBudget(context_tokens=131072, model="synthetic", output_reserve=32768), **IDENTITY,
-        checklist_digest=value["checklist_digest"])
-    intent = artifacts.read_json(reference)["search_intents"][0]
-    assert intent["query"] == "技术实施服务"
-    assert intent["rule_refs"] == [ctx.rules[next(iter(ctx.rules))]]
-    assert intent["source_refs"] and all(identity in ctx.sources for identity in intent["range_ids"])
 
 
 async def test_source_only_snapshot_supplies_original_text_without_waiting_for_extraction(tmp_path):

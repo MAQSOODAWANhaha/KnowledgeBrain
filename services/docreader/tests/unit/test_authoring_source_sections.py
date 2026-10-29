@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.llm.wire import WirePayload
-from docreader.tender.authoring import _OutlineContext, organize_outline
+from docreader.tender.authoring import _OutlineContext
 from docreader.tender.authoring_pipeline import _organize, _outline_payload
 from docreader.tender.authoring_templates import prepare_template_parts
 from docreader.tender.evidence.references import SourceIndex
@@ -95,26 +95,4 @@ async def test_document_source_pass_retains_template_anchors_after_heading_proje
     outline = await _organize(artifacts, _OutlineContext(artifacts, snapshot),
         RequestBudget(model="fixture", context_tokens=131072), execute, [])
     assert calls == ["source", "assemble"]
-    assert outline["chapters"][0]["targets"][0]["template_refs"] == list(expected_context.template_parts.values())
-
-
-async def test_independent_outline_entry_uses_the_same_shared_sections(tmp_path, monkeypatch):
-    artifacts = ArtifactStore(tmp_path)
-    snapshot = frozen_source(artifacts)
-    expected_context = _OutlineContext(artifacts, snapshot)
-    prepare_template_parts(artifacts, expected_context)
-
-    async def active(*args):
-        return None
-
-    async def execute(request, validate):
-        payload = json.loads(request["messages"][1]["content"][0]["text"])
-        inspect_source_payload(payload)
-        return validate(source_response(payload))
-
-    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", active)
-    reference = await organize_outline(None, artifacts, execute,
-        RequestBudget(model="fixture", context_tokens=131072, output_reserve=16384),
-        run_id=snapshot["run_id"], source_version=1, domain_revision=1, authoring_input=snapshot)
-    outline = artifacts.read_json(reference)
     assert outline["chapters"][0]["targets"][0]["template_refs"] == list(expected_context.template_parts.values())

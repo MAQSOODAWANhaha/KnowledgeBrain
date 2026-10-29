@@ -6,6 +6,7 @@ import json
 from zipfile import ZipFile
 
 from docx import Document
+from docx.oxml.ns import qn
 import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
@@ -35,6 +36,10 @@ def test_non_body_dispositions_preserve_rules_without_false_unassigned_gap(tmp_p
     assert not any(gap["code"] == "export_requirement_unassigned" for gap in result["gaps"])
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         assert json.loads(archive.read("招标要求底稿.json")) == data
+        notes = archive.read("提交要求与待办.md").decode()
+        assert "按原文限定处理提交安排。" in notes
+        assert "设备应支持原文规定的功能。" in notes
+        assert "按原文限定处理提交安排。" not in notes.split("尚未安排的要求")[1].split("人工填写位置")[0]
     pending = rule_ref(artifacts, "truly-pending")
     data["rules"].append(requirement(pending, "该要求尚未安排。", targets=()))
     result = export_authoring_document(artifacts, outline, [], requirements=data)
@@ -58,6 +63,45 @@ def outline_target(identity, refs, **fields):
 
 def word(artifacts, result):
     return Document(BytesIO(artifacts.read_bytes(result["docx_ref"])))
+
+
+def submission_notes(artifacts, result):
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
+        return archive.read("提交要求与待办.md").decode()
+
+
+def assert_no_analysis_preamble(document):
+    text = "\n".join(element.text or "" for element in document.element.body.iter(qn("w:t")))
+    assert "招标要求依据（企业应答另行填写）" not in text
+    assert "分析整理（待确认）" not in text
+    assert "原文依据不代替有效要求" not in text
+
+
+def test_formal_letter_starts_with_its_template_without_analysis_tables_in_main_or_volume(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    reference = rule_ref(artifacts)
+    letter_text = "致：招标人\n我方按规定提交投标文件。\n投标人：________"
+    template = source(artifacts, "letter-template", text=letter_text)
+    selected = outline_target("letter", [reference], kind="form", template_refs=[part(template)])
+    outline = {"chapters": [chapter("投标函", [selected], volume=True)]}
+    data = requirements(requirement(reference, "应提交签署的投标函。", targets=("letter",),
+        evidence=[{"range_id": "letter-source", "quote": "投标函应由授权人签署。"}]))
+
+    result = export_authoring_document(artifacts, outline, [], requirements=data)
+
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
+        assert json.loads(archive.read("招标要求底稿.json")) == data
+        notes = archive.read("提交要求与待办.md").decode()
+        assert "投标函" in notes and "应提交签署的投标函。" in notes
+        assert "投标函应由授权人签署。" in notes
+        for content in [artifacts.read_bytes(result["docx_ref"]), archive.read("volumes/001.docx")]:
+            document = Document(BytesIO(content))
+            assert_no_analysis_preamble(document)
+            assert not document.tables
+            paragraphs = [p.text for p in document.paragraphs]
+            assert paragraphs[paragraphs.index("1 投标函") + 1] == letter_text
+            names = [b.get(qn("w:name")) for b in document.element.body.iter(qn("w:bookmarkStart"))]
+            assert len(names) == len(set(names)) == 2
 
 
 @pytest.mark.parametrize("legacy_unit", [False, True])
@@ -112,7 +156,7 @@ def test_reference_does_not_hide_an_empty_unit_shared_with_actual_work(tmp_path)
 
 
 @pytest.mark.parametrize("mode", ["no_unit", "no_knowledge", "response_removed_by_review"])
-def test_requirements_remain_before_blank_or_removed_enterprise_response(tmp_path, mode):
+def test_requirements_remain_in_notes_when_enterprise_response_is_blank_or_removed(tmp_path, mode):
     artifacts = ArtifactStore(tmp_path)
     reference = rule_ref(artifacts)
     outline = {"chapters": [chapter("技术", [outline_target("technical", [reference])])]}
@@ -123,15 +167,12 @@ def test_requirements_remain_before_blank_or_removed_enterprise_response(tmp_pat
                                       requirements=requirements(requirement(reference)))
 
     document = word(artifacts, result)
-    assert len(document.tables) == 1
-    row = document.tables[0].rows[1]
-    assert "设备应支持原文规定的功能。" in row.cells[0].text
-    assert row.cells[-1].text == ""
-    assert "招标要求依据（企业应答另行填写）" in [p.text for p in document.paragraphs]
-    assert not any("完全满足" in cell.text for cell in row.cells)
-    body = list(document.element.body)
-    pending = next(p for p in document.paragraphs if "待补" in p.text)
-    assert body.index(document.tables[0]._tbl) < body.index(pending._p)
+    assert not document.tables
+    assert_no_analysis_preamble(document)
+    assert any("待补" in p.text for p in document.paragraphs)
+    assert not any("完全满足" in p.text for p in document.paragraphs)
+    notes = submission_notes(artifacts, result)
+    assert "技术" in notes and "设备应支持原文规定的功能。" in notes
 
 
 def test_requirement_scope_conditions_exceptions_and_ordered_quotes_are_lossless(tmp_path):
@@ -148,15 +189,15 @@ def test_requirement_scope_conditions_exceptions_and_ordered_quotes_are_lossless
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    document = word(artifacts, result)
-    cells = document.tables[0].rows[1].cells
+    assert not word(artifacts, result).tables
+    notes = submission_notes(artifacts, result)
     for text in [entry["rule"]["text"], entry["rule"]["scope"], *entry["rule"]["conditions"],
                  *entry["rule"]["exceptions"]]:
-        assert text in cells[0].text
+        assert text in notes
     quotes = [e["quote"] for e in entry["rule"]["evidence"]]
-    assert all(quote in cells[1].text for quote in quotes)
-    assert cells[1].text.index(quotes[0]) < cells[1].text.index(quotes[1])
-    assert any("原文依据" in p.text and "有效要求" in p.text for p in document.paragraphs)
+    assert all(quote in notes for quote in quotes)
+    assert notes.index(quotes[0]) < notes.index(quotes[1])
+    assert_no_analysis_preamble(word(artifacts, result))
     assert data == before
 
 
@@ -174,7 +215,7 @@ def test_typed_source_facts_are_retained_without_calculation(tmp_path, details):
 
     result = export_authoring_document(artifacts, outline, [], requirements=requirements(entry))
 
-    content = word(artifacts, result).tables[0].cell(1, 0).text
+    content = submission_notes(artifacts, result)
     for value in details.values():
         if isinstance(value, (dict, list)):
             def leaves(item):
@@ -184,7 +225,7 @@ def test_typed_source_facts_are_retained_without_calculation(tmp_path, details):
                     return [leaf for child in item for leaf in leaves(child)]
                 return [str(item)]
             assert all(leaf in content for leaf in leaves(value))
-    assert word(artifacts, result).tables[0].cell(1, 2).text == ""
+    assert not word(artifacts, result).tables
 
 
 def test_effective_rule_matches_full_reference_and_does_not_revive_original(tmp_path):
@@ -198,14 +239,16 @@ def test_effective_rule_matches_full_reference_and_does_not_revive_original(tmp_
 
     result = export_authoring_document(artifacts, outline, [], requirements=requirements(old, effective))
 
-    document = word(artifacts, result)
-    assert len(document.tables[0].rows) == 2
-    assert "仅保留范围乙的现行要求。" in document.tables[0].cell(1, 0).text
-    assert "已失效的范围甲要求。" not in document.tables[0].cell(1, 0).text
-    assert "原文件曾要求范围甲。" in document.tables[0].cell(1, 1).text
+    assert not word(artifacts, result).tables
+    notes = submission_notes(artifacts, result)
+    assigned = notes.split("尚未安排的要求")[0]
+    assert "仅保留范围乙的现行要求。" in assigned
+    assert "已失效的范围甲要求。" not in assigned
+    assert "原文件曾要求范围甲。" in assigned
+    assert "已失效的范围甲要求。" in notes.split("尚未安排的要求")[1]
 
 
-def test_requirement_basis_precedes_generated_response_and_matches_volume(tmp_path):
+def test_generated_response_and_volume_do_not_include_requirement_analysis_tables(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     reference = rule_ref(artifacts)
     outline = {"chapters": [chapter("技术", [outline_target("technical", [reference])], volume=True)]}
@@ -217,13 +260,15 @@ def test_requirement_basis_precedes_generated_response_and_matches_volume(tmp_pa
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         for content in [artifacts.read_bytes(result["docx_ref"]), archive.read("volumes/001.docx")]:
             document = Document(BytesIO(content))
-            body = list(document.element.body)
-            response = next(p for p in document.paragraphs if p.text == "有依据的企业应答。")
-            assert body.index(document.tables[0]._tbl) < body.index(response._p)
-            assert document.tables[0].cell(1, 2).text == ""
+            assert not document.tables
+            assert_no_analysis_preamble(document)
+            paragraphs = [p.text for p in document.paragraphs]
+            assert paragraphs[paragraphs.index("1 技术") + 1] == "有依据的企业应答。"
+        notes = archive.read("提交要求与待办.md").decode()
+        assert "技术" in notes and "设备应支持原文规定的功能。" in notes
 
 
-def test_all_requirements_precede_a_shared_writing_unit(tmp_path):
+def test_shared_writing_unit_keeps_all_requirements_in_notes_only(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     first, second = rule_ref(artifacts, "first"), rule_ref(artifacts, "second")
     outline = {"chapters": [chapter("技术", [outline_target("technical", [first]),
@@ -235,11 +280,11 @@ def test_all_requirements_precede_a_shared_writing_unit(tmp_path):
     result = export_authoring_document(artifacts, outline, units, requirements=data)
 
     document = word(artifacts, result)
-    body = list(document.element.body)
-    response = next(p for p in document.paragraphs if p.text == "两个位置共享的企业应答。")
-    assert len(document.tables) == 1
-    assert len(document.tables[0].rows) == 3
-    assert all(body.index(table._tbl) < body.index(response._p) for table in document.tables)
+    assert not document.tables
+    assert [p.text for p in document.paragraphs].count("两个位置共享的企业应答。") == 1
+    notes = submission_notes(artifacts, result)
+    # Equal wording does not merge distinct formal rule identities.
+    assert notes.count("设备应支持原文规定的功能。") == 4
 
 
 def test_forms_and_attachments_are_not_recreated_and_manual_prices_stay_blank(tmp_path):
@@ -254,12 +299,12 @@ def test_forms_and_attachments_are_not_recreated_and_manual_prices_stay_blank(tm
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
     document = word(artifacts, result)
-    assert len(document.tables) == 2
-    assert len(document.tables[0].rows) == 2
-    assert document.tables[0].cell(1, 2).text == ""
-    assert document.tables[1].cell(2, 1).text == ""
-    assert document.tables[1].cell(0, 0).text == "规定表头"
-    assert "招标要求依据（企业应答另行填写）" in [p.text for p in document.paragraphs]
+    assert len(document.tables) == 1
+    assert document.tables[0].cell(2, 1).text == ""
+    assert document.tables[0].cell(0, 0).text == "规定表头"
+    assert_no_analysis_preamble(document)
+    notes = submission_notes(artifacts, result)
+    assert "设备应支持原文规定的功能。" in notes
 
 
 def test_attachment_and_form_requirements_survive_without_enterprise_materials(tmp_path):
@@ -281,19 +326,19 @@ def test_attachment_and_form_requirements_survive_without_enterprise_materials(t
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         for content in [artifacts.read_bytes(result["docx_ref"]), archive.read("volumes/001.docx")]:
             document = Document(BytesIO(content))
-            assert len(document.tables) == 2
-            basis, original = document.tables
-            assert len(basis.rows) == 3
-            for row, entry in zip(basis.rows[1:], entries):
-                assert entry["rule"]["text"] in row.cells[0].text
-                assert entry["rule"]["evidence"][0]["quote"] == row.cells[1].text
-                assert row.cells[2].text == ""
-            assert "经评审同意后" in basis.cell(2, 0).text
+            assert len(document.tables) == 1
+            original = document.tables[0]
+            assert_no_analysis_preamble(document)
             assert original.cell(0, 0).text == "规定表头"
             assert original.cell(2, 1).text == ""
             body = list(document.element.body)
             pending = next(p for p in document.paragraphs if "待补" in p.text)
-            assert body.index(basis._tbl) < body.index(pending._p) < body.index(original._tbl)
+            assert body.index(pending._p) < body.index(original._tbl)
+        notes = archive.read("提交要求与待办.md").decode()
+        for entry in entries:
+            assert entry["rule"]["text"] in notes
+            assert entry["rule"]["evidence"][0]["quote"] in notes
+        assert "经评审同意后" in notes
 
 
 def test_chapter_deduplicates_full_rule_identity_without_merging_form_instances(tmp_path):
@@ -315,18 +360,82 @@ def test_chapter_deduplicates_full_rule_identity_without_merging_form_instances(
     result = export_authoring_document(artifacts, {"chapters": [chapter("技术", targets)]}, [], requirements=data)
 
     document = word(artifacts, result)
-    assert len(document.tables) == 3
-    basis, bidder, manufacturer = document.tables
-    assert len(basis.rows) == 3
-    assert basis.cell(1, 0).text == "原厂证明须盖章。"
-    assert basis.cell(2, 0).text == "另一个有效规则必须保留。"
-    assert all(row.cells[2].text == "" for row in basis.rows[1:])
+    assert len(document.tables) == 2
+    bidder, manufacturer = document.tables
+    notes = submission_notes(artifacts, result)
+    assert notes.count("原厂证明须盖章。") == 1
+    assert notes.count("另一个有效规则必须保留。") == 1
     assert bidder.cell(0, 0).text == manufacturer.cell(0, 0).text == "规定表头"
     assert bidder.cell(2, 1).text == manufacturer.cell(2, 1).text == ""
     captions = [p.text for p in document.paragraphs]
     assert "投标人分别填写。" in captions and "原厂分别填写。" in captions
-    assert captions.count("招标要求依据（企业应答另行填写）") == 1
+    assert_no_analysis_preamble(document)
     assert data == before
+
+
+def test_shared_requirement_is_readable_under_each_relevant_chapter(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    reference = rule_ref(artifacts)
+    outline = {"chapters": [chapter("设备应答", [outline_target("hardware", [reference, reference])]),
+        chapter("服务应答", [outline_target("service", [reference])])]}
+    data = requirements(requirement(reference, "设备及服务共同执行三年保障。", targets=("hardware", "service"),
+        evidence=[{"range_id": "shared", "quote": "设备和服务保障期均为三年。"}]))
+
+    result = export_authoring_document(artifacts, outline, [], requirements=data)
+
+    notes = submission_notes(artifacts, result)
+    assert notes.count("设备及服务共同执行三年保障。") == 2
+    assert notes.count("设备和服务保障期均为三年。") == 2
+    assert notes.index("设备应答") < notes.index("设备及服务共同执行三年保障。") < notes.index("服务应答")
+    assert "设备及服务共同执行三年保障。" in notes[notes.index("服务应答"):]
+    assert not word(artifacts, result).tables
+
+
+def test_excluding_a_candidate_does_not_describe_its_assigned_rule_as_excluded(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    reference = rule_ref(artifacts)
+    text = "设备仍须满足全部技术指标。"
+    quote = "设备技术指标应逐项响应。"
+    reason = "该候选附件本次不适用，技术指标在技术响应中保留。"
+    outline = {"chapters": [chapter("技术响应", [outline_target("technical", [reference])])],
+        "issues": [{"code": "outline_target_excluded", "detail": reason, "rule_refs": [reference]}]}
+    data = requirements(requirement(reference, text,
+        evidence=[{"range_id": "technical-source", "quote": quote}]))
+
+    result = export_authoring_document(artifacts, outline, [], requirements=data)
+
+    notes = submission_notes(artifacts, result)
+    assigned = notes.split("已排除候选及关联要求")[0]
+    excluded = notes.split("已排除候选及关联要求")[1].split("尚未安排的要求")[0]
+    unassigned = notes.split("尚未安排的要求")[1].split("人工填写位置")[0]
+    assert "技术响应" in assigned and text in assigned and quote in assigned
+    assert reason in excluded and text in excluded and quote in excluded
+    assert "仅排除该候选" in excluded and "其他响应位置的安排仍保留" in excluded
+    assert "已明确排除的要求" not in notes and text not in unassigned
+    assert not any(gap["code"] == "export_requirement_unassigned" for gap in result["gaps"])
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
+        assert json.loads(archive.read("招标要求底稿.json")) == data
+
+
+def test_explicit_technical_response_table_remains_with_blank_enterprise_cells(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    reference = rule_ref(artifacts)
+    outline = {"chapters": [chapter("技术参数响应", [outline_target("technical", [reference])], volume=True)]}
+    data = requirements(requirement(reference, "设备应支持角色权限管理。"))
+    units = [writing("response", "技术参数响应", ["technical"], blocks=[{
+        "kind": "table", "headers": ["技术要求", "投标响应", "偏差"],
+        "rows": [["设备应支持角色权限管理。", "", ""]]}])]
+
+    result = export_authoring_document(artifacts, outline, units, requirements=data)
+
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
+        for content in [artifacts.read_bytes(result["docx_ref"]), archive.read("volumes/001.docx")]:
+            document = Document(BytesIO(content))
+            assert len(document.tables) == 1
+            assert [c.text for c in document.tables[0].rows[0].cells] == ["技术要求", "投标响应", "偏差"]
+            assert [c.text for c in document.tables[0].rows[1].cells] == ["设备应支持角色权限管理。", "", ""]
+            assert_no_analysis_preamble(document)
+        assert json.loads(archive.read("招标要求底稿.json")) == data
 
 
 def test_cover_requirements_remain_in_submission_notes_without_preceding_the_original_cover(tmp_path):
@@ -347,17 +456,15 @@ def test_cover_requirements_remain_in_submission_notes_without_preceding_the_ori
     result = export_authoring_document(artifacts, {"chapters": [cover, body]}, [], requirements=data)
 
     document = word(artifacts, result)
-    assert len(document.tables) == 1
-    assert document.tables[0].cell(1, 0).text == "接口应支持原文规定的协议。"
-    assert document.tables[0].cell(1, 2).text == ""
+    assert not document.tables
+    assert_no_analysis_preamble(document)
     paragraphs = [p.text for p in document.paragraphs]
     assert paragraphs.index(original_text) < paragraphs.index("目录")
-    assert paragraphs.index("目录") < paragraphs.index("招标要求依据（企业应答另行填写）")
     assert cover_text not in "\n".join(paragraphs)
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         notes = archive.read("提交要求与待办.md").decode()
-        assert "封面填写要求" in notes
         assert cover_text in notes and cover_quote in notes
+        assert "接口应支持原文规定的协议。" in notes
         assert json.loads(archive.read("招标要求底稿.json")) == before
     assert not any(gap["code"] == "export_requirement_unassigned" for gap in result["gaps"])
     assert data == before
@@ -383,10 +490,11 @@ def test_complete_requirements_are_packaged_with_unassigned_and_unknown_rules(tm
         assert json.loads(archive.read(record["package_path"])) == before
         assert artifacts.read_json(record["artifact_ref"]) == before
     document = word(artifacts, result)
-    assert len(document.tables) == 1
-    assert "待核" in document.tables[0].cell(2, 0).text
-    assert document.tables[0].cell(2, 2).text == ""
-    assert "尚未安排的要求。" not in "\n".join(c.text for table in document.tables for row in table.rows for c in row.cells)
+    assert not document.tables
+    notes = submission_notes(artifacts, result)
+    assert "待核" in notes and "尚未安排的要求。" in notes
+    assert "设备应支持原文规定的功能。" in notes
+    assert "尚未安排的要求。" not in "\n".join(p.text for p in document.paragraphs)
     assert any(g["code"] == "export_requirement_unassigned" for g in result["gaps"])
     assert any(g["code"] == "export_requirement_unavailable" for g in result["gaps"])
     assert data == before
@@ -418,12 +526,11 @@ def test_legacy_requirement_shape_keeps_document_and_complete_raw_snapshot(tmp_p
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    document = word(artifacts, result)
-    row = document.tables[0].rows[1]
+    assert not word(artifacts, result).tables
+    notes = submission_notes(artifacts, result)
     for value in ["已有可读要求。", "特定区域", "原条件", "附带条件", "旧协议的单字符串例外"]:
-        assert value in row.cells[0].text
-    assert "旧引文片段" in row.cells[1].text and "待核" in row.cells[1].text
-    assert row.cells[2].text == ""
+        assert value in notes
+    assert "旧引文片段" in notes and "待核" in notes
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         assert json.loads(archive.read("招标要求底稿.json")) == data
     assert any(g["code"] == "export_requirement_evidence_unverified" for g in result["gaps"])
@@ -449,7 +556,7 @@ def test_structured_requirement_details_are_readable_business_text(tmp_path, det
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    content = word(artifacts, result).tables[0].cell(1, 0).text
+    content = submission_notes(artifacts, result)
     assert all(value in content for value in expected)
     assert [content.index(value) for value in expected] == sorted(content.index(value) for value in expected)
     assert "后果：后果：" not in content
@@ -472,10 +579,10 @@ def test_original_business_label_text_and_values_are_preserved(tmp_path):
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    row = word(artifacts, result).tables[0].rows[1]
-    assert row.cells[0].text == original + "\n后果：后果：否决投标\n触发条件：条件：来源值"
-    assert row.cells[1].text == original
-    assert row.cells[2].text == ""
+    notes = submission_notes(artifacts, result).replace("\n   ", "\n")
+    assert original + "\n后果：后果：否决投标\n触发条件：条件：来源值" in notes
+    assert "> " + original in notes
+    assert not word(artifacts, result).tables
     assert data == before
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         assert json.loads(archive.read("招标要求底稿.json")) == before
@@ -493,13 +600,12 @@ def test_unknown_legacy_fields_are_pending_without_dumping_internal_names(tmp_pa
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    row = word(artifacts, result).tables[0].rows[1]
-    content = "\n".join(cell.text for cell in row.cells)
+    content = submission_notes(artifacts, result)
     assert "最高分：20" in content and "待核" in content
     assert "局部适用" in content and "旧记录值" in content and "原记录片段" in content
     assert not any(name in content for name in ["legacy_internal_name", "another_internal_name", "private_scope_key",
                                                "private_evidence_key", "range_id", "{", "}", "[", "]"])
-    assert row.cells[2].text == ""
+    assert not word(artifacts, result).tables
     assert any(g["code"] == "export_requirement_evidence_unverified" for g in result["gaps"])
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
         assert json.loads(archive.read("招标要求底稿.json")) == data
@@ -514,10 +620,9 @@ def test_original_json_code_examples_are_preserved_as_source_text(tmp_path):
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    row = word(artifacts, result).tables[0].rows[1]
-    assert original in row.cells[0].text
-    assert row.cells[1].text == original
-    assert row.cells[2].text == ""
+    notes = submission_notes(artifacts, result)
+    assert original in notes and "> " + original in notes
+    assert not word(artifacts, result).tables
 
 
 def test_internal_classification_is_hidden_and_zero_false_values_remain_visible(tmp_path):
@@ -529,7 +634,7 @@ def test_internal_classification_is_hidden_and_zero_false_values_remain_visible(
 
     result = export_authoring_document(artifacts, outline, [], requirements=data)
 
-    content = word(artifacts, result).tables[0].cell(1, 0).text
+    content = submission_notes(artifacts, result).replace("\n   ", "\n")
     assert "分值：0" in content and "最高分：0" in content
     assert "条件（待核）：否\n0" in content
     assert not any(value in content for value in ["scoring_rule", "internal_domain_code", "事项类型", "业务领域"])

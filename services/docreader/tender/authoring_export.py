@@ -156,7 +156,8 @@ def _submission_notes(outline, requirements, gaps):
 
     def append_rules(title, references):
         lines.extend(["## " + title, ""])
-        for number, reference in enumerate(references, 1):
+        references = {_requirement_key(ref): ref for ref in references}
+        for number, reference in enumerate(references.values(), 1):
             rule = rules.get(_requirement_key(reference), {}).get("rule")
             if not isinstance(rule, dict) or not rule.get("text"):
                 lines.extend([f"{number}. 具体要求待核对，正式引用保留在大纲和要求底稿中。", ""])
@@ -170,11 +171,23 @@ def _submission_notes(outline, requirements, gaps):
                 lines.extend(["> " + quote.replace("\n", "\n> "), ""])
 
     append_rules("已知提交与编制约束", constraints)
-    cover_rules = {_requirement_key(ref): ref for chapter, _ in entries
-                   if chapter.get("presentation_role", "body") == "cover"
-                   for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])}
-    if cover_rules:
-        append_rules("封面填写要求", cover_rules.values())
+    paths = _display_paths(entries)
+    for chapter, _ in entries:
+        references = [ref for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])]
+        if references:
+            location = " ".join(part for part in (
+                ".".join(map(str, paths.get(chapter["chapter_id"], ()))), chapter["title"]) if part)
+            label = "封面填写要求：" if chapter.get("presentation_role", "body") == "cover" else "章节要求："
+            append_rules(label + location, references)
+    for issue in outline.get("issues", []):
+        if issue["code"] in {"outline_target_excluded", "outline_rule_excluded"}:
+            excluded_target = issue["code"] == "outline_target_excluded"
+            append_rules("已排除候选及关联要求" if excluded_target else "已明确排除的要求",
+                         issue.get("rule_refs", []))
+            if excluded_target:
+                lines.extend(["此记录仅排除该候选；关联要求在其他响应位置的安排仍保留。", ""])
+            if issue.get("detail"):
+                lines.extend(["排除理由：" + issue["detail"], ""])
     append_rules("尚未安排的要求", [row["rule_ref"] for key, row in rules.items() if key not in assigned])
     lines.extend(["## 人工填写位置", ""])
     for chapter, _ in entries:
@@ -238,7 +251,7 @@ def _block(document, block, *, width_ratios=None):
 
 
 class _Assembler:
-    def __init__(self, artifacts, writing_units, review_issues, requirements=None, entries=()):
+    def __init__(self, artifacts, writing_units, review_issues, entries=()):
         self.artifacts = artifacts
         self.units = defaultdict(list)
         for unit in writing_units:
@@ -247,9 +260,6 @@ class _Assembler:
         self.attachments = {}
         self.template_parts = {}
         self.repository = EvidenceRepository(artifacts)
-        self.requirements = None if requirements is None else {
-            _requirement_key(entry["rule_ref"]): entry for entry in requirements.get("rules", [])}
-        self.analysis_pending = requirements is not None and not requirements.get("authoring_input", {}).get("confirmation_ref")
         self.display_paths = _display_paths(entries)
         self.locations = {target["target_id"]: " ".join(part for part in (
             ".".join(map(str, self.display_paths.get(chapter["chapter_id"], ()))), chapter["title"]) if part)
@@ -260,40 +270,6 @@ class _Assembler:
         if target_id is not None:
             value["target_id"] = target_id
         self.gaps.append(value)
-
-    def requirement_basis(self, document, targets, chapter_id):
-        if self.requirements is None:
-            return
-        references = {}
-        for target in targets:
-            for reference in target.get("rule_refs", []):
-                references.setdefault(_requirement_key(reference), target["target_id"])
-        if not references:
-            return
-        rows = []
-        for key, target_id in references.items():
-            rule = self.requirements.get(key, {}).get("rule")
-            if not isinstance(rule, dict) or not rule.get("text"):
-                rows.append(["该要求内容待核对。", "", ""])
-                self.gap("export_requirement_unavailable", "已保留要求位置及引用，具体内容尚待核对。",
-                         chapter_id, target_id)
-                continue
-            evidence = rule.get("evidence")
-            entries = evidence if isinstance(evidence, list) else [evidence]
-            quoted = "\n\n".join(_requirement_value(e.get("quote", e) if isinstance(e, dict) else e) for e in entries)
-            if not evidence or not isinstance(evidence, list) or any(
-                    not isinstance(e, dict) or not isinstance(e.get("quote"), str) for e in entries):
-                quoted = "原文依据待核对：\n" + quoted
-                self.gap("export_requirement_evidence_unverified", "已有原文依据结构需核对，原值保留在底稿中。",
-                         chapter_id, target_id)
-            rows.append([_requirement_text(rule), quoted, ""])
-        document.add_paragraph("招标要求依据（企业应答另行填写）")
-        if self.analysis_pending:
-            document.add_paragraph(PENDING_ANALYSIS_NOTE)
-        document.add_paragraph("原文依据不代替有效要求及适用范围，也不代表企业已作出应答。")
-        label = "分析整理（待确认）" if self.analysis_pending else "招标要求"
-        _block(document, {"headers": [label, "原文依据", "企业应答（待填写）"], "rows": rows},
-               width_ratios=[40, 35, 25])
 
     def load_template(self, part):
         key = template_part_key(part)
@@ -450,8 +426,6 @@ class _Assembler:
             and target.get('related_target_ids')
             and all(identity in self.locations and identity != target['target_id']
                     for identity in target['related_target_ids'])}
-        if chapter.get("presentation_role", "body") != "cover":
-            self.requirement_basis(document, targets, chapter_id)
         forms, grid_forms = {}, set()
         manual_forms = {target["target_id"] for target in targets
                         if target["kind"] == "form" and target.get("manual_fill", False)}
@@ -580,6 +554,12 @@ class _Assembler:
             self.chapter(document, chapter, path)
         field = OxmlElement("w:fldSimple")
         field.set(qn("w:instr"), "PAGE")
+        # Word rejects a simple field that has no result run.
+        run = OxmlElement("w:r")
+        text = OxmlElement("w:t")
+        text.text = "1"
+        run.append(text)
+        field.append(run)
         section.footer.paragraphs[0]._p.append(field)
         output = BytesIO()
         document.save(output)
@@ -590,8 +570,25 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
                               review_issues: list[dict] | None = None, *, requirements: dict | None = None) -> dict:
     """Return immutable DOCX/ZIP references; source and business gaps remain deliverable."""
     entries = list(_walk(outline.get("chapters", [])))
-    assembler = _Assembler(artifacts, writing_units, review_issues, requirements, entries)
+    assembler = _Assembler(artifacts, writing_units, review_issues, entries)
     if requirements is not None:
+        rules = {_requirement_key(entry["rule_ref"]): entry.get("rule") for entry in requirements.get("rules", [])}
+        locations = [(ref, chapter["chapter_id"], target["target_id"]) for chapter, _ in entries
+                     for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])]
+        located = {_requirement_key(ref) for ref, _, _ in locations}
+        locations.extend((entry["rule_ref"], None, None) for entry in requirements.get("rules", [])
+                         if _requirement_key(entry["rule_ref"]) not in located)
+        for reference, chapter_id, target_id in locations:
+            rule = rules.get(_requirement_key(reference))
+            if not isinstance(rule, dict) or not rule.get("text"):
+                assembler.gap("export_requirement_unavailable", "已保留要求位置及引用，具体内容尚待核对。",
+                              chapter_id, target_id)
+                continue
+            evidence = rule.get("evidence")
+            if not evidence or not isinstance(evidence, list) or any(
+                    not isinstance(item, dict) or not isinstance(item.get("quote"), str) for item in evidence):
+                assembler.gap("export_requirement_evidence_unverified", "已有原文依据结构需核对，原值保留在底稿中。",
+                              chapter_id, target_id)
         assigned = {_requirement_key(ref) for chapter, _ in entries
                     for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])}
         assigned.update(_requirement_key(ref) for ref in outline.get("constraint_rule_refs", []))

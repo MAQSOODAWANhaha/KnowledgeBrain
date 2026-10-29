@@ -42,7 +42,8 @@ def payload(large=False):
 
 
 def budget():
-    return RequestBudget(model='fixture', context_tokens=65536, prompts={'authoring_review': PROMPT})
+    return RequestBudget(model='fixture', context_tokens=65536, prompts={
+        'authoring_review': PROMPT, 'authoring_structure': PROMPT})
 
 
 async def test_over_budget_structure_preserves_every_cell_and_only_projects_grid_views(monkeypatch):

@@ -123,6 +123,8 @@ def test_directory_has_updatable_toc_field_and_existing_page_field(tmp_path):
         assert update is not None and update.get(qn("w:val")) in {"true", "1"}
         footer = archive.read("word/footer1.xml").decode()
         assert 'w:instr="PAGE"' in footer
+        footer_xml = etree.fromstring(archive.read("word/footer1.xml"))
+        assert footer_xml.xpath("//w:fldSimple/w:r", namespaces=namespaces)
     assert [p.text for p in word(artifacts, result).paragraphs].count("1 正文") == 1
 
 
@@ -160,18 +162,27 @@ def test_native_table_layout_uses_explicit_or_native_headers_and_keeps_original_
     assert raw == original
 
 
-def test_requirement_table_reserves_readable_response_width_and_repeated_headers(tmp_path):
+def test_analysis_requirements_do_not_insert_tables_or_change_native_response_layout(tmp_path):
     artifacts = ArtifactStore(tmp_path)
+    selected, _ = native_part(artifacts, count=1)
     reference = {"item_ref": {"item_id": "rule", "artifact_ref": artifacts.put_json({"rule": True})}}
     requirements = {"rules": [{"rule_ref": reference, "target_ids": ["response"], "rule": {
         "text": "至少提供三年售后服务。", "evidence": [{"range_id": "range", "quote": "至少提供三年售后服务。"}]}}]}
     result = export_authoring_document(artifacts, {"chapters": [chapter("service", targets=[
-        target("response", rules=[reference])])]}, [], requirements=requirements)
-    table = word(artifacts, result).tables[0]
+        target("response", rules=[reference], templates=[selected], manual=True)])]}, [], requirements=requirements)
+    document = word(artifacts, result)
+    assert len(document.tables) == 1
+    table = document.tables[0]
     assert header_rows(table) == [0]
     widths = [column.width for column in table.columns]
-    assert [value / sum(widths) for value in widths] == pytest.approx([.4, .35, .25], rel=.01)
-    assert table.cell(1, 2).text == ""
+    assert [value / sum(widths) for value in widths] == pytest.approx([1 / 3, 2 / 3], rel=.01)
+    assert table.cell(0, 0)._tc is table.cell(0, 1)._tc
+    assert table.cell(1, 0).text == "功能要求" and table.cell(1, 1).text == ""
+    assert table.cell(2, 0).text == "最终报价" and table.cell(2, 1).text == ""
+    assert not any("分析整理（待确认）" in p.text for p in document.paragraphs)
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
+        notes = package.read("提交要求与待办.md").decode()
+    assert "service" in notes and "至少提供三年售后服务。" in notes
 
 
 def test_package_submission_notes_keep_constraints_unassigned_rules_and_review_opinions(tmp_path):
@@ -189,6 +200,7 @@ def test_package_submission_notes_keep_constraints_unassigned_rules_and_review_o
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
         notes = package.read("提交要求与待办.md").decode()
     assert "已知提交与编制约束" in notes and texts[0] in notes
+    assert "response" in notes and texts[2] in notes
     assert "尚未安排的要求" in notes and texts[1] in notes
     assert texts[2] not in notes.split("尚未安排的要求")[1].split("当前核对意见")[0]
     assert "当前核对意见" in notes and "并非缺少企业资料" in notes
@@ -206,3 +218,6 @@ def test_explicit_rule_exclusion_is_not_reported_as_unassigned_in_document_or_no
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
         notes = package.read("提交要求与待办.md").decode()
     assert "仅另一标段需要此证明。" not in notes.split("尚未安排的要求")[1].split("人工填写位置")[0]
+    assert "仅另一标段需要此证明。" in notes
+    assert "原文明示本标段不适用。" in notes
+    assert "已明确排除的要求" in notes and "已排除候选及关联要求" not in notes

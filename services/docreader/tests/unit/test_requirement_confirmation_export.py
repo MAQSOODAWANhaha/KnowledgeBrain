@@ -11,12 +11,14 @@ import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
-from test_requirement_preservation_export import outline_target, requirement, requirements, rule_ref
+from test_requirement_preservation_export import (
+    assert_no_analysis_preamble, outline_target, requirement, requirements, rule_ref,
+)
 from test_submission_export import chapter, grid, part, source, target, writing
 
 
 @pytest.mark.parametrize("confirmation", ["absent", None, "confirmed"])
-def test_confirmation_status_labels_main_volume_and_notes_without_changing_facts(tmp_path, confirmation):
+def test_confirmation_status_stays_in_notes_without_changing_formal_documents_or_facts(tmp_path, confirmation):
     artifacts = ArtifactStore(tmp_path)
     reference = rule_ref(artifacts, decision="accepted-amendment", index=1)
     entry = requirement(reference, "有效补遗仅要求范围乙。", scope="范围乙",
@@ -46,18 +48,17 @@ def test_confirmation_status_labels_main_volume_and_notes_without_changing_facts
         assert "原文曾要求范围甲。" in notes
         for content in (artifacts.read_bytes(result["docx_ref"]), archive.read("volumes/001.docx")):
             document = Document(BytesIO(content))
-            basis, native = document.tables
-            assert basis.cell(0, 0).text == ("分析整理（待确认）" if pending else "招标要求")
-            assert basis.cell(1, 0).text == "有效补遗仅要求范围乙。\n适用范围：范围乙\n条件：按当前有效条件"
-            assert basis.cell(1, 1).text == "原文曾要求范围甲。"
-            assert basis.cell(1, 2).text == ""
-            assert (any("摘要及适用范围仍需结合原文和有效补遗核对" in p.text
-                        for p in document.paragraphs)) is pending
+            assert len(document.tables) == 1
+            native = document.tables[0]
+            assert_no_analysis_preamble(document)
+            assert not any("摘要及适用范围仍需结合原文和有效补遗核对" in p.text
+                           for p in document.paragraphs)
             assert native.cell(0, 0).text == "规定表头"
             assert native.cell(1, 1).text == native.cell(2, 1).text == ""
             bookmarks = [element.get(qn("w:name"))
                          for element in document.element.body.iter(qn("w:bookmarkStart"))]
             assert len(bookmarks) == len(set(bookmarks)) == 4
+        assert "适用范围：范围乙" in notes and "条件：按当前有效条件" in notes
     assert (data, outline, units) == before
 
 

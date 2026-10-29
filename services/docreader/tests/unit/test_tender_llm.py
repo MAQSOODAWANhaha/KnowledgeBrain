@@ -8,8 +8,13 @@ import httpx
 import pytest
 
 from docreader.llm import (
-    ImageInput, ModelBudgetError, ModelConfig, ModelConfigurationError, ModelInfrastructureError,
-    ModelSemanticError, OpenAIModel,
+    ImageInput,
+    ModelBudgetError,
+    ModelConfig,
+    ModelConfigurationError,
+    ModelInfrastructureError,
+    ModelSemanticError,
+    OpenAIModel,
 )
 from docreader.llm.budget import RequestBudget
 from docreader.llm.config import completions_url
@@ -39,20 +44,34 @@ def test_aliases_preserve_secret_bytes_and_reject_conflicts_without_values():
     assert "KNOWLEDGEBRAIN_CHAT_API_KEY / LLM_API_KEY" in str(error.value)
     assert "synthetic-secret" not in str(error.value)
     assert "other-secret" not in str(error.value)
-    aliases = {"LLM_BASE_URL": " https://chat.invalid/v1 ", "LLM_MODEL": " gpt-4o ",
-               "LLM_API_KEY": "secret", "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS": "8192"}
+    aliases = {
+        "LLM_BASE_URL": " https://chat.invalid/v1 ",
+        "LLM_MODEL": " gpt-4o ",
+        "LLM_API_KEY": "secret",
+        "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS": "8192",
+    }
     assert ModelConfig.from_env(aliases).chat.context_tokens == 8192
 
 
 @pytest.mark.parametrize("context", ["", "0", "-1", "abc", "1.5", "4194305", "１２８"])
 def test_context_requires_service_capacity(context):
     with pytest.raises(ModelConfigurationError):
-        ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=context))
+        ModelConfig.from_env(
+            environment(KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=context)
+        )
 
 
-@pytest.mark.parametrize("url", ["ftp://chat.invalid", "https://user:secret@chat.invalid/v1",
-                                "https://chat.invalid/v1?secret=x", "https://chat.invalid/#secret",
-                                "https://chat.invalid:invalid", "https://chat.invalid?"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://chat.invalid",
+        "https://user:secret@chat.invalid/v1",
+        "https://chat.invalid/v1?secret=x",
+        "https://chat.invalid/#secret",
+        "https://chat.invalid:invalid",
+        "https://chat.invalid?",
+    ],
+)
 def test_invalid_endpoint_does_not_echo_input(url):
     with pytest.raises(ModelConfigurationError) as error:
         ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_BASE_URL=url))
@@ -63,15 +82,22 @@ def test_invalid_endpoint_does_not_echo_input(url):
 def test_vlm_validation_is_lazy_and_does_not_inherit_chat(chat_model):
     config = ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_MODEL=chat_model))
     assert config.chat.model == chat_model
-    with pytest.raises(ModelConfigurationError, match="VLM base URL, API key and model"):
+    with pytest.raises(
+        ModelConfigurationError, match="VLM base URL, API key and model"
+    ):
         config.for_images()
 
 
-@pytest.mark.parametrize("url", ["https://vision.invalid/v1", "https://chat.invalid/v1/"])
+@pytest.mark.parametrize(
+    "url", ["https://vision.invalid/v1", "https://chat.invalid/v1/"]
+)
 def test_vlm_never_inherits_chat_credentials(url):
-    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL=url,
-                         KNOWLEDGEBRAIN_VLM_MODEL="vision-model")
-    with pytest.raises(ModelConfigurationError, match="VLM base URL, API key and model"):
+    values = environment(
+        KNOWLEDGEBRAIN_VLM_BASE_URL=url, KNOWLEDGEBRAIN_VLM_MODEL="vision-model"
+    )
+    with pytest.raises(
+        ModelConfigurationError, match="VLM base URL, API key and model"
+    ):
         ModelConfig.from_env(values).for_images()
     values["KNOWLEDGEBRAIN_VLM_API_KEY"] = "vision-key"
     vision = ModelConfig.from_env(values).for_images()
@@ -80,12 +106,14 @@ def test_vlm_never_inherits_chat_credentials(url):
 
 
 def test_explicit_vlm_accepts_unlisted_model_even_when_chat_uses_same_model():
-    config = ModelConfig.from_env(environment(
-        KNOWLEDGEBRAIN_CHAT_MODEL="unlisted-vision-model",
-        KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1",
-        KNOWLEDGEBRAIN_VLM_API_KEY=" vision-key ",
-        KNOWLEDGEBRAIN_VLM_MODEL="unlisted-vision-model",
-    ))
+    config = ModelConfig.from_env(
+        environment(
+            KNOWLEDGEBRAIN_CHAT_MODEL="unlisted-vision-model",
+            KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1",
+            KNOWLEDGEBRAIN_VLM_API_KEY=" vision-key ",
+            KNOWLEDGEBRAIN_VLM_MODEL="unlisted-vision-model",
+        )
+    )
     assert config.for_images().model == "unlisted-vision-model"
     assert config.for_images().api_key == " vision-key "
     assert config.for_images().context_tokens == 32768
@@ -93,19 +121,32 @@ def test_explicit_vlm_accepts_unlisted_model_even_when_chat_uses_same_model():
 
 @pytest.mark.parametrize("missing", ["BASE_URL", "API_KEY", "MODEL"])
 def test_partial_vlm_configuration_never_falls_back_to_chat(missing):
-    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1",
-                         KNOWLEDGEBRAIN_VLM_API_KEY="vision-key", KNOWLEDGEBRAIN_VLM_MODEL="gpt-4o")
+    values = environment(
+        KNOWLEDGEBRAIN_VLM_BASE_URL="https://chat.invalid/v1",
+        KNOWLEDGEBRAIN_VLM_API_KEY="vision-key",
+        KNOWLEDGEBRAIN_VLM_MODEL="gpt-4o",
+    )
     del values[f"KNOWLEDGEBRAIN_VLM_{missing}"]
     config = ModelConfig.from_env(values)
     assert config.chat.model == "gpt-4o"
-    with pytest.raises(ModelConfigurationError, match="VLM base URL, API key and model"):
+    with pytest.raises(
+        ModelConfigurationError, match="VLM base URL, API key and model"
+    ):
         config.for_images()
 
 
-@pytest.mark.parametrize("url", ["https://chat.invalid/v1/chat/completions", "https://chat.invalid",
-                                "https://CHAT.invalid:443/v1/"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://chat.invalid/v1/chat/completions",
+        "https://chat.invalid",
+        "https://CHAT.invalid:443/v1/",
+    ],
+)
 def test_equivalent_endpoint_inherits_context_but_requires_explicit_key(url):
-    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL=url, KNOWLEDGEBRAIN_VLM_MODEL="gpt-4o")
+    values = environment(
+        KNOWLEDGEBRAIN_VLM_BASE_URL=url, KNOWLEDGEBRAIN_VLM_MODEL="gpt-4o"
+    )
     with pytest.raises(ModelConfigurationError):
         ModelConfig.from_env(values).for_images()
     values["KNOWLEDGEBRAIN_VLM_API_KEY"] = "vision-key"
@@ -118,13 +159,23 @@ def test_equivalent_endpoint_inherits_context_but_requires_explicit_key(url):
 
 def test_context_and_total_usage_are_independent_and_images_do_not_count_base64():
     budget = RequestBudget(context_tokens=65536, prompts={"extract": "Return JSON."})
-    estimate = budget.require("extract", {"source": "中文"}, images=[ImageInput(b"fixture", "image/png")])
+    estimate = budget.require(
+        "extract", {"source": "中文"}, images=[ImageInput(b"fixture", "image/png")]
+    )
     assert estimate["image_tokens"] == 16384
-    assert estimate["input_tokens"] == estimate["text_tokens"] + estimate["framing_tokens"] + estimate["image_tokens"]
+    assert (
+        estimate["input_tokens"]
+        == estimate["text_tokens"]
+        + estimate["framing_tokens"]
+        + estimate["image_tokens"]
+    )
     with pytest.raises(ModelBudgetError, match="context"):
         budget.require("extract", {"source": "x" * 65536})
     ledger = UsageLedger()
-    ledger.record("succeeded", {"prompt_tokens": 100000, "completion_tokens": 1000, "total_tokens": 101000})
+    ledger.record(
+        "succeeded",
+        {"prompt_tokens": 100000, "completion_tokens": 1000, "total_tokens": 101000},
+    )
     ledger.record("uncertain", None)
     assert budget.require("extract", {"source": "small"})["context_tokens"] == 65536
     assert ledger.snapshot()["reported_tokens"]["total_tokens"] == 101000
@@ -147,38 +198,90 @@ class Audit:
         return self.spec
 
     async def begin_request(self, lease, request_id, model, kind, metadata=None):
-        self.events.append({"request_id": request_id, "status": "prepared", "model": model,
-                            "kind": kind, "metadata": metadata})
+        self.events.append(
+            {
+                "request_id": request_id,
+                "status": "prepared",
+                "model": model,
+                "kind": kind,
+                "metadata": metadata,
+            }
+        )
         return self.events[-1]
 
-    async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None, activity=None):
+    async def finish_request(
+        self,
+        request_id,
+        status,
+        usage=None,
+        error=None,
+        *,
+        response_ref=None,
+        activity=None,
+    ):
         if status == "sent" and self.fail_sent:
             raise ConnectionError("audit unavailable")
-        self.events.append({"request_id": request_id, "status": status, "usage": usage, "error": error,
-                            "response_ref": response_ref, "activity": activity})
+        self.events.append(
+            {
+                "request_id": request_id,
+                "status": status,
+                "usage": usage,
+                "error": error,
+                "response_ref": response_ref,
+                "activity": activity,
+            }
+        )
 
 
 def sse_response(envelopes):
     body = "".join("data: " + json.dumps(envelope) + "\n\n" for envelope in envelopes)
-    return httpx.Response(200, content=body + "data: [DONE]\n\n",
-                          headers={"content-type": "text/event-stream"})
+    return httpx.Response(
+        200,
+        content=body + "data: [DONE]\n\n",
+        headers={"content-type": "text/event-stream"},
+    )
 
 
-def response(content='{"result":"ok"}', *, finish_reason="stop", refusal=None, usage=True):
-    envelopes = [{"choices": [{"index": 0, "finish_reason": None,
-                              "delta": {"content": content, "refusal": refusal}}]},
-                 {"choices": [{"index": 0, "finish_reason": finish_reason, "delta": {}}]}]
+def response(
+    content='{"result":"ok"}', *, finish_reason="stop", refusal=None, usage=True
+):
+    envelopes = [
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": None,
+                    "delta": {"content": content, "refusal": refusal},
+                }
+            ]
+        },
+        {"choices": [{"index": 0, "finish_reason": finish_reason, "delta": {}}]},
+    ]
     if usage:
-        envelopes.append({"choices": [], "usage": {"prompt_tokens": 13, "completion_tokens": 7,
-                           "total_tokens": 20, "prompt_tokens_details": {"cached_tokens": 3}}})
+        envelopes.append(
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 13,
+                    "completion_tokens": 7,
+                    "total_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                },
+            }
+        )
     return sse_response(envelopes)
 
 
 def model(handler, audit=None, values=None, **kwargs):
     audit = audit or Audit()
-    return OpenAIModel(ModelConfig.from_env(values or environment()), audit, object(),
-                       {"extract": "Return JSON evidence.", "ocr": "Return JSON literal text."},
-                       transport=httpx.MockTransport(handler), **kwargs), audit
+    return OpenAIModel(
+        ModelConfig.from_env(values or environment()),
+        audit,
+        object(),
+        {"extract": "Return JSON evidence.", "ocr": "Return JSON literal text."},
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    ), audit
 
 
 async def test_request_audits_before_send_no_output_caps_and_real_usage_only():
@@ -191,7 +294,9 @@ async def test_request_audits_before_send_no_output_caps_and_real_usage_only():
         assert [event["status"] for event in audit.events] == ["prepared", "sent"]
         body = json.loads(request.content)
         assert "max_tokens" not in body and "max_completion_tokens" not in body
-        assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
+        assert body["stream"] is True and body["stream_options"] == {
+            "include_usage": True
+        }
         assert audit.events[0]["metadata"]["wire_bytes"] == len(request.content)
         assert request.url == "https://chat.invalid/v1/chat/completions"
         seen.append(body)
@@ -199,7 +304,9 @@ async def test_request_audits_before_send_no_output_caps_and_real_usage_only():
 
     client, _ = model(handler, audit)
     async with client:
-        assert await client.call("extract", {"source": "private document text"}) == {"result": "ok"}
+        assert await client.call("extract", {"source": "private document text"}) == {
+            "result": "ok"
+        }
     assert len(seen) == 1
     assert audit.events[-1]["status"] == "succeeded"
     assert audit.events[-1]["usage"]["total_tokens"] == 20
@@ -218,19 +325,30 @@ async def test_audit_failure_before_send_does_not_call_provider():
     assert calls == []
 
 
-@pytest.mark.parametrize("status,exception,recorded", [
-    (400, ModelSemanticError, "failed"), (401, ModelConfigurationError, "failed"),
-    (403, ModelConfigurationError, "failed"), (404, ModelConfigurationError, "failed"),
-    (408, ModelInfrastructureError, "failed"), (409, ModelInfrastructureError, "failed"),
-    (429, ModelInfrastructureError, "failed"), (500, ModelInfrastructureError, "failed"),
-    (503, ModelInfrastructureError, "failed"),
-])
-async def test_http_errors_are_classified_without_sdk_retry_or_provider_body(status, exception, recorded):
+@pytest.mark.parametrize(
+    "status,exception,recorded",
+    [
+        (400, ModelSemanticError, "failed"),
+        (401, ModelConfigurationError, "failed"),
+        (403, ModelConfigurationError, "failed"),
+        (404, ModelConfigurationError, "failed"),
+        (408, ModelInfrastructureError, "failed"),
+        (409, ModelInfrastructureError, "failed"),
+        (429, ModelInfrastructureError, "failed"),
+        (500, ModelInfrastructureError, "failed"),
+        (503, ModelInfrastructureError, "failed"),
+    ],
+)
+async def test_http_errors_are_classified_without_sdk_retry_or_provider_body(
+    status, exception, recorded
+):
     calls = []
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(status, json={"error": {"message": "synthetic-secret private document"}})
+        return httpx.Response(
+            status, json={"error": {"message": "synthetic-secret private document"}}
+        )
 
     client, audit = model(handler)
     async with client:
@@ -263,12 +381,19 @@ async def test_no_data_before_idle_deadline_is_a_retryable_failure_with_unknown_
     assert client.usage.snapshot()["reported_tokens"] == {}
 
 
-@pytest.mark.parametrize("content,finish_reason,refusal", [
-    ("not-json", "stop", None), ("[]", "stop", None), ('{"a":NaN}', "stop", None),
-    ('{"a":1}', "length", None),
-    ('{"a":1}', "stop", "policy refusal"),
-])
-async def test_semantic_failures_keep_billed_usage_and_do_not_retry(content, finish_reason, refusal):
+@pytest.mark.parametrize(
+    "content,finish_reason,refusal",
+    [
+        ("not-json", "stop", None),
+        ("[]", "stop", None),
+        ('{"a":NaN}', "stop", None),
+        ('{"a":1}', "length", None),
+        ('{"a":1}', "stop", "policy refusal"),
+    ],
+)
+async def test_semantic_failures_keep_billed_usage_and_do_not_retry(
+    content, finish_reason, refusal
+):
     calls = []
 
     def handler(request):
@@ -292,9 +417,17 @@ async def test_missing_provider_usage_is_explicitly_missing():
     assert client.usage.snapshot()["missing_usage_requests"] == 1
 
 
-@pytest.mark.parametrize("envelope", [None, {}, [], {"choices": "invalid"},
-                                      {"choices": [{"message": "bad"}]},
-                                      {"choices": [{"message": {"content": {"a": 1}}}]}])
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        None,
+        {},
+        [],
+        {"choices": "invalid"},
+        {"choices": [{"message": "bad"}]},
+        {"choices": [{"message": {"content": {"a": 1}}}]},
+    ],
+)
 async def test_malformed_provider_envelope_is_audited_as_semantic_failure(envelope):
     client, audit = model(lambda _: sse_response([envelope]))
     async with client:
@@ -308,7 +441,9 @@ async def test_redirects_cannot_send_document_or_credentials_to_a_new_endpoint()
 
     def handler(request):
         seen.append(request)
-        return httpx.Response(307, headers={"Location": "https://other.invalid/v1/chat/completions"})
+        return httpx.Response(
+            307, headers={"Location": "https://other.invalid/v1/chat/completions"}
+        )
 
     client, audit = model(handler)
     async with client:
@@ -343,11 +478,18 @@ async def test_inline_image_selects_vlm_and_rejects_remote_urls():
         seen.append(request)
         return response()
 
-    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
-                         KNOWLEDGEBRAIN_VLM_API_KEY="vision-key", KNOWLEDGEBRAIN_VLM_MODEL="vision")
+    values = environment(
+        KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
+        KNOWLEDGEBRAIN_VLM_API_KEY="vision-key",
+        KNOWLEDGEBRAIN_VLM_MODEL="vision",
+    )
     client, audit = model(handler, values=values)
     async with client:
-        await client.call("ocr", {"unit_id": "image-1"}, images=[ImageInput(b"actual-fixture-bytes", "image/png")])
+        await client.call(
+            "ocr",
+            {"unit_id": "image-1"},
+            images=[ImageInput(b"actual-fixture-bytes", "image/png")],
+        )
         with pytest.raises(ModelSemanticError, match="not remote"):
             await client.call("ocr", {}, images=["https://remote.invalid/image.png"])
     assert len(seen) == 1
@@ -370,9 +512,13 @@ async def test_concurrency_limits_in_flight_requests_and_ids_are_unique(concurre
         active -= 1
         return response()
 
-    client, audit = model(handler, **({"concurrency": concurrency} if concurrency is not None else {}))
+    client, audit = model(
+        handler, **({"concurrency": concurrency} if concurrency is not None else {})
+    )
     async with client:
-        await asyncio.gather(*(client.call("extract", {"pack": number}) for number in range(6)))
+        await asyncio.gather(
+            *(client.call("extract", {"pack": number}) for number in range(6))
+        )
     assert maximum == (2 if concurrency is None else concurrency)
     prepared = [event for event in audit.events if event["status"] == "prepared"]
     assert len({event["request_id"] for event in prepared}) == 6
@@ -381,38 +527,72 @@ async def test_concurrency_limits_in_flight_requests_and_ids_are_unique(concurre
 
 def test_execution_spec_is_non_secret_json_with_all_actual_prompts():
     prompts = {"extract": "实际抽取提示", "ocr": "actual OCR prompt"}
-    values = environment(KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
-                         KNOWLEDGEBRAIN_VLM_MODEL="vision", KNOWLEDGEBRAIN_VLM_API_KEY="vision-secret")
-    client = OpenAIModel(ModelConfig.from_env(values), Audit(), object(), prompts, concurrency=3, timeout_seconds=45)
+    values = environment(
+        KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
+        KNOWLEDGEBRAIN_VLM_MODEL="vision",
+        KNOWLEDGEBRAIN_VLM_API_KEY="vision-secret",
+    )
+    client = OpenAIModel(
+        ModelConfig.from_env(values),
+        Audit(),
+        object(),
+        prompts,
+        concurrency=3,
+        timeout_seconds=45,
+    )
     spec = client.execution_spec()
-    assert spec["chat"] == {"endpoint": "https://chat.invalid/v1/chat/completions",
-                            "model": "gpt-4o", "context_tokens": 32768}
-    assert spec["vlm"] == {"endpoint": "https://vision.invalid/v1/chat/completions",
-                           "model": "vision", "context_tokens": None}
-    assert spec["prompts"] == {task: hashlib.sha256(prompt.encode()).hexdigest() for task, prompt in prompts.items()}
+    assert spec["chat"] == {
+        "endpoint": "https://chat.invalid/v1/chat/completions",
+        "model": "gpt-4o",
+        "context_tokens": 32768,
+    }
+    assert spec["vlm"] == {
+        "endpoint": "https://vision.invalid/v1/chat/completions",
+        "model": "vision",
+        "context_tokens": None,
+    }
+    assert spec["prompts"] == {
+        task: hashlib.sha256(prompt.encode()).hexdigest()
+        for task, prompt in prompts.items()
+    }
     assert spec["timeout_seconds"] == 45
     assert spec["concurrency"] == 3
     encoded = json.dumps(spec)
-    for private in ("synthetic-secret", "vision-secret", "api_key", "actual OCR prompt"):
+    for private in (
+        "synthetic-secret",
+        "vision-secret",
+        "api_key",
+        "actual OCR prompt",
+    ):
         assert private not in encoded
     # Both external mutation paths must leave the actual instance snapshot intact.
     prompts["extract"] = "changed caller mapping"
     spec["prompts"]["extract"] = "changed returned mapping"
-    assert client.execution_spec()["prompts"]["extract"] == hashlib.sha256("实际抽取提示".encode()).hexdigest()
+    assert (
+        client.execution_spec()["prompts"]["extract"]
+        == hashlib.sha256("实际抽取提示".encode()).hexdigest()
+    )
 
 
-def test_default_execution_spec_snapshots_all_domain_prompts(monkeypatch):
+def test_default_execution_spec_snapshots_live_analysis_prompts_only(monkeypatch):
     from docreader.tender import prompts
 
-    contents = {task: f"{task} original JSON prompt" for task in ("extract", "verify", "plan", "ocr")}
+    contents = {
+        task: f"{task} original JSON prompt"
+        for task in ("extract", "verify", "plan", "ocr")
+    }
     monkeypatch.setattr(prompts, "get_prompt", contents.__getitem__)
     client = OpenAIModel(ModelConfig.from_env(environment()), Audit(), object())
     spec = client.execution_spec()
-    assert set(spec["prompts"]) == {"extract", "verify", "plan", "ocr"}
+    assert set(spec["prompts"]) == {"extract", "verify", "ocr"}
+    assert set(spec["budget"]["chat"]["prompts"]) == {"extract", "verify", "ocr"}
     contents["plan"] = "changed on disk"
     assert client.execution_spec() == spec
-    next_client = OpenAIModel(ModelConfig.from_env(environment()), Audit(), object())
-    assert next_client.execution_spec() != spec
+    unchanged = OpenAIModel(ModelConfig.from_env(environment()), Audit(), object())
+    assert unchanged.execution_spec() == spec
+    contents["extract"] = "changed extract prompt"
+    changed = OpenAIModel(ModelConfig.from_env(environment()), Audit(), object())
+    assert changed.execution_spec() != spec
 
 
 async def test_key_rotation_and_equivalent_endpoint_keep_pinned_identity():
@@ -427,10 +607,14 @@ async def test_key_rotation_and_equivalent_endpoint_keep_pinned_identity():
     async with first:
         await first.call("extract", {})
     spec = audit.spec
-    second, _ = model(handler, audit, values=environment(
-        KNOWLEDGEBRAIN_CHAT_API_KEY="rotated-secret",
-        KNOWLEDGEBRAIN_CHAT_BASE_URL="https://CHAT.invalid:443/v1/chat/completions",
-    ))
+    second, _ = model(
+        handler,
+        audit,
+        values=environment(
+            KNOWLEDGEBRAIN_CHAT_API_KEY="rotated-secret",
+            KNOWLEDGEBRAIN_CHAT_BASE_URL="https://CHAT.invalid:443/v1/chat/completions",
+        ),
+    )
     assert second.execution_spec() == spec
     async with second:
         await second.call("extract", {})
@@ -439,7 +623,10 @@ async def test_key_rotation_and_equivalent_endpoint_keep_pinned_identity():
     assert "rotated-secret" not in json.dumps(audit.spec)
 
 
-@pytest.mark.parametrize("change", ["model", "context", "endpoint", "vlm", "prompt", "concurrency", "timeout"])
+@pytest.mark.parametrize(
+    "change",
+    ["model", "context", "endpoint", "vlm", "prompt", "concurrency", "timeout"],
+)
 async def test_execution_drift_fails_before_request_audit_or_http(change):
     audit = Audit()
     calls = []
@@ -462,9 +649,11 @@ async def test_execution_drift_fails_before_request_audit_or_http(change):
     elif change == "endpoint":
         values["KNOWLEDGEBRAIN_CHAT_BASE_URL"] = "https://other.invalid/v1"
     elif change == "vlm":
-        values.update(KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
-                      KNOWLEDGEBRAIN_VLM_API_KEY="vision-key",
-                      KNOWLEDGEBRAIN_VLM_MODEL="explicit-vision-model")
+        values.update(
+            KNOWLEDGEBRAIN_VLM_BASE_URL="https://vision.invalid/v1",
+            KNOWLEDGEBRAIN_VLM_API_KEY="vision-key",
+            KNOWLEDGEBRAIN_VLM_MODEL="explicit-vision-model",
+        )
     elif change == "prompt":
         # Even a changed task not being called now changes this revision's plan.
         prompts["ocr"] = "changed OCR prompt"
@@ -472,8 +661,14 @@ async def test_execution_drift_fails_before_request_audit_or_http(change):
         kwargs["concurrency"] = 3
     else:
         kwargs["timeout_seconds"] = 60
-    second = OpenAIModel(ModelConfig.from_env(values), audit, object(), prompts,
-                         transport=httpx.MockTransport(handler), **kwargs)
+    second = OpenAIModel(
+        ModelConfig.from_env(values),
+        audit,
+        object(),
+        prompts,
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
     async with second:
         with pytest.raises(Conflict):
             await second.call("extract", {})
@@ -488,11 +683,19 @@ async def test_snapshot_prompt_is_the_prompt_actually_sent():
 
     def handler(request):
         seen.append(json.loads(request.content)["messages"][0]["content"])
-        assert audit.spec["prompts"]["extract"] == hashlib.sha256(seen[-1].encode()).hexdigest()
+        assert (
+            audit.spec["prompts"]["extract"]
+            == hashlib.sha256(seen[-1].encode()).hexdigest()
+        )
         return response()
 
-    client = OpenAIModel(ModelConfig.from_env(environment()), audit, object(), prompts,
-                         transport=httpx.MockTransport(handler))
+    client = OpenAIModel(
+        ModelConfig.from_env(environment()),
+        audit,
+        object(),
+        prompts,
+        transport=httpx.MockTransport(handler),
+    )
     prompts["extract"] = "caller changed this after construction"
     async with client:
         await client.call("extract", {})
@@ -501,8 +704,14 @@ async def test_snapshot_prompt_is_the_prompt_actually_sent():
 
 async def test_exact_sent_body_has_same_measurement_as_planner_and_budget_is_pinned():
     seen = []
-    client, audit = model(lambda request: (seen.append(json.loads(request.content)), response())[1])
-    payload = {"pack_id": "p1", "body": [{"text": "实际正文"}], "supporting": [{"text": "全部适用条件"}]}
+    client, audit = model(
+        lambda request: (seen.append(json.loads(request.content)), response())[1]
+    )
+    payload = {
+        "pack_id": "p1",
+        "body": [{"text": "实际正文"}],
+        "supporting": [{"text": "全部适用条件"}],
+    }
     budget = client.request_budget()
     expected = budget.measure("extract", payload)
     async with client:
@@ -519,8 +728,13 @@ async def test_complete_request_budget_failure_prevents_audit_and_network():
     client, audit = model(lambda request: calls.append(request))
     async with client:
         with pytest.raises(ModelBudgetError, match="context"):
-            await client.call("extract", {"body": [{"text": "tiny"}],
-                                          "supporting": [{"text": "required" * 3000}]})
+            await client.call(
+                "extract",
+                {
+                    "body": [{"text": "tiny"}],
+                    "supporting": [{"text": "required" * 3000}],
+                },
+            )
     assert calls == [] and audit.events == []
 
 
@@ -548,13 +762,24 @@ class CountedArtifacts(ArtifactStore):
         return super().put_json(value)
 
 
-@pytest.mark.parametrize("content,status", [('{"result":"private source quote"}', "succeeded"),
-                                           ("not valid JSON private source quote", "failed")])
-async def test_full_response_is_saved_once_and_audit_retains_only_reference(tmp_path, content, status):
+@pytest.mark.parametrize(
+    "content,status",
+    [
+        ('{"result":"private source quote"}', "succeeded"),
+        ("not valid JSON private source quote", "failed"),
+    ],
+)
+async def test_full_response_is_saved_once_and_audit_retains_only_reference(
+    tmp_path, content, status
+):
     artifacts = CountedArtifacts(tmp_path)
     raw = response(content).text
-    client, audit = model(lambda _: httpx.Response(200, text=raw, headers={"content-type": "text/event-stream"}),
-                          artifacts=artifacts)
+    client, audit = model(
+        lambda _: httpx.Response(
+            200, text=raw, headers={"content-type": "text/event-stream"}
+        ),
+        artifacts=artifacts,
+    )
     async with client:
         if status == "succeeded":
             await client.call("extract", {})
@@ -568,8 +793,10 @@ async def test_full_response_is_saved_once_and_audit_retains_only_reference(tmp_
     assert "private source quote" not in json.dumps(audit.events)
 
 
-@pytest.mark.parametrize("raw", [{"choices": "invalid"}, ["malformed envelope"],
-                                 {"choices": [{"message": "bad"}]}])
+@pytest.mark.parametrize(
+    "raw",
+    [{"choices": "invalid"}, ["malformed envelope"], {"choices": [{"message": "bad"}]}],
+)
 async def test_invalid_envelope_also_has_one_response_artifact(tmp_path, raw):
     artifacts = CountedArtifacts(tmp_path)
     client, audit = model(lambda _: sse_response([raw]), artifacts=artifacts)
@@ -577,13 +804,21 @@ async def test_invalid_envelope_also_has_one_response_artifact(tmp_path, raw):
         with pytest.raises(ModelSemanticError):
             await client.call("extract", {})
     assert artifacts.writes == 1
-    assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == sse_response([raw]).text
+    assert (
+        artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"]
+        == sse_response([raw]).text
+    )
 
 
 async def test_received_http_error_is_saved_and_credentials_are_redacted(tmp_path):
     artifacts = CountedArtifacts(tmp_path)
-    body = {"error": {"message": "credential synthetic-secret rejected", "api_key": "unknown-secret",
-                      "Authorization": "Bearer unknown-secret"}}
+    body = {
+        "error": {
+            "message": "credential synthetic-secret rejected",
+            "api_key": "unknown-secret",
+            "Authorization": "Bearer unknown-secret",
+        }
+    }
     client, audit = model(lambda _: httpx.Response(401, json=body), artifacts=artifacts)
     async with client:
         with pytest.raises(ModelConfigurationError):
@@ -593,15 +828,26 @@ async def test_received_http_error_is_saved_and_credentials_are_redacted(tmp_pat
     assert saved["body"] == {"error": {"message": "credential [REDACTED] rejected"}}
 
 
-async def test_non_json_response_preserves_body_without_headers_or_credentials(tmp_path):
+async def test_non_json_response_preserves_body_without_headers_or_credentials(
+    tmp_path,
+):
     artifacts = CountedArtifacts(tmp_path)
-    client, audit = model(lambda _: httpx.Response(200, text="invalid synthetic-secret body",
-                                                  headers={"Set-Cookie": "private-cookie"}), artifacts=artifacts)
+    client, audit = model(
+        lambda _: httpx.Response(
+            200,
+            text="invalid synthetic-secret body",
+            headers={"Set-Cookie": "private-cookie"},
+        ),
+        artifacts=artifacts,
+    )
     async with client:
         with pytest.raises(ModelSemanticError):
             await client.call("extract", {})
     assert artifacts.writes == 1
-    assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == "invalid [REDACTED] body"
+    assert (
+        artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"]
+        == "invalid [REDACTED] body"
+    )
 
 
 async def test_no_response_records_empty_partial_response_once(tmp_path):
@@ -619,7 +865,9 @@ async def test_no_response_records_empty_partial_response_once(tmp_path):
     assert artifacts.read_json(audit.events[-1]["response_ref"])["raw_body"] == ""
 
 
-async def test_response_artifact_write_failure_is_not_a_semantic_model_failure(tmp_path):
+async def test_response_artifact_write_failure_is_not_a_semantic_model_failure(
+    tmp_path,
+):
     class BrokenArtifacts:
         def put_json(self, value):
             raise OSError("artifact storage unavailable")
@@ -632,14 +880,26 @@ async def test_response_artifact_write_failure_is_not_a_semantic_model_failure(t
 
 
 @pytest.mark.parametrize("status", [200, 500])
-async def test_reported_usage_survives_invalid_completion_or_http_error(tmp_path, status):
+async def test_reported_usage_survives_invalid_completion_or_http_error(
+    tmp_path, status
+):
     artifacts = CountedArtifacts(tmp_path)
     raw = {"choices": "invalid", "usage": {"prompt_tokens": 5, "total_tokens": 5}}
-    client, audit = model(lambda _: sse_response([raw]) if status == 200 else httpx.Response(status, json=raw),
-                          artifacts=artifacts)
+    client, audit = model(
+        lambda _: (
+            sse_response([raw]) if status == 200 else httpx.Response(status, json=raw)
+        ),
+        artifacts=artifacts,
+    )
     async with client:
-        with pytest.raises(ModelSemanticError if status == 200 else ModelInfrastructureError):
+        with pytest.raises(
+            ModelSemanticError if status == 200 else ModelInfrastructureError
+        ):
             await client.call("extract", {})
     assert audit.events[-1]["usage"] == {"prompt_tokens": 5, "total_tokens": 5}
     saved = artifacts.read_json(audit.events[-1]["response_ref"])
-    assert saved["raw_body"] == sse_response([raw]).text if status == 200 else saved["body"] == raw
+    assert (
+        saved["raw_body"] == sse_response([raw]).text
+        if status == 200
+        else saved["body"] == raw
+    )

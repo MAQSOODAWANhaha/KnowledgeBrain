@@ -1,5 +1,15 @@
 """Host-owned lifecycle states; wire and SQL values remain plain strings."""
+
 from enum import StrEnum
+
+# Document model tasks. Structure review reuses the content-review prompt bytes.
+AUTHORING_MODEL_TASKS = (
+    "outline",
+    "authoring_basis",
+    "authoring_write",
+    "authoring_review",
+    "authoring_structure",
+)
 
 
 class RunStatus(StrEnum):

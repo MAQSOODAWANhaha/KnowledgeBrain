@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from copy import deepcopy
-from importlib.resources import files
 
 from pydantic import ValidationError
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
-from docreader.integrations.authoring import assert_authoring_active, read_authoring_input
-from docreader.llm.request import ModelConfigurationError, ModelContractError, build_request
-from docreader.llm.wire import WirePayload
+from docreader.llm.request import ModelContractError
 from docreader.tender.checks.analysis import current_items
 from docreader.tender.evidence.references import EvidenceRepository
 from docreader.tender.evidence.view import source_view
@@ -369,40 +365,3 @@ class _OutlineContext:
                                                 "constraint_rule_refs": constraint_refs,
                                                 "submission_refs": submission_refs,
                                                 "search_intents": search_intents}).model_dump(exclude_unset=True)
-
-
-async def organize_outline(store, artifacts, execute, budget, *, run_id: str, source_version: int,
-                           domain_revision: int, checklist_digest: str | None = None,
-                           authoring_input: dict | None = None) -> dict:
-    """The injected executor owns sending, durable retry and response correction.
-
-    It receives the complete request and a synchronous validator, and returns
-    the validator's result. This domain function never borrows an analysis lease.
-    """
-    identity = {"run_id": run_id, "source_version": source_version,
-                "domain_revision": domain_revision, "checklist_digest": checklist_digest}
-    approved = (await read_authoring_input(store, artifacts, **identity) if authoring_input is None
-                else AuthoringInput.model_validate(authoring_input).model_dump())
-    context = await asyncio.to_thread(_OutlineContext, artifacts, approved)
-    from docreader.tender.authoring_templates import prepare_template_parts
-    records, parts = await asyncio.to_thread(prepare_template_parts, artifacts, context)
-    sources = [source for record in records for source in record.get(
-        "sources", [record["source"]] if "source" in record else [])]
-    context.payload.pop("source_views", None)
-    context.payload.pop("source_catalog", None)
-    sections, projected = project_source_sections(sources)
-    context.payload.update(sources=projected, sections=sections, template_parts=parts)
-    context.read_units.update((ref["source_index_ref"]["sha256"], ref["unit_id"])
-                              for source in sources for ref in context.sources.get(source["range_id"], []))
-    if budget.output_reserve <= 0:
-        raise ModelConfigurationError("outline requires an explicit positive output reserve")
-    prompt = budget.prompts.get("outline")
-    if prompt is None:
-        prompt = files("docreader.tender.prompts").joinpath("outline.md").read_text(encoding="utf-8")
-    wire = WirePayload("outline", context.payload)
-    request = build_request(budget.model, prompt, wire.payload)
-    budget.require_request(request)
-    result = await execute(request, lambda response: context.validate(wire.decode(response)))
-    # Keep the fixed version even when analysis progresses while the model works.
-    await assert_authoring_active(store, approved)
-    return await asyncio.to_thread(artifacts.put_json, result)
