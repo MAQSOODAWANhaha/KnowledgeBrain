@@ -2,6 +2,10 @@
 
 mod err;
 mod routes;
+mod tender_editor;
+mod tender_knowledge;
+mod tender_routes;
+mod tender_state;
 
 use axum::Router;
 

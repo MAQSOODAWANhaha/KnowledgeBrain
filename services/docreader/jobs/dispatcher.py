@@ -26,7 +26,8 @@ async def dispatch_once(store, send, *, redeliver_seconds=60):
 
 
 async def dispatch_forever():
-    from docreader.jobs.tasks import tender_command
+    from docreader.jobs.tasks import tender_authoring, tender_command
+    from docreader.integrations.web import dispatch_authoring
 
     settings = Settings.from_env()
     store = Store(settings.dsn)
@@ -34,6 +35,7 @@ async def dispatch_forever():
     while True:
         try:
             await dispatch_once(store, tender_command.send, redeliver_seconds=settings.redeliver_seconds)
+            await dispatch_authoring(store, tender_authoring.send, redeliver_seconds=settings.redeliver_seconds)
             delay = 2
         except (psycopg.OperationalError, psycopg.InterfaceError, ConnectionError, TimeoutError) as error:
             logger.warning("Dispatcher infrastructure unavailable (%s)", type(error).__name__)

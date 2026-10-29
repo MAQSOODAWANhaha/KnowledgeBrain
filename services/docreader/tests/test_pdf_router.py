@@ -341,7 +341,7 @@ class PlainWellFormedTest(unittest.TestCase):
 
         plain = (
             "Recent work [DL15, MBXS17] shows progress on NLP tasks "
-            "with pre-trained models."
+            "with pre-trained platform_models."
         )
         self.assertTrue(_plain_is_well_formed(plain))
 

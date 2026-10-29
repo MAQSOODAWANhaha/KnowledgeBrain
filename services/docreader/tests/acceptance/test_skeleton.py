@@ -9,6 +9,8 @@ import time
 import uuid
 
 import pytest
+
+from docreader.tests.database import initialize_schema
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
@@ -18,6 +20,7 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import InvalidConfirmation, StaleExecution, Store
 from docreader.jobs.dispatcher import dispatch_once
 from docreader.jobs.settings import Settings
+from docreader.tender.status import RunStatus
 from docreader.workflow.persistence import FencedPostgresSaver, initialize_checkpoints
 from docreader.workflow.graph import build_graph
 from docreader.workflow.runner import execute_command
@@ -44,6 +47,7 @@ async def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("TENDER_ARTIFACT_ROOT", str(tmp_path))
     settings = Settings(dsn, redis_url, tmp_path, lease_seconds=2, heartbeat_seconds=0.2, redeliver_seconds=0.1)
     store = Store(dsn)
+    await initialize_schema(store.dsn)
     await store.setup()
     await initialize_checkpoints(dsn)
     manifest = ArtifactStore(tmp_path).put_json({"documents": []})
@@ -133,7 +137,8 @@ async def test_old_executor_cannot_write_postgres_checkpoint(setup):
     ) as conn:
         old = FencedPostgresSaver(conn, store, lease)
         graph = build_graph(SkeletonNodes(store, ArtifactStore(settings.artifact_root), lease), old)
-        await graph.ainvoke({"run_id": run["run_id"], "source_version": 1, "domain_revision": 1}, config, durability="sync")
+        await graph.ainvoke({"run_id": run["run_id"], "source_version": 1, "domain_revision": 1,
+                             "status": RunStatus.RUNNING}, config, durability="sync")
         checkpoint = await old.aget_tuple(config)
         await store.release(lease, "retry")
         replacement = await store.acquire(run["run_id"], cmd["command_id"], 1)

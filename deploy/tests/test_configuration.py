@@ -14,6 +14,7 @@ SAMPLE = {
     "KB_ADMIN_USERNAME": "test_admin",
     "KB_ADMIN_PASSWORD": "test-local-password-only",
     "JWT_SECRET": "test-jwt-secret-only-not-real-credential",
+    "GRPC_AUTH_TOKEN": "test-docreader-token-only-not-real-credential",
     "MINIO_ROOT_USER": "test_storage",
     "MINIO_ROOT_PASSWORD": "test-storage-password-only",
     "KNOWLEDGEBRAIN_CHAT_BASE_URL": "https://model.invalid/v1",
@@ -48,7 +49,10 @@ class DeploymentConfiguration(unittest.TestCase):
         services = cfg["services"]
         self.assertNotIn("neo4j", services)
         self.assertNotIn("onlyoffice", services)
-        self.assertNotIn("python-tender-worker", services)
+        for name in ("python-tender-init", "python-tender-worker", "python-tender-dispatcher"):
+            self.assertIn(name, services)
+        self.assertEqual(services["docreader"]["depends_on"]["python-tender-init"]["condition"],
+                         "service_completed_successfully")
         for name in ("migrate", "api", "worker", "retention"):
             env = services[name]["environment"]
             self.assertEqual(env["POSTGRES_USER"], SAMPLE["POSTGRES_USER"])
@@ -75,7 +79,7 @@ class DeploymentConfiguration(unittest.TestCase):
         for key in ("POSTGRES_USER", "POSTGRES_PASSWORD", "JWT_SECRET", "MINIO_ROOT_USER",
                     "MINIO_ROOT_PASSWORD", "KNOWLEDGEBRAIN_CHAT_BASE_URL",
                     "KNOWLEDGEBRAIN_CHAT_API_KEY", "KNOWLEDGEBRAIN_CHAT_MODEL",
-                    "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS"):
+                    "KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS", "GRPC_AUTH_TOKEN"):
             with self.subTest(key=key):
                 result = render(omit=key)
                 self.assertNotEqual(result.returncode, 0)
@@ -99,7 +103,7 @@ class DeploymentConfiguration(unittest.TestCase):
         self.assertEqual(cfg["name"], "kb")
         services = cfg["services"]
         api = services["api"]["environment"]
-        for name in ("python-tender-init", "python-tender-worker", "python-tender-dispatcher"):
+        for name in ("docreader", "python-tender-init", "python-tender-worker", "python-tender-dispatcher"):
             role = services[name]
             env = role["environment"]
             self.assertEqual(env["DATABASE_URL"], "")
@@ -117,9 +121,16 @@ class DeploymentConfiguration(unittest.TestCase):
             self.assertEqual(services[name]["environment"]["REDIS_URL"], api["REDIS_URL"])
             self.assertEqual(services[name]["depends_on"]["python-tender-init"]["condition"],
                              "service_completed_successfully")
+            self.assertEqual(services[name]["healthcheck"]["test"],
+                             ["CMD", "uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "-m",
+                              "docreader.jobs.healthcheck", name.removeprefix("python-tender-")])
+            self.assertEqual(services[name]["healthcheck"]["timeout"], "10s")
         for key, value in api.items():
             if key.startswith(("KNOWLEDGEBRAIN_CHAT_", "KNOWLEDGEBRAIN_VLM_")) and key != "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT":
-                self.assertEqual(services["python-tender-worker"]["environment"][key], value)
+                for name in ("docreader", "python-tender-worker"):
+                    self.assertEqual(services[name]["environment"][key], value)
+        self.assertEqual(services["docreader"]["environment"]["GRPC_AUTH_TOKEN"],
+                         api["GRPC_AUTH_TOKEN"])
 
     def test_python_only_startup_waits_for_shared_database_baseline(self):
         result = render(python_tender=True, runtime=False)
@@ -130,6 +141,28 @@ class DeploymentConfiguration(unittest.TestCase):
         self.assertNotIn("worker", services)
         self.assertEqual(services["python-tender-init"]["depends_on"]["migrate"]["condition"],
                          "service_completed_successfully")
+
+    def test_python_worker_knowledge_uses_existing_bridge_token(self):
+        result = render()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)["services"]
+        self.assertEqual(services["python-tender-worker"]["environment"].get("GRPC_AUTH_TOKEN"),
+                         services["api"]["environment"]["GRPC_AUTH_TOKEN"])
+        for name in ("python-tender-init", "python-tender-dispatcher"):
+            self.assertNotIn("GRPC_AUTH_TOKEN", services[name]["environment"])
+
+    def test_python_knowledge_api_url_follows_port_or_explicit_url(self):
+        for extra, expected in (
+            ({}, "http://api:8080"),
+            ({"API_PORT": "8181"}, "http://api:8181"),
+            ({"API_PORT": "8181", "KNOWLEDGEBRAIN_INTERNAL_API_URL": "https://knowledge.invalid"},
+             "https://knowledge.invalid"),
+        ):
+            with self.subTest(extra=extra):
+                result = render(extra)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                worker = json.loads(result.stdout)["services"]["python-tender-worker"]
+                self.assertEqual(worker["environment"]["KNOWLEDGEBRAIN_INTERNAL_API_URL"], expected)
 
     def test_role_environments_exclude_unneeded_secrets_and_retired_keys(self):
         result = render(python_tender=True)

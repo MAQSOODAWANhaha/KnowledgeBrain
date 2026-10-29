@@ -1,3 +1,6 @@
+pub(crate) mod storage;
+pub use storage::source_snapshot_v2;
+
 use crate::knowledge_retrieval::EmbeddingRevisionV2;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -431,7 +434,6 @@ fn provider_status_error(status: reqwest::StatusCode) -> VectorIndexErrorV2 {
 
 #[derive(Clone)]
 struct FrozenVectorIndexSnapshotV2 {
-    product_version_id: Uuid,
     revision: EmbeddingRevisionV2,
     revision_sha256: String,
     credential_ref: String,
@@ -485,12 +487,9 @@ async fn rebuild_vector_indexes_v2_expected_in_transaction(
         ));
     }
     if expected.is_some() {
-        let pending: bool =
-            sqlx::query_scalar("SELECT public.kb_knowledge_has_pending_derived_v2($1)")
-                .bind(product_version_id)
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(VectorIndexErrorV2::Database)?;
+        let pending = storage::pending_derived(tx, product_version_id)
+            .await
+            .map_err(VectorIndexErrorV2::Database)?;
         if pending {
             return Err(VectorIndexErrorV2::PendingDerived(
                 "semantic source has pending derived work".into(),
@@ -528,20 +527,48 @@ async fn rebuild_vector_indexes_v2_expected_in_transaction(
             })
         })
         .collect::<Vec<_>>();
-    let count: i64 =
-        sqlx::query_scalar("SELECT public.kb_knowledge_reconcile_vector_indexes_v2($1,$2,$3,$4)")
-            .bind(snapshot.product_version_id)
-            .bind(&snapshot.revision_sha256)
-            .bind(&snapshot.source_snapshot_sha256)
-            .bind(serde_json::Value::Array(payload))
-            .fetch_one(&mut **tx)
+    // Provider calls use a frozen snapshot. Lock and re-read after the call;
+    // stale source bytes never replace a previously published generation.
+    if !storage::lock_version(tx, product_version_id)
+        .await
+        .map_err(VectorIndexErrorV2::Database)?
+        || !storage::supported_binding(tx, product_version_id, &snapshot.revision_sha256)
             .await
-            .map_err(map_reconcile_error)?;
-    if usize::try_from(count).ok() != Some(snapshot.inputs.len()) {
-        return Err(VectorIndexErrorV2::Database(sqlx::Error::Protocol(
-            "vector reconcile returned an impossible count".into(),
-        )));
+            .map_err(VectorIndexErrorV2::Database)?
+    {
+        return Err(VectorIndexErrorV2::InvalidConfiguration(
+            "vector binding is unsupported".into(),
+        ));
     }
+    storage::lock_sources(tx, product_version_id)
+        .await
+        .map_err(VectorIndexErrorV2::Database)?;
+    let (actual, count) = source_snapshot_v2(tx, product_version_id, &snapshot.revision_sha256)
+        .await
+        .map_err(VectorIndexErrorV2::Database)?;
+    if actual != snapshot.source_snapshot_sha256
+        || usize::try_from(count).ok() != Some(snapshot.inputs.len())
+    {
+        return Err(VectorIndexErrorV2::SnapshotChanged(
+            "vector source snapshot changed".into(),
+        ));
+    }
+    sqlx::query("DELETE FROM knowledge_chunk_vector_indexes WHERE product_version_id=$1")
+        .bind(product_version_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(VectorIndexErrorV2::Database)?;
+    sqlx::query("INSERT INTO knowledge_chunk_vector_indexes(chunk_id,product_version_id,embedding_revision_sha256,source_snapshot_sha256,indexed_content_sha256,embedding)
+        SELECT (value->>'chunk_id')::uuid,$1,$2,$3,value->>'indexed_content_sha256',(value->'embedding')::text::vector
+        FROM jsonb_array_elements($4::jsonb) WITH ORDINALITY AS values(value,ordinal) ORDER BY ordinal")
+        .bind(product_version_id).bind(&snapshot.revision_sha256).bind(&snapshot.source_snapshot_sha256)
+        .bind(serde_json::Value::Array(payload)).execute(&mut **tx).await.map_err(VectorIndexErrorV2::Database)?;
+    sqlx::query("INSERT INTO knowledge_product_version_vector_generations(product_version_id,embedding_revision_sha256,source_snapshot_sha256,chunk_count,completed_at)
+        VALUES($1,$2,$3,$4,clock_timestamp()) ON CONFLICT(product_version_id) DO UPDATE SET
+        embedding_revision_sha256=EXCLUDED.embedding_revision_sha256,source_snapshot_sha256=EXCLUDED.source_snapshot_sha256,
+        chunk_count=EXCLUDED.chunk_count,completed_at=EXCLUDED.completed_at")
+        .bind(product_version_id).bind(&snapshot.revision_sha256).bind(&snapshot.source_snapshot_sha256).bind(count)
+        .execute(&mut **tx).await.map_err(VectorIndexErrorV2::Database)?;
     Ok(VectorIndexGenerationV2 {
         product_version_id,
         embedding_revision_sha256: snapshot.revision_sha256,
@@ -560,10 +587,10 @@ async fn freeze_vector_index_snapshot_v2(
 ) -> Result<FrozenVectorIndexSnapshotV2, VectorIndexErrorV2> {
     let row = sqlx::query(
         "SELECT binding.embedding_revision_sha256,revision.canonical_revision_payload,revision.credential_ref
-           FROM public.product_versions version
-           JOIN public.product_version_embedding_bindings_v2 binding
+           FROM public.knowledge_product_versions version
+           JOIN public.knowledge_product_version_embedding_bindings binding
              ON binding.product_version_id=version.id
-           JOIN public.embedding_revisions_v2 revision
+           JOIN public.knowledge_embedding_revisions revision
              ON revision.revision_sha256=binding.embedding_revision_sha256
             AND revision.support_state='supported'
           WHERE version.id=$1 AND version.deleted_at IS NULL
@@ -599,8 +626,8 @@ async fn freeze_vector_index_snapshot_v2(
     }
     let rows = sqlx::query(
         "SELECT chunk.id,chunk.context_header,chunk.content
-           FROM public.chunks chunk
-           JOIN public.documents document ON document.id=chunk.document_id
+           FROM public.knowledge_chunks chunk
+           JOIN public.knowledge_documents document ON document.id=chunk.document_id
             AND document.product_version_id=chunk.product_version_id
           WHERE chunk.product_version_id=$1
             AND document.deleted_at IS NULL AND document.parse_status NOT IN ('deleting','deleted','cancelled') AND chunk.generation=document.active_generation
@@ -608,7 +635,7 @@ async fn freeze_vector_index_snapshot_v2(
             AND document.index_ready
             AND chunk.chunk_type=ANY($2::text[])
             AND (chunk.chunk_type<>'image_ocr' OR EXISTS (
-              SELECT 1 FROM public.knowledge_image_ocr_chunk_artifact_mappings mapping
+              SELECT 1 FROM public.knowledge_image_chunk_links mapping
                WHERE mapping.chunk_id=chunk.id))
           ORDER BY chunk.id",
     )
@@ -636,7 +663,6 @@ async fn freeze_vector_index_snapshot_v2(
     let source_snapshot_sha256 = source_snapshot_sha256_v2(&revision_sha256, &inputs);
     let credential_ref = row.get::<String, _>("credential_ref");
     Ok(FrozenVectorIndexSnapshotV2 {
-        product_version_id,
         revision,
         revision_sha256,
         credential_ref,
@@ -673,22 +699,6 @@ pub fn source_snapshot_sha256_v2(
     hex::encode(digest.finalize())
 }
 
-fn map_reconcile_error(error: sqlx::Error) -> VectorIndexErrorV2 {
-    let message = error
-        .as_database_error()
-        .map(|database| database.message().to_string())
-        .unwrap_or_default();
-    if message.contains("KNOWLEDGE_VECTOR_INDEX_V2_SNAPSHOT_CHANGED") {
-        VectorIndexErrorV2::SnapshotChanged(message)
-    } else if message.contains("KNOWLEDGE_VECTOR_INDEX_V2_NOT_SUPPORTED")
-        || message.contains("KNOWLEDGE_VECTOR_INDEX_V2_INVALID")
-    {
-        VectorIndexErrorV2::InvalidConfiguration(message)
-    } else {
-        VectorIndexErrorV2::Database(error)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticIndexIntentV2 {
     pub id: Uuid,
@@ -696,7 +706,7 @@ pub struct SemanticIndexIntentV2 {
     pub embedding_revision_sha256: String,
     pub source_snapshot_sha256: String,
     pub target_revision: i64,
-    pub status: String,
+    pub status: crate::SemanticIndexIntentStatus,
     pub generation_marker_sha256: Option<String>,
     pub last_error_code: Option<String>,
 }
@@ -762,23 +772,24 @@ async fn load_semantic_index_intent_v2(
         "SELECT id,product_version_id,embedding_revision_sha256,
                 source_snapshot_sha256,target_revision,status,
                 generation_marker_sha256,last_error_code
-           FROM knowledge_semantic_index_intents_v2 WHERE id=$1",
+           FROM knowledge_semantic_index_intents WHERE id=$1",
     )
     .bind(intent_id)
     .fetch_optional(pool)
-    .await
+    .await?
     .map(|row| {
-        row.map(|row| SemanticIndexIntentV2 {
+        Ok(SemanticIndexIntentV2 {
             id: row.get("id"),
             product_version_id: row.get("product_version_id"),
             embedding_revision_sha256: row.get("embedding_revision_sha256"),
             source_snapshot_sha256: row.get("source_snapshot_sha256"),
             target_revision: row.get("target_revision"),
-            status: row.get("status"),
+            status: row.try_get("status")?,
             generation_marker_sha256: row.get("generation_marker_sha256"),
             last_error_code: row.get("last_error_code"),
         })
     })
+    .transpose()
 }
 
 pub async fn semantic_index_intent_v2(
@@ -797,36 +808,10 @@ pub async fn prepare_semantic_index_intent_v2(
     pool: &PgPool,
     product_version_id: Uuid,
 ) -> Result<SemanticIndexPreparationV2, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT state,intent_id,target_revision
-           FROM kb_knowledge_prepare_semantic_index_intent_v2($1)",
-    )
-    .bind(product_version_id)
-    .fetch_one(pool)
-    .await?;
-    let state = row.get::<String, _>("state");
-    let intent_id = row.get::<Option<Uuid>, _>("intent_id");
-    if state == "unbound" {
-        return Ok(SemanticIndexPreparationV2::Unbound);
-    }
-    if state == "pending_derived" {
-        return Ok(SemanticIndexPreparationV2::PendingDerived);
-    }
-    let intent_id = intent_id.ok_or_else(|| {
-        sqlx::Error::Protocol("semantic index preparation omitted intent identity".into())
-    })?;
-    let intent = load_semantic_index_intent_v2(pool, intent_id)
-        .await?
-        .ok_or_else(|| sqlx::Error::Protocol("semantic index intent disappeared".into()))?;
-    match state.as_str() {
-        "enqueue" => Ok(SemanticIndexPreparationV2::Enqueue(intent)),
-        "ready" => Ok(SemanticIndexPreparationV2::Ready(intent)),
-        "terminal" => Ok(SemanticIndexPreparationV2::Terminal(intent)),
-        "superseded" => Ok(SemanticIndexPreparationV2::Superseded(intent)),
-        _ => Err(sqlx::Error::Protocol(
-            "semantic index preparation returned an unknown state".into(),
-        )),
-    }
+    let mut tx = pool.begin().await?;
+    let result = storage::prepare(&mut tx, product_version_id).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 pub async fn preflight_semantic_index_intent_v2(
@@ -834,12 +819,9 @@ pub async fn preflight_semantic_index_intent_v2(
     intent_id: Uuid,
     target_revision: i64,
 ) -> Result<SemanticIndexPreflightV2, sqlx::Error> {
-    let state: String =
-        sqlx::query_scalar("SELECT kb_knowledge_preflight_semantic_index_intent_v2($1,$2)")
-            .bind(intent_id)
-            .bind(target_revision)
-            .fetch_one(pool)
-            .await?;
+    let mut tx = pool.begin().await?;
+    let state = storage::preflight(&mut tx, intent_id, target_revision, false).await?;
+    tx.commit().await?;
     match state.as_str() {
         "current" => Ok(SemanticIndexPreflightV2::Current),
         "pending_derived" => Ok(SemanticIndexPreflightV2::PendingDerived),
@@ -857,13 +839,16 @@ pub async fn rebuild_semantic_keyword_indexes_v2(
     pool: &PgPool,
     intent: &SemanticIndexIntentV2,
 ) -> Result<i64, VectorIndexErrorV2> {
-    sqlx::query_scalar("SELECT kb_knowledge_rebuild_semantic_keyword_indexes_v2($1,$2,$3)")
-        .bind(intent.product_version_id)
-        .bind(&intent.embedding_revision_sha256)
-        .bind(&intent.source_snapshot_sha256)
-        .fetch_one(pool)
-        .await
-        .map_err(map_semantic_index_sql_error_v2)
+    let mut tx = pool.begin().await.map_err(VectorIndexErrorV2::Database)?;
+    let count = storage::rebuild_semantic_keywords(
+        &mut tx,
+        intent.product_version_id,
+        &intent.embedding_revision_sha256,
+        &intent.source_snapshot_sha256,
+    )
+    .await?;
+    tx.commit().await.map_err(VectorIndexErrorV2::Database)?;
+    Ok(count)
 }
 
 pub async fn semantic_vector_generation_matches_intent_v2(
@@ -872,7 +857,7 @@ pub async fn semantic_vector_generation_matches_intent_v2(
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(
-           SELECT 1 FROM product_version_vector_index_generations_v2 generation
+           SELECT 1 FROM knowledge_product_version_vector_generations generation
             WHERE generation.product_version_id=$1
               AND generation.embedding_revision_sha256=$2
               AND generation.source_snapshot_sha256=$3)",
@@ -888,12 +873,9 @@ pub async fn complete_semantic_index_intent_v2(
     pool: &PgPool,
     intent: &SemanticIndexIntentV2,
 ) -> Result<SemanticIndexCompletionV2, sqlx::Error> {
-    let state: String =
-        sqlx::query_scalar("SELECT kb_knowledge_complete_semantic_index_intent_v2($1,$2)")
-            .bind(intent.id)
-            .bind(intent.target_revision)
-            .fetch_one(pool)
-            .await?;
+    let mut tx = pool.begin().await?;
+    let state = storage::preflight(&mut tx, intent.id, intent.target_revision, true).await?;
+    tx.commit().await?;
     match state.as_str() {
         "completed" => Ok(SemanticIndexCompletionV2::Completed),
         "pending_derived" => Ok(SemanticIndexCompletionV2::PendingDerived),
@@ -933,32 +915,19 @@ pub async fn record_semantic_index_error_v2(
     error_code: &str,
     error_detail: &str,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_knowledge_record_semantic_index_intent_v2($1,$2,$3,$4,$5)")
-        .bind(intent_id)
-        .bind(target_revision)
-        .bind(disposition)
-        .bind(error_code)
-        .bind(error_detail)
-        .fetch_one(pool)
-        .await
-}
-
-pub fn map_semantic_index_sql_error_v2(error: sqlx::Error) -> VectorIndexErrorV2 {
-    let message = error
-        .as_database_error()
-        .map(|database| database.message().to_string())
-        .unwrap_or_default();
-    if message.contains("KNOWLEDGE_SEMANTIC_INDEX_V2_PENDING_DERIVED") {
-        VectorIndexErrorV2::PendingDerived(message)
-    } else if message.contains("KNOWLEDGE_SEMANTIC_INDEX_V2_SNAPSHOT_CHANGED") {
-        VectorIndexErrorV2::SnapshotChanged(message)
-    } else if message.contains("KNOWLEDGE_SEMANTIC_INDEX_V2_NOT_SUPPORTED")
-        || message.contains("KNOWLEDGE_SEMANTIC_INDEX_V2_KEYWORD_INCOMPLETE")
+    if !matches!(disposition, "retryable" | "terminal" | "superseded")
+        || !(1..=96).contains(&error_code.len())
+        || !(1..=512).contains(&error_detail.len())
     {
-        VectorIndexErrorV2::InvalidConfiguration(message)
-    } else {
-        VectorIndexErrorV2::Database(error)
+        return Err(sqlx::Error::Protocol(
+            "invalid semantic index error disposition".into(),
+        ));
     }
+    Ok(sqlx::query("UPDATE knowledge_semantic_index_intents SET
+        status=CASE WHEN $3='retryable' THEN status ELSE $3 END,last_error_code=$4,last_error_detail=$5
+        WHERE id=$1 AND target_revision=$2 AND status='pending'")
+        .bind(intent_id).bind(target_revision).bind(disposition).bind(error_code).bind(error_detail)
+        .execute(pool).await?.rows_affected()!=0)
 }
 
 /// Rebuilds the fixed V2 keyword sidecar for one product version in PostgreSQL.
@@ -966,10 +935,10 @@ pub async fn rebuild_keyword_indexes_v2(
     pool: &PgPool,
     product_version_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_knowledge_rebuild_keyword_indexes_v2($1)")
-        .bind(product_version_id)
-        .fetch_one(pool)
-        .await
+    let mut tx = pool.begin().await?;
+    let count = storage::rebuild_keywords(&mut tx, product_version_id).await?;
+    tx.commit().await?;
+    Ok(count)
 }
 
 fn bounded_semantic_index_error_detail(error: &str) -> String {

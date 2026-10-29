@@ -1,15 +1,13 @@
 //! Process liveness and readiness JSON shared by API, worker, and retention.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 pub const REASON_POSTGRES_UNAVAILABLE: &str = "postgres_unavailable";
-pub const REASON_DATABASE_ROLE_INVALID: &str = "database_role_invalid";
 pub const REASON_MAINTENANCE_GATE_UNREADABLE: &str = "maintenance_gate_unreadable";
 pub const REASON_MAINTENANCE: &str = "maintenance";
 pub const REASON_DRAINING: &str = "draining";
 pub const REASON_ROLLBACK: &str = "rollback";
-pub const REASON_GATE_MODE_NOT_LIVE_READY: &str = "gate_mode_not_live_ready";
 pub const REASON_QUEUE_REGISTRY_UNREADABLE: &str = "queue_registry_unreadable";
 pub const REASON_EMBEDDING_UNCONFIGURED: &str = "embedding_unconfigured";
 
@@ -46,7 +44,15 @@ pub fn embedding_config_not_ready_reason_for(url: &str, model: &str) -> Option<&
     }
 }
 
-const LIVE_READY_GATE_MODE: &str = "open";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum MaintenanceMode {
+    Maintenance,
+    Open,
+    Draining,
+    Rollback,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LiveBody {
@@ -63,17 +69,17 @@ pub struct ReadyBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gate_mode: Option<String>,
+    pub gate_mode: Option<MaintenanceMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadyCheck {
     Ready {
-        gate_mode: String,
+        gate_mode: MaintenanceMode,
     },
     NotReady {
         reason: &'static str,
-        gate_mode: Option<String>,
+        gate_mode: Option<MaintenanceMode>,
     },
 }
 
@@ -98,14 +104,14 @@ pub fn ready_body(service: &'static str, check: &ReadyCheck) -> ReadyBody {
             probe: "ready",
             service,
             reason: None,
-            gate_mode: Some(gate_mode.clone()),
+            gate_mode: Some(*gate_mode),
         },
         ReadyCheck::NotReady { reason, gate_mode } => ReadyBody {
             status: "not_ready",
             probe: "ready",
             service,
             reason: Some(*reason),
-            gate_mode: gate_mode.clone(),
+            gate_mode: *gate_mode,
         },
     }
 }
@@ -120,7 +126,7 @@ pub async fn check_readiness(expected_component: crate::ReleaseComponentKind) ->
     }
 }
 
-/// Readiness checks database connectivity, application privileges and the maintenance gate.
+/// Readiness checks database connectivity and the maintenance gate.
 pub async fn inspect_readiness(
     pool: &PgPool,
     expected_component: crate::ReleaseComponentKind,
@@ -135,14 +141,8 @@ pub async fn inspect_readiness(
             gate_mode: None,
         };
     }
-    if crate::verify_application_role(pool).await.is_err() {
-        return ReadyCheck::NotReady {
-            reason: REASON_DATABASE_ROLE_INVALID,
-            gate_mode: None,
-        };
-    }
-    let mode = match sqlx::query_scalar::<_, String>(
-        "SELECT mode FROM public.application_maintenance_gate WHERE singleton_key",
+    let mode = match sqlx::query_scalar::<_, MaintenanceMode>(
+        "SELECT mode FROM public.platform_maintenance_state WHERE singleton_key",
     )
     .fetch_optional(pool)
     .await
@@ -162,7 +162,7 @@ pub async fn inspect_readiness(
     if crate::QueueRegistry::load().is_err() {
         return ReadyCheck::NotReady {
             reason: REASON_QUEUE_REGISTRY_UNREADABLE,
-            gate_mode: Some(LIVE_READY_GATE_MODE.to_string()),
+            gate_mode: Some(MaintenanceMode::Open),
         };
     }
     if matches!(
@@ -172,15 +172,14 @@ pub async fn inspect_readiness(
     {
         return ReadyCheck::NotReady {
             reason,
-            gate_mode: Some(LIVE_READY_GATE_MODE.to_string()),
+            gate_mode: Some(MaintenanceMode::Open),
         };
     }
     check
 }
 
-pub fn inspect_gate_mode(mode: impl Into<String>) -> ReadyCheck {
-    let mode = mode.into();
-    match gate_mode_not_ready_reason(&mode) {
+pub fn inspect_gate_mode(mode: MaintenanceMode) -> ReadyCheck {
+    match gate_mode_not_ready_reason(mode) {
         None => ReadyCheck::Ready { gate_mode: mode },
         Some(reason) => ReadyCheck::NotReady {
             reason,
@@ -189,13 +188,12 @@ pub fn inspect_gate_mode(mode: impl Into<String>) -> ReadyCheck {
     }
 }
 
-pub fn gate_mode_not_ready_reason(mode: &str) -> Option<&'static str> {
+pub fn gate_mode_not_ready_reason(mode: MaintenanceMode) -> Option<&'static str> {
     match mode {
-        LIVE_READY_GATE_MODE => None,
-        "maintenance" => Some(REASON_MAINTENANCE),
-        "draining" => Some(REASON_DRAINING),
-        "rollback" => Some(REASON_ROLLBACK),
-        _ => Some(REASON_GATE_MODE_NOT_LIVE_READY),
+        MaintenanceMode::Open => None,
+        MaintenanceMode::Maintenance => Some(REASON_MAINTENANCE),
+        MaintenanceMode::Draining => Some(REASON_DRAINING),
+        MaintenanceMode::Rollback => Some(REASON_ROLLBACK),
     }
 }
 
@@ -238,15 +236,28 @@ mod tests {
 
     #[test]
     fn maintenance_modes_fail_closed() {
-        assert!(inspect_gate_mode("open").is_ready());
+        assert!(inspect_gate_mode(MaintenanceMode::Open).is_ready());
         assert_eq!(
-            gate_mode_not_ready_reason("maintenance"),
+            gate_mode_not_ready_reason(MaintenanceMode::Maintenance),
             Some(REASON_MAINTENANCE)
         );
-        assert_eq!(
-            gate_mode_not_ready_reason("unknown"),
-            Some(REASON_GATE_MODE_NOT_LIVE_READY)
-        );
+        assert!(serde_json::from_str::<MaintenanceMode>("\"unknown\"").is_err());
+        for (mode, wire) in [
+            (MaintenanceMode::Open, "open"),
+            (MaintenanceMode::Maintenance, "maintenance"),
+            (MaintenanceMode::Draining, "draining"),
+            (MaintenanceMode::Rollback, "rollback"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<MaintenanceMode>(serde_json::json!(wire)).unwrap(),
+                mode
+            );
+            assert_eq!(
+                inspect_gate_mode(mode).is_ready(),
+                mode == MaintenanceMode::Open
+            );
+        }
     }
 
     #[test]
@@ -254,11 +265,11 @@ mod tests {
         let body = ready_body(
             "api",
             &ReadyCheck::NotReady {
-                reason: REASON_DATABASE_ROLE_INVALID,
+                reason: REASON_MAINTENANCE_GATE_UNREADABLE,
                 gate_mode: None,
             },
         );
         let json = serde_json::to_value(body).unwrap();
-        assert_eq!(json["reason"], REASON_DATABASE_ROLE_INVALID);
+        assert_eq!(json["reason"], REASON_MAINTENANCE_GATE_UNREADABLE);
     }
 }

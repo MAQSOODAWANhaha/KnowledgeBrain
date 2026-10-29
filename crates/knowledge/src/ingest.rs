@@ -20,7 +20,7 @@ pub async fn run_convert(
     manual: bool,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status IN ('pending','processing','finalizing','failed')) AND EXISTS(SELECT 1 FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=$2 AND job_key='convert' AND state IN ('pending','published')) AND NOT EXISTS(SELECT 1 FROM knowledge_job_receipts WHERE document_id=$1 AND attempt=$2 AND job_key='convert')").bind(document_id).bind(attempt).fetch_one(pool).await.map_err(|e|e.to_string())?;
+    let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status IN ('pending','processing','finalizing','failed')) AND EXISTS(SELECT 1 FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=$2 AND job_key='convert' AND state IN ('pending','published')) AND NOT EXISTS(SELECT 1 FROM knowledge_job_receipts WHERE document_id=$1 AND attempt=$2 AND job_key='convert')").bind(document_id).bind(attempt).fetch_one(pool).await.map_err(|e|e.to_string())?;
     if !current {
         return Ok(());
     }
@@ -29,7 +29,7 @@ pub async fn run_convert(
         (
             String,
             String,
-            String,
+            crate::ParseStatus,
             bool,
             String,
             serde_json::Value,
@@ -37,14 +37,14 @@ pub async fn run_convert(
             Uuid,
         ),
     >(
-        "SELECT d.file_name, d.file_hash, d.parse_status,
+        "SELECT d.file_name, d.content_sha256 AS file_hash, d.parse_status,
                 COALESCE((v.asr_config->>'enabled')::boolean, false),
                 COALESCE(v.asr_model_id, ''),
                 COALESCE(v.chunking_config, '{}'::jsonb),
                 d.process_overrides,
                 d.product_version_id
-         FROM documents d
-         JOIN product_versions v ON v.id = d.product_version_id
+         FROM knowledge_documents d
+         JOIN knowledge_product_versions v ON v.id = d.product_version_id
          WHERE d.id = $1",
     )
     .bind(document_id)
@@ -74,27 +74,34 @@ pub async fn run_convert(
     }
     let ext = file_name.rsplit('.').next().unwrap_or("txt");
     let parser_engine = crate::parser_engine_for(&chunking_cfg, overrides.as_ref(), ext);
-    if parse_status == "completed" {
+    if parse_status == crate::ParseStatus::Completed {
         return crate::pipeline::schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
-    if matches!(parse_status.as_str(), "cancelled" | "deleting") {
+    if parse_status.is_aborted() {
         return Ok(());
     }
-    let flipped = sqlx::query("UPDATE documents SET parse_status='processing',error_message='',updated_at=now() WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status IN ('pending','failed')")
-        .bind(document_id).bind(attempt).execute(pool).await.map_err(|e|e.to_string())?.rows_affected()==1;
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let flipped = sqlx::query("UPDATE knowledge_documents SET parse_status='processing',error_message='',updated_at=now() WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status IN ('pending','failed')")
+        .bind(document_id).bind(attempt).execute(&mut *tx).await.map_err(|e|e.to_string())?.rows_affected()==1;
+    crate::workflow::record_document_change(&mut tx, document_id, before)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     if !flipped {
         return match crate::document_parse_status(pool, document_id)
             .await
             .map_err(|error| error.to_string())?
-            .as_deref()
         {
-            Some("completed") => {
+            Some(crate::ParseStatus::Completed) => {
                 crate::pipeline::schedule_semantic_index_v2_if_ready(pool, version_id).await
             }
             // A duplicate delivery does not own the running generation.
             // Durable conversion obligations are reclaimed with a new attempt
             // after the bounded processing lease, never by failing this worker.
-            Some("processing") => Ok(()),
+            Some(crate::ParseStatus::Processing) => Ok(()),
             _ => Ok(()),
         };
     }
@@ -549,12 +556,13 @@ async fn persist_passage_index(
     attempt: i32,
     passages: &[String],
 ) -> Result<PersistIndexResult, String> {
-    let file_hash: String =
-        sqlx::query_scalar("SELECT COALESCE(file_hash,'') FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_one(pool)
-            .await
-            .unwrap_or_default();
+    let file_hash: String = sqlx::query_scalar(
+        "SELECT COALESCE(content_sha256,'') FROM knowledge_documents WHERE id = $1",
+    )
+    .bind(document_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_default();
     if !file_hash.is_empty() {
         let joined = passages.join("\n\n");
         let _ = platform::write_blob_async(
@@ -595,19 +603,6 @@ async fn persist_passage_index(
 pub enum PersistIndexResult {
     Aborted,
     Written { text_count: usize },
-}
-
-async fn document_parse_status(pool: &PgPool, document_id: Uuid) -> Option<String> {
-    sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-}
-
-fn status_aborted(st: Option<&str>) -> bool {
-    matches!(st, Some("cancelled") | Some("deleting"))
 }
 
 pub async fn after_index_fanout(
@@ -690,10 +685,16 @@ pub async fn after_index_fanout(
         .await
         .map_err(|e| e.to_string())?;
     }
+    let before = crate::workflow::capture_document_state(&mut tx, document_id)
+        .await
+        .map_err(|e| e.to_string())?;
     if text_count == 0 {
-        sqlx::query("UPDATE documents SET parse_status='completed',active_generation=$2,index_ready=true,enable_status='enabled',updated_at=now() WHERE id=$1 AND attempt=$2")
+        sqlx::query("UPDATE knowledge_documents SET parse_status='completed',active_generation=$2,index_ready=true,enable_status='enabled',updated_at=now() WHERE id=$1 AND attempt=$2")
             .bind(document_id).bind(attempt).execute(&mut *tx).await.map_err(|e|e.to_string())?;
     }
+    crate::workflow::record_document_change(&mut tx, document_id, before)
+        .await
+        .map_err(|e| e.to_string())?;
     crate::workflow::complete_tx(&mut tx, document_id, attempt, "convert")
         .await
         .map_err(|e| e.to_string())?;
@@ -756,7 +757,7 @@ fn apply_chunking_overrides(
 async fn version_index_opts(pool: &PgPool, version_id: Uuid) -> VersionIndexOpts {
     let row: Option<(serde_json::Value, serde_json::Value)> = sqlx::query_as(
         "SELECT COALESCE(chunking_config, '{}'::jsonb), COALESCE(indexing_strategy, '{}'::jsonb)
-         FROM product_versions WHERE id = $1",
+         FROM knowledge_product_versions WHERE id = $1",
     )
     .bind(version_id)
     .fetch_optional(pool)
@@ -832,7 +833,11 @@ pub async fn persist_indexed_chunks(
     vector_on: bool,
     keyword_on: bool,
 ) -> Result<PersistIndexResult, String> {
-    if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
+    if crate::document_parse_status(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some_and(crate::ParseStatus::is_aborted)
+    {
         return Ok(PersistIndexResult::Aborted);
     }
     let kept = crate::index::keep_nonempty_chunks(chunks.to_vec());
@@ -850,17 +855,21 @@ async fn persist_document_embeddings(
     vector_on: bool,
     keyword_on: bool,
 ) -> Result<PersistIndexResult, String> {
-    if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
+    if crate::document_parse_status(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some_and(crate::ParseStatus::is_aborted)
+    {
         return Ok(PersistIndexResult::Aborted);
     }
-    let title: String = sqlx::query_scalar("SELECT title FROM documents WHERE id = $1")
+    let title: String = sqlx::query_scalar("SELECT title FROM knowledge_documents WHERE id = $1")
         .bind(document_id)
         .fetch_one(pool)
         .await
         .unwrap_or_default();
     if vector_on {
         let version_id: Uuid =
-            sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
+            sqlx::query_scalar("SELECT product_version_id FROM knowledge_documents WHERE id = $1")
                 .bind(document_id)
                 .fetch_one(pool)
                 .await
@@ -868,14 +877,18 @@ async fn persist_document_embeddings(
         crate::freeze_version_embedding_model(pool, version_id).await?;
     }
     let embeddings = crate::index::index_chunks(chunks, &title, vector_on, keyword_on)?;
-    if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
+    if crate::document_parse_status(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .is_some_and(crate::ParseStatus::is_aborted)
+    {
         return Ok(PersistIndexResult::Aborted);
     }
     if !crate::workflow::stage_index(pool, document_id, attempt, chunks, &embeddings, false).await?
     {
         return Ok(PersistIndexResult::Aborted);
     }
-    sqlx::query("UPDATE documents SET processed_at=now(),updated_at=now() WHERE id=$1 AND attempt=$2 AND parse_status='processing'")
+    sqlx::query("UPDATE knowledge_documents SET processed_at=now(),updated_at=now() WHERE id=$1 AND attempt=$2 AND parse_status='processing'")
         .bind(document_id).bind(attempt).execute(pool).await.map_err(|e|e.to_string())?;
     let text_count = chunks.iter().filter(|c| c.chunk_type == "text").count();
     Ok(PersistIndexResult::Written { text_count })
@@ -997,7 +1010,14 @@ async fn fail_stage_retryable(
     )
     .await;
     let _ = crate::cancel_dependent_stages(pool, document_id, attempt, stage).await;
-    crate::workflow::update_status(pool, document_id, attempt, "failed", message).await?;
+    crate::workflow::update_status(
+        pool,
+        document_id,
+        attempt,
+        crate::ParseStatus::Failed,
+        message,
+    )
+    .await?;
     tracing::error!(document_id = %document_id, stage, error = %message, "parse stage fail");
     Err(message.into())
 }
@@ -1038,45 +1058,49 @@ pub async fn fail_now(
     attempt: i32,
     message: &str,
 ) -> Result<(), String> {
-    crate::workflow::update_status(pool, document_id, attempt, "failed", message).await?;
+    crate::workflow::update_status(
+        pool,
+        document_id,
+        attempt,
+        crate::ParseStatus::Failed,
+        message,
+    )
+    .await?;
     Ok(())
 }
 
 pub async fn run_kb_delete(pool: &PgPool, product_version_id: Uuid) -> Result<(), String> {
     let _ = crate::cancel_active_docs_for_versions(pool, &[product_version_id]).await;
-    sqlx::query(
-        "UPDATE documents SET parse_status = 'deleting', updated_at = now()
-         WHERE product_version_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(product_version_id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
     let docs: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM documents WHERE product_version_id = $1 AND deleted_at IS NULL",
+        "SELECT id FROM knowledge_documents WHERE product_version_id = $1 AND deleted_at IS NULL",
     )
     .bind(product_version_id)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
     for did in docs {
+        crate::set_parse_status(pool, did, crate::ParseStatus::Deleting, "")
+            .await
+            .map_err(|e| e.to_string())?;
         crate::pipeline::run_list_delete(pool, did).await?;
     }
     sqlx::query(
-        "UPDATE product_versions SET status = 'archived', deleted_at = now(), updated_at = now()
+        "UPDATE knowledge_product_versions SET status = 'archived', deleted_at = now(), updated_at = now()
          WHERE id = $1",
     )
     .bind(product_version_id)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE products SET current_version_id = NULL WHERE current_version_id = $1")
-        .bind(product_version_id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE knowledge_products SET current_version_id = NULL WHERE current_version_id = $1",
+    )
+    .bind(product_version_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     let pid: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_id FROM product_versions WHERE id = $1")
+        sqlx::query_scalar("SELECT product_id FROM knowledge_product_versions WHERE id = $1")
             .bind(product_version_id)
             .fetch_optional(pool)
             .await
@@ -1090,7 +1114,7 @@ pub async fn run_kb_delete(pool: &PgPool, product_version_id: Uuid) -> Result<()
 /// Reparse publication is owned by the fresh attempt's durable conversion
 /// obligation. A delayed reparse envelope must never retract newly built data.
 pub async fn run_reparse(pool: &PgPool, document_id: Uuid, attempt: i32) -> Result<(), String> {
-    let row:Option<(Uuid,String,Option<serde_json::Value>)>=sqlx::query_as("SELECT product_version_id,type,source_passages FROM documents WHERE id=$1 AND attempt=$2 AND parse_status='pending' AND deleted_at IS NULL")
+    let row:Option<(Uuid,String,Option<serde_json::Value>)>=sqlx::query_as("SELECT product_version_id,document_kind AS type,source_passages FROM knowledge_documents WHERE id=$1 AND attempt=$2 AND parse_status='pending' AND deleted_at IS NULL")
         .bind(document_id).bind(attempt).fetch_optional(pool).await.map_err(|e|e.to_string())?;
     if let Some((version_id, kind, source)) = row {
         let passages = source

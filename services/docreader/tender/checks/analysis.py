@@ -213,6 +213,7 @@ class _Analysis:
         if self.dispositions.keys() != self.owners.keys():
             raise ModelSemanticError("Analysis dispositions must cover all original body ranges")
         self.operation_refs = []
+        self.completed_model_requests = 0
         self.incomplete_requests = []
         self.local_candidates, self.problem_routing, self.problem_dependencies = [], [], {}
 
@@ -598,6 +599,7 @@ class _Analysis:
 
             ref, value = result
             self.operation_refs.append({"operation": phase, "work_unit_id": payload["work_unit_id"], "artifact_ref": ref})
+            self.completed_model_requests += 1
             self.problems.extend(self.findings(value["findings"], payload))
             results.append(value)
         return plan_ref, results
@@ -619,16 +621,30 @@ class _Analysis:
             if current:
                 payloads.append(self.review_payload(current))
         reviewed_relations = {r["relation_id"] for p in payloads for r in p["relations"]}
+        pending_ranges, pending = set(), None
         for relation_id, relation in self.relations.items():
             if relation_id in reviewed_relations:
                 continue
             endpoints = [self.items[relation[key]] for key in ("from_item_id", "to_item_id")]
-            ranges = sorted({e["range_id"] for item in endpoints for e in item["evidence"]
-                             if e["range_id"] in self.dispositions})
+            ranges = {e["range_id"] for item in endpoints for e in item["evidence"]
+                      if e["range_id"] in self.dispositions}
             # Relationship semantics require both endpoints and all evidence in
-            # one request, even when ordinary source reviews were repartitioned.
-            payloads.append(self.review_payload(ranges))
-            reviewed_relations.update(r["relation_id"] for r in payloads[-1]["relations"])
+            # one request; combine complete supplements within the review budget.
+            combined = pending_ranges | ranges
+            trial = self.review_payload(sorted(combined))
+            measured = self.budget.measure("verify", trial)
+            if pending is not None and (measured["fits"] is False or (
+                    measured["method"] == RequestBudget.TOKENIZED_METHOD
+                    and measured["input_tokens"] > self.REVIEW_INPUT_TOKENS)):
+                payloads.append(pending)
+                combined = ranges
+                trial = self.review_payload(sorted(combined))
+            pending_ranges, pending = combined, trial
+            # A rejected union may contain extra relations absent from both
+            # retained batches; only an accepted complete payload owns coverage.
+            reviewed_relations.update(r["relation_id"] for r in pending["relations"])
+        if pending is not None:
+            payloads.append(pending)
         for decision in self.plan.get("scope_decisions", []):
             # Human scope interpretation, including local_only, must actually
             # reach independent review with its original and target evidence.
@@ -845,7 +861,18 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     locate_plan_ref, located = await context.execute("locate", locate_requests, model, save)
     candidates = [c for result in located if result for c in result["candidates"]] + context.local_candidates
     associations = await asyncio.to_thread(context.association_requests, candidates)
-    association_plan_ref, associated = await context.execute("associate", associations, model, save)
+    batched = hasattr(model, "call_groups_validated")
+    if batched:
+        from docreader.tender.checks.analysis_batch_execution import execute_batches, joint_batches
+        from docreader.tender.checks.analysis_batches import make_batches
+
+        batches = await asyncio.to_thread(make_batches, associations, budget,
+            source_order=lambda identity: context.source_order(context.sources[identity]),
+            document_order=context.document_order.__getitem__)
+        association_plan_ref, associations, associated = await execute_batches(
+            context, "associate", batches, model, save)
+    else:
+        association_plan_ref, associated = await context.execute("associate", associations, model, save)
     joint, decisions, relations = [], [], list(context.relations.values())
     unverified, associated_only = set(), set()
     for payload, result in zip(associations, associated, strict=True):
@@ -863,7 +890,12 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
                       "relations": [*payload["relations"], *result["relations"]], "decisions": result["decisions"],
                       "issues": _public_issues(assign_issues([*payload["issues"], *result["findings"]],
                                                              payload["work_unit_id"]))})
-    joint_plan_ref, reviewed = await context.execute("joint", joint, model, save)
+    if batched:
+        joint_requests = await asyncio.to_thread(joint_batches, context, batches,
+            {payload["work_unit_id"]: result for payload, result in zip(associations, associated, strict=True)})
+        joint_plan_ref, joint, reviewed = await execute_batches(context, "joint", joint_requests, model, save)
+    else:
+        joint_plan_ref, reviewed = await context.execute("joint", joint, model, save)
     completed = [result for result in [*source_reviewed, *reviewed] if result]
     required_ranges = {r["range_id"] for pack in context.packs.values() for r in pack["body"]
                        if r["range_id"] not in host_reviewed_ranges(pack)}
@@ -931,7 +963,7 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
             "counts": {"items": len(context.items), "ranges": len(context.owners), "relations": len(relations),
                        "decisions": len(decisions), "candidates": len(candidates),
                        "blocking_issues": sum(p["blocking"] for p in active),
-                       "model_calls": len(context.operation_refs)}}
+                       "model_calls": context.completed_model_requests}}
 
 
 def current_items(artifacts, verification: dict) -> list[dict]:

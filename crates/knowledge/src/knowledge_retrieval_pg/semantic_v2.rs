@@ -448,8 +448,16 @@ pub(crate) async fn lock_supported_policy_in_snapshot(
     validated: &ValidatedSemanticPolicyV2,
 ) -> Result<(), KnowledgeRetrievalError> {
     let row = sqlx::query(
-        "SELECT canonical_policy_payload,canonical_revision_payload,embedding_revision_sha256,credential_ref
-           FROM public.kb_knowledge_lock_semantic_policy_v2($1)",
+        "SELECT policy.canonical_policy_payload,revision.canonical_revision_payload,
+                policy.embedding_revision_sha256,revision.credential_ref
+           FROM public.knowledge_retrieval_policies policy
+           JOIN public.knowledge_embedding_revisions revision
+             ON revision.revision_sha256=policy.embedding_revision_sha256
+           JOIN public.knowledge_rerank_revisions reranker
+             ON reranker.revision_sha256=policy.rerank_revision_sha256
+          WHERE policy.policy_sha256=$1 AND policy.support_state='supported'
+            AND revision.support_state='supported' AND reranker.support_state='supported'
+          FOR SHARE OF policy,revision,reranker",
     )
     .bind(&identity.policy_sha256)
     .fetch_optional(&mut **tx)
@@ -501,8 +509,8 @@ pub(crate) async fn recall_in_snapshot(
     }
     let eligible_rows = sqlx::query(
         "SELECT p.id AS product_id,pv.id AS version_id
-           FROM workspaces w JOIN products p ON p.workspace_id=w.id
-           JOIN product_versions pv ON pv.product_id=p.id
+           FROM knowledge_workspaces w JOIN knowledge_products p ON p.workspace_id=w.id
+           JOIN knowledge_product_versions pv ON pv.product_id=p.id
           WHERE w.kind=$1
             AND (($1='product_line' AND p.kind='product') OR ($1='company' AND p.kind='library'))
             AND pv.id=ANY($2::uuid[])
@@ -527,7 +535,7 @@ pub(crate) async fn recall_in_snapshot(
 
     let bindings = sqlx::query(
         "SELECT product_version_id,embedding_revision_sha256
-           FROM product_version_embedding_bindings_v2 WHERE product_version_id=ANY($1::uuid[])
+           FROM knowledge_product_version_embedding_bindings WHERE product_version_id=ANY($1::uuid[])
           ORDER BY product_version_id",
     )
     .bind(&eligible_vec)
@@ -550,13 +558,13 @@ pub(crate) async fn recall_in_snapshot(
                 vector_generation.embedding_revision_sha256,
                 vector_generation.source_snapshot_sha256,
                 vector_generation.chunk_count
-           FROM product_version_vector_index_generations_v2 vector_generation
-           JOIN product_version_keyword_index_generations_v2 keyword_generation
+           FROM knowledge_product_version_vector_generations vector_generation
+           JOIN knowledge_product_version_keyword_generations keyword_generation
              ON keyword_generation.product_version_id=vector_generation.product_version_id
             AND keyword_generation.embedding_revision_sha256=vector_generation.embedding_revision_sha256
             AND keyword_generation.source_snapshot_sha256=vector_generation.source_snapshot_sha256
             AND keyword_generation.chunk_count=vector_generation.chunk_count
-           JOIN knowledge_semantic_index_intents_v2 intent
+           JOIN knowledge_semantic_index_intents intent
              ON intent.product_version_id=vector_generation.product_version_id
             AND intent.embedding_revision_sha256=vector_generation.embedding_revision_sha256
             AND intent.source_snapshot_sha256=vector_generation.source_snapshot_sha256
@@ -564,7 +572,7 @@ pub(crate) async fn recall_in_snapshot(
             AND intent.status='completed'
           WHERE vector_generation.product_version_id=ANY($1::uuid[])
             AND NOT EXISTS(
-              SELECT 1 FROM documents pending_document
+              SELECT 1 FROM knowledge_documents pending_document
                WHERE pending_document.product_version_id=vector_generation.product_version_id
                  AND pending_document.deleted_at IS NULL AND pending_document.parse_status NOT IN ('deleting','deleted','cancelled')
                  AND (pending_document.parse_status IN ('pending','processing','finalizing')
@@ -599,16 +607,16 @@ pub(crate) async fn recall_in_snapshot(
                 k.indexed_content,k.indexed_content_sha256 AS keyword_sha,
                 v.chunk_id AS vector_chunk_id,v.indexed_content_sha256 AS vector_sha,
                 v.source_snapshot_sha256 AS vector_snapshot_sha
-           FROM chunks c JOIN documents d ON d.id=c.document_id
-           LEFT JOIN chunk_keyword_indexes_v2 k ON k.chunk_id=c.id
+           FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id
+           LEFT JOIN knowledge_chunk_keyword_indexes k ON k.chunk_id=c.id
              AND k.tokenizer=$2 AND k.tokenizer_version=$3
-           LEFT JOIN chunk_vector_indexes_v2 v ON v.chunk_id=c.id
+           LEFT JOIN knowledge_chunk_vector_indexes v ON v.chunk_id=c.id
              AND v.product_version_id=c.product_version_id
              AND v.embedding_revision_sha256=$4
           WHERE c.product_version_id=ANY($1::uuid[]) AND d.product_version_id=c.product_version_id
 AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation AND d.enable_status='enabled' AND d.index_ready
 AND c.chunk_type=ANY($5::text[])
-AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
+AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))
 ORDER BY c.id",
     )
     .bind(&eligible_vec)
@@ -770,12 +778,12 @@ async fn load_signals(
     let rows = sqlx::query(
         "SELECT c.id,c.product_version_id,c.document_id,c.chunk_type,c.content,c.context_header,c.parent_chunk_id,
                 p.id AS product_id,d.file_name
-           FROM chunks c JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
-           JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id
-           JOIN workspaces w ON w.id=p.workspace_id
+           FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
+           JOIN knowledge_product_versions pv ON pv.id=c.product_version_id JOIN knowledge_products p ON p.id=pv.product_id
+           JOIN knowledge_workspaces w ON w.id=p.workspace_id
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($3::text[])
-            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))"
+            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))"
     ).bind(workspace_kind).bind(versions).bind(SIGNAL_TYPES.as_slice()).fetch_all(&mut **tx).await.map_err(db)?;
     Ok(rows
         .into_iter()
@@ -804,11 +812,11 @@ async fn load_sources(
 ) -> Result<Vec<Source>, KnowledgeRetrievalError> {
     let rows=sqlx::query(
         "SELECT c.id,c.product_version_id,c.document_id,c.chunk_type,c.content,c.context_header,c.parent_chunk_id,p.id AS product_id,d.file_name
-           FROM chunks c JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
-           JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
+           FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
+           JOIN knowledge_product_versions pv ON pv.id=c.product_version_id JOIN knowledge_products p ON p.id=pv.product_id JOIN knowledge_workspaces w ON w.id=p.workspace_id
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation AND d.enable_status='enabled' AND d.index_ready
             AND c.chunk_type=ANY($3::text[])
-            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))"
+            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))"
     ).bind(workspace_kind).bind(versions).bind(["text","parent_text","image_ocr"].as_slice()).fetch_all(&mut **tx).await.map_err(db)?;
     Ok(rows
         .into_iter()
@@ -834,20 +842,20 @@ async fn keyword_ranks(
     policy: &RetrievalPolicyV2,
 ) -> Result<HashMap<Uuid, u32>, KnowledgeRetrievalError> {
     let rows=sqlx::query(
-        "WITH prepared AS (SELECT public.kb_knowledge_keyword_token_stream_v2($3) AS stream),
+        "WITH prepared AS (SELECT $3::text AS stream),
          query_value AS (SELECT CASE WHEN stream='' THEN NULL::tsquery ELSE to_tsquery('simple',replace(stream,' ',' | ')) END AS value FROM prepared),
          scored AS (SELECT c.id,p.id AS product_id,c.product_version_id,c.document_id,
                     floor(least(1.0::real,greatest(0.0::real,ts_rank_cd(k.tsv,q.value,32)))*1000000)::bigint AS score
-           FROM query_value q JOIN chunks c ON true JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
-           JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
-           JOIN chunk_keyword_indexes_v2 k ON k.chunk_id=c.id AND k.tokenizer=$4 AND k.tokenizer_version=$5
+           FROM query_value q JOIN knowledge_chunks c ON true JOIN knowledge_documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
+           JOIN knowledge_product_versions pv ON pv.id=c.product_version_id JOIN knowledge_products p ON p.id=pv.product_id JOIN knowledge_workspaces w ON w.id=p.workspace_id
+           JOIN knowledge_chunk_keyword_indexes k ON k.chunk_id=c.id AND k.tokenizer=$4 AND k.tokenizer_version=$5
           WHERE q.value IS NOT NULL AND w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($8::text[])
-AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
+AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))
 AND k.tsv @@ q.value),
          chosen AS (SELECT *,row_number() OVER(ORDER BY score DESC,product_id,product_version_id,document_id,id) AS rank FROM scored WHERE score >= $6)
          SELECT id,rank FROM chosen WHERE rank <= $7 ORDER BY rank"
-    ).bind(workspace_kind).bind(versions).bind(query).bind(&policy.keyword.tokenizer).bind(&policy.keyword.tokenizer_version)
+    ).bind(workspace_kind).bind(versions).bind(crate::index::keyword_token_stream_v2(query)).bind(&policy.keyword.tokenizer).bind(&policy.keyword.tokenizer_version)
       .bind(i64::from(policy.keyword.threshold_millionths)).bind(i64::from(policy.keyword.top_k)).bind(SIGNAL_TYPES.as_slice())
       .fetch_all(&mut **tx).await.map_err(db)?;
     rows.into_iter()
@@ -869,16 +877,16 @@ async fn vector_ranks(
     policy: &RetrievalPolicyV2,
 ) -> Result<HashMap<Uuid, u32>, KnowledgeRetrievalError> {
     let invalid_distance_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM chunks c
-           JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
-           JOIN product_versions pv ON pv.id=c.product_version_id
-           JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
-           JOIN chunk_vector_indexes_v2 v ON v.chunk_id=c.id
+        "SELECT count(*) FROM knowledge_chunks c
+           JOIN knowledge_documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
+           JOIN knowledge_product_versions pv ON pv.id=c.product_version_id
+           JOIN knowledge_products p ON p.id=pv.product_id JOIN knowledge_workspaces w ON w.id=p.workspace_id
+           JOIN knowledge_chunk_vector_indexes v ON v.chunk_id=c.id
             AND v.product_version_id=c.product_version_id
             AND v.embedding_revision_sha256=$4
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($5::text[])
-            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
+            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))
             AND ((v.embedding <=> CAST($3 AS vector))::float8)::text IN ('NaN','Infinity','-Infinity')",
     )
     .bind(workspace_kind)
@@ -894,13 +902,13 @@ async fn vector_ranks(
     }
     let rows=sqlx::query(
         "WITH distances AS (SELECT c.id,p.id AS product_id,c.product_version_id,c.document_id,(v.embedding <=> CAST($3 AS vector))::float8 AS distance
-           FROM chunks c JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
-           JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
-           JOIN chunk_vector_indexes_v2 v ON v.chunk_id=c.id
+           FROM knowledge_chunks c JOIN knowledge_documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
+           JOIN knowledge_product_versions pv ON pv.id=c.product_version_id JOIN knowledge_products p ON p.id=pv.product_id JOIN knowledge_workspaces w ON w.id=p.workspace_id
+           JOIN knowledge_chunk_vector_indexes v ON v.chunk_id=c.id
             AND v.product_version_id=c.product_version_id
             AND v.embedding_revision_sha256=$4
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND c.generation=d.active_generation AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($7::text[])
-AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))),
+AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))),
          scored AS (SELECT *,floor(least(1.0::float8,greatest(0.0::float8,1.0-distance))*1000000)::bigint AS score FROM distances
                     WHERE distance::text NOT IN ('NaN','Infinity','-Infinity')),
          chosen AS (SELECT *,row_number() OVER(ORDER BY score DESC,product_id,product_version_id,document_id,id) AS rank FROM scored WHERE score >= $5)
@@ -936,7 +944,7 @@ async fn load_graph_refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows=sqlx::query("SELECT s.id,n.chunk_ids FROM chunks s JOIN graph_nodes n ON n.product_version_id=s.product_version_id AND n.document_id=s.document_id AND n.name=s.context_header AND n.generation=s.generation WHERE s.id=ANY($1::uuid[]) AND s.content=n.name ORDER BY s.id")
+    let rows=sqlx::query("SELECT s.id,n.chunk_ids FROM knowledge_chunks s JOIN knowledge_graph_nodes n ON n.product_version_id=s.product_version_id AND n.document_id=s.document_id AND n.name=s.context_header AND n.generation=s.generation WHERE s.id=ANY($1::uuid[]) AND s.content=n.name ORDER BY s.id")
         .bind(&ids).fetch_all(&mut **tx).await.map_err(db)?;
     let mut refs = HashMap::new();
     for row in rows {
@@ -968,7 +976,7 @@ async fn load_wiki_refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows=sqlx::query("SELECT s.id,w.chunk_refs FROM chunks s JOIN wiki_pages w ON w.product_version_id=s.product_version_id AND w.slug=s.context_header WHERE s.id=ANY($1::uuid[]) AND s.content=w.content AND w.status='published' AND w.deleted_at IS NULL ORDER BY s.id")
+    let rows=sqlx::query("SELECT s.id,w.chunk_refs FROM knowledge_chunks s JOIN knowledge_wiki_pages w ON w.product_version_id=s.product_version_id AND w.slug=s.context_header WHERE s.id=ANY($1::uuid[]) AND s.content=w.content AND w.status='published' AND w.deleted_at IS NULL ORDER BY s.id")
         .bind(&ids).fetch_all(&mut **tx).await.map_err(db)?;
     let mut refs = HashMap::new();
     for row in rows {
@@ -1552,7 +1560,7 @@ pub(super) mod tests {
         };
         let revision_bytes = revision.canonical_bytes().unwrap();
         let revision_sha = revision.sha256().unwrap();
-        sqlx::query("INSERT INTO embedding_revisions_v2(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'test:semantic-lock-v2') ON CONFLICT (revision_sha256) DO NOTHING")
+        sqlx::query("INSERT INTO knowledge_embedding_revisions(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'test:semantic-lock-v2') ON CONFLICT (revision_sha256) DO NOTHING")
             .bind(&revision_sha).bind(&revision_bytes).bind(i16::try_from(revision.schema_version).unwrap()).bind(&revision.provider_protocol_version).bind(&revision.provider_model_identifier).bind(&revision.provider_model_revision_sha256).bind(&revision.endpoint_config_sha256).bind(&revision.endpoint_identity).bind(i32::try_from(revision.dimension).unwrap()).bind(&revision.request_config_sha256).bind(&revision.output_normalization_version).execute(pool).await.unwrap();
         let mut artifact = policy();
         artifact.embedding.model_revision_sha256 = revision_sha.clone();
@@ -1569,17 +1577,17 @@ pub(super) mod tests {
         };
         let reranker_sha = reranker.sha256().unwrap();
         artifact.rerank.revision_sha256 = reranker_sha.clone();
-        sqlx::query("INSERT INTO rerank_revisions_v2(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,config_revision_sha256,endpoint_identity,request_config_sha256,score_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'test:semantic-lock-rerank-v2') ON CONFLICT (revision_sha256) DO NOTHING")
+        sqlx::query("INSERT INTO knowledge_rerank_revisions(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,config_revision_sha256,endpoint_identity,request_config_sha256,score_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'test:semantic-lock-rerank-v2') ON CONFLICT (revision_sha256) DO NOTHING")
             .bind(&reranker_sha).bind(reranker.canonical_bytes().unwrap()).bind(i16::try_from(reranker.schema_version).unwrap()).bind(&reranker.provider_protocol_version).bind(&reranker.provider_model_identifier).bind(&reranker.provider_model_revision_sha256).bind(&reranker.config_revision_sha256).bind(&reranker.endpoint_identity).bind(&reranker.request_config_sha256).bind(&reranker.score_normalization_version).execute(pool).await.unwrap();
         artifact.validate().unwrap();
         let identity = artifact.request_identity().unwrap();
-        sqlx::query("INSERT INTO knowledge_retrieval_policies_v2(policy_sha256,canonical_policy_payload,embedding_revision_sha256,contract_version,max_hits,max_chunk_bytes,max_total_bytes) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (policy_sha256) DO NOTHING")
-            .bind(&identity.policy_sha256).bind(artifact.canonical_bytes().unwrap()).bind(&revision_sha).bind(&identity.contract_version).bind(i64::from(identity.max_hits)).bind(i64::from(identity.max_chunk_bytes)).bind(i64::try_from(identity.max_total_bytes).unwrap()).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO knowledge_retrieval_policies(policy_sha256,canonical_policy_payload,embedding_revision_sha256,contract_version,max_hits,max_chunk_bytes,max_total_bytes,rerank_revision_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (policy_sha256) DO NOTHING")
+            .bind(&identity.policy_sha256).bind(artifact.canonical_bytes().unwrap()).bind(&revision_sha).bind(&identity.contract_version).bind(i64::from(identity.max_hits)).bind(i64::from(identity.max_chunk_bytes)).bind(i64::try_from(identity.max_total_bytes).unwrap()).bind(&reranker_sha).execute(pool).await.unwrap();
         (identity, revision_sha, reranker_sha)
     }
 
     #[tokio::test]
-    async fn runtime_lock_is_shadow_safe_acl_narrow_and_serializes_revocations() {
+    async fn runtime_row_locks_serialize_policy_and_model_revocations() {
         let _permit = crate::TEST_PG_SERIAL
             .acquire()
             .await
@@ -1587,59 +1595,6 @@ pub(super) mod tests {
         let Some(pool) = postgres_pool().await else {
             return;
         };
-        let ready: bool = sqlx::query_scalar(
-            "SELECT to_regprocedure('kb_knowledge_lock_semantic_policy_v2(text)') IS NOT NULL",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(false);
-        if !ready {
-            if std::env::var_os("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").is_some() {
-                panic!("semantic policy lock function is required")
-            }
-            return;
-        }
-        let public_execute: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM pg_catalog.pg_proc procedure
-                 JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
-                 CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
-                     procedure.proacl,pg_catalog.acldefault('f',procedure.proowner)
-                 )) privilege
-                WHERE namespace.nspname='public'
-                  AND procedure.proname='kb_knowledge_lock_semantic_policy_v2'
-                  AND privilege.grantee=0 AND privilege.privilege_type='EXECUTE')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let runtime_execute: bool = sqlx::query_scalar(
-            "SELECT has_function_privilege(current_user, 'public.kb_knowledge_lock_semantic_policy_v2(text)', 'EXECUTE')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let runtime_tokenizer_execute: bool = sqlx::query_scalar(
-            "SELECT has_function_privilege(current_user, 'public.kb_knowledge_keyword_token_stream_v2(text)', 'EXECUTE')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let runtime_registry_update: bool = sqlx::query_scalar(
-            "SELECT has_table_privilege(current_user, 'public.knowledge_retrieval_policies_v2', 'UPDATE')
-                 OR has_table_privilege(current_user, 'public.embedding_revisions_v2', 'UPDATE')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(!public_execute);
-        assert!(runtime_execute);
-        assert!(runtime_tokenizer_execute);
-        assert!(
-            runtime_registry_update,
-            "the application owner manages registry data"
-        );
-
         let (identity, revision_sha, reranker_sha) = register_lock_policy(&pool).await;
         struct FailingCredentialResolver;
         #[async_trait]
@@ -1667,37 +1622,17 @@ pub(super) mod tests {
             .execute(&mut *locked)
             .await
             .unwrap();
-        let temporary_allowed: bool = sqlx::query_scalar(
-            "SELECT has_database_privilege(current_user,current_database(),'TEMPORARY')",
-        )
-        .fetch_one(&mut *locked)
-        .await
-        .unwrap();
-        assert!(
-            !temporary_allowed,
-            "application identity cannot create temporary registry shadows"
-        );
         sqlx::query("SET LOCAL search_path = pg_temp, public, pg_catalog")
             .execute(&mut *locked)
             .await
             .unwrap();
-        let token_stream: String =
-            sqlx::query_scalar("SELECT public.kb_knowledge_keyword_token_stream_v2('Alpha知识')")
-                .fetch_one(&mut *locked)
-                .await
-                .unwrap();
-        assert_eq!(token_stream, "alpha 知识");
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM public.kb_knowledge_lock_semantic_policy_v2($1)",
-        )
-        .bind(&identity.policy_sha256)
-        .fetch_one(&mut *locked)
-        .await
-        .unwrap();
-        assert_eq!(
-            count, 1,
-            "qualified registry lookup remains correct with pg_temp first"
-        );
+        let validated = adapter
+            .validate_supported_policy_v2(&identity)
+            .await
+            .unwrap();
+        lock_supported_policy_in_snapshot(&mut locked, &identity, &validated)
+            .await
+            .unwrap();
         let locked_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
             .fetch_one(&mut *locked)
             .await
@@ -1713,7 +1648,7 @@ pub(super) mod tests {
                 .await
                 .unwrap();
             let _ = policy_pid_sender.send(pid);
-            sqlx::query("UPDATE public.knowledge_retrieval_policies_v2 SET support_state='revoked' WHERE policy_sha256=$1")
+            sqlx::query("UPDATE public.knowledge_retrieval_policies SET support_state='revoked' WHERE policy_sha256=$1")
                 .bind(policy_sha).execute(&mut *tx).await.unwrap();
             tx.rollback().await.unwrap();
         });
@@ -1726,7 +1661,7 @@ pub(super) mod tests {
                 .await
                 .unwrap();
             let _ = revision_pid_sender.send(pid);
-            sqlx::query("UPDATE public.embedding_revisions_v2 SET support_state='revoked' WHERE revision_sha256=$1")
+            sqlx::query("UPDATE public.knowledge_embedding_revisions SET support_state='revoked' WHERE revision_sha256=$1")
                 .bind(revision_sha).execute(&mut *tx).await.unwrap();
             tx.rollback().await.unwrap();
         });
@@ -1739,7 +1674,7 @@ pub(super) mod tests {
                 .await
                 .unwrap();
             let _ = reranker_pid_sender.send(pid);
-            sqlx::query("UPDATE public.rerank_revisions_v2 SET support_state='revoked' WHERE revision_sha256=$1")
+            sqlx::query("UPDATE public.knowledge_rerank_revisions SET support_state='revoked' WHERE revision_sha256=$1")
                 .bind(reranker_sha).execute(&mut *tx).await.unwrap();
             tx.rollback().await.unwrap();
         });
@@ -1795,10 +1730,10 @@ pub(super) mod tests {
 
         let states: (String, String, String) = sqlx::query_as(
             "SELECT policy.support_state,revision.support_state,reranker.support_state
-               FROM public.knowledge_retrieval_policies_v2 policy
-               JOIN public.embedding_revisions_v2 revision
+               FROM public.knowledge_retrieval_policies policy
+               JOIN public.knowledge_embedding_revisions revision
                  ON revision.revision_sha256=policy.embedding_revision_sha256
-               JOIN public.rerank_revisions_v2 reranker
+               JOIN public.knowledge_rerank_revisions reranker
                  ON reranker.revision_sha256=policy.rerank_revision_sha256
               WHERE policy.policy_sha256=$1",
         )
@@ -1822,9 +1757,9 @@ pub(super) mod tests {
             return;
         };
         let ready: bool = sqlx::query_scalar(
-            "SELECT to_regclass('chunk_vector_indexes_v2') IS NOT NULL
-                 AND to_regclass('graph_nodes') IS NOT NULL
-                 AND to_regclass('wiki_pages') IS NOT NULL",
+            "SELECT to_regclass('knowledge_chunk_vector_indexes') IS NOT NULL
+                 AND to_regclass('knowledge_graph_nodes') IS NOT NULL
+                 AND to_regclass('knowledge_wiki_pages') IS NOT NULL",
         )
         .fetch_one(&pool)
         .await
@@ -1842,25 +1777,31 @@ pub(super) mod tests {
         let version_id = Uuid::new_v4();
         let document_id = Uuid::new_v4();
         let other_document_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO platform_users(id,email) VALUES($1,$2)")
+            .bind(workspace_id)
+            .bind(format!("{workspace_id}@test.invalid"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         sqlx::query(
-            "INSERT INTO workspaces(id,name,slug,kind) VALUES($1,'semantic v2',$2,'product_line')",
+            "INSERT INTO knowledge_workspaces(id,name,slug,kind,owner_user_id) VALUES($1,'semantic v2',$2,'product_line',$1)",
         )
         .bind(workspace_id)
         .bind(format!("semantic-v2-{workspace_id}"))
         .execute(&mut *tx)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','semantic v2',$3)")
+        sqlx::query("INSERT INTO knowledge_products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','semantic v2',$3)")
             .bind(product_id).bind(workspace_id).bind(format!("semantic-v2-{product_id}")).execute(&mut *tx).await.unwrap();
         sqlx::query(
-            "INSERT INTO product_versions(id,product_id,label,status) VALUES($1,$2,'v1','active')",
+            "INSERT INTO knowledge_product_versions(id,product_id,label,status) VALUES($1,$2,'v1','active')",
         )
         .bind(version_id)
         .bind(product_id)
         .execute(&mut *tx)
         .await
         .unwrap();
-        sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+        sqlx::query("UPDATE knowledge_products SET current_version_id=$2 WHERE id=$1")
             .bind(product_id)
             .bind(version_id)
             .execute(&mut *tx)
@@ -1869,11 +1810,11 @@ pub(super) mod tests {
         for id in [document_id, other_document_id] {
             let digest = platform::sha256_hex(id.as_bytes());
             let object_ref = format!("objects/{digest}");
-            sqlx::query("INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state) VALUES($1,$2,'text/plain',1,'available')")
+            sqlx::query("INSERT INTO platform_objects(object_ref,content_sha256,media_type,byte_length,state) VALUES($1,$2,'text/plain',1,'available')")
                 .bind(&object_ref).bind(&digest).execute(&mut *tx).await.unwrap();
-            sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original',NULL)")
+            sqlx::query("INSERT INTO platform_object_references(object_ref,owner_kind,owner_id,occurrence) VALUES($1,'knowledge_document',$2,'original')")
                 .bind(&object_ref).bind(id).execute(&mut *tx).await.unwrap();
-            sqlx::query("INSERT INTO documents(id,product_version_id,title,parse_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES($1,$2,'semantic','completed','enabled',true,$3,1,$4,$5)")
+            sqlx::query("INSERT INTO knowledge_documents(id,product_version_id,title,parse_status,enable_status,index_ready,file_name,byte_length,content_sha256,object_ref) VALUES($1,$2,'semantic','completed','enabled',true,$3,1,$4,$5)")
                 .bind(id).bind(version_id).bind(format!("{id}.txt")).bind(&digest).bind(&object_ref).execute(&mut *tx).await.unwrap();
         }
 
@@ -2051,7 +1992,7 @@ pub(super) mod tests {
             ),
         ];
         for (id, doc, kind, content, header, parent) in &chunks {
-            sqlx::query("INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,context_header,parent_chunk_id) VALUES($1,$2,$3,$4,$5,$6,$7)")
+            sqlx::query("INSERT INTO knowledge_chunks(id,product_version_id,document_id,chunk_type,content,context_header,parent_chunk_id) VALUES($1,$2,$3,$4,$5,$6,$7)")
                 .bind(id).bind(version_id).bind(doc).bind(kind).bind(content).bind(header).bind(parent).execute(&mut *tx).await.unwrap();
         }
         let image_artifact_id = Uuid::new_v4();
@@ -2059,7 +2000,7 @@ pub(super) mod tests {
         let image_object_ref = format!("objects/{image_content_sha}");
         let canonical_media = br#"{"schema_version":3,"fixture":"semantic-v2"}"#;
         sqlx::query(
-            "INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state)
+            "INSERT INTO platform_objects(object_ref,content_sha256,media_type,byte_length,state)
              VALUES($1,$2,'image/png',1,'available')",
         )
         .bind(&image_object_ref)
@@ -2085,7 +2026,7 @@ pub(super) mod tests {
         .unwrap();
         for image_chunk_id in [ocr, ocr_ambiguous_one, ocr_ambiguous_two] {
             sqlx::query(
-                "INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(
+                "INSERT INTO knowledge_image_chunk_links(
                    chunk_id,product_version_id,document_id,image_artifact_revision_id,
                    object_ref,content_sha256,media_type)
                  VALUES($1,$2,$3,$4,$5,$6,'image/png')",
@@ -2100,42 +2041,35 @@ pub(super) mod tests {
             .await
             .unwrap();
         }
-        sqlx::query("INSERT INTO graph_nodes(product_version_id,document_id,name,chunk_ids) VALUES($1,$2,'alpha graph',$3),($1,$2,'alpha ambiguous graph',$4)")
+        sqlx::query("INSERT INTO knowledge_graph_nodes(product_version_id,document_id,name,chunk_ids) VALUES($1,$2,'alpha graph',$3),($1,$2,'alpha ambiguous graph',$4)")
             .bind(version_id).bind(document_id).bind(vec![source_two]).bind(vec![source_ambiguous, source_one]).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO wiki_pages(id,product_version_id,slug,title,status,content,chunk_refs) VALUES($1,$2,'semantic-page','semantic','published','alpha wiki',$3)")
+        sqlx::query("INSERT INTO knowledge_wiki_pages(id,product_version_id,slug,title,status,content,chunk_refs) VALUES($1,$2,'semantic-page','semantic','published','alpha wiki',$3)")
             .bind(Uuid::new_v4()).bind(version_id).bind(serde_json::json!([source_two.to_string()])).execute(&mut *tx).await.unwrap();
 
         let revision = test_revision();
         let revision_bytes = revision.canonical_bytes().unwrap();
         let revision_sha = revision.sha256().unwrap();
-        sqlx::query("INSERT INTO embedding_revisions_v2(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'test:semantic-v2')")
+        sqlx::query("INSERT INTO knowledge_embedding_revisions(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'test:semantic-v2')")
             .bind(&revision_sha).bind(&revision_bytes).bind(i16::try_from(revision.schema_version).unwrap()).bind(&revision.provider_protocol_version).bind(&revision.provider_model_identifier).bind(&revision.provider_model_revision_sha256).bind(&revision.endpoint_config_sha256).bind(&revision.endpoint_identity).bind(i32::try_from(revision.dimension).unwrap()).bind(&revision.request_config_sha256).bind(&revision.output_normalization_version).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO product_version_embedding_bindings_v2(product_version_id,embedding_revision_sha256) VALUES($1,$2)")
+        sqlx::query("INSERT INTO knowledge_product_version_embedding_bindings(product_version_id,embedding_revision_sha256) VALUES($1,$2)")
             .bind(version_id).bind(&revision_sha).execute(&mut *tx).await.unwrap();
-        let lifecycle: (String, Option<Uuid>, Option<i64>) = sqlx::query_as(
-            "SELECT state,intent_id,target_revision FROM kb_knowledge_prepare_semantic_index_intent_v2($1)",
+        let crate::knowledge_index_v2::SemanticIndexPreparationV2::Enqueue(lifecycle) =
+            crate::knowledge_index_v2::storage::prepare(&mut tx, version_id)
+                .await
+                .unwrap()
+        else {
+            panic!("settled source should enqueue an intent")
+        };
+        let lifecycle_intent_id = lifecycle.id;
+        let lifecycle_target_revision = lifecycle.target_revision;
+        crate::knowledge_index_v2::storage::rebuild_semantic_keywords(
+            &mut tx,
+            version_id,
+            &revision_sha,
+            &lifecycle.source_snapshot_sha256,
         )
-        .bind(version_id)
-        .fetch_one(&mut *tx)
         .await
         .unwrap();
-        assert_eq!(lifecycle.0, "enqueue");
-        let lifecycle_intent_id = lifecycle.1.unwrap();
-        let lifecycle_target_revision = lifecycle.2.unwrap();
-        let lifecycle_source_snapshot: String = sqlx::query_scalar(
-            "SELECT source_snapshot_sha256 FROM knowledge_semantic_index_intents_v2 WHERE id=$1",
-        )
-        .bind(lifecycle_intent_id)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("SELECT kb_knowledge_rebuild_semantic_keyword_indexes_v2($1,$2,$3)")
-            .bind(version_id)
-            .bind(&revision_sha)
-            .bind(&lifecycle_source_snapshot)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
         let query_values = {
             let mut values = vec![0.0f32; 1024];
             values[0] = 1.0;
@@ -2158,16 +2092,17 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!(generation.chunk_count, u32::try_from(chunks.len()).unwrap());
         assert_eq!(provider.calls.load(AtomicOrdering::SeqCst), 1);
-        let lifecycle_completed: String =
-            sqlx::query_scalar("SELECT kb_knowledge_complete_semantic_index_intent_v2($1,$2)")
-                .bind(lifecycle_intent_id)
-                .bind(lifecycle_target_revision)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
+        let lifecycle_completed = crate::knowledge_index_v2::storage::preflight(
+            &mut tx,
+            lifecycle_intent_id,
+            lifecycle_target_revision,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(lifecycle_completed, "completed");
         let direct_digest: String = sqlx::query_scalar(
-            "SELECT indexed_content_sha256 FROM chunk_vector_indexes_v2
+            "SELECT indexed_content_sha256 FROM knowledge_chunk_vector_indexes
               WHERE product_version_id=$1 AND chunk_id=$2",
         )
         .bind(version_id)
@@ -2195,7 +2130,7 @@ pub(super) mod tests {
             score_normalization_version: p.rerank.score_normalization_version.clone(),
         };
         p.rerank.revision_sha256 = reranker.sha256().unwrap();
-        sqlx::query("INSERT INTO rerank_revisions_v2(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,config_revision_sha256,endpoint_identity,request_config_sha256,score_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'test:semantic-rerank-v2')")
+        sqlx::query("INSERT INTO knowledge_rerank_revisions(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,config_revision_sha256,endpoint_identity,request_config_sha256,score_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'test:semantic-rerank-v2')")
             .bind(reranker.sha256().unwrap())
             .bind(reranker.canonical_bytes().unwrap())
             .bind(i16::try_from(reranker.schema_version).unwrap())
@@ -2209,7 +2144,7 @@ pub(super) mod tests {
             .execute(&mut *tx).await.unwrap();
         p.validate().unwrap();
         let policy_identity = p.request_identity().unwrap();
-        sqlx::query("INSERT INTO knowledge_retrieval_policies_v2(policy_sha256,canonical_policy_payload,embedding_revision_sha256,contract_version,max_hits,max_chunk_bytes,max_total_bytes) VALUES($1,$2,$3,$4,$5,$6,$7)")
+        sqlx::query("INSERT INTO knowledge_retrieval_policies(policy_sha256,canonical_policy_payload,embedding_revision_sha256,contract_version,max_hits,max_chunk_bytes,max_total_bytes,rerank_revision_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(&policy_identity.policy_sha256)
             .bind(p.canonical_bytes().unwrap())
             .bind(&revision_sha)
@@ -2217,17 +2152,16 @@ pub(super) mod tests {
             .bind(i64::from(policy_identity.max_hits))
             .bind(i64::from(policy_identity.max_chunk_bytes))
             .bind(i64::try_from(policy_identity.max_total_bytes).unwrap())
+            .bind(&p.rerank.revision_sha256)
             .execute(&mut *tx).await.unwrap();
-        let locked: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM kb_knowledge_lock_semantic_policy_v2($1)")
-                .bind(&policy_identity.policy_sha256)
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-        assert_eq!(
-            locked, 1,
-            "shared application identity can acquire semantic registry locks"
-        );
+        let validated = ValidatedSemanticPolicyV2 {
+            policy: p.clone(),
+            revision: revision.clone(),
+            credential_ref: "test:semantic-v2".into(),
+        };
+        lock_supported_policy_in_snapshot(&mut tx, &policy_identity, &validated)
+            .await
+            .unwrap();
         let first = recall_in_snapshot(
             &mut tx,
             "product_line",
@@ -2272,7 +2206,7 @@ pub(super) mod tests {
                 .all(|candidate| candidate.pre_rerank_rrf_rank > 0)
         );
 
-        sqlx::query("UPDATE graph_nodes SET chunk_ids=ARRAY[NULL]::uuid[] WHERE product_version_id=$1 AND document_id=$2 AND name='alpha graph'")
+        sqlx::query("UPDATE knowledge_graph_nodes SET chunk_ids=ARRAY[NULL]::uuid[] WHERE product_version_id=$1 AND document_id=$2 AND name='alpha graph'")
             .bind(version_id).bind(document_id).execute(&mut *tx).await.unwrap();
         let null_graph_ref = recall_in_snapshot(
             &mut tx,
@@ -2290,7 +2224,7 @@ pub(super) mod tests {
             null_graph_ref,
             Err(KnowledgeRetrievalError::Unavailable(_))
         ));
-        sqlx::query("UPDATE graph_nodes SET chunk_ids=$3 WHERE product_version_id=$1 AND document_id=$2 AND name='alpha graph'")
+        sqlx::query("UPDATE knowledge_graph_nodes SET chunk_ids=$3 WHERE product_version_id=$1 AND document_id=$2 AND name='alpha graph'")
             .bind(version_id).bind(document_id).bind(vec![source_two]).execute(&mut *tx).await.unwrap();
 
         let empty_requirement = recall_in_snapshot(
@@ -2368,7 +2302,7 @@ pub(super) mod tests {
         ));
 
         sqlx::query(
-            "UPDATE chunk_vector_indexes_v2 SET indexed_content_sha256=$2 WHERE chunk_id=$1",
+            "UPDATE knowledge_chunk_vector_indexes SET indexed_content_sha256=$2 WHERE chunk_id=$1",
         )
         .bind(question)
         .bind("f".repeat(64))
@@ -2392,7 +2326,7 @@ pub(super) mod tests {
             Err(KnowledgeRetrievalError::Unavailable(_))
         ));
         sqlx::query(
-            "UPDATE chunk_vector_indexes_v2 SET indexed_content_sha256=$2 WHERE chunk_id=$1",
+            "UPDATE knowledge_chunk_vector_indexes SET indexed_content_sha256=$2 WHERE chunk_id=$1",
         )
         .bind(question)
         .bind(
@@ -2405,7 +2339,7 @@ pub(super) mod tests {
         .await
         .unwrap();
 
-        sqlx::query("DELETE FROM chunk_keyword_indexes_v2 WHERE chunk_id=$1")
+        sqlx::query("DELETE FROM knowledge_chunk_keyword_indexes WHERE chunk_id=$1")
             .bind(question)
             .execute(&mut *tx)
             .await

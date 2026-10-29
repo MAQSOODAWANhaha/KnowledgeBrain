@@ -29,10 +29,6 @@ async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
     platform::require_openai_chat();
-    bidding::analysis::agent::Config::from_environment()
-        .map_err(anyhow::Error::msg)
-        .context("invalid tender model configuration")
-        .unwrap_or_else(fail);
     let external_shutdown = CancellationToken::new();
     let root_cancel = CancellationToken::new();
     let signal_shutdown = external_shutdown.clone();
@@ -55,11 +51,6 @@ async fn main() {
             result.context("postgres connection failed").unwrap_or_else(fail)
         }
     };
-
-    platform::verify_application_role(&pool)
-        .await
-        .context("invalid application database role")
-        .unwrap_or_else(fail);
 
     let probe_addr = worker::probe::probe_addr();
     let probe_listener = worker::probe::bind()

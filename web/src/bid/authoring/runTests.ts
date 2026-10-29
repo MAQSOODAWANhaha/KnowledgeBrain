@@ -8,6 +8,8 @@ import "./exportSession.test";
 import { runAll, testSummary } from "./harness";
 import "./sha256.test";
 import "./analysisProgress.test";
+import "./routes.test";
+import "./outlineTree.test";
 
 await runAll();
 const { failed, passed } = testSummary();

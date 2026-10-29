@@ -229,162 +229,20 @@ pub fn declared_disabled_tasks() -> Result<Vec<&'static str>, QueueRegistryError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        BID_CONTENT_GENERATE_V2_TASK, BID_DOCX_COMPOSE_V2_TASK,
-        BID_REQUIREMENT_SET_COMPILE_V2_TASK, BID_SUBMISSION_EXPORT_V2_TASK,
-        BID_TENDER_DOCUMENT_PROCESS_V2_TASK, BidAuthoringRequestIdentityV2, ContentGenerateJobV2,
-        ContentGenerateOperationV2, DocxComposeJobV2, RequirementSetCompileJobV2,
-        SubmissionExportJobV2, TenderDocumentProcessJobV2,
-    };
-    use oxana::Job;
-    use uuid::Uuid;
-
-    fn loaded() -> QueueRegistry {
-        QueueRegistry::load().expect("repo-relative deploy/queue-registry.toml")
-    }
 
     #[test]
-    fn active_registry_has_only_v2_bidding_tasks() {
-        let registry = loaded();
+    fn rust_registry_does_not_dispatch_retired_tender_work() {
+        let registry = QueueRegistry::load().expect("queue registry");
         assert_eq!(registry.format, 1);
-        let bid: Vec<_> = registry
-            .entries()
-            .iter()
-            .filter(|entry| entry.task_type.starts_with("bid:"))
-            .collect();
-        assert_eq!(bid.len(), 5);
-        for task in [
-            BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
-            BID_REQUIREMENT_SET_COMPILE_V2_TASK,
-            BID_DOCX_COMPOSE_V2_TASK,
-            BID_CONTENT_GENERATE_V2_TASK,
-            BID_SUBMISSION_EXPORT_V2_TASK,
-        ] {
-            let entry = registry.entry_for_task(task).expect("V2 task declared");
-            assert_eq!(entry.physical_queue, "bid-authoring-v2");
-            assert_eq!(entry.payload_schema, "bid-authoring/v2");
-        }
-    }
-
-    #[test]
-    fn bidding_identity_formulas_equal_oxana_unique_ids() {
-        let registry = loaded();
-        let request = BidAuthoringRequestIdentityV2 {
-            request_artifact_id: Uuid::from_u128(1),
-            request_revision: 7,
-            frozen_input_sha256: "a".repeat(64),
-        };
-        let project_id = Uuid::from_u128(2);
-        let document_id = Uuid::from_u128(3);
-        let workspace_id = Uuid::from_u128(4);
-        let request_formula =
-            |kind: &str| format!("{kind}:{{request_artifact_id}}:{{request_revision}}");
-        let request_unique = |kind: &str| format!("{kind}:{}:7", request.request_artifact_id);
-        let tender = TenderDocumentProcessJobV2 {
-            request: request.clone(),
-            project_id,
-            document_revision_id: document_id,
-        };
-        let content = ContentGenerateJobV2 {
-            request: request.clone(),
-            project_id,
-            workspace_id,
-            base_workspace_revision_id: document_id,
-            operation: ContentGenerateOperationV2::Generate,
-        };
-        let export = SubmissionExportJobV2 {
-            request: request.clone(),
-            project_id,
-            workspace_id,
-        };
-        for (task, kind, actual) in [
-            (
-                BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
-                "tender_document_process",
-                tender.unique_id(),
-            ),
-            (
-                BID_CONTENT_GENERATE_V2_TASK,
-                "content_generate",
-                content.unique_id(),
-            ),
-            (
-                BID_SUBMISSION_EXPORT_V2_TASK,
-                "submission_export",
-                export.unique_id(),
-            ),
-        ] {
-            assert_eq!(
-                registry.entry_for_task(task).unwrap().identity_formula,
-                request_formula(kind)
-            );
-            assert_eq!(actual.as_deref(), Some(request_unique(kind).as_str()));
-        }
-        let compose = DocxComposeJobV2 {
-            request: request.clone(),
-            project_id,
-            workspace_id,
-        };
-        assert_eq!(
+        assert!(
             registry
-                .entry_for_task(BID_DOCX_COMPOSE_V2_TASK)
-                .unwrap()
-                .identity_formula,
-            request_formula("docx_compose")
-        );
-        assert_eq!(compose.unique_id(), Some(request_unique("docx_compose")));
-        let compile = RequirementSetCompileJobV2 {
-            request: request.clone(),
-            project_id,
-            document_set_revision_id: document_id,
-            disposition_set_revision_id: Uuid::from_u128(5),
-            reclaim: false,
-            reclaim_attempt: 0,
-        };
-        assert_eq!(
-            registry
-                .entry_for_task(BID_REQUIREMENT_SET_COMPILE_V2_TASK)
-                .unwrap()
-                .identity_formula,
-            request_formula("requirement_set_compile")
+                .entries()
+                .iter()
+                .all(|entry| !entry.task_type.starts_with("bid:"))
         );
         assert_eq!(
-            compile.unique_id(),
-            Some(request_unique("requirement_set_compile"))
+            crate::queue_for("bid:tender_document_process:v2"),
+            "rejected:unknown"
         );
-    }
-
-    #[test]
-    fn retired_v2_bid_workers_stay_disabled() {
-        let registry = loaded();
-        // B4 enabled tender_document_process and content_generate; the rest stay retired.
-        for task in [
-            BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
-            BID_CONTENT_GENERATE_V2_TASK,
-        ] {
-            assert_eq!(
-                registry.launch_mode(task),
-                Some(LaunchMode::RequiredEnabled)
-            );
-        }
-        for task in [
-            BID_REQUIREMENT_SET_COMPILE_V2_TASK,
-            BID_DOCX_COMPOSE_V2_TASK,
-            BID_SUBMISSION_EXPORT_V2_TASK,
-        ] {
-            assert_eq!(
-                registry.launch_mode(task),
-                Some(LaunchMode::DeclaredDisabled)
-            );
-        }
-    }
-
-    #[test]
-    fn no_bidding_task_uses_default_queue() {
-        for entry in loaded().entries() {
-            if entry.task_type.starts_with("bid:") {
-                assert_ne!(entry.physical_queue, "default");
-            }
-        }
     }
 }

@@ -26,6 +26,84 @@ if _version_not_supported:
     )
 
 
+class TenderBridgeStub:
+    """Host-only adapter over the existing authenticated transport. It does not
+    change model messages or grant callers access to arbitrary artifact paths.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Command = channel.unary_unary(
+                '/docreader.TenderBridge/Command',
+                request_serializer=docreader__pb2.TenderCommandRequest.SerializeToString,
+                response_deserializer=docreader__pb2.TenderCommandResponse.FromString,
+                _registered_method=True)
+
+
+class TenderBridgeServicer:
+    """Host-only adapter over the existing authenticated transport. It does not
+    change model messages or grant callers access to arbitrary artifact paths.
+    """
+
+    def Command(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_TenderBridgeServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Command': grpc.unary_unary_rpc_method_handler(
+                    servicer.Command,
+                    request_deserializer=docreader__pb2.TenderCommandRequest.FromString,
+                    response_serializer=docreader__pb2.TenderCommandResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'docreader.TenderBridge', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('docreader.TenderBridge', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class TenderBridge:
+    """Host-only adapter over the existing authenticated transport. It does not
+    change model messages or grant callers access to arbitrary artifact paths.
+    """
+
+    @staticmethod
+    def Command(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return unary_unary(
+            request,
+            target,
+            '/docreader.TenderBridge/Command',
+            docreader__pb2.TenderCommandRequest.SerializeToString,
+            docreader__pb2.TenderCommandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
 class DocReaderStub:
     """Missing associated documentation comment in .proto file."""
 

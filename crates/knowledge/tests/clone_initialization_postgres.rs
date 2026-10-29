@@ -39,9 +39,7 @@ async fn seed(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-        .bind(source)
-        .execute(pool)
+    knowledge::set_parse_status(pool, source, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     let target = Uuid::new_v4();
@@ -87,15 +85,13 @@ async fn keep_copies_only_active_generation_and_rebuilds_wiki() {
     workflow::stage_index(&pool, source, 1, std::slice::from_ref(&old), &[], true)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO graph_nodes(product_version_id,document_id,name,chunk_ids) VALUES($1,$2,'current',ARRAY[$3::uuid])")
+    sqlx::query("INSERT INTO knowledge_graph_nodes(product_version_id,document_id,name,chunk_ids,generation) VALUES($1,$2,'current',ARRAY[$3::uuid],(SELECT attempt FROM knowledge_documents WHERE id=$2))")
         .bind(source_version).bind(source).bind(old.id).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO graph_relations(product_version_id,document_id,node1,node2,rel_type) VALUES($1,$2,'current','current','old')")
+    sqlx::query("INSERT INTO knowledge_graph_relations(product_version_id,document_id,source_node_name,target_node_name,relation_type,generation) VALUES($1,$2,'current','current','old',1)")
         .bind(source_version).bind(source).execute(&pool).await.unwrap();
     workflow::publish_empty(&pool, source, 1).await.unwrap();
     workflow::retry_document(&pool, source).await.unwrap();
-    sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-        .bind(source)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, source, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     let current = chunk(source, source_version, "current text");
@@ -105,12 +101,12 @@ async fn keep_copies_only_active_generation_and_rebuilds_wiki() {
     workflow::stage_index(&pool, source, 2, &[current.clone(), wiki], &[], true)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO graph_nodes(product_version_id,document_id,name,chunk_ids) VALUES($1,$2,'current',ARRAY[$3::uuid])")
+    sqlx::query("INSERT INTO knowledge_graph_nodes(product_version_id,document_id,name,chunk_ids,generation) VALUES($1,$2,'current',ARRAY[$3::uuid],(SELECT attempt FROM knowledge_documents WHERE id=$2))")
         .bind(source_version).bind(source).bind(current.id).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO graph_relations(product_version_id,document_id,node1,node2,rel_type) VALUES($1,$2,'current','current','current')")
+    sqlx::query("INSERT INTO knowledge_graph_relations(product_version_id,document_id,source_node_name,target_node_name,relation_type,generation) VALUES($1,$2,'current','current','current',2)")
         .bind(source_version).bind(source).execute(&pool).await.unwrap();
     workflow::publish_empty(&pool, source, 2).await.unwrap();
-    sqlx::query("INSERT INTO wiki_pages(id,product_version_id,slug,title,status,content,source_refs) VALUES($1,$2,'source-wiki','Source wiki','published','old source-set wiki',$3)")
+    sqlx::query("INSERT INTO knowledge_wiki_pages(id,product_version_id,slug,title,status,content,source_refs) VALUES($1,$2,'source-wiki','Source wiki','published','old source-set wiki',$3)")
         .bind(Uuid::new_v4()).bind(source_version).bind(serde_json::json!([source])).execute(&pool).await.unwrap();
 
     let follow = knowledge::clone::run_clone(&pool, source_version, target_version, &[], false)
@@ -122,7 +118,7 @@ async fn keep_copies_only_active_generation_and_rebuilds_wiki() {
         .unwrap()
         .document_id;
     let chunks: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT id,content,generation FROM chunks WHERE document_id=$1 ORDER BY content",
+        "SELECT id,content,generation FROM knowledge_chunks WHERE document_id=$1 ORDER BY content",
     )
     .bind(target)
     .fetch_all(&pool)
@@ -131,19 +127,21 @@ async fn keep_copies_only_active_generation_and_rebuilds_wiki() {
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].1, "current text");
     assert_eq!(chunks[0].2, 1);
-    let graph: Vec<(String, Vec<Uuid>, i32)> =
-        sqlx::query_as("SELECT name,chunk_ids,generation FROM graph_nodes WHERE document_id=$1")
-            .bind(target)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let graph: Vec<(String, Vec<Uuid>, i32)> = sqlx::query_as(
+        "SELECT name,chunk_ids,generation FROM knowledge_graph_nodes WHERE document_id=$1",
+    )
+    .bind(target)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(graph, vec![("current".into(), vec![chunks[0].0], 1)]);
-    let relation: Vec<String> =
-        sqlx::query_scalar("SELECT rel_type FROM graph_relations WHERE document_id=$1")
-            .bind(target)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let relation: Vec<String> = sqlx::query_scalar(
+        "SELECT relation_type AS rel_type FROM knowledge_graph_relations WHERE document_id=$1",
+    )
+    .bind(target)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(relation, vec!["current"]);
     let obligations: Vec<String> = sqlx::query_scalar(
         "SELECT job_key FROM knowledge_job_outbox WHERE document_id=$1 ORDER BY job_key",
@@ -158,11 +156,12 @@ async fn keep_copies_only_active_generation_and_rebuilds_wiki() {
             .iter()
             .any(|task| task.task_type == platform::TYPE_WIKI_INGEST)
     );
-    let source_chunks: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id=$1")
-        .bind(source)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let source_chunks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id=$1")
+            .bind(source)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         source_chunks, 3,
         "copy must leave retained source generations intact"
@@ -178,11 +177,13 @@ async fn reparse_captures_manual_source_in_the_initial_convert_obligation() {
     knowledge::set_document_source(&pool, source, "manual", &passages)
         .await
         .unwrap();
-    sqlx::query("UPDATE product_versions SET embedding_model_id='different-model' WHERE id=$1")
-        .bind(target_version)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE knowledge_product_versions SET embedding_model_id='different-model' WHERE id=$1",
+    )
+    .bind(target_version)
+    .execute(&pool)
+    .await
+    .unwrap();
     let follow = knowledge::clone::run_clone(&pool, source_version, target_version, &[], false)
         .await
         .unwrap();
@@ -239,8 +240,8 @@ async fn failed_follow_up_insert_rolls_back_clone_index_and_object_owner() {
             .contains("injected clone obligation failure")
     );
     let counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM documents WHERE product_version_id=$1),
-                (SELECT count(*) FROM chunks WHERE product_version_id=$1),
+        "SELECT (SELECT count(*) FROM knowledge_documents WHERE product_version_id=$1),
+                (SELECT count(*) FROM knowledge_chunks WHERE product_version_id=$1),
                 (SELECT count(*) FROM knowledge_job_outbox WHERE product_version_id=$1)",
     )
     .bind(target_version)
@@ -249,11 +250,11 @@ async fn failed_follow_up_insert_rolls_back_clone_index_and_object_owner() {
     .unwrap();
     assert_eq!(counts, (0, 0, 0));
     let owners: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM object_owner_references WHERE object_ref=(SELECT object_ref FROM documents WHERE id=$1)",
+        "SELECT count(*) FROM platform_object_references WHERE object_ref=(SELECT object_ref FROM knowledge_documents WHERE id=$1)",
     ).bind(source).fetch_one(&pool).await.unwrap();
     assert_eq!(owners, 1);
     let version: (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT v.status,p.current_version_id FROM product_versions v JOIN products p ON p.id=v.product_id WHERE v.id=$1 AND p.id=$2",
+        "SELECT v.status,p.current_version_id FROM knowledge_product_versions v JOIN knowledge_products p ON p.id=v.product_id WHERE v.id=$1 AND p.id=$2",
     ).bind(target_version).bind(product).fetch_one(&pool).await.unwrap();
     assert_eq!(version, ("cloning".into(), Some(source_version)));
 }
@@ -302,8 +303,8 @@ async fn target_and_convert_cannot_be_observed_before_clone_initialization_commi
         }
     }).await;
     let visible: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM documents WHERE product_version_id=$1),
-                (SELECT count(*) FROM chunks WHERE product_version_id=$1),
+        "SELECT (SELECT count(*) FROM knowledge_documents WHERE product_version_id=$1),
+                (SELECT count(*) FROM knowledge_chunks WHERE product_version_id=$1),
                 (SELECT count(*) FROM knowledge_job_outbox WHERE product_version_id=$1)",
     )
     .bind(target_version)
@@ -351,14 +352,24 @@ async fn keep_copies_ocr_artifact_mapping_and_object_ownership() {
     let artifact = Uuid::new_v4();
     let digest = platform::sha256_hex(artifact.as_bytes());
     let object_ref = format!("objects/{digest}");
-    sqlx::query("UPDATE chunks SET chunk_type='image_ocr',context_header=$2 WHERE id=$1")
+    sqlx::query("UPDATE knowledge_chunks SET chunk_type='image_ocr',context_header=$2 WHERE id=$1")
         .bind(original.id)
         .bind(&object_ref)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,'image/png',16,NULL::kb_actor_identity)")
-        .bind(artifact).bind(&object_ref).bind(&digest).execute(&pool).await.unwrap();
+    let mut connection = pool.begin().await.unwrap();
+    platform::register_knowledge_image_object_in_tx(
+        &mut connection,
+        artifact,
+        &object_ref,
+        &digest,
+        "image/png",
+        16,
+    )
+    .await
+    .unwrap();
+    connection.commit().await.unwrap();
     let payload = serde_json::to_vec(&serde_json::json!({
         "schema_version":1,"image_artifact_revision_id":artifact,
         "product_version_id":source_version,"document_id":source,"revision":1,
@@ -375,7 +386,7 @@ async fn keep_copies_ocr_artifact_mapping_and_object_ownership() {
     ).bind(artifact).bind(source_version).bind(source).bind(&object_ref).bind(&digest)
         .bind(payload).execute(&pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(
+        "INSERT INTO knowledge_image_chunk_links(
             chunk_id,product_version_id,document_id,image_artifact_revision_id,object_ref,content_sha256,media_type)
          VALUES($1,$2,$3,$4,$5,$6,'image/png')",
     ).bind(original.id).bind(source_version).bind(source).bind(artifact)
@@ -393,7 +404,7 @@ async fn keep_copies_ocr_artifact_mapping_and_object_ownership() {
     let target = follow[0].document_id;
     let (copied_chunk, copied_artifact, copied_payload, page): (Uuid, Uuid, Vec<u8>, Option<i32>) = sqlx::query_as(
         "SELECT mapping.chunk_id,artifact.id,artifact.canonical_payload,artifact.page_ordinal
-         FROM knowledge_image_ocr_chunk_artifact_mappings mapping
+         FROM knowledge_image_chunk_links mapping
          JOIN knowledge_image_artifact_revisions artifact ON artifact.id=mapping.image_artifact_revision_id
          WHERE mapping.document_id=$1 AND mapping.product_version_id=$2",
     ).bind(target).bind(target_version).fetch_one(&pool).await.unwrap();
@@ -412,7 +423,7 @@ async fn keep_copies_ocr_artifact_mapping_and_object_ownership() {
     );
     assert_eq!(copied_payload["sha256"], serde_json::json!(digest));
     let owners: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM object_owner_references WHERE object_ref=$1")
+        sqlx::query_scalar("SELECT count(*) FROM platform_object_references WHERE object_ref=$1")
             .bind(object_ref)
             .fetch_one(&pool)
             .await

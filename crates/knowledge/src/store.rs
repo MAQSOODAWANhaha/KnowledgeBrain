@@ -16,6 +16,7 @@ pub struct User {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: Uuid,
+    pub owner_user_id: Uuid,
     pub name: String,
     pub slug: String,
     #[serde(default)]
@@ -178,7 +179,7 @@ pub struct Document {
     pub file_hash: String,
     pub object_ref: String,
     pub parse_status: ParseStatus,
-    pub enable_status: String,
+    pub enable_status: crate::EnableStatus,
     pub summary_status: SummaryStatus,
     pub pending_subtasks_count: i32,
     pub error_message: String,
@@ -215,7 +216,7 @@ impl Document {
             file_hash,
             object_ref,
             parse_status: ParseStatus::Pending,
-            enable_status: "disabled".into(),
+            enable_status: crate::EnableStatus::Disabled,
             summary_status: SummaryStatus::default(),
             pending_subtasks_count: 0,
             error_message: String::new(),
@@ -318,7 +319,7 @@ pub struct WikiPage {
     pub title: String,
     pub content: String,
     pub page_type: String,
-    pub status: String,
+    pub status: crate::WikiStatus,
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
@@ -350,7 +351,7 @@ impl WikiPage {
             title,
             content,
             page_type,
-            status: "published".into(),
+            status: crate::WikiStatus::Published,
             summary,
             aliases: Vec::new(),
             source_refs: Vec::new(),
@@ -403,7 +404,7 @@ pub struct Span {
     pub name: String,
     pub parent_span_id: Option<Uuid>,
     pub kind: String,
-    pub status: String,
+    pub status: crate::SpanStatus,
     pub output: Option<serde_json::Value>,
     pub error_message: String,
     pub started_at: DateTime<Utc>,
@@ -417,7 +418,5 @@ pub struct ApiKey {
     pub name: String,
     pub key_hash: String,
     pub prefix: String,
-    pub scope_type: String,
-    pub scope_id: Uuid,
-    pub scopes: Vec<String>,
+    pub owner_user_id: Uuid,
 }

@@ -1,6 +1,6 @@
 //! Processing spans. Brain-aligned five-stage DAG. No Langfuse / Prometheus.
 
-use crate::Span;
+use crate::{ParseStatus, Span, SpanStatus};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -9,12 +9,12 @@ pub const KIND_ROOT: &str = "root";
 pub const KIND_STAGE: &str = "stage";
 pub const KIND_SUBSPAN: &str = "subspan";
 
-pub const STATUS_PENDING: &str = "pending";
-pub const STATUS_RUNNING: &str = "running";
-pub const STATUS_DONE: &str = "done";
-pub const STATUS_FAILED: &str = "failed";
-pub const STATUS_SKIPPED: &str = "skipped";
-pub const STATUS_CANCELLED: &str = "cancelled";
+pub const STATUS_PENDING: SpanStatus = SpanStatus::Pending;
+pub const STATUS_RUNNING: SpanStatus = SpanStatus::Running;
+pub const STATUS_DONE: SpanStatus = SpanStatus::Done;
+pub const STATUS_FAILED: SpanStatus = SpanStatus::Failed;
+pub const STATUS_SKIPPED: SpanStatus = SpanStatus::Skipped;
+pub const STATUS_CANCELLED: SpanStatus = SpanStatus::Cancelled;
 
 pub const ROOT_NAME: &str = "document_processing";
 pub const SPAN_DOCREADER: &str = "docreader";
@@ -41,16 +41,8 @@ pub fn kind_of(name: &str) -> &'static str {
     }
 }
 
-pub fn normalize_status(status: &str) -> &'static str {
-    match status {
-        "ok" | STATUS_DONE => STATUS_DONE,
-        "error" | STATUS_FAILED => STATUS_FAILED,
-        STATUS_RUNNING => STATUS_RUNNING,
-        STATUS_PENDING => STATUS_PENDING,
-        STATUS_SKIPPED => STATUS_SKIPPED,
-        STATUS_CANCELLED => STATUS_CANCELLED,
-        _ => STATUS_DONE,
-    }
+pub fn normalize_status(status: &str) -> Result<SpanStatus, serde_json::Error> {
+    serde_json::from_value(serde_json::Value::String(status.to_owned()))
 }
 
 pub fn stage_satisfied(rows: &[Span], name: &str) -> bool {
@@ -112,7 +104,7 @@ pub struct TraceNode {
     pub parent_span_id: Option<Uuid>,
     pub name: String,
     pub kind: String,
-    pub status: String,
+    pub status: SpanStatus,
     pub attempt: i32,
     pub output: Option<serde_json::Value>,
     pub error_message: String,
@@ -124,13 +116,13 @@ pub struct TraceNode {
 
 pub fn build_trace(
     attempt: i32,
-    parse_status: &str,
+    parse_status: ParseStatus,
     rows: &[Span],
 ) -> (TraceNode, String, Option<Span>) {
     let synthetic = match parse_status {
-        "completed" => STATUS_DONE,
-        "failed" => STATUS_FAILED,
-        "cancelled" => STATUS_CANCELLED,
+        ParseStatus::Completed => STATUS_DONE,
+        ParseStatus::Failed => STATUS_FAILED,
+        ParseStatus::Cancelled | ParseStatus::Deleting | ParseStatus::Deleted => STATUS_CANCELLED,
         _ => STATUS_PENDING,
     };
     let mut current_stage = String::new();
@@ -154,7 +146,7 @@ pub fn build_trace(
             parent_span_id: None,
             name: ROOT_NAME.into(),
             kind: KIND_ROOT.into(),
-            status: synthetic.into(),
+            status: synthetic,
             attempt,
             output: None,
             error_message: String::new(),
@@ -193,7 +185,7 @@ pub fn build_trace(
             parent_span_id: root_id,
             name: (*name).into(),
             kind: KIND_STAGE.into(),
-            status: synthetic.into(),
+            status: synthetic,
             attempt,
             output: None,
             error_message: String::new(),
@@ -212,7 +204,7 @@ fn node_from(r: &Span) -> TraceNode {
         parent_span_id: r.parent_span_id,
         name: r.name.clone(),
         kind: r.kind.clone(),
-        status: r.status.clone(),
+        status: r.status,
         attempt: r.attempt,
         output: r.output.clone(),
         error_message: r.error_message.clone(),
@@ -240,7 +232,14 @@ fn attach_child(node: &mut TraceNode, parent_id: Uuid, child: TraceNode) -> bool
 mod tests {
     use super::*;
 
-    fn span(did: Uuid, name: &str, status: &str) -> Span {
+    #[test]
+    fn unknown_span_status_is_not_success() {
+        assert!(normalize_status("unexpected-state").is_err());
+        assert_eq!(normalize_status("ok").unwrap(), STATUS_DONE);
+        assert_eq!(normalize_status("error").unwrap(), STATUS_FAILED);
+    }
+
+    fn span(did: Uuid, name: &str, status: SpanStatus) -> Span {
         let kind = if name == ROOT_NAME {
             KIND_ROOT
         } else {
@@ -253,7 +252,7 @@ mod tests {
             name: name.to_string(),
             parent_span_id: None,
             kind: kind.to_string(),
-            status: status.to_string(),
+            status,
             output: None,
             error_message: String::new(),
             started_at: Utc::now(),
@@ -281,7 +280,7 @@ mod tests {
 
     #[test]
     fn build_trace_always_has_five_stages() {
-        let (tree, current, fail) = build_trace(1, "processing", &[]);
+        let (tree, current, fail) = build_trace(1, ParseStatus::Processing, &[]);
         assert_eq!(tree.name, ROOT_NAME);
         assert_eq!(tree.children.len(), 5);
         assert!(current.is_empty());
@@ -291,7 +290,7 @@ mod tests {
 
     #[test]
     fn build_trace_completed_without_rows_is_done() {
-        let (tree, _, _) = build_trace(1, "completed", &[]);
+        let (tree, _, _) = build_trace(1, ParseStatus::Completed, &[]);
         assert_eq!(tree.status, STATUS_DONE);
         assert!(tree.children.iter().all(|c| c.status == STATUS_DONE));
     }
@@ -315,7 +314,7 @@ mod tests {
             span(did, SPAN_MULTIMODAL, STATUS_RUNNING),
         ];
         assert!(!can_start_stage(SPAN_POSTPROCESS, &rows));
-        rows[4].status = STATUS_DONE.to_string();
+        rows[4].status = STATUS_DONE;
         assert!(can_start_stage(SPAN_POSTPROCESS, &rows));
     }
 

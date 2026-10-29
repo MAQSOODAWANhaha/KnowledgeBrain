@@ -26,6 +26,9 @@ an exhaustive checklist. Do not invent a scoring rule or any other missing busin
 Source requirements for forms, attachments, certificates, signatures and proposal contents
 belong in this analysis. Do not fill company data, generate response actions or preparation
 tasks, select scoring opportunities, calculate a bidder's score, or write bid prose.
+Headings and directories can themselves state applicability, exceptions or conditions.
+Preserve such source-backed scope in the analysis even when the rest of the passage is
+navigation; do not discard the whole passage as non_item merely because it is a contents list.
 
 Every item requires only item_id, kind, text and evidence. Use <work_unit_id>:i1, :i2, etc.
 kind is obligation, scoring_rule, consequence_rule or submission_requirement. Different

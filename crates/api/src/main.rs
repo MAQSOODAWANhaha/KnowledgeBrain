@@ -17,14 +17,9 @@ async fn run() -> anyhow::Result<()> {
     platform::knowledge_enabled().map_err(anyhow::Error::msg)?;
     let app = router().map_err(anyhow::Error::msg)?;
     let local_admin = platform::LocalAdminConfig::from_env().map_err(anyhow::Error::msg)?;
-    bidding::analysis::agent::Config::from_environment()
-        .context("invalid bidding model configuration")?;
     let pool = platform::connect()
         .await
         .context("postgres connection failed")?;
-    platform::verify_application_role(&pool)
-        .await
-        .context("invalid application database role")?;
     if let Some(config) = local_admin {
         platform::initialize_local_admin(&pool, &config)
             .await

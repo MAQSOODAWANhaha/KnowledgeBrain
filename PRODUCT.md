@@ -30,7 +30,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 ## Capabilities and Constraints
 
-- 关注册。LDAP 或本地口令。登录可进入投标和读写知识库；投标项目与文件仍校验既有 owner/用途权限。
+- 关注册。LDAP 或本地口令。知识库与投标项目按创建人隔离，子资源继承归属；API Key 与其所属用户具有相同业务权限，不再区分成员角色或 Key 范围。
 - 招标文件不进 `documents`。公司资料走 Document 管线，看 `index_ready`。
 - Web 编制面：顶栏切换产品，左栏列项目并把 **文件 / 编制 / 导出** 挂在当前标下；编制步主列是 ONLYOFFICE，检查器可选。解析是文件状态；freeze 是文件页动作，不是第四导航，也不是「确认后才能改」的闸门。
 - 结构规划与章节导航保留，招标文件指定目录/表格优先；标题、顺序、层级和表格由 DOCX 承载，外部业务索引不能强制回写覆盖人工修改。人员独立数据不等于强制增加专章。
@@ -68,7 +68,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 3. 缺了就补，不锁死。生成中、有候选、有检查提示时，用户仍可改树、改字、导出当前稿。
 4. 系统建议，人改写。大纲候选和内容候选都是 overlay；人改的留下，过期候选不得覆盖。
 5. DOCX/PDF 是同一完整稿的两种格式，不按格式分业务等级；正式稿不写水印、风险声明或内部知识来源，检查报告独立。技术损坏 fail-closed。
-6. 知识库不做 Workspace 成员门闩；投标保持既有项目 owner 与文件用途校验，不能将登录等同任意投标访问权。
+6. 不做 Workspace 成员分级。知识库与投标都由业务层执行创建人归属校验，登录与 API Key 均不授予跨用户访问权。
 
 ## Accessibility & Inclusion
 

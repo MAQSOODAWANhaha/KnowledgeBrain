@@ -16,18 +16,19 @@ from pydantic import (
 )
 
 
+from docreader.tender.status import CommandStatus, ModelRequestStatus, RunStatus
+
+
 Identity = Annotated[StrictStr, Field(min_length=1)]
 Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 PositiveInt = Annotated[StrictInt, Field(ge=1)]
 NonnegativeInt = Annotated[StrictInt, Field(ge=0)]
 Task = Literal["extract", "verify", "plan", "ocr"]
-RunStatus = Literal["pending", "running", "waiting-confirmation", "analysis-ready", "response-plan-ready", "blocked", "failed", "cancelled"]
-CommandStatus = Literal["pending", "claimed", "published", "running", "completed", "failed", "cancelled"]
-ModelRequestStatus = Literal["prepared", "sent", "succeeded", "failed", "uncertain"]
 OCRStatus = Literal["complete", "partial", "unresolved"]
 ScopeStatus = Literal["bound", "unresolved"]
 DispositionStatus = Literal["requirements", "non_requirement", "unresolved"]
 DocumentStatus = Literal["complete", "partial", "unresolved"]
+AUTHORING_GROUNDING_POLICY = "knowledge_required_v2"
 
 
 class Model(Protocol):
@@ -107,14 +108,21 @@ class RunIdentity(SourceIdentity):
     domain_revision: PositiveInt
 
 
+class AuthoringInputIssue(Contract):
+    code: Text
+    detail: Text
+
+
 class AuthoringInput(RunIdentity):
     schema_version: AnalysisVersion
-    checklist_digest: Digest
-    frozen_ref: ArtifactRef
-    pack_plan_ref: ArtifactRef
-    items_ref: ArtifactRef
-    verification_ref: ArtifactRef
-    confirmation_ref: ArtifactRef
+    checklist_digest: Digest | None = None
+    frozen_ref: ArtifactRef | None = None
+    pack_plan_ref: ArtifactRef | None = None
+    items_ref: ArtifactRef | None = None
+    verification_ref: ArtifactRef | None = None
+    confirmation_ref: ArtifactRef | None = None
+    extract_refs: list[ArtifactRef] = Field(default_factory=list)
+    issues: list[AuthoringInputIssue] = Field(default_factory=list)
 
 
 class SourceReceiptIdentity(SourceIdentity):
@@ -314,7 +322,16 @@ class SourceUnitRef(Contract):
     unit_id: Identity
 
 
+class TemplatePartRef(Contract):
+    source_ref: SourceUnitRef
+    selectors: list["RangeSelector"]
+    header_row_count: NonnegativeInt | None = None
+
+
 ResponseTargetKind = Literal["narrative", "form", "attachment"]
+SupportOrigins = Annotated[list[Literal["tender", "knowledge"]], Field(min_length=1, max_length=2),
+                           AfterValidator(lambda values: list(dict.fromkeys(values)))]
+SearchQuery = Annotated[Text, Field(max_length=256)]
 
 
 class OutlineTargetResponse(Contract):
@@ -322,12 +339,16 @@ class OutlineTargetResponse(Contract):
     purpose: Text
     rule_ids: list[Identity]
     range_ids: list[Identity]
+    template_part_ids: list[Identity] = Field(default_factory=list)
+    manual_fill: StrictBool = False
+    support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
 
 
 class OutlineChapterResponse(Contract):
     title: Text
     targets: list[OutlineTargetResponse]
     children: list["OutlineChapterResponse"]
+    is_volume: StrictBool = False
 
 
 class OutlineFinding(Contract):
@@ -336,10 +357,69 @@ class OutlineFinding(Contract):
     rule_ids: list[Identity]
 
 
+class SearchIntentResponse(Contract):
+    query: SearchQuery
+    for_ids: list[Identity] = Field(min_length=1)
+
+
 class OutlineResponse(Contract):
     schema_version: AnalysisVersion
     chapters: list[OutlineChapterResponse]
     findings: list[OutlineFinding]
+    constraint_rule_ids: list[Identity] = Field(default_factory=list)
+    constraint_range_ids: list[Identity] = Field(default_factory=list)
+    search_intents: list[SearchIntentResponse] = Field(default_factory=list)
+
+
+class OutlineAssemblyTarget(Contract):
+    kind: ResponseTargetKind
+    purpose: Text
+    target_ids: list[Identity] = Field(default_factory=list)
+    rule_ids: list[Identity] = Field(default_factory=list)
+    source_ids: list[Identity] = Field(default_factory=list)
+    template_part_ids: list[Identity] = Field(default_factory=list)
+    related_target_ids: list[Identity] = Field(default_factory=list)
+    manual_fill: StrictBool = False
+    support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
+
+    @model_validator(mode="after")
+    def grounded_position(self):
+        if not self.target_ids and not self.rule_ids and not (
+                self.kind == "narrative" and self.related_target_ids):
+            raise ValueError("a position requires a candidate, an unassigned rule, or a narrative reference to a candidate")
+        return self
+
+
+class OutlineAssemblyChapter(Contract):
+    title: Text
+    targets: list[OutlineAssemblyTarget] = Field(default_factory=list)
+    is_volume: StrictBool = False
+    presentation_role: Literal["body", "cover"] = "body"
+    children: list["OutlineAssemblyChapter"] = Field(default_factory=list)
+
+
+class OutlineAssemblyExclusion(Contract):
+    target_ids: list[Identity] = Field(min_length=1)
+    reason: Text
+
+
+class OutlineAssemblyRuleExclusion(Contract):
+    rule_ids: list[Identity] = Field(min_length=1)
+    reason: Text
+
+
+class OutlineTableHeader(Contract):
+    part_id: Identity
+    header_row_count: NonnegativeInt
+
+
+class OutlineAssemblyResponse(Contract):
+    chapters: list[OutlineAssemblyChapter]
+    excluded_targets: list[OutlineAssemblyExclusion] = Field(default_factory=list)
+    constraint_rule_ids: list[Identity] = Field(default_factory=list)
+    excluded_rules: list[OutlineAssemblyRuleExclusion] = Field(default_factory=list)
+    table_headers: list[OutlineTableHeader] = Field(default_factory=list)
+    search_intents: list[SearchIntentResponse] = Field(default_factory=list)
 
 
 class ResponseTarget(Contract):
@@ -348,6 +428,10 @@ class ResponseTarget(Contract):
     purpose: Text
     rule_refs: list[EffectiveItemRef]
     source_refs: list[SourceUnitRef]
+    template_refs: list[TemplatePartRef] = Field(default_factory=list)
+    manual_fill: StrictBool = False
+    support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
+    related_target_ids: list[Identity] = Field(default_factory=list)
 
 
 class OutlineChapter(Contract):
@@ -355,6 +439,8 @@ class OutlineChapter(Contract):
     title: Text
     targets: list[ResponseTarget]
     children: list["OutlineChapter"]
+    is_volume: StrictBool = False
+    presentation_role: Literal["body", "cover"] = "body"
 
 
 class OutlineIssue(_AnalysisContract):
@@ -364,11 +450,190 @@ class OutlineIssue(_AnalysisContract):
     target_id: Identity | None = None
 
 
+class SearchIntent(Contract):
+    query: SearchQuery
+    rule_refs: list[EffectiveItemRef] = Field(default_factory=list)
+    source_refs: list[SourceUnitRef] = Field(default_factory=list)
+    range_ids: list[Identity] = Field(default_factory=list)
+
+
 class AuthoringOutline(Contract):
     schema_version: AnalysisVersion
     authoring_input: AuthoringInput
     chapters: list[OutlineChapter]
     issues: list[OutlineIssue]
+    constraint_rule_refs: list[EffectiveItemRef] = Field(default_factory=list)
+    submission_refs: list[SourceUnitRef] = Field(default_factory=list)
+    search_intents: list[SearchIntent] = Field(default_factory=list)
+
+
+class KnowledgeMaterial(Contract):
+    material_id: Identity
+    title: Text
+    text: StrictStr
+    content_ref: ArtifactRef | None = None
+    original_ref: ArtifactRef | None = None
+    locator: dict = Field(default_factory=dict)
+    usage: Literal["fact", "reference", "proof"] = "reference"
+    attachment: StrictBool = False
+
+
+class AuthoringArrangement(Contract):
+    topic: Text
+    text: StrictStr
+    nature: Literal["provided", "proposed"]
+    material_ids: list[Identity] = Field(default_factory=list)
+
+
+class AuthoringArrangementResponse(Contract):
+    topic: Text
+    text: StrictStr
+    nature: Literal["provided", "proposed"]
+    support_ids: list[Identity] = Field(default_factory=list)
+
+
+class AuthoringBasisResponse(Contract):
+    project_background: StrictStr = ""
+    approach: StrictStr = ""
+    shared_arrangements: list[AuthoringArrangementResponse] = Field(default_factory=list)
+    gaps: list[StrictStr] = Field(default_factory=list)
+
+
+class AuthoringBasisContent(Contract):
+    project_background: StrictStr = ""
+    approach: StrictStr = ""
+    shared_arrangements: list[AuthoringArrangement] = Field(default_factory=list)
+    gaps: list[StrictStr] = Field(default_factory=list)
+
+
+class AuthoringBasis(Contract):
+    schema_version: AnalysisVersion = 2
+    authoring_input: AuthoringInput
+    response: AuthoringBasisContent
+    materials: list[KnowledgeMaterial] = Field(default_factory=list)
+
+
+class AuthoringBlockResponse(Contract):
+    kind: Literal["paragraph", "table"]
+    text: StrictStr = ""
+    headers: list[StrictStr] = Field(default_factory=list)
+    rows: list[list[StrictStr]] = Field(default_factory=list)
+    target_ids: list[Identity] = Field(default_factory=list)
+    support_ids: list[Identity] = Field(default_factory=list)
+
+
+class AuthoringBlock(Contract):
+    kind: Literal["paragraph", "table"]
+    text: StrictStr = ""
+    headers: list[StrictStr] = Field(default_factory=list)
+    rows: list[list[StrictStr]] = Field(default_factory=list)
+    target_ids: list[Identity] = Field(default_factory=list)
+    material_ids: list[Identity] = Field(default_factory=list)
+    source_refs: list[SourceUnitRef] = Field(default_factory=list)
+
+
+class CellFillResponse(Contract):
+    source_id: Identity
+    row: NonnegativeInt
+    column: NonnegativeInt
+    text: StrictStr
+    target_ids: list[Identity] = Field(default_factory=list)
+    support_ids: list[Identity] = Field(default_factory=list)
+
+
+class CellFill(Contract):
+    source_ref: SourceUnitRef
+    row: NonnegativeInt
+    column: NonnegativeInt
+    text: StrictStr
+    target_ids: list[Identity] = Field(default_factory=list)
+    material_ids: list[Identity] = Field(default_factory=list)
+    source_refs: list[SourceUnitRef] = Field(default_factory=list)
+
+
+class AuthoringAttachment(Contract):
+    material_id: Identity
+    title: Text
+    artifact_ref: ArtifactRef
+
+
+class WritingResponse(Contract):
+    blocks: list[AuthoringBlockResponse]
+    cell_fills: list[CellFillResponse] = Field(default_factory=list)
+    attachment_ids: list[Identity] = Field(default_factory=list)
+    gaps: list[StrictStr] = Field(default_factory=list)
+
+
+class WritingTask(Contract):
+    task_id: Identity
+    chapter_id: Identity
+    title_path: list[Text]
+    targets: list[ResponseTarget]
+
+
+class WritingUnit(Contract):
+    schema_version: AnalysisVersion = 2
+    task_id: Identity
+    chapter_id: Identity
+    target_ids: list[Identity]
+    status: Literal["generated", "placeholder"]
+    blocks: list[AuthoringBlock] = Field(default_factory=list)
+    cell_fills: list[CellFill] = Field(default_factory=list)
+    attachments: list[AuthoringAttachment] = Field(default_factory=list)
+    gaps: list[StrictStr] = Field(default_factory=list)
+    error_type: StrictStr | None = None
+
+
+class AuthoringReviewRequest(Contract):
+    target_ids: list[Identity] = Field(min_length=1)
+    reason: Text
+
+
+class AuthoringReviewFinding(Contract):
+    code: Text
+    detail: Text
+    task_ids: list[Identity] = Field(default_factory=list)
+    content_ids: list[Identity] = Field(default_factory=list)
+    suggestion: StrictStr = ""
+    can_revise: StrictBool = False
+
+
+class AuthoringReviewResponse(Contract):
+    findings: list[AuthoringReviewFinding]
+
+
+class AuthoringGap(Contract):
+    code: Text
+    detail: Text
+    task_id: Identity | None = None
+    chapter_id: Identity | None = None
+    target_id: Identity | None = None
+
+
+class AuthoringUsage(Contract):
+    sent_requests: NonnegativeInt = 0
+    retry_requests: NonnegativeInt = 0
+    estimated_input_tokens: NonnegativeInt = 0
+    prompt_tokens: NonnegativeInt = 0
+    completion_tokens: NonnegativeInt = 0
+    total_tokens: NonnegativeInt = 0
+    unknown_usage_requests: NonnegativeInt = 0
+
+
+class AuthoringDocument(Contract):
+    schema_version: AnalysisVersion = 2
+    authoring_input: AuthoringInput
+    outline_ref: ArtifactRef
+    requirements_ref: ArtifactRef | None = None
+    basis_ref: ArtifactRef
+    unit_refs: list[ArtifactRef]
+    review_ref: ArtifactRef
+    initial_review_ref: ArtifactRef | None = None
+    superseded_unit_refs: list[ArtifactRef] = Field(default_factory=list)
+    docx_ref: ArtifactRef
+    package_ref: ArtifactRef
+    gaps: list[AuthoringGap]
+    usage: AuthoringUsage
 
 
 class ScoringDetails(_AnalysisContract):
@@ -477,6 +742,20 @@ class EffectiveRule(_AnalysisContract):
     text: Text
     scope: Text
     evidence: list[Evidence] = Field(min_length=1)
+
+
+class AuthoringRequirement(Contract):
+    rule_ref: EffectiveItemRef
+    rule: dict[str, Any] | None = None
+    target_ids: list[Identity] = Field(default_factory=list)
+
+
+class AuthoringRequirements(Contract):
+    schema_version: AnalysisVersion = 2
+    authoring_input: AuthoringInput
+    rule_origin: Literal["extraction", "verified_projection", "source_only"]
+    rules: list[AuthoringRequirement]
+    issues: list[AuthoringInputIssue] = Field(default_factory=list)
 
 
 class AmendmentEffect(_AnalysisContract):
@@ -634,6 +913,28 @@ class AssociationResult(_AnalysisContract):
     relations: list[Relation]
     decisions: list[Decision]
     findings: list[_AnalysisIssue]
+
+
+class AnalysisWorkUnit(_AnalysisContract):
+    """One unchanged semantic dependency group within a shared physical request."""
+
+    work_unit_id: Text
+    candidate_ids: list[Text]
+    issue_ids: list[Text]
+    decision_ids: list[Text] | None = None
+
+
+class AnalysisBatchResponse(_AnalysisContract):
+    """Validate the complete envelope; route and validate each member separately."""
+
+    schema_version: AnalysisVersion
+    work_units: list[Any]
+    shared_findings: list[Any]
+
+
+class AnalysisSharedFinding(_AnalysisContract):
+    work_unit_ids: list[Text] = Field(min_length=1)
+    finding: _AnalysisIssue
 
 
 class PlanItem(Contract):

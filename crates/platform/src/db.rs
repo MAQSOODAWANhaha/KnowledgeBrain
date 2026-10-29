@@ -1,24 +1,16 @@
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use thiserror::Error;
 
-pub const KNOWLEDGE_BASE_BASELINE: &str =
-    include_str!("../../../migrations/knowledge_base_baseline.sql");
-pub const SHARED_PLATFORM_BASELINE: &str =
-    include_str!("../../../migrations/shared_platform_baseline.sql");
-pub const BIDDING_BASELINE: &str = include_str!("../../../migrations/bidding_v2_baseline.sql");
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
-const BOOTSTRAP_LOCK_ID: i64 = 0x4b_42_53_43_48_45_4d_41;
-#[derive(Debug, Error)]
-pub enum SchemaError {
-    #[error("postgres operation failed")]
-    Sql(#[from] sqlx::Error),
-    #[error(
-        "application database identity must be a non-superuser login without administrative, inherited role, CREATE or TEMPORARY privileges"
-    )]
-    UnsafeApplicationRole,
-    #[error("fresh initialization refused a partially populated application schema")]
-    PartialSchema,
-}
+#[cfg(test)]
+const KNOWLEDGE_BASE_BASELINE: &str =
+    include_str!("../../../migrations/20261028000002_knowledge_base.sql");
+#[cfg(test)]
+const SHARED_PLATFORM_BASELINE: &str =
+    include_str!("../../../migrations/20261028000001_shared_platform.sql");
+#[cfg(test)]
+const TENDER_BASELINE: &str = include_str!("../../../migrations/20261028000003_tender.sql");
 
 #[derive(Debug, Error)]
 #[error("{0}")]
@@ -131,82 +123,17 @@ pub async fn connect() -> Result<PgPool, sqlx::Error> {
     POOL.get_or_try_init(open_pool).await.cloned()
 }
 
-pub async fn verify_application_role(pool: &PgPool) -> Result<(), SchemaError> {
-    let safe: bool = sqlx::query_scalar(
-        "SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
-           AND NOT rolbypassrls AND rolcanlogin AND current_user=session_user
-           AND NOT has_database_privilege(current_user,current_database(),'CREATE,TEMPORARY')
-           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=pg_roles.oid)
-         FROM pg_catalog.pg_roles WHERE rolname=current_user",
-    )
-    .fetch_one(pool)
-    .await?;
-    if !safe {
-        return Err(SchemaError::UnsafeApplicationRole);
-    }
-    Ok(())
-}
-
-async fn application_object_count(connection: &mut PgConnection) -> Result<i64, sqlx::Error> {
-    // Reject a partially populated application schema regardless of the owner.
-    // Extension members include dependent array/row types and indexes, not just
-    // objects with a direct extension-membership dependency.
-    sqlx::query_scalar(
-        "WITH RECURSIVE extension_objects(classid,objid) AS (
-           SELECT classid,objid FROM pg_catalog.pg_depend WHERE deptype='e'
-           UNION
-           SELECT d.classid,d.objid FROM pg_catalog.pg_depend d
-           JOIN extension_objects e ON e.classid=d.refclassid AND e.objid=d.refobjid
-           WHERE d.deptype IN ('i','a')
-         ), application_objects AS (
-           SELECT 'pg_catalog.pg_class'::regclass AS classid,c.oid AS objid
-           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-           WHERE n.nspname='public'
-           UNION ALL
-           SELECT 'pg_catalog.pg_proc'::regclass,p.oid
-           FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
-           WHERE n.nspname='public'
-           UNION ALL
-           SELECT 'pg_catalog.pg_type'::regclass,t.oid
-           FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
-           WHERE n.nspname='public'
-         ) SELECT count(*) FROM application_objects a
-         WHERE NOT EXISTS (SELECT 1 FROM extension_objects e WHERE e.classid=a.classid AND e.objid=a.objid)",
-    ).fetch_one(connection).await
-}
-
-/// Initialize a new application database atomically. Existing users means the
-/// database is initialized; this is deliberately not a compatibility check or migration.
-pub async fn apply_fresh_baseline(pool: &PgPool) -> Result<(), SchemaError> {
-    verify_application_role(pool).await?;
-    let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(BOOTSTRAP_LOCK_ID)
-        .execute(&mut *transaction)
-        .await?;
-    let initialized: bool = sqlx::query_scalar("SELECT to_regclass('public.users') IS NOT NULL")
-        .fetch_one(&mut *transaction)
-        .await?;
-    if initialized {
-        transaction.commit().await?;
-        return Ok(());
-    }
-    if application_object_count(&mut transaction).await? != 0 {
-        return Err(SchemaError::PartialSchema);
-    }
-    sqlx::query("SET LOCAL search_path = public, pg_catalog")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::raw_sql(SHARED_PLATFORM_BASELINE)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::raw_sql(KNOWLEDGE_BASE_BASELINE)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::raw_sql(BIDDING_BASELINE)
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
+/// Apply pending SQLx migrations and validate previously applied checksums.
+/// Only the deployment migrator invokes this; application startup never runs DDL.
+pub async fn migrate_database(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    let mut connection = pool.acquire().await?;
+    // SQLx holds a session advisory lock and may return before unlocking on an
+    // error. Never return this connection to the pool, including on cancellation.
+    connection.close_on_drop();
+    let result = MIGRATOR.run(&mut *connection).await;
+    let closed = connection.close().await;
+    result?;
+    closed?;
     Ok(())
 }
 
@@ -295,38 +222,37 @@ mod tests {
     }
 
     #[test]
-    fn actor_identity_is_only_a_user_or_api_key() {
-        let allowlist = SHARED_PLATFORM_BASELINE
-            .split_once("CREATE FUNCTION kb_actor_identity_valid")
-            .unwrap()
-            .1
-            .split_once("$$;")
-            .unwrap()
-            .0;
-        assert!(allowlist.contains("^(user|api_key):"));
-        assert!(!allowlist.contains("system:"));
-        assert!(!SHARED_PLATFORM_BASELINE.contains("SYSTEM_ACTOR_REQUIRED"));
-        assert!(!BIDDING_BASELINE.contains("SYSTEM_ACTOR_REQUIRED"));
-        assert!(!KNOWLEDGE_BASE_BASELINE.contains("system:"));
+    fn baselines_have_no_database_authorization_layer() {
+        for ddl in [
+            SHARED_PLATFORM_BASELINE,
+            KNOWLEDGE_BASE_BASELINE,
+            TENDER_BASELINE,
+        ] {
+            assert!(!ddl.contains("SECURITY DEFINER"));
+            assert!(!ddl.contains("CREATE ROLE"));
+            assert!(!ddl.contains("CREATE POLICY"));
+            assert!(!ddl.contains("CREATE FUNCTION"));
+            assert!(!ddl.contains("CREATE TRIGGER"));
+        }
     }
 
     #[test]
     fn knowledge_baseline_stores_chunk_source_locator_and_deleted_parse_status() {
         let documents = KNOWLEDGE_BASE_BASELINE
-            .split_once("CREATE TABLE documents (")
+            .split_once("CREATE TABLE knowledge_documents (")
             .unwrap()
             .1
-            .split_once("CREATE UNIQUE INDEX documents_live_file_uidx")
+            .split_once("\n);")
             .unwrap()
             .0;
         assert!(documents.contains(
             "'pending', 'processing', 'finalizing', 'completed', 'failed', 'cancelled', 'deleting',\n        'deleted'"
         ));
         let chunks = KNOWLEDGE_BASE_BASELINE
-            .split_once("CREATE TABLE chunks (")
+            .split_once("CREATE TABLE knowledge_chunks (")
             .unwrap()
             .1
-            .split_once("CREATE INDEX chunks_document_idx")
+            .split_once("\n);")
             .unwrap()
             .0;
         assert!(chunks.contains("source_locator jsonb,"));

@@ -1,7 +1,6 @@
 //! Shared platform: auth, queue transport, Postgres pool, objects, and observability.
 
 mod auth;
-mod bid_authoring_contract;
 mod blobs;
 mod db;
 mod env;
@@ -15,7 +14,6 @@ mod release;
 mod s3;
 
 pub use auth::*;
-pub use bid_authoring_contract::*;
 pub use blobs::*;
 pub use db::*;
 pub use env::*;
@@ -92,11 +90,6 @@ pub fn queue_for(task_type: &str) -> &'static str {
     }
     match task_type {
         TYPE_DOCUMENT_PROCESS | TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
-        BID_TENDER_DOCUMENT_PROCESS_V2_TASK
-        | BID_REQUIREMENT_SET_COMPILE_V2_TASK
-        | BID_DOCX_COMPOSE_V2_TASK
-        | BID_CONTENT_GENERATE_V2_TASK
-        | BID_SUBMISSION_EXPORT_V2_TASK => BID_AUTHORING_V2_QUEUE,
         TYPE_POST_PROCESS | TYPE_SEMANTIC_INDEX_V2 => QUEUE_POSTPROCESS,
         TYPE_SUMMARY | TYPE_DATATABLE => QUEUE_SUMMARY,
         TYPE_IMAGE_MULTIMODAL => QUEUE_MULTIMODAL,
@@ -130,13 +123,12 @@ pub fn housekeep_enabled() -> bool {
 #[cfg(test)]
 mod workspace_layout {
     #[test]
-    fn workspace_members_are_the_seven_crates() {
+    fn workspace_members_are_the_six_crates() {
         let manifest = include_str!("../../../Cargo.toml");
         for member in [
             "crates/platform",
             "crates/knowledge",
             "crates/docparser",
-            "crates/bidding",
             "crates/api",
             "crates/worker",
             "crates/retention",
@@ -152,6 +144,7 @@ mod workspace_layout {
             "crates/runtime",
             "crates/auth",
             "crates/bid",
+            "crates/bidding",
         ] {
             assert!(
                 !manifest.contains(&format!("\"{retired}\"")),

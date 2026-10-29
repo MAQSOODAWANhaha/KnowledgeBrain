@@ -12,7 +12,7 @@ pub async fn list_versions_for_product(
                 image_processing_config, chunking_config,
                 embedding_model_id, summary_model_id, vlm_model_id, asr_model_id,
                 vlm_config, asr_config, extract_config, wiki_config, question_generation_config
-         FROM product_versions WHERE product_id = $1 AND deleted_at IS NULL",
+         FROM knowledge_product_versions WHERE product_id = $1 AND deleted_at IS NULL",
     )
     .bind(product_id)
     .fetch_all(pool)
@@ -31,7 +31,7 @@ pub async fn load_version(
                 image_processing_config, chunking_config,
                 embedding_model_id, summary_model_id, vlm_model_id, asr_model_id,
                 vlm_config, asr_config, extract_config, wiki_config, question_generation_config
-         FROM product_versions WHERE id = $1 AND deleted_at IS NULL",
+         FROM knowledge_product_versions WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(version_id)
     .fetch_optional(pool)
@@ -66,7 +66,7 @@ pub async fn version_label_taken(
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(
-            SELECT 1 FROM product_versions
+            SELECT 1 FROM knowledge_product_versions
             WHERE product_id = $1 AND label = $2 AND status <> 'archived' AND deleted_at IS NULL
          )",
     )
@@ -81,12 +81,12 @@ pub async fn insert_version(
     id: Uuid,
     product_id: Uuid,
     label: &str,
-    status: &str,
+    status: crate::VersionStatus,
     cloned_from: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     let embedding_model_id = platform::embedding_model();
     sqlx::query(
-        "INSERT INTO product_versions (
+        "INSERT INTO knowledge_product_versions (
             id, product_id, label, status, cloned_from_version_id,
             embedding_model_id, summary_model_id
          ) VALUES ($1, $2, $3, $4, $5, $6, 'stub-chat')
@@ -109,7 +109,7 @@ pub async fn version_has_chunk_embeddings(
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(
-            SELECT 1 FROM chunk_embeddings
+            SELECT 1 FROM knowledge_chunk_embeddings
             WHERE product_version_id = $1 AND embedding IS NOT NULL
          )",
     )
@@ -125,7 +125,7 @@ pub async fn freeze_version_embedding_model(
 ) -> Result<String, String> {
     if !crate::index::embedding_http_configured() {
         let stored: String = sqlx::query_scalar(
-            "SELECT COALESCE(embedding_model_id, '') FROM product_versions WHERE id = $1",
+            "SELECT COALESCE(embedding_model_id, '') FROM knowledge_product_versions WHERE id = $1",
         )
         .bind(version_id)
         .fetch_one(pool)
@@ -134,7 +134,7 @@ pub async fn freeze_version_embedding_model(
         return Ok(stored);
     }
     let stored: String = sqlx::query_scalar(
-        "SELECT COALESCE(embedding_model_id, '') FROM product_versions WHERE id = $1",
+        "SELECT COALESCE(embedding_model_id, '') FROM knowledge_product_versions WHERE id = $1",
     )
     .bind(version_id)
     .fetch_one(pool)
@@ -145,8 +145,8 @@ pub async fn freeze_version_embedding_model(
         .map_err(|e| e.to_string())?;
     let v3: Option<String> = sqlx::query_scalar(
         "SELECT revision.provider_model_identifier
-         FROM product_version_embedding_bindings_v2 binding
-         JOIN embedding_revisions_v2 revision
+         FROM knowledge_product_version_embedding_bindings binding
+         JOIN knowledge_embedding_revisions revision
            ON revision.revision_sha256 = binding.embedding_revision_sha256
          WHERE binding.product_version_id = $1",
     )
@@ -158,7 +158,7 @@ pub async fn freeze_version_embedding_model(
         crate::index::EmbeddingIdentity::Use(id) => Ok(id),
         crate::index::EmbeddingIdentity::Bind(id) => {
             let n = sqlx::query(
-                "UPDATE product_versions
+                "UPDATE knowledge_product_versions
                  SET embedding_model_id = $2, updated_at = now()
                  WHERE id = $1
                    AND (COALESCE(embedding_model_id, '') = ''
@@ -172,7 +172,7 @@ pub async fn freeze_version_embedding_model(
             .rows_affected();
             if n == 0 {
                 let again: String = sqlx::query_scalar(
-                    "SELECT COALESCE(embedding_model_id, '') FROM product_versions WHERE id = $1",
+                    "SELECT COALESCE(embedding_model_id, '') FROM knowledge_product_versions WHERE id = $1",
                 )
                 .bind(version_id)
                 .fetch_one(pool)
@@ -200,21 +200,11 @@ pub(crate) fn parse_kind(s: &str) -> crate::ProductKind {
     }
 }
 
-pub(crate) fn parse_version_status(s: &str) -> crate::VersionStatus {
-    match s {
-        "cloning" => crate::VersionStatus::Cloning,
-        "archived" => crate::VersionStatus::Archived,
-        "failed" => crate::VersionStatus::Failed,
-        _ => crate::VersionStatus::Active,
-    }
-}
-
 pub(crate) fn product_version_from_row(
     product_id: Uuid,
     v: &sqlx::postgres::PgRow,
 ) -> Result<crate::ProductVersion, sqlx::Error> {
     let vid: Uuid = v.try_get("id")?;
-    let status: String = v.try_get("status")?;
     let idx: serde_json::Value = v
         .try_get("indexing_strategy")
         .unwrap_or_else(|_| serde_json::json!({}));
@@ -226,7 +216,7 @@ pub(crate) fn product_version_from_row(
         .unwrap_or_else(|_| serde_json::json!({}));
     let mut pv = crate::ProductVersion::new(product_id, v.try_get("label")?);
     pv.id = vid;
-    pv.status = parse_version_status(&status);
+    pv.status = v.try_get("status")?;
     pv.cloned_from = v.try_get("cloned_from_version_id")?;
     pv.vector_enabled = idx.get("vector").and_then(|x| x.as_bool()).unwrap_or(true);
     pv.keyword_enabled = idx.get("keyword").and_then(|x| x.as_bool()).unwrap_or(true);
@@ -345,8 +335,8 @@ pub async fn version_workspace_id(
     version_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT p.workspace_id FROM product_versions pv
-         JOIN products p ON p.id = pv.product_id
+        "SELECT p.workspace_id FROM knowledge_product_versions pv
+         JOIN knowledge_products p ON p.id = pv.product_id
          WHERE pv.id = $1",
     )
     .bind(version_id)
@@ -362,7 +352,7 @@ pub async fn insert_version_cloning(
     source_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO product_versions (
+        "INSERT INTO knowledge_product_versions (
             id, product_id, label, status, cloned_from_version_id,
             chunking_config, indexing_strategy, image_processing_config,
             embedding_model_id, summary_model_id, vlm_model_id, asr_model_id,
@@ -372,7 +362,7 @@ pub async fn insert_version_cloning(
             chunking_config, indexing_strategy, image_processing_config,
             embedding_model_id, summary_model_id, vlm_model_id, asr_model_id,
             vlm_config, asr_config, extract_config, wiki_config, question_generation_config
-         FROM product_versions WHERE id = $4",
+         FROM knowledge_product_versions WHERE id = $4",
     )
     .bind(target_id)
     .bind(product_id)
@@ -385,7 +375,7 @@ pub async fn insert_version_cloning(
 
 pub async fn version_exists(pool: &PgPool, version_id: Uuid) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM product_versions WHERE id = $1 AND deleted_at IS NULL)",
+        "SELECT EXISTS(SELECT 1 FROM knowledge_product_versions WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(version_id)
     .fetch_one(pool)
@@ -395,18 +385,20 @@ pub async fn version_exists(pool: &PgPool, version_id: Uuid) -> Result<bool, sql
 pub async fn set_version_status(
     pool: &PgPool,
     version_id: Uuid,
-    status: &str,
+    status: crate::VersionStatus,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE product_versions SET status = $2, updated_at = now() WHERE id = $1")
-        .bind(version_id)
-        .bind(status)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE knowledge_product_versions SET status = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(version_id)
+    .bind(status)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 pub struct VersionConfig {
-    pub status: Option<String>,
+    pub status: Option<crate::VersionStatus>,
     pub chunking: Option<serde_json::Value>,
     pub indexing: Option<serde_json::Value>,
     pub image_processing: Option<serde_json::Value>,
@@ -427,7 +419,7 @@ pub async fn update_version_config(
     cfg: VersionConfig,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE product_versions SET
+        "UPDATE knowledge_product_versions SET
             status = COALESCE($2, status),
             chunking_config = COALESCE($3, chunking_config),
             indexing_strategy = COALESCE($4, indexing_strategy),
@@ -468,8 +460,8 @@ pub async fn version_ids_for_workspace(
     workspace_id: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT v.id FROM product_versions v
-         JOIN products p ON p.id = v.product_id
+        "SELECT v.id FROM knowledge_product_versions v
+         JOIN knowledge_products p ON p.id = v.product_id
          WHERE p.workspace_id = $1 AND v.deleted_at IS NULL",
     )
     .bind(workspace_id)
@@ -482,7 +474,7 @@ pub async fn version_ids_for_product(
     product_id: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT id FROM product_versions WHERE product_id = $1 AND deleted_at IS NULL",
+        "SELECT id FROM knowledge_product_versions WHERE product_id = $1 AND deleted_at IS NULL",
     )
     .bind(product_id)
     .fetch_all(pool)
@@ -499,7 +491,7 @@ pub async fn version_multimodal_enabled(
             (indexing_strategy->>'multimodal')::boolean,
             false
          )
-         FROM product_versions WHERE id = $1 AND deleted_at IS NULL",
+         FROM knowledge_product_versions WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(version_id)
     .fetch_optional(pool)
@@ -513,8 +505,8 @@ pub async fn current_summary_model(
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT COALESCE(pv.summary_model_id, 'stub-chat')
-         FROM products p
-         JOIN product_versions pv ON pv.id = p.current_version_id
+         FROM knowledge_products p
+         JOIN knowledge_product_versions pv ON pv.id = p.current_version_id
          WHERE p.id = $1",
     )
     .bind(product_id)
@@ -535,20 +527,20 @@ pub async fn version_references_object(
     };
     sqlx::query_scalar(
         "SELECT EXISTS (
-            SELECT 1 FROM documents
+            SELECT 1 FROM knowledge_documents
             WHERE product_version_id = $1
               AND deleted_at IS NULL
-              AND (object_ref = $2 OR object_ref = $3 OR file_hash = $4)
+              AND object_ref = $2
          ) OR EXISTS (
-            SELECT 1 FROM chunks
-            WHERE product_version_id = $1
-              AND (position($2 in content) > 0 OR position($3 in content) > 0)
+            SELECT 1 FROM knowledge_image_artifact_revisions i
+            JOIN knowledge_documents d
+              ON d.id = i.document_id AND d.product_version_id = i.product_version_id
+            WHERE i.product_version_id = $1 AND i.object_ref = $2
+              AND d.deleted_at IS NULL
          )",
     )
     .bind(version_id)
     .bind(&object_ref)
-    .bind(key)
-    .bind(hash)
     .fetch_one(pool)
     .await
 }
@@ -556,7 +548,7 @@ pub async fn version_references_object(
 pub async fn version_wiki_enabled(pool: &PgPool, version_id: Uuid) -> Result<bool, sqlx::Error> {
     let row: Option<bool> = sqlx::query_scalar(
         "SELECT COALESCE((indexing_strategy->>'wiki')::boolean, true)
-         FROM product_versions WHERE id = $1 AND deleted_at IS NULL",
+         FROM knowledge_product_versions WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(version_id)
     .fetch_optional(pool)
@@ -569,7 +561,7 @@ pub async fn version_indexing_flags(
     version_id: Uuid,
 ) -> Result<(bool, bool), sqlx::Error> {
     let idx: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT COALESCE(indexing_strategy, '{}'::jsonb) FROM product_versions WHERE id = $1",
+        "SELECT COALESCE(indexing_strategy, '{}'::jsonb) FROM knowledge_product_versions WHERE id = $1",
     )
     .bind(version_id)
     .fetch_optional(pool)

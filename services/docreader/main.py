@@ -51,6 +51,43 @@ from docreader.utils.request import init_logging_request_id, request_id_context
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
+class TenderBridgeServicer(docreader_pb2_grpc.TenderBridgeServicer):
+    """Authenticated host commands; no filesystem paths are accepted from HTTP."""
+
+    def Command(self, request, context):
+        import asyncio
+        import json
+        from docreader.integrations.store import Conflict
+        from docreader.integrations.web import WebError, handle_command
+        from docreader.proto.docreader_pb2 import TenderCommandResponse
+
+        # Unlike read-only parsing, commands can spend money and write documents.
+        # The existing service token must be explicitly configured for this RPC.
+        if not os.environ.get("GRPC_AUTH_TOKEN", "").strip():
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, "Tender bridge requires GRPC_AUTH_TOKEN")
+        if len(request.json_payload) > 1024 * 1024:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "Tender command metadata is too large")
+        try:
+            payload = json.loads(request.json_payload)
+            if not isinstance(payload, dict):
+                raise ValueError("Command must be an object")
+            result, blob = asyncio.run(handle_command(payload, request.blob))
+            return TenderCommandResponse(json_payload=json.dumps(result, ensure_ascii=False, default=str).encode(), blob=blob)
+        except WebError as error:
+            return TenderCommandResponse(json_payload=json.dumps({"error": {
+                "code": error.code, "message": str(error), "status": error.status,
+            }}, ensure_ascii=False).encode())
+        except Conflict:
+            return TenderCommandResponse(json_payload=json.dumps({"error": {
+                "code": "REQUEST_CONFLICT", "message": "请求标识已用于不同内容，请读取原操作结果或用新标识提交修改。", "status": 409,
+            }}, ensure_ascii=False).encode())
+        except (ValueError, TypeError, KeyError):
+            return TenderCommandResponse(json_payload=b'{"error":{"code":"VALIDATION","message":"Invalid tender command","status":400}}')
+        except Exception as error:
+            logger.error("Tender command failed (%s)", type(error).__name__)
+            return TenderCommandResponse(json_payload=b'{"error":{"code":"UPSTREAM","message":"Tender operation is unavailable; retry with the same request identity","status":503}}')
+
+
 def to_valid_utf8_text(s: Optional[str]) -> str:
     if not s:
         return ""
@@ -463,6 +500,7 @@ def main():
     )
 
     docreader_pb2_grpc.add_DocReaderServicer_to_server(DocReaderServicer(), server)
+    docreader_pb2_grpc.add_TenderBridgeServicer_to_server(TenderBridgeServicer(), server)
 
     health_servicer = HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)

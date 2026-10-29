@@ -276,13 +276,6 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
             "graph",
             storage.enqueued_count(GraphQueue).await.unwrap_or(0),
         ),
-        (
-            "bid-authoring-v2",
-            storage
-                .enqueued_count(crate::BidAuthoringV2Queue)
-                .await
-                .unwrap_or(0),
-        ),
     ] {
         out.insert(name.into(), n as i64);
     }
@@ -355,8 +348,7 @@ pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
         .queue::<GraphQueue>()
         .queue::<MultimodalQueue>()
         .queue::<WikiQueue>()
-        .queue::<crate::RetentionQueue>()
-        .queue::<crate::BidAuthoringV2Queue>();
+        .queue::<crate::RetentionQueue>();
     let catalog = builder.catalog();
     Some((storage, catalog))
 }
@@ -401,13 +393,6 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
             "retention",
             storage
                 .list_queue_jobs(crate::RetentionQueue, &opts)
-                .await
-                .ok(),
-        ),
-        (
-            "bid-authoring-v2",
-            storage
-                .list_queue_jobs(crate::BidAuthoringV2Queue, &opts)
                 .await
                 .ok(),
         ),
@@ -496,145 +481,6 @@ pub async fn enqueue_post_process(
                     product_version_id,
                     clone_keep,
                     task_type: crate::TYPE_POST_PROCESS.to_string(),
-                },
-            )
-            .await,
-    )
-}
-
-pub async fn enqueue_bid_authoring_v2(
-    payload: crate::BidAuthoringJobPayloadV2,
-) -> Result<Option<String>, String> {
-    payload.validate().map_err(str::to_owned)?;
-    let Ok(storage) = oxana_connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(
-        job = payload.kind().as_str(),
-        request_artifact_id = %payload.request().request_artifact_id,
-        request_revision = payload.request().request_revision,
-        "enqueue bidding authoring v2"
-    );
-    match payload {
-        crate::BidAuthoringJobPayloadV2::TenderDocumentProcess {
-            request,
-            project_id,
-            document_revision_id,
-        } => oxana_id(
-            storage
-                .enqueue(
-                    crate::BidAuthoringV2Queue,
-                    crate::TenderDocumentProcessJobV2 {
-                        request,
-                        project_id,
-                        document_revision_id,
-                    },
-                )
-                .await,
-        ),
-        crate::BidAuthoringJobPayloadV2::RequirementSetCompile {
-            request,
-            project_id,
-            document_set_revision_id,
-            disposition_set_revision_id,
-        } => oxana_id(
-            storage
-                .enqueue(
-                    crate::BidAuthoringV2Queue,
-                    crate::RequirementSetCompileJobV2 {
-                        request,
-                        project_id,
-                        document_set_revision_id,
-                        disposition_set_revision_id,
-                        reclaim: false,
-                        reclaim_attempt: 0,
-                    },
-                )
-                .await,
-        ),
-        crate::BidAuthoringJobPayloadV2::DocxCompose {
-            request,
-            project_id,
-            workspace_id,
-        } => oxana_id(
-            storage
-                .enqueue(
-                    crate::BidAuthoringV2Queue,
-                    crate::DocxComposeJobV2 {
-                        request,
-                        project_id,
-                        workspace_id,
-                    },
-                )
-                .await,
-        ),
-        crate::BidAuthoringJobPayloadV2::ContentGenerate {
-            request,
-            project_id,
-            workspace_id,
-            base_workspace_revision_id,
-            operation,
-        } => oxana_id(
-            storage
-                .enqueue(
-                    crate::BidAuthoringV2Queue,
-                    crate::ContentGenerateJobV2 {
-                        request,
-                        project_id,
-                        workspace_id,
-                        base_workspace_revision_id,
-                        operation,
-                    },
-                )
-                .await,
-        ),
-        crate::BidAuthoringJobPayloadV2::SubmissionExport {
-            request,
-            project_id,
-            workspace_id,
-        } => oxana_id(
-            storage
-                .enqueue(
-                    crate::BidAuthoringV2Queue,
-                    crate::SubmissionExportJobV2 {
-                        request,
-                        project_id,
-                        workspace_id,
-                    },
-                )
-                .await,
-        ),
-    }
-}
-
-pub async fn enqueue_requirement_set_compile_reclaim(
-    payload: crate::BidAuthoringJobPayloadV2,
-    reclaim_attempt: i32,
-) -> Result<Option<String>, String> {
-    payload.validate().map_err(str::to_owned)?;
-    let crate::BidAuthoringJobPayloadV2::RequirementSetCompile {
-        request,
-        project_id,
-        document_set_revision_id,
-        disposition_set_revision_id,
-    } = payload
-    else {
-        return Err("reclaim is only valid for requirement set compilation".into());
-    };
-    let Ok(storage) = oxana_connect() else {
-        return Ok(None);
-    };
-    oxana_id(
-        storage
-            .enqueue(
-                crate::BidAuthoringV2Queue,
-                crate::RequirementSetCompileJobV2 {
-                    request,
-                    project_id,
-                    document_set_revision_id,
-                    disposition_set_revision_id,
-                    reclaim: true,
-                    reclaim_attempt,
                 },
             )
             .await,

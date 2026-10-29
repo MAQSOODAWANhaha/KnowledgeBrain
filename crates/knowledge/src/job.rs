@@ -150,8 +150,8 @@ impl WikiJob {
             wiki.insert((page.product_version_id, page.slug.clone()), page);
         }
         let folder_rows = sqlx::query(
-            "SELECT id, product_version_id, parent_id, name, path, depth, sort_order
-             FROM wiki_folders
+            "SELECT id, product_version_id, parent_folder_id AS parent_id, name, path, depth, sort_order
+             FROM knowledge_wiki_folders
              WHERE product_version_id = $1 AND deleted_at IS NULL",
         )
         .bind(version_id)

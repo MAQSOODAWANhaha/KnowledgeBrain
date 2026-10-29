@@ -13,7 +13,7 @@ import math
 import psycopg
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
-from docreader.integrations.authoring import read_authoring_input
+from docreader.integrations.authoring import assert_authoring_active, read_authoring_input
 from docreader.integrations.authoring_store import AuthoringStore
 from docreader.integrations.store import Cancelled, Conflict, StaleExecution
 from docreader.llm.budget import RequestBudget
@@ -22,13 +22,15 @@ from docreader.llm.config import completions_url
 from docreader.llm.recovery import call_validated
 from docreader.llm.request import ModelBudgetError, ModelConfigurationError, ModelWorkUnitExhausted, request_digest
 from docreader.tender.authoring import organize_outline
-from docreader.tender.schema import AuthoringOutline
+from docreader.tender.schema import AuthoringInput, AuthoringOutline
+from docreader.tender.status import AuthoringExecutionStatus
 
 
 class _OutlineModel:
-    def __init__(self, client, store, artifacts, lease, budget, spec):
+    def __init__(self, client, store, artifacts, lease, budget, spec, task="outline"):
         self.client, self.store, self.artifacts, self.lease = client, store, artifacts, lease
         self.budget, self.spec = budget, spec
+        self.task = task
 
     async def call(self, task, payload):
         baseline = payload["request"]
@@ -39,7 +41,7 @@ class _OutlineModel:
             value = json.loads(content["text"])
             value["contract_feedback"] = payload["contract_feedback"]
             content["text"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        self.budget.require_request(request)
+        self.budget.require_request(request, task)
         digest = request_digest(self.client.config.chat.base_url, request)
         logical = request_digest(self.client.config.chat.base_url, baseline)
         ref = await asyncio.to_thread(self.artifacts.put_json, request)
@@ -48,13 +50,13 @@ class _OutlineModel:
                                               logical_request=baseline)
 
     async def __call__(self, request, validate):
-        return await call_validated(self, self.store, self.artifacts, self.lease, "outline",
+        return await call_validated(self, self.store, self.artifacts, self.lease, self.task,
                                     {"request": request}, validate,
                                     owner_metadata={"execution_id": self.lease.execution_id, "epoch": self.lease.epoch})
 
 
 async def execute_outline(analysis_store, artifacts, config, budget, *, execution_id: str,
-                          run_id: str, source_version: int, domain_revision: int, checklist_digest: str,
+                          run_id: str, source_version: int, domain_revision: int, checklist_digest: str | None = None,
                           transport=None, lease_seconds: float = 60, heartbeat_seconds: float = 20,
                           timeout_seconds: float = 180) -> dict:
     """Run or resume T2 without acquiring or updating the parent analysis lease.
@@ -72,7 +74,16 @@ async def execute_outline(analysis_store, artifacts, config, budget, *, executio
         raise ModelConfigurationError("outline requires its configured Chat model, window and positive output reserve")
     identity = {"run_id": run_id, "source_version": source_version, "domain_revision": domain_revision,
                 "checklist_digest": checklist_digest}
-    approved = await read_authoring_input(analysis_store, artifacts, **identity)
+    store = AuthoringStore(analysis_store.dsn)
+    await store.setup()
+    existing = await store.get_execution(execution_id, missing_ok=True)
+    if existing is None:
+        approved = await read_authoring_input(analysis_store, artifacts, **identity)
+    else:
+        approved = AuthoringInput.model_validate(existing["authoring_input"]).model_dump()
+        if any(approved[key] != identity[key] for key in ("run_id", "source_version", "domain_revision")):
+            raise Conflict("execution_id already identifies a different authoring input")
+    await assert_authoring_active(analysis_store, approved)
     prompt = files("docreader.tender.prompts").joinpath("outline.md").read_text(encoding="utf-8")
     # Snapshot only the settings used here; analysis prompts and verify tokenizer
     # cannot alter this execution's identity or expand its input admission.
@@ -83,32 +94,31 @@ async def execute_outline(analysis_store, artifacts, config, budget, *, executio
             "model": config.chat.model, "context_tokens": config.chat.context_tokens,
             "prompt_digest": hashlib.sha256(prompt.encode()).hexdigest(), "budget": admitted.spec(),
             "timeout_seconds": float(timeout_seconds), "timeout_policy": "raw_response_idle_v1"}
-    store = AuthoringStore(analysis_store.dsn)
-    await store.setup()
     await store.submit(execution_id, approved, spec)
     lease = await store.acquire(execution_id, lease_seconds=lease_seconds)
     if lease is None:
         previous = await store.get_execution(execution_id)
         if previous["cancel_requested"]:
             raise Cancelled("outline execution was cancelled")
-        if previous["status"] != "succeeded":
+        if previous["status"] != AuthoringExecutionStatus.SUCCEEDED:
             raise Conflict("outline execution already has an active owner")
         value = await asyncio.to_thread(artifacts.read_json, previous["result_ref"])
         if AuthoringOutline.model_validate(value).authoring_input.model_dump() != approved:
-            raise ArtifactIntegrityError("stored outline does not refer to its confirmed analysis")
-        await read_authoring_input(analysis_store, artifacts, **identity)
+            raise ArtifactIntegrityError("stored outline does not refer to its fixed analysis snapshot")
+        await assert_authoring_active(analysis_store, approved)
         return previous["result_ref"]
 
     async def invoke():
         async with OpenAIModel(config, store, lease, prompts={}, concurrency=1, timeout_seconds=timeout_seconds,
                                artifacts=artifacts, transport=transport) as client:
             executor = _OutlineModel(client, store, artifacts, lease, admitted, spec)
-            return await organize_outline(analysis_store, artifacts, executor, admitted, **identity)
+            return await organize_outline(analysis_store, artifacts, executor, admitted,
+                                          **identity, authoring_input=approved)
 
     async def heartbeat():
         while True:
             await asyncio.sleep(heartbeat_seconds)
-            await read_authoring_input(analysis_store, artifacts, **identity)
+            await assert_authoring_active(analysis_store, approved)
             await store.heartbeat(lease, lease_seconds=lease_seconds)
 
     work, heart = asyncio.create_task(invoke()), asyncio.create_task(heartbeat())
@@ -123,9 +133,9 @@ async def execute_outline(analysis_store, artifacts, config, budget, *, executio
         heartbeat_result, = await asyncio.gather(heart, return_exceptions=True)
         if isinstance(heartbeat_result, BaseException) and not isinstance(heartbeat_result, asyncio.CancelledError):
             raise heartbeat_result
-        # The existing transaction checks the parent confirmation and authoring
+        # The existing transaction checks cancellation and the authoring
         # fence; no background heartbeat can mistake this success for a lost lease.
-        await store.release(lease, "succeeded", result_ref=result)
+        await store.release(lease, AuthoringExecutionStatus.SUCCEEDED, result_ref=result)
         return result
     except BaseException as error:
         failure = (error.__cause__ if isinstance(error, ModelWorkUnitExhausted)
@@ -136,7 +146,7 @@ async def execute_outline(analysis_store, artifacts, config, budget, *, executio
         with suppress(asyncio.CancelledError, Exception):
             await work
         with suppress(StaleExecution, psycopg.Error):
-            await asyncio.shield(store.release(lease, "failed", error={"type": type(failure).__name__}))
+            await asyncio.shield(store.release(lease, AuthoringExecutionStatus.FAILED, error={"type": type(failure).__name__}))
         if failure is not error:
             raise failure from error
         raise

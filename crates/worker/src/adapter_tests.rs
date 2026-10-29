@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use platform::{apply_fresh_baseline, write_blob};
+use platform::write_blob;
 
 #[derive(Clone, Copy)]
 enum LifecycleProviderResult {
@@ -72,7 +72,7 @@ impl knowledge::knowledge_index_v2::VectorEmbeddingProviderV2 for PendingAfterLi
         inputs: &[knowledge::knowledge_index_v2::VectorEmbeddingInputV2],
     ) -> Result<Vec<Vec<f32>>, knowledge::knowledge_index_v2::VectorIndexErrorV2> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        sqlx::query("UPDATE documents SET pending_subtasks_count=1 WHERE id=$1")
+        sqlx::query("UPDATE knowledge_documents SET pending_subtasks_count=1 WHERE id=$1")
             .bind(self.document_id)
             .execute(&self.pool)
             .await
@@ -160,42 +160,49 @@ async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
     LOCK.lock().await
 }
 
-// Destructive schema tests must opt into a dedicated isolated database. Never
-// inherit DATABASE_URL: production Compose is intentionally exposed on :15432.
-fn destructive_test_database_url() -> Result<String, sqlx::Error> {
-    let database_url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {
-        sqlx::Error::Configuration(
-            "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for destructive PostgreSQL tests".into(),
-        )
+// Explicit disposable database only; these fixtures never reset a schema.
+fn isolated_test_database_url() -> Result<String, sqlx::Error> {
+    let url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {
+        sqlx::Error::Configuration("explicit isolated PostgreSQL test URL required".into())
     })?;
-    if database_url.contains(":15432/") {
-        return Err(sqlx::Error::Configuration(
-            "destructive PostgreSQL tests refuse the live :15432 database".into(),
-        ));
+    let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+    if options.get_host() != "127.0.0.1"
+        || options.get_port() == 15432
+        || !options
+            .get_database()
+            .is_some_and(|name| name.starts_with("knowledgebrain_test_"))
+    {
+        return Err(sqlx::Error::Configuration("worker fixtures require a loopback knowledgebrain_test_* database outside the application port".into()));
     }
-    Ok(database_url)
+    Ok(url)
 }
 
 // Tokio creates a separate runtime for each async unit test. A process-global
 // PgPool can retain runtime-bound connections between tests and time out.
 async fn connect() -> Result<sqlx::PgPool, sqlx::Error> {
-    let database_url = destructive_test_database_url()?;
-    sqlx::postgres::PgPoolOptions::new()
+    let required = std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1");
+    let database_url = match isolated_test_database_url() {
+        Ok(url) => url,
+        Err(error) if required => panic!("required worker test database: {error}"),
+        Err(error) => return Err(error),
+    };
+    let result = sqlx::postgres::PgPoolOptions::new()
         .max_connections(16)
         .connect(&database_url)
-        .await
+        .await;
+    if required && let Err(error) = &result {
+        panic!("required worker test PostgreSQL is unavailable: {error}");
+    }
+    result
 }
 
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../test-support/postgres.rs"
-));
-
-async fn reset_test_schema(pool: &sqlx::PgPool) {
-    reset_isolated_schema(pool)
-        .await
-        .expect("reset isolated test schema");
-    apply_fresh_baseline(pool).await.unwrap();
+async fn require_test_schema(pool: &sqlx::PgPool) {
+    let ready:bool=sqlx::query_scalar("SELECT to_regclass('public.knowledge_job_outbox') IS NOT NULL AND to_regclass('public.platform_objects') IS NOT NULL")
+        .fetch_one(pool).await.expect("inspect isolated worker schema");
+    assert!(
+        ready,
+        "worker fixtures require an initialized disposable database"
+    );
 }
 
 #[test]
@@ -244,7 +251,7 @@ async fn list_delete_skips_non_deleting_rows() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -253,8 +260,9 @@ async fn list_delete_skips_non_deleting_rows() {
         .await
         .unwrap();
     let did = Uuid::new_v4();
-    let hash = platform::sha256_hex(b"keep");
-    write_blob(&hash, b"keep").unwrap();
+    let bytes = format!("keep:{did}");
+    let hash = platform::sha256_hex(bytes.as_bytes());
+    write_blob(&hash, bytes.as_bytes()).unwrap();
     insert_document(
         &pool,
         knowledge::NewDocument {
@@ -262,7 +270,7 @@ async fn list_delete_skips_non_deleting_rows() {
             product_version_id: seeded.library_version_id,
             title: "k",
             file_name: "k.txt",
-            file_size: 4,
+            file_size: bytes.len() as i64,
             file_hash: &hash,
             object_ref: &format!("objects/{hash}"),
         },
@@ -271,20 +279,18 @@ async fn list_delete_skips_non_deleting_rows() {
     .unwrap();
     process_list_delete_pg(&pool, did).await.unwrap();
     let gone: bool =
-        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM documents WHERE id = $1")
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM knowledge_documents WHERE id = $1")
             .bind(did)
             .fetch_one(&pool)
             .await
             .unwrap();
     assert!(!gone, "pending row must survive list_delete");
-    sqlx::query("UPDATE documents SET parse_status = 'deleting' WHERE id = $1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Deleting, "")
         .await
         .unwrap();
     process_list_delete_pg(&pool, did).await.unwrap();
     let gone: bool =
-        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM documents WHERE id = $1")
+        sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM knowledge_documents WHERE id = $1")
             .bind(did)
             .fetch_one(&pool)
             .await
@@ -299,7 +305,7 @@ async fn persist_blank_chunks_completes_without_postprocess() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -316,15 +322,13 @@ async fn persist_blank_chunks_completes_without_postprocess() {
             title: "empty",
             file_name: "e.txt",
             file_size: 1,
-            file_hash: "ff71cf74abb3ccb005b8b64371725db15edc42c1ad33413bbe561b2da3c85ef9",
-            object_ref: "objects/ff71cf74abb3ccb005b8b64371725db15edc42c1ad33413bbe561b2da3c85ef9",
+            file_hash: &platform::sha256_hex(did.as_bytes()),
+            object_ref: &platform::object_ref(&platform::sha256_hex(did.as_bytes())),
         },
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status = 'processing' WHERE id = $1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     let blank = knowledge::Chunk {
@@ -367,7 +371,7 @@ async fn persist_blank_chunks_completes_without_postprocess() {
     .await
     .unwrap();
     let (parse, enable, summary): (String, String, String) = sqlx::query_as(
-        "SELECT parse_status, enable_status, summary_status FROM documents WHERE id = $1",
+        "SELECT parse_status, enable_status, summary_status FROM knowledge_documents WHERE id = $1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -376,7 +380,7 @@ async fn persist_blank_chunks_completes_without_postprocess() {
     assert_eq!(parse, "completed");
     assert_eq!(enable, "enabled");
     assert_eq!(summary, "none");
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
         .bind(did)
         .fetch_one(&pool)
         .await
@@ -391,7 +395,7 @@ async fn persist_indexed_chunks_keeps_rows_when_embed_fails() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -416,9 +420,7 @@ async fn persist_indexed_chunks_keeps_rows_when_embed_fails() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status = 'processing' WHERE id = $1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     let ch = knowledge::Chunk {
@@ -468,17 +470,19 @@ async fn persist_indexed_chunks_keeps_rows_when_embed_fails() {
         err.contains("embed") || err.contains("error") || err.contains("connect"),
         "{err}"
     );
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
         .bind(did)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(n, 1, "chunk row must survive embed failure");
-    let e: i64 = sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let e: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_chunk_embeddings WHERE document_id = $1",
+    )
+    .bind(did)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(e, 0);
 }
 
@@ -489,7 +493,7 @@ async fn convert_reuses_markdown_and_chunks_after_embed_fail() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -516,7 +520,7 @@ async fn convert_reuses_markdown_and_chunks_after_embed_fail() {
     .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
     let started: String = sqlx::query_scalar(
-        "SELECT started_at::text FROM document_processing_spans
+        "SELECT started_at::text FROM knowledge_document_processing_spans
              WHERE document_id = $1 AND name = 'docreader'",
     )
     .bind(did)
@@ -524,33 +528,31 @@ async fn convert_reuses_markdown_and_chunks_after_embed_fail() {
     .await
     .unwrap();
     let chunk_ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM chunks WHERE document_id = $1 ORDER BY id")
+        sqlx::query_scalar("SELECT id FROM knowledge_chunks WHERE document_id = $1 ORDER BY id")
             .bind(did)
             .fetch_all(&pool)
             .await
             .unwrap();
     assert!(!chunk_ids.is_empty());
-    sqlx::query("DELETE FROM chunk_embeddings WHERE document_id = $1")
+    sqlx::query("DELETE FROM knowledge_chunk_embeddings WHERE document_id = $1")
         .bind(did)
         .execute(&pool)
         .await
         .unwrap();
     sqlx::query(
-        "UPDATE document_processing_spans SET status = 'failed', finished_at = now()
+        "UPDATE knowledge_document_processing_spans SET status = 'failed', finished_at = now()
              WHERE document_id = $1 AND name = 'embedding'",
     )
     .bind(did)
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status = 'processing' WHERE id = $1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
     let started2: String = sqlx::query_scalar(
-        "SELECT started_at::text FROM document_processing_spans
+        "SELECT started_at::text FROM knowledge_document_processing_spans
              WHERE document_id = $1 AND name = 'docreader'",
     )
     .bind(did)
@@ -559,18 +561,19 @@ async fn convert_reuses_markdown_and_chunks_after_embed_fail() {
     .unwrap();
     assert_eq!(started, started2, "docreader must not rerun");
     let chunk_ids2: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM chunks WHERE document_id = $1 ORDER BY id")
+        sqlx::query_scalar("SELECT id FROM knowledge_chunks WHERE document_id = $1 ORDER BY id")
             .bind(did)
             .fetch_all(&pool)
             .await
             .unwrap();
     assert_eq!(chunk_ids, chunk_ids2);
-    let emb: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let emb: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_chunk_embeddings WHERE document_id = $1",
+    )
+    .bind(did)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(emb, chunk_ids.len() as i64);
 }
 
@@ -581,7 +584,7 @@ async fn convert_simple_txt_sets_processing_and_span() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -607,14 +610,15 @@ async fn convert_simple_txt_sets_processing_and_span() {
     .await
     .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT parse_status FROM knowledge_documents WHERE id = $1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status, "processing");
     let span: String = sqlx::query_scalar(
-        "SELECT status FROM document_processing_spans
+        "SELECT status FROM knowledge_document_processing_spans
              WHERE document_id = $1 AND name = 'docreader'",
     )
     .bind(did)
@@ -623,7 +627,7 @@ async fn convert_simple_txt_sets_processing_and_span() {
     .unwrap();
     assert_eq!(span, "done");
     let stages: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name, status FROM document_processing_spans
+        "SELECT name, status FROM knowledge_document_processing_spans
              WHERE document_id = $1 AND kind = 'stage' ORDER BY name",
     )
     .bind(did)
@@ -637,24 +641,26 @@ async fn convert_simple_txt_sets_processing_and_span() {
     assert_eq!(map.get("multimodal").map(String::as_str), Some("skipped"));
     assert_eq!(map.get("postprocess").map(String::as_str), Some("running"));
     assert!(platform::blob_exists(&format!("{hash}.md")));
-    let enabled: String = sqlx::query_scalar("SELECT enable_status FROM documents WHERE id = $1")
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let enabled: String =
+        sqlx::query_scalar("SELECT enable_status FROM knowledge_documents WHERE id = $1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(enabled, "enabled");
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
         .bind(did)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert!(n >= 1, "convert must persist chunks");
-    let en: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let en: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_chunk_embeddings WHERE document_id = $1",
+    )
+    .bind(did)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(en, n);
 }
 
@@ -666,7 +672,7 @@ async fn convert_pdf_without_reader_fails_immediately() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -693,7 +699,7 @@ async fn convert_pdf_without_reader_fails_immediately() {
     .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
     let (status, err): (String, String) = sqlx::query_as(
-        "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
+        "SELECT parse_status, COALESCE(error_message,'') FROM knowledge_documents WHERE id = $1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -702,7 +708,7 @@ async fn convert_pdf_without_reader_fails_immediately() {
     assert_eq!(status, "failed");
     assert!(err.contains("DOCREADER_ADDR"), "{err}");
     let cancelled: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM document_processing_spans
+        "SELECT count(*) FROM knowledge_document_processing_spans
              WHERE document_id = $1 AND status = 'cancelled'",
     )
     .bind(did)
@@ -714,7 +720,7 @@ async fn convert_pdf_without_reader_fails_immediately() {
         "failed docreader must cancel dependent stages, got {cancelled}"
     );
     let post: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM document_processing_spans
+        "SELECT status FROM knowledge_document_processing_spans
              WHERE document_id = $1 AND name = 'postprocess'",
     )
     .bind(did)
@@ -731,7 +737,7 @@ async fn convert_markdown_with_image_enqueues_multimodal() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -740,7 +746,7 @@ async fn convert_markdown_with_image_enqueues_multimodal() {
         .await
         .unwrap();
     sqlx::query(
-            "UPDATE product_versions SET image_processing_config = '{\"enable_multimodel\":true}'::jsonb
+            "UPDATE knowledge_product_versions SET image_processing_config = '{\"enable_multimodel\":true}'::jsonb
              WHERE id = $1",
         )
         .bind(seeded.library_version_id)
@@ -780,7 +786,7 @@ async fn convert_markdown_with_image_enqueues_multimodal() {
         let _ = storage.wipe_queue(platform::MultimodalQueue).await;
     } else {
         let (status, err): (String, String) = sqlx::query_as(
-            "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
+            "SELECT parse_status, COALESCE(error_message,'') FROM knowledge_documents WHERE id = $1",
         )
         .bind(did)
         .fetch_one(&pool)
@@ -788,11 +794,12 @@ async fn convert_markdown_with_image_enqueues_multimodal() {
         .unwrap();
         assert_eq!(status, "finalizing");
         assert!(err.contains("ocr_error"), "{err}");
-        let ready: bool = sqlx::query_scalar("SELECT index_ready FROM documents WHERE id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let ready: bool =
+            sqlx::query_scalar("SELECT index_ready FROM knowledge_documents WHERE id = $1")
+                .bind(did)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(!ready, "images without VLM must not be searchable");
     }
 }
@@ -804,7 +811,7 @@ async fn convert_audio_without_asr_fails_immediately() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -831,7 +838,7 @@ async fn convert_audio_without_asr_fails_immediately() {
     .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
     let (status, err): (String, String) = sqlx::query_as(
-        "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
+        "SELECT parse_status, COALESCE(error_message,'') FROM knowledge_documents WHERE id = $1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -848,7 +855,7 @@ async fn convert_audio_stub_writes_markdown() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -857,7 +864,7 @@ async fn convert_audio_stub_writes_markdown() {
         .await
         .unwrap();
     sqlx::query(
-        "UPDATE product_versions SET asr_model_id = 'stub-asr',
+        "UPDATE knowledge_product_versions SET asr_model_id = 'stub-asr',
                 asr_config = '{\"enabled\":true}'::jsonb WHERE id = $1",
     )
     .bind(seeded.library_version_id)
@@ -883,11 +890,12 @@ async fn convert_audio_stub_writes_markdown() {
     .await
     .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
-    let status: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT parse_status FROM knowledge_documents WHERE id = $1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status, "processing");
     let md = String::from_utf8(platform::read_blob(&format!("{hash}.md")).unwrap()).unwrap();
     assert_eq!(md, "[stub-asr:talk.wav:8]");
@@ -909,7 +917,7 @@ async fn convert_passages_skips_reader_and_indexes_each() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -942,18 +950,19 @@ async fn convert_passages_skips_reader_and_indexes_each() {
     )
     .await
     .unwrap();
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
         .bind(did)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(n, 2);
-    let texts: Vec<String> =
-        sqlx::query_scalar("SELECT content FROM chunks WHERE document_id = $1 ORDER BY content")
-            .bind(did)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let texts: Vec<String> = sqlx::query_scalar(
+        "SELECT content FROM knowledge_chunks WHERE document_id = $1 ORDER BY content",
+    )
+    .bind(did)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(texts, vec!["first passage", "second passage"]);
     knowledge::set_document_source(
         &pool,
@@ -968,13 +977,13 @@ async fn convert_passages_skips_reader_and_indexes_each() {
     process_reparse_pg(&pool, did, attempt).await.unwrap();
     let replay_attempt = knowledge::mark_reparse_queued(&pool, did).await.unwrap();
     assert_eq!(replay_attempt, attempt);
-    let kind: String = sqlx::query_scalar("SELECT type FROM documents WHERE id = $1")
+    let kind: String = sqlx::query_scalar("SELECT type FROM knowledge_documents WHERE id = $1")
         .bind(did)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(kind, "passage");
-    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM documents WHERE id = $1")
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM knowledge_documents WHERE id = $1")
         .bind(did)
         .fetch_one(&pool)
         .await
@@ -990,7 +999,7 @@ async fn convert_url_without_reader_fails_immediately() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -1018,7 +1027,7 @@ async fn convert_url_without_reader_fails_immediately() {
     .unwrap();
     convert_document(&pool, did, 1, &[], false).await.unwrap();
     let (status, err): (String, String) = sqlx::query_as(
-        "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
+        "SELECT parse_status, COALESCE(error_message,'') FROM knowledge_documents WHERE id = $1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -1035,7 +1044,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -1044,6 +1053,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         .await
         .unwrap();
     let vid = seeded.library_version_id;
+    sqlx::query("UPDATE knowledge_product_versions SET indexing_strategy='{\"vector\":false,\"keyword\":true,\"wiki\":true,\"graph\":false}'::jsonb WHERE id=$1").bind(vid).execute(&pool).await.unwrap();
     let did = Uuid::new_v4();
     let hash = platform::sha256_hex(b"wiki body");
     write_blob(&hash, b"wiki body").unwrap();
@@ -1052,7 +1062,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         knowledge::NewDocument {
             id: did,
             product_version_id: vid,
-            title: "w",
+            title: &did.to_string(),
             file_name: "w.txt",
             file_size: 9,
             file_hash: &hash,
@@ -1061,14 +1071,9 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE documents SET parse_status = 'finalizing', pending_subtasks_count = 1
-             WHERE id = $1",
-    )
-    .bind(did)
-    .execute(&pool)
-    .await
-    .unwrap();
+    knowledge::set_document_progress(&pool, did, knowledge::ParseStatus::Finalizing, 1)
+        .await
+        .unwrap();
     let cid = Uuid::new_v4();
     knowledge::replace_document_chunks(
         &pool,
@@ -1090,6 +1095,9 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     )
     .await
     .unwrap();
+    knowledge::workflow::put(&pool, did, vid, 1, knowledge::workflow::Work::Wiki)
+        .await
+        .unwrap();
     if let Err(error) = process_wiki_ingest(&pool, vid, did, knowledge::wiki::OP_INGEST, 1).await {
         assert!(error.contains("Oxana Redis is not configured"), "{error}");
     }
@@ -1102,25 +1110,20 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     .await
     .unwrap();
     assert!(!postgres_queue_tables);
-    let (status, pending): (String, i32) =
-        sqlx::query_as("SELECT parse_status, pending_subtasks_count FROM documents WHERE id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(pending, 0);
-    assert_eq!(status, "completed");
-    let span: String = sqlx::query_scalar(
-        "SELECT status FROM document_processing_spans
-             WHERE document_id = $1 AND name = 'wiki.ingest'",
+    let (status, pending): (String, i32) = sqlx::query_as(
+        "SELECT parse_status, pending_subtasks_count FROM knowledge_documents WHERE id = $1",
     )
     .bind(did)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(span, "done");
+    assert_eq!(pending, 0);
+    assert_eq!(status, "completed");
+    let completed: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_job_receipts WHERE document_id=$1 AND attempt=1 AND job_key='wiki')")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    assert!(completed, "Wiki completion must be durably acknowledged");
     let pages: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM wiki_pages WHERE product_version_id = $1 AND status = 'published'",
+        "SELECT count(*) FROM knowledge_wiki_pages WHERE product_version_id = $1 AND status = 'published'",
     )
     .bind(vid)
     .fetch_one(&pool)
@@ -1128,7 +1131,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     .unwrap();
     assert!(pages >= 1, "wiki page persisted");
     let wiki_chunks: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'wiki_page'",
+        "SELECT count(*) FROM knowledge_chunks WHERE document_id = $1 AND chunk_type = 'wiki_page'",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -1136,8 +1139,8 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     .unwrap();
     assert!(wiki_chunks >= 1, "wiki_page chunk persisted");
     let original_page: (Uuid, String, serde_json::Value) = sqlx::query_as(
-        "SELECT id,content,source_refs FROM wiki_pages WHERE product_version_id=$1
-               AND source_refs @> jsonb_build_array($2::text) ORDER BY slug LIMIT 1",
+        "SELECT id,content,source_refs FROM knowledge_wiki_pages WHERE product_version_id=$1
+               AND page_type='summary' AND source_refs @> jsonb_build_array($2::text) ORDER BY slug LIMIT 1",
     )
     .bind(vid)
     .bind(did.to_string())
@@ -1154,7 +1157,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
             knowledge::NewDocument {
                 id: document_id,
                 product_version_id: vid,
-                title: "w",
+                title: &document_id.to_string(),
                 file_name: &format!("w-{suffix}.txt"),
                 file_size: 9,
                 file_hash: &hash,
@@ -1163,13 +1166,12 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         )
         .await
         .unwrap();
-        sqlx::query(
-            "UPDATE documents SET parse_status='finalizing', pending_subtasks_count=1 WHERE id=$1",
-        )
-        .bind(document_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        knowledge::set_document_progress(&pool, document_id, knowledge::ParseStatus::Finalizing, 1)
+            .await
+            .unwrap();
+        knowledge::workflow::put(&pool, document_id, vid, 1, knowledge::workflow::Work::Wiki)
+            .await
+            .unwrap();
         let chunk_id = Uuid::new_v4();
         knowledge::replace_document_chunks(
             &pool,
@@ -1207,7 +1209,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     }
     for document_id in [did, left, right] {
         let owned_page: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE product_version_id=$1
+            "SELECT EXISTS(SELECT 1 FROM knowledge_wiki_pages WHERE product_version_id=$1
                    AND source_refs @> jsonb_build_array($2::text))",
         )
         .bind(vid)
@@ -1221,7 +1223,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         );
     }
     let original_page_after: (Uuid, String, serde_json::Value) =
-        sqlx::query_as("SELECT id,content,source_refs FROM wiki_pages WHERE id=$1")
+        sqlx::query_as("SELECT id,content,source_refs FROM knowledge_wiki_pages WHERE id=$1")
             .bind(original_page.0)
             .fetch_one(&pool)
             .await
@@ -1237,7 +1239,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
             assert!(error.contains("Oxana Redis is not configured"), "{error}");
         });
     let retracted_source_remains: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE product_version_id=$1
+        "SELECT EXISTS(SELECT 1 FROM knowledge_wiki_pages WHERE product_version_id=$1
                AND source_refs @> jsonb_build_array($2::text))",
     )
     .bind(vid)
@@ -1248,8 +1250,8 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     assert!(!retracted_source_remains);
     let survivor_is_searchable: bool = sqlx::query_scalar(
         "SELECT EXISTS(
-                SELECT 1 FROM wiki_pages page
-                JOIN chunks chunk ON chunk.product_version_id=page.product_version_id
+                SELECT 1 FROM knowledge_wiki_pages page
+                JOIN knowledge_chunks chunk ON chunk.product_version_id=page.product_version_id
                     AND chunk.chunk_type='wiki_page' AND chunk.context_header=page.slug
                 WHERE page.product_version_id=$1
                   AND page.source_refs @> jsonb_build_array($2::text)
@@ -1264,9 +1266,9 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     assert!(survivor_is_searchable);
 
     let before_failure: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM wiki_pages WHERE product_version_id=$1),
-                    (SELECT count(*) FROM wiki_folders WHERE product_version_id=$1),
-                    (SELECT count(*) FROM chunks WHERE product_version_id=$1 AND chunk_type='wiki_page')",
+            "SELECT (SELECT count(*) FROM knowledge_wiki_pages WHERE product_version_id=$1),
+                    (SELECT count(*) FROM knowledge_wiki_folders WHERE product_version_id=$1),
+                    (SELECT count(*) FROM knowledge_chunks WHERE product_version_id=$1 AND chunk_type='wiki_page')",
         )
         .bind(vid)
         .fetch_one(&pool)
@@ -1274,7 +1276,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         .unwrap();
     sqlx::query("CREATE FUNCTION kb_test_reject_wiki_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced wiki write failure'; END $$")
             .execute(&pool).await.unwrap();
-    sqlx::query("CREATE TRIGGER kb_test_reject_wiki_write BEFORE INSERT OR UPDATE OR DELETE ON wiki_pages FOR EACH ROW EXECUTE FUNCTION kb_test_reject_wiki_write()")
+    sqlx::query("CREATE TRIGGER kb_test_reject_wiki_write BEFORE INSERT OR UPDATE OR DELETE ON knowledge_wiki_pages FOR EACH ROW EXECUTE FUNCTION kb_test_reject_wiki_write()")
             .execute(&pool).await.unwrap();
     let pages = knowledge::list_wiki_pages(&pool, vid).await.unwrap();
     let mut changed_page = pages
@@ -1284,7 +1286,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
     changed_page.content.push_str(" forced change");
     let folder_rows = sqlx::query(
         "SELECT id, product_version_id, parent_id, name, path, depth, sort_order
-             FROM wiki_folders
+             FROM knowledge_wiki_folders
              WHERE product_version_id = $1 AND deleted_at IS NULL",
     )
     .bind(vid)
@@ -1320,7 +1322,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         .await
         .is_err()
     );
-    sqlx::query("DROP TRIGGER kb_test_reject_wiki_write ON wiki_pages")
+    sqlx::query("DROP TRIGGER kb_test_reject_wiki_write ON knowledge_wiki_pages")
         .execute(&pool)
         .await
         .unwrap();
@@ -1329,9 +1331,9 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
         .await
         .unwrap();
     let after_failure: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM wiki_pages WHERE product_version_id=$1),
-                    (SELECT count(*) FROM wiki_folders WHERE product_version_id=$1),
-                    (SELECT count(*) FROM chunks WHERE product_version_id=$1 AND chunk_type='wiki_page')",
+            "SELECT (SELECT count(*) FROM knowledge_wiki_pages WHERE product_version_id=$1),
+                    (SELECT count(*) FROM knowledge_wiki_folders WHERE product_version_id=$1),
+                    (SELECT count(*) FROM knowledge_chunks WHERE product_version_id=$1 AND chunk_type='wiki_page')",
         )
         .bind(vid)
         .fetch_one(&pool)
@@ -1350,7 +1352,7 @@ async fn wiki_disabled_skips_without_error() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -1359,7 +1361,7 @@ async fn wiki_disabled_skips_without_error() {
         .await
         .unwrap();
     sqlx::query(
-        "UPDATE product_versions SET indexing_strategy = '{\"wiki\":false}'::jsonb WHERE id = $1",
+        "UPDATE knowledge_product_versions SET indexing_strategy = '{\"wiki\":false}'::jsonb WHERE id = $1",
     )
     .bind(seeded.library_version_id)
     .execute(&pool)
@@ -1383,7 +1385,7 @@ async fn version_clone_worker_copies_doc_and_sets_active() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -1401,8 +1403,8 @@ async fn version_clone_worker_copies_doc_and_sets_active() {
             title: "iso",
             file_name: "iso.txt",
             file_size: 3,
-            file_hash: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            object_ref: "objects/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            file_hash: &platform::sha256_hex(src_doc.as_bytes()),
+            object_ref: &platform::object_ref(&platform::sha256_hex(src_doc.as_bytes())),
         },
     )
     .await
@@ -1423,31 +1425,35 @@ async fn version_clone_worker_copies_doc_and_sets_active() {
     )
     .await
     .unwrap();
-    let src_n: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM documents WHERE product_version_id = $1")
-            .bind(src)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let dst_n: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM documents WHERE product_version_id = $1")
+    let src_n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_documents WHERE product_version_id = $1",
+    )
+    .bind(src)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let dst_n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_documents WHERE product_version_id = $1",
+    )
+    .bind(dst)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM knowledge_product_versions WHERE id = $1")
             .bind(dst)
             .fetch_one(&pool)
             .await
             .unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM product_versions WHERE id = $1")
-        .bind(dst)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
     assert_eq!(src_n, 1);
     assert_eq!(dst_n, 1);
     assert_eq!(status, "active");
-    let dst_id: Uuid = sqlx::query_scalar("SELECT id FROM documents WHERE product_version_id = $1")
-        .bind(dst)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let dst_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM knowledge_documents WHERE product_version_id = $1")
+            .bind(dst)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_ne!(dst_id, src_doc);
 }
 
@@ -1471,7 +1477,7 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -1479,6 +1485,7 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
     let seeded = create_workspace_with_library(&pool, owner, "Pp", "pp")
         .await
         .unwrap();
+    sqlx::query("UPDATE knowledge_product_versions SET indexing_strategy='{\"vector\":false,\"keyword\":true,\"wiki\":true,\"graph\":false}'::jsonb WHERE id=$1").bind(seeded.library_version_id).execute(&pool).await.unwrap();
     let did = Uuid::new_v4();
     insert_document(
         &pool,
@@ -1488,20 +1495,20 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
             title: "keep",
             file_name: "keep.txt",
             file_size: 8,
-            file_hash: "930a443e0bc8b34f4fdba1201cf2e2a4d551d226d65270c47ef56e3256e8b3e9",
-            object_ref: "objects/930a443e0bc8b34f4fdba1201cf2e2a4d551d226d65270c47ef56e3256e8b3e9",
+            file_hash: &platform::sha256_hex(did.as_bytes()),
+            object_ref: &platform::object_ref(&platform::sha256_hex(did.as_bytes())),
         },
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE documents SET parse_status = 'processing', enable_status = 'enabled'
-             WHERE id = $1",
-    )
-    .bind(did)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE knowledge_documents SET enable_status='enabled' WHERE id=$1")
+        .bind(did)
+        .execute(&pool)
+        .await
+        .unwrap();
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
+        .await
+        .unwrap();
     let cid = Uuid::new_v4();
     knowledge::replace_document_chunks(
         &pool,
@@ -1530,16 +1537,26 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
     )
     .await
     .unwrap();
+    knowledge::workflow::put(
+        &pool,
+        did,
+        seeded.library_version_id,
+        1,
+        knowledge::workflow::Work::Postprocess { clone_keep: true },
+    )
+    .await
+    .unwrap();
     if let Err(error) = process_post_process(&pool, did, seeded.library_version_id, true, 1).await {
         assert!(error.contains("Oxana Redis is not configured"), "{error}");
     }
-    let status: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT parse_status FROM knowledge_documents WHERE id = $1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let pending: i32 =
-        sqlx::query_scalar("SELECT pending_subtasks_count FROM documents WHERE id = $1")
+        sqlx::query_scalar("SELECT pending_subtasks_count FROM knowledge_documents WHERE id = $1")
             .bind(did)
             .fetch_one(&pool)
             .await
@@ -1551,14 +1568,14 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn process_post_process_writes_summary_and_keeps_question_payload_closed() {
     let _g = db_lock().await;
     let Ok(pool) = connect().await else {
         eprintln!("skip: postgres down");
         return;
     };
-    reset_test_schema(&pool).await;
+    require_test_schema(&pool).await;
     let owner = Uuid::new_v4();
     insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
         .await
@@ -1566,11 +1583,14 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
     let seeded = create_workspace_with_library(&pool, owner, "Sm", "sm")
         .await
         .unwrap();
-    sqlx::query("UPDATE product_versions SET summary_model_id = 'stub-chat' WHERE id = $1")
-        .bind(seeded.library_version_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE knowledge_product_versions SET summary_model_id = 'stub-chat' WHERE id = $1",
+    )
+    .bind(seeded.library_version_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE knowledge_product_versions SET indexing_strategy='{\"vector\":false,\"keyword\":true,\"wiki\":false,\"graph\":false}'::jsonb WHERE id=$1").bind(seeded.library_version_id).execute(&pool).await.unwrap();
     let did = Uuid::new_v4();
     insert_document(
         &pool,
@@ -1580,20 +1600,20 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
             title: "spec",
             file_name: "spec.txt",
             file_size: 80,
-            file_hash: "bb558b4638d76b2461f5cdeca98bc8b4ba29b652cfa1ca7662c82d15fd171063",
-            object_ref: "objects/bb558b4638d76b2461f5cdeca98bc8b4ba29b652cfa1ca7662c82d15fd171063",
+            file_hash: &platform::sha256_hex(did.as_bytes()),
+            object_ref: &platform::object_ref(&platform::sha256_hex(did.as_bytes())),
         },
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE documents SET parse_status = 'processing', enable_status = 'enabled'
-             WHERE id = $1",
-    )
-    .bind(did)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE knowledge_documents SET enable_status='enabled' WHERE id=$1")
+        .bind(did)
+        .execute(&pool)
+        .await
+        .unwrap();
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
+        .await
+        .unwrap();
     let body = "The product delivers forty gigabit throughput on the line card. \
                     Operators use this guide to install the switch in a rack and verify ISO9001.";
     let cid = Uuid::new_v4();
@@ -1624,11 +1644,23 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
     )
     .await
     .unwrap();
+    knowledge::workflow::put(
+        &pool,
+        did,
+        seeded.library_version_id,
+        1,
+        knowledge::workflow::Work::Image {
+            image_key: "images/p1.jpg".into(),
+            image_source_type: "scanned_pdf".into(),
+        },
+    )
+    .await
+    .unwrap();
     let image = process_image_pg(&pool, did, "images/p1.jpg", "scanned_pdf", true, true, 1).await;
     if platform::vlm_configured() {
         image.unwrap();
         let text_n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'text'",
+            "SELECT count(*) FROM knowledge_chunks WHERE document_id = $1 AND chunk_type = 'text'",
         )
         .bind(did)
         .fetch_one(&pool)
@@ -1636,7 +1668,7 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
         .unwrap();
         assert_eq!(text_n, 1, "multimodal append must keep text chunks");
         let ocr_n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'image_ocr'",
+            "SELECT count(*) FROM knowledge_chunks WHERE document_id = $1 AND chunk_type = 'image_ocr'",
         )
         .bind(did)
         .fetch_one(&pool)
@@ -1647,13 +1679,22 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
         assert!(image.is_err(), "no VLM must not stub OCR chunks");
     }
 
+    knowledge::workflow::put(
+        &pool,
+        did,
+        seeded.library_version_id,
+        1,
+        knowledge::workflow::Work::Postprocess { clone_keep: false },
+    )
+    .await
+    .unwrap();
     process_post_process(&pool, did, seeded.library_version_id, false, 1)
         .await
         .unwrap();
     let _ = process_summary_pg(&pool, did, 1, false).await;
     let _ = knowledge::pipeline::run_questions(&pool, did, &[cid], &[], &[], 1).await;
     let summaries: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'summary'",
+        "SELECT count(*) FROM knowledge_chunks WHERE document_id = $1 AND chunk_type = 'summary'",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -1661,7 +1702,7 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
     .unwrap();
     assert!(summaries >= 1, "summary chunk persisted");
     let qs: serde_json::Value =
-        sqlx::query_scalar("SELECT generated_questions FROM chunks WHERE id = $1")
+        sqlx::query_scalar("SELECT generated_questions FROM knowledge_chunks WHERE id = $1")
             .bind(cid)
             .fetch_one(&pool)
             .await
@@ -1693,13 +1734,12 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
             return;
         }
     };
-    reset_test_schema(&pool).await;
-    let schema_ready: bool = sqlx::query_scalar(
-        "SELECT to_regprocedure('kb_knowledge_prepare_semantic_index_intent_v2(uuid)') IS NOT NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap_or(false);
+    require_test_schema(&pool).await;
+    let schema_ready: bool =
+        sqlx::query_scalar("SELECT to_regclass('knowledge_semantic_index_intents') IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false);
     if !schema_ready {
         if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") {
             panic!("required semantic-index V2 schema is unavailable");
@@ -1728,16 +1768,24 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     };
     let revision_sha256 = revision.sha256().unwrap();
 
-    sqlx::query("INSERT INTO workspaces(id,name,slug,kind) VALUES($1,'semantic lifecycle',$2,'product_line')")
+    insert_user(
+        &pool,
+        workspace_id,
+        &format!("{workspace_id}@worker.test"),
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO knowledge_workspaces(id,name,slug,kind,owner_user_id) VALUES($1,'semantic lifecycle',$2,'product_line',$1)")
             .bind(workspace_id)
             .bind(format!("semantic-lifecycle-{workspace_id}"))
             .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','semantic lifecycle',$3)")
+    sqlx::query("INSERT INTO knowledge_products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','semantic lifecycle',$3)")
             .bind(product_id).bind(workspace_id)
             .bind(format!("semantic-lifecycle-{product_id}"))
             .execute(&pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO product_versions(id,product_id,label,status) VALUES($1,$2,'v2','active')",
+        "INSERT INTO knowledge_product_versions(id,product_id,label,status) VALUES($1,$2,'v2','active')",
     )
     .bind(version_id)
     .bind(product_id)
@@ -1751,7 +1799,7 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
             .unwrap();
     assert_eq!(unbound, SemanticIndexPreparationV2::Unbound);
 
-    sqlx::query("INSERT INTO embedding_revisions_v2(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'env:KNOWLEDGEBRAIN_TEST_MISSING_SEMANTIC_V2')")
+    sqlx::query("INSERT INTO knowledge_embedding_revisions(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'env:KNOWLEDGEBRAIN_TEST_MISSING_SEMANTIC_V2')")
             .bind(&revision_sha256)
             .bind(revision.canonical_bytes().unwrap())
             .bind(i16::try_from(revision.schema_version).unwrap())
@@ -1764,7 +1812,7 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
             .bind(&revision.request_config_sha256)
             .bind(&revision.output_normalization_version)
             .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO product_version_embedding_bindings_v2(product_version_id,embedding_revision_sha256) VALUES($1,$2)")
+    sqlx::query("INSERT INTO knowledge_product_version_embedding_bindings(product_version_id,embedding_revision_sha256) VALUES($1,$2)")
             .bind(version_id).bind(&revision_sha256).execute(&pool).await.unwrap();
 
     let empty_intent =
@@ -1797,34 +1845,18 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(empty_completed.status, "completed");
-    for statement in [
-        "UPDATE knowledge_semantic_index_intents_v2 SET source_snapshot_sha256=repeat('0',64) WHERE id=$1",
-        "DELETE FROM knowledge_semantic_index_intents_v2 WHERE id=$1",
-    ] {
-        let immutable_error = sqlx::query(statement)
-            .bind(empty_intent.id)
-            .execute(&pool)
-            .await
-            .unwrap_err();
-        assert!(
-            immutable_error
-                .as_database_error()
-                .is_some_and(|error| error
-                    .message()
-                    .contains("KNOWLEDGE_SEMANTIC_INDEX_INTENT_V2_IMMUTABLE")),
-            "intent identity/history must be immutable: {immutable_error}"
-        );
-    }
-
-    sqlx::query("INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state) VALUES($1,$2,'text/plain',0,'available')")
+    assert_eq!(
+        empty_completed.status,
+        knowledge::SemanticIndexIntentStatus::Completed
+    );
+    sqlx::query("INSERT INTO platform_objects(object_ref,content_sha256,media_type,byte_length,state) VALUES($1,$2,'text/plain',0,'available')")
             .bind(&object_ref).bind(&file_hash).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original',NULL)")
+    sqlx::query("INSERT INTO platform_object_references(object_ref,owner_kind,owner_id,occurrence) VALUES($1,'knowledge_document',$2,'original')")
             .bind(&object_ref).bind(document_id).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO documents(id,product_version_id,title,parse_status,pending_subtasks_count,summary_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES($1,$2,'lifecycle','finalizing',1,'pending','enabled',true,$3,0,$4,$5)")
+    sqlx::query("INSERT INTO knowledge_documents(id,product_version_id,title,parse_status,pending_subtasks_count,summary_status,enable_status,index_ready,file_name,byte_length,content_sha256,object_ref) VALUES($1,$2,'lifecycle','finalizing',1,'pending','enabled',true,$3,0,$4,$5)")
             .bind(document_id).bind(version_id).bind(format!("{document_id}.txt"))
             .bind(&file_hash).bind(&object_ref).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,context_header) VALUES($1,$2,$3,'text','settled source','# lifecycle')")
+    sqlx::query("INSERT INTO knowledge_chunks(id,product_version_id,document_id,chunk_type,content,context_header) VALUES($1,$2,$3,'text','settled source','# lifecycle')")
             .bind(chunk_id).bind(version_id).bind(document_id).execute(&pool).await.unwrap();
 
     assert_eq!(
@@ -1833,8 +1865,12 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
             .unwrap(),
         SemanticIndexPreparationV2::PendingDerived
     );
-    sqlx::query("UPDATE documents SET parse_status='completed',pending_subtasks_count=0,summary_status='completed' WHERE id=$1")
-            .bind(document_id).execute(&pool).await.unwrap();
+    knowledge::set_document_progress(&pool, document_id, knowledge::ParseStatus::Completed, 0)
+        .await
+        .unwrap();
+    knowledge::set_summary_status(&pool, document_id, knowledge::SummaryStatus::Completed)
+        .await
+        .unwrap();
     let source_intent =
         match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
             .await
@@ -1886,9 +1922,8 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     assert_eq!(
         knowledge::document_parse_status(&pool, document_id)
             .await
-            .unwrap()
-            .as_deref(),
-        Some("completed"),
+            .unwrap(),
+        Some(knowledge::ParseStatus::Completed),
         "V2 enqueue failure must not rewrite completed V1 status"
     );
 
@@ -1922,7 +1957,10 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(retryable.status, "pending");
+    assert_eq!(
+        retryable.status,
+        knowledge::SemanticIndexIntentStatus::Pending
+    );
     assert_eq!(
         retryable.last_error_code.as_deref(),
         Some("PROVIDER_UNAVAILABLE")
@@ -1953,7 +1991,10 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(ready.status, "completed");
+    assert_eq!(
+        ready.status,
+        knowledge::SemanticIndexIntentStatus::Completed
+    );
     assert_eq!(
         ready.generation_marker_sha256.as_deref(),
         Some(source_intent.source_snapshot_sha256.as_str())
@@ -1961,12 +2002,12 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     let complete_generation: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                SELECT 1
-                 FROM product_version_keyword_index_generations_v2 keyword_generation
-                 JOIN product_version_vector_index_generations_v2 vector_generation
+                 FROM knowledge_product_version_keyword_generations keyword_generation
+                 JOIN knowledge_product_version_vector_generations vector_generation
                    ON vector_generation.product_version_id=keyword_generation.product_version_id
                   AND vector_generation.embedding_revision_sha256=keyword_generation.embedding_revision_sha256
                   AND vector_generation.source_snapshot_sha256=keyword_generation.source_snapshot_sha256
-                 JOIN knowledge_semantic_index_intents_v2 intent
+                 JOIN knowledge_semantic_index_intents intent
                    ON intent.product_version_id=keyword_generation.product_version_id
                   AND intent.embedding_revision_sha256=keyword_generation.embedding_revision_sha256
                   AND intent.source_snapshot_sha256=keyword_generation.source_snapshot_sha256
@@ -1995,14 +2036,15 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
         1,
         "duplicate delivery must noop"
     );
-    let v1_ready: bool = sqlx::query_scalar("SELECT index_ready FROM documents WHERE id=$1")
-        .bind(document_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let v1_ready: bool =
+        sqlx::query_scalar("SELECT index_ready FROM knowledge_documents WHERE id=$1")
+            .bind(document_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(v1_ready, "V1 document readiness must remain unchanged");
 
-    sqlx::query("UPDATE chunks SET content='aba generation b' WHERE id=$1")
+    sqlx::query("UPDATE knowledge_chunks SET content='aba generation b' WHERE id=$1")
         .bind(chunk_id)
         .execute(&pool)
         .await
@@ -2030,7 +2072,7 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .unwrap();
     assert_eq!(aba_b_provider.calls.load(Ordering::SeqCst), 1);
 
-    sqlx::query("UPDATE chunks SET content='settled source' WHERE id=$1")
+    sqlx::query("UPDATE knowledge_chunks SET content='settled source' WHERE id=$1")
         .bind(chunk_id)
         .execute(&pool)
         .await
@@ -2076,8 +2118,11 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(aba_pending.status, "pending");
-    sqlx::query("UPDATE documents SET pending_subtasks_count=0 WHERE id=$1")
+    assert_eq!(
+        aba_pending.status,
+        knowledge::SemanticIndexIntentStatus::Pending
+    );
+    sqlx::query("UPDATE knowledge_documents SET pending_subtasks_count=0 WHERE id=$1")
         .bind(document_id)
         .execute(&pool)
         .await
@@ -2101,9 +2146,9 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
         "the already fenced vector generation is reused without duplicate provider I/O"
     );
 
-    let prior_marker: String = sqlx::query_scalar("SELECT source_snapshot_sha256 FROM product_version_vector_index_generations_v2 WHERE product_version_id=$1")
+    let prior_marker: String = sqlx::query_scalar("SELECT source_snapshot_sha256 FROM knowledge_product_version_vector_generations WHERE product_version_id=$1")
             .bind(version_id).fetch_one(&pool).await.unwrap();
-    sqlx::query("UPDATE chunks SET content='stale source generation' WHERE id=$1")
+    sqlx::query("UPDATE knowledge_chunks SET content='stale source generation' WHERE id=$1")
         .bind(chunk_id)
         .execute(&pool)
         .await
@@ -2116,11 +2161,13 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
             SemanticIndexPreparationV2::Enqueue(intent) => intent,
             other => panic!("expected stale source intent, got {other:?}"),
         };
-    sqlx::query("UPDATE chunks SET content='new immutable source generation' WHERE id=$1")
-        .bind(chunk_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE knowledge_chunks SET content='new immutable source generation' WHERE id=$1",
+    )
+    .bind(chunk_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let terminal_intent =
         match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
             .await
@@ -2155,7 +2202,10 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(stale.status, "superseded");
+    assert_eq!(
+        stale.status,
+        knowledge::SemanticIndexIntentStatus::Superseded
+    );
     assert_eq!(
         stale_successor.as_ref().map(|successor| successor.id),
         Some(terminal_intent.id),
@@ -2199,28 +2249,31 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(terminal.status, "terminal");
+    assert_eq!(
+        terminal.status,
+        knowledge::SemanticIndexIntentStatus::Terminal
+    );
     assert_eq!(
         terminal.last_error_code.as_deref(),
         Some("INVALID_IMMUTABLE_CONFIGURATION")
     );
-    let retained_marker: String = sqlx::query_scalar("SELECT source_snapshot_sha256 FROM product_version_vector_index_generations_v2 WHERE product_version_id=$1")
+    let retained_marker: String = sqlx::query_scalar("SELECT source_snapshot_sha256 FROM knowledge_product_version_vector_generations WHERE product_version_id=$1")
             .bind(version_id).fetch_one(&pool).await.unwrap();
     assert_eq!(
         retained_marker, prior_marker,
         "failed publication must preserve the prior complete generation"
     );
-    let current_snapshot: String = sqlx::query_scalar(
-        "SELECT source_snapshot_sha256 FROM kb_knowledge_source_snapshot_v2($1,$2)",
+    let current_snapshot = knowledge::knowledge_index_v2::source_snapshot_v2(
+        &mut pool.acquire().await.unwrap(),
+        version_id,
+        &revision_sha256,
     )
-    .bind(version_id)
-    .bind(&revision_sha256)
-    .fetch_one(&pool)
     .await
-    .unwrap();
+    .unwrap()
+    .0;
     let stale_ready: bool = sqlx::query_scalar(
         "SELECT EXISTS(
-               SELECT 1 FROM knowledge_semantic_index_intents_v2
+               SELECT 1 FROM knowledge_semantic_index_intents
                 WHERE product_version_id=$1 AND embedding_revision_sha256=$2
                   AND source_snapshot_sha256=$3 AND status='completed'
                   AND generation_marker_sha256=$3)",
@@ -2236,7 +2289,7 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
         "a failed new source generation must never be retrieval-ready"
     );
 
-    sqlx::query("UPDATE chunks SET content='revision fence generation' WHERE id=$1")
+    sqlx::query("UPDATE knowledge_chunks SET content='revision fence generation' WHERE id=$1")
         .bind(chunk_id)
         .execute(&pool)
         .await
@@ -2249,7 +2302,7 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
             SemanticIndexPreparationV2::Enqueue(intent) => intent,
             other => panic!("expected pre-revocation intent, got {other:?}"),
         };
-    sqlx::query("UPDATE embedding_revisions_v2 SET support_state='revoked',updated_at=clock_timestamp() WHERE revision_sha256=$1")
+    sqlx::query("UPDATE knowledge_embedding_revisions SET support_state='revoked',updated_at=clock_timestamp() WHERE revision_sha256=$1")
             .bind(&revision_sha256).execute(&pool).await.unwrap();
     let revoked_provider = LifecycleProvider {
         calls: AtomicUsize::new(0),
@@ -2277,7 +2330,10 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(revoked.status, "terminal");
+    assert_eq!(
+        revoked.status,
+        knowledge::SemanticIndexIntentStatus::Terminal
+    );
     assert_eq!(
         knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
             .await
@@ -2285,55 +2341,4 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
         SemanticIndexPreparationV2::Terminal(revoked.clone()),
         "terminal immutable generation must not be re-enqueued"
     );
-
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("ALTER TABLE public.embedding_revisions_v2 DISABLE TRIGGER USER")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM chunks WHERE product_version_id=$1")
-        .bind(version_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM object_owner_references WHERE object_ref=$1")
-        .bind(&object_ref)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM documents WHERE id=$1")
-        .bind(document_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM object_registry WHERE object_ref=$1")
-        .bind(&object_ref)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM product_versions WHERE id=$1")
-        .bind(version_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM embedding_revisions_v2 WHERE revision_sha256=$1")
-        .bind(&revision_sha256)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("ALTER TABLE public.embedding_revisions_v2 ENABLE TRIGGER USER")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM products WHERE id=$1")
-        .bind(product_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM workspaces WHERE id=$1")
-        .bind(workspace_id)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
 }

@@ -20,6 +20,8 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 import pytest
+
+from docreader.tests.database import initialize_schema
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from docreader.integrations.artifacts import ArtifactStore
@@ -115,6 +117,7 @@ async def runtime(base_dsn, root):
     artifacts = ArtifactStore(root / "artifacts")
     store = Store(dsn)
     try:
+        await initialize_schema(store.dsn)
         await store.setup()
         await initialize_checkpoints(dsn)
         yield store, artifacts, Settings(dsn, "redis://unused.invalid", artifacts.root)
@@ -211,7 +214,7 @@ async def measurements(store, artifacts, row, calls):
             ).format(sql.Identifier(table)), (thread_id,))).fetchone()
             checkpoint_tables[table] = {key: int(value) for key, value in values.items()}
         audit_bytes = (await (await conn.execute(
-            "SELECT COALESCE(sum(pg_column_size(r)), 0) AS bytes FROM tender_model_requests r WHERE run_id = %s",
+            "SELECT COALESCE(sum(pg_column_size(r)), 0) AS bytes FROM tender_analysis_model_requests r WHERE run_id = %s",
             (row["run_id"],),
         )).fetchone())["bytes"]
     async with AsyncPostgresSaver.from_conn_string(store.dsn) as saver:

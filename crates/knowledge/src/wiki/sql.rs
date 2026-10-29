@@ -12,7 +12,7 @@ pub async fn replace_wiki_page_chunks(
 ) -> Result<(), sqlx::Error> {
     if !slugs.is_empty() {
         sqlx::query(
-            "DELETE FROM chunks
+            "DELETE FROM knowledge_chunks
              WHERE product_version_id = $1
                AND chunk_type = 'wiki_page'
                AND context_header = ANY($2)",
@@ -55,24 +55,20 @@ pub async fn persist_wiki_changes_atomic(
         lock_ids.sort_unstable();
         lock_ids.dedup();
     }
-    let locked = sqlx::query("SELECT id,attempt,parse_status,deleted_at IS NULL AS live FROM documents WHERE product_version_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE")
+    let locked: Vec<(Uuid, i32, crate::ParseStatus, bool)> = sqlx::query_as("SELECT id,attempt,parse_status,deleted_at IS NULL AS live FROM knowledge_documents WHERE product_version_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE")
         .bind(version_id).bind(&lock_ids).fetch_all(&mut *tx).await?;
     for source_id in source_ids {
         let expected = source_generations
             .iter()
             .find(|(id, _)| *id == source_id)
             .map(|(_, attempt)| *attempt);
-        let current = locked
-            .iter()
-            .find(|row| row.get::<Uuid, _>("id") == source_id);
+        let current = locked.iter().find(|(id, _, _, _)| *id == source_id);
         if expected.is_none()
-            || current.is_none_or(|row| {
-                !row.get::<bool, _>("live")
-                    || expected != Some(row.get::<i32, _>("attempt"))
-                    || matches!(
-                        row.get::<String, _>("parse_status").as_str(),
-                        "cancelled" | "deleting" | "deleted" | "failed"
-                    )
+            || current.is_none_or(|(_, attempt, status, live)| {
+                !live
+                    || expected != Some(*attempt)
+                    || status.is_aborted()
+                    || *status == crate::ParseStatus::Failed
             })
         {
             return Err(sqlx::Error::Protocol(
@@ -81,10 +77,10 @@ pub async fn persist_wiki_changes_atomic(
         }
     }
     if let Some((document_id, attempt, receipt)) = guard {
-        let current:Option<String>=sqlx::query_scalar("SELECT parse_status FROM documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL FOR UPDATE").bind(document_id).bind(attempt).fetch_optional(&mut *tx).await?;
+        let current:Option<crate::ParseStatus>=sqlx::query_scalar("SELECT parse_status FROM knowledge_documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL FOR UPDATE").bind(document_id).bind(attempt).fetch_optional(&mut *tx).await?;
         if current.is_none()
-            || current.as_deref() == Some("cancelled")
-            || (current.as_deref() == Some("deleting") && receipt != "wiki-retract")
+            || current == Some(crate::ParseStatus::Cancelled)
+            || (current == Some(crate::ParseStatus::Deleting) && receipt != "wiki-retract")
         {
             return Ok(());
         }
@@ -94,18 +90,20 @@ pub async fn persist_wiki_changes_atomic(
     }
 
     if !removed_page_ids.is_empty() {
-        sqlx::query("DELETE FROM wiki_pages WHERE product_version_id=$1 AND id=ANY($2::uuid[])")
-            .bind(version_id)
-            .bind(removed_page_ids)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM knowledge_wiki_pages WHERE product_version_id=$1 AND id=ANY($2::uuid[])",
+        )
+        .bind(version_id)
+        .bind(removed_page_ids)
+        .execute(&mut *tx)
+        .await?;
     }
     for folder in folders {
         sqlx::query(
-            "INSERT INTO wiki_folders
-                (id,product_version_id,parent_id,name,path,depth,sort_order)
+            "INSERT INTO knowledge_wiki_folders
+                (id,product_version_id,parent_folder_id,name,path,depth,sort_order)
              VALUES($1,$2,$3,$4,$5,$6,$7)
-             ON CONFLICT(id) DO UPDATE SET parent_id=EXCLUDED.parent_id,name=EXCLUDED.name,
+             ON CONFLICT(id) DO UPDATE SET parent_folder_id=EXCLUDED.parent_folder_id,name=EXCLUDED.name,
                path=EXCLUDED.path,depth=EXCLUDED.depth,sort_order=EXCLUDED.sort_order,
                updated_at=clock_timestamp(),deleted_at=NULL",
         )
@@ -126,7 +124,7 @@ pub async fn persist_wiki_changes_atomic(
             .map(Uuid::to_string)
             .collect::<Vec<_>>();
         sqlx::query(
-            "INSERT INTO wiki_pages
+            "INSERT INTO knowledge_wiki_pages
               (id,product_version_id,slug,title,content,page_type,status,summary,aliases,
                source_refs,chunk_refs,category_path,folder_id)
              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -142,7 +140,7 @@ pub async fn persist_wiki_changes_atomic(
         .bind(&page.title)
         .bind(&page.content)
         .bind(&page.page_type)
-        .bind(&page.status)
+        .bind(page.status)
         .bind(&page.summary)
         .bind(serde_json::json!(page.aliases))
         .bind(serde_json::json!(source_refs))
@@ -158,15 +156,17 @@ pub async fn persist_wiki_changes_atomic(
         .await?;
     }
     if !removed_folder_ids.is_empty() {
-        sqlx::query("DELETE FROM wiki_folders WHERE product_version_id=$1 AND id=ANY($2::uuid[])")
-            .bind(version_id)
-            .bind(removed_folder_ids)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM knowledge_wiki_folders WHERE product_version_id=$1 AND id=ANY($2::uuid[])",
+        )
+        .bind(version_id)
+        .bind(removed_folder_ids)
+        .execute(&mut *tx)
+        .await?;
     }
     if !changed_slugs.is_empty() {
         sqlx::query(
-            "DELETE FROM chunks WHERE product_version_id=$1 AND chunk_type='wiki_page'
+            "DELETE FROM knowledge_chunks WHERE product_version_id=$1 AND chunk_type='wiki_page'
                AND context_header=ANY($2::text[])",
         )
         .bind(version_id)
@@ -176,9 +176,9 @@ pub async fn persist_wiki_changes_atomic(
     }
     for chunk in chunks {
         sqlx::query(
-            "INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,
-               context_header,start_at,end_at,parent_chunk_id,generated_questions)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            "INSERT INTO knowledge_chunks(id,product_version_id,document_id,chunk_type,content,
+               context_header,start_offset,end_offset,parent_chunk_id,generated_questions,generation)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,(SELECT attempt FROM knowledge_documents WHERE id=$3 FOR SHARE))",
         )
         .bind(chunk.id)
         .bind(chunk.product_version_id)
@@ -196,7 +196,7 @@ pub async fn persist_wiki_changes_atomic(
     for embedding in embeddings {
         let vector = vector_literal(&embedding.vector);
         sqlx::query(
-            "INSERT INTO chunk_embeddings(chunk_id,product_version_id,document_id,embedding,tsv,content)
+            "INSERT INTO knowledge_chunk_embeddings(chunk_id,product_version_id,document_id,embedding,tsv,content)
              VALUES($1,$2,$3,CAST($4 AS vector),to_tsvector('simple',$5),$5)",
         )
         .bind(embedding.chunk_id)
@@ -217,7 +217,7 @@ pub async fn upsert_wiki_page(
 ) -> Result<(), sqlx::Error> {
     let refs: Vec<String> = page.source_refs.iter().map(|id| id.to_string()).collect();
     sqlx::query(
-        "INSERT INTO wiki_pages
+        "INSERT INTO knowledge_wiki_pages
             (id, product_version_id, slug, title, content, page_type, status,
              summary, aliases, source_refs, chunk_refs, category_path, folder_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -241,7 +241,7 @@ pub async fn upsert_wiki_page(
     .bind(&page.title)
     .bind(&page.content)
     .bind(&page.page_type)
-    .bind(&page.status)
+    .bind(page.status)
     .bind(&page.summary)
     .bind(serde_json::json!(page.aliases))
     .bind(serde_json::json!(refs))
@@ -263,13 +263,13 @@ pub async fn upsert_wiki_folder(
     folder: &crate::WikiFolder,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO wiki_folders
-            (id, product_version_id, parent_id, name, path, depth, sort_order)
+        "INSERT INTO knowledge_wiki_folders
+            (id, product_version_id, parent_folder_id, name, path, depth, sort_order)
          VALUES ($1,$2,$3,$4,$5,$6,$7)
          ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
             path = EXCLUDED.path,
-            parent_id = EXCLUDED.parent_id,
+            parent_folder_id = EXCLUDED.parent_folder_id,
             depth = EXCLUDED.depth,
             sort_order = EXCLUDED.sort_order,
             updated_at = now(),
@@ -292,7 +292,7 @@ pub async fn list_wiki_folders(
     version_id: Uuid,
 ) -> Result<Vec<(Uuid, String, String, i32)>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, name, path, depth FROM wiki_folders
+        "SELECT id, name, path, depth FROM knowledge_wiki_folders
          WHERE product_version_id = $1 AND deleted_at IS NULL
          ORDER BY sort_order, name",
     )

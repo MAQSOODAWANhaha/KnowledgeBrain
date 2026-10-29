@@ -1,4 +1,4 @@
-"""Confirmed analysis references remain a read-only, version-bound authoring input."""
+"""Available analysis references remain a read-only, version-bound authoring input."""
 
 from copy import deepcopy
 import hashlib
@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from docreader.integrations.artifacts import ArtifactIntegrityError, ArtifactStore
+from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.authoring import read_authoring_input
-from docreader.integrations.store import InvalidConfirmation
+from docreader.integrations.store import Cancelled, InvalidConfirmation
 from docreader.tender.checks.analysis import current_items
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment, selector
 from docreader.tender.schema import AuthoringInput
@@ -43,7 +43,7 @@ def snapshot(artifacts, *, roots=None, resolutions=None):
                  "checklist_digest": digest, **({"issue_resolutions": resolutions} if resolutions else {})}
     roots["confirm"] = confirmed
     refs["confirmation_ref"] = artifacts.put_json(confirmed)
-    value = {"schema_version": 2, **IDENTITY, "checklist_digest": digest, **refs}
+    value = {"schema_version": 2, **IDENTITY, "checklist_digest": digest, **refs, "extract_refs": [], "issues": []}
     row = {**IDENTITY, "status": "analysis-ready", "cancel_requested": False, "checklist_digest": digest,
            "revision": {"execution_spec": {"normalization_version": 1}},
            "artifacts": [{**IDENTITY, "domain_revision": 0 if stage == "freeze" else IDENTITY["domain_revision"],
@@ -74,16 +74,15 @@ async def test_returns_only_shared_contract_without_writes_or_protocol_upgrade(c
     assert {p: p.read_bytes() for p in confirmed.artifacts.root.rglob("*") if p.is_file()} == before
 
 
-@pytest.mark.parametrize("status", ["pending", "running", "waiting-confirmation", "blocked", "failed", "cancelled"])
-async def test_requires_completed_confirmation(confirmed, status):
+@pytest.mark.parametrize("status", ["pending", "running", "waiting-confirmation", "blocked", "failed"])
+async def test_analysis_progress_does_not_gate_available_input(confirmed, status):
     confirmed.row["status"] = status
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    assert (await read(confirmed))["items_ref"] == confirmed.expected["items_ref"]
 
 
 async def test_cancellation_overrides_ready(confirmed):
     confirmed.row["cancel_requested"] = True
-    with pytest.raises(InvalidConfirmation):
+    with pytest.raises(Cancelled):
         await read(confirmed)
 
 
@@ -99,15 +98,16 @@ async def test_history_and_scoped_receipts_cannot_substitute_current_root(confir
     receipt = next(r for r in confirmed.row["artifacts"] if r["stage"] == stage)
     confirmed.row["history"]["artifacts"].append(deepcopy(receipt))
     receipt["scope"] = "child-pack"
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value[STAGES[stage]] is None
+    assert value["issues"]
 
 
 @pytest.mark.parametrize("field,value", [("run_id", "another"), ("source_version", 1), ("domain_revision", 1)])
 async def test_wrong_revision_receipt_cannot_supply_root(confirmed, field, value):
     confirmed.row["artifacts"][-1][field] = value
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value["confirmation_ref"] is None and value["issues"]
 
 
 def replace_root(data, stage, value):
@@ -117,29 +117,30 @@ def replace_root(data, stage, value):
 
 @pytest.mark.parametrize("stage,field,value", [
     ("pack-plan", "frozen_ref", {}), ("pack-plan", "run_identity", {**IDENTITY, "domain_revision": 1}),
-    ("verify", "items_ref", {}), ("verify", "hard_blocking", True),
+    ("verify", "items_ref", {}),
     ("confirm", "source_version", 1), ("confirm", "domain_revision", 1),
     ("confirm", "checklist_digest", "0" * 64),
 ])
 async def test_inconsistent_artifacts_are_not_authoring_input(confirmed, stage, field, value):
     replace_root(confirmed, stage, {**confirmed.roots[stage], field: value})
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value[STAGES[stage]] is None and value["issues"]
 
 
 @pytest.mark.parametrize("stage", ["freeze", "pack-plan", "extract", "verify"])
 async def test_only_v2_analysis_roots_are_supported(confirmed, stage):
     replace_root(confirmed, stage, {**confirmed.roots[stage], "schema_version": 1})
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value[STAGES[stage]] is None and value["issues"]
 
 
 async def test_digest_recomputed_even_if_confirmed_digest_matches_run(confirmed):
     replace_root(confirmed, "extract", {"schema_version": 2, "packs": [], "changed": True})
     changed_ref = next(r["artifact_ref"] for r in confirmed.row["artifacts"] if r["stage"] == "extract")
     replace_root(confirmed, "verify", {**confirmed.roots["verify"], "items_ref": changed_ref})
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value["confirmation_ref"] is None and value["checklist_digest"] is None
+    assert value["items_ref"] == changed_ref
 
 
 @pytest.mark.parametrize("stage", STAGES)
@@ -148,8 +149,9 @@ async def test_content_integrity_is_checked(confirmed, stage):
     path = confirmed.artifacts.path(ref)
     path.chmod(0o644)
     path.write_bytes(b"x" * ref["size"])
-    with pytest.raises(ArtifactIntegrityError):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value[STAGES[stage]] is None
+    assert any(issue["code"] == "authoring_input_unavailable" for issue in value["issues"])
 
 
 @pytest.mark.parametrize("mutation", ["missing", "digest", "resolutions"])
@@ -158,8 +160,8 @@ async def test_requires_persisted_matching_confirmation(confirmed, mutation):
         confirmed.row["confirmations"] = []
     else:
         confirmed.row["confirmations"][0]["checklist_digest" if mutation == "digest" else "issue_resolutions"] = "wrong"
-    with pytest.raises(InvalidConfirmation):
-        await read(confirmed)
+    value = await read(confirmed)
+    assert value["confirmation_ref"] is None and value["issues"]
 
 
 @pytest.mark.parametrize("field,value", [("schema_version", True), ("source_version", "2"),
@@ -238,3 +240,41 @@ async def test_source_fragments_recover_original_location_and_keep_background_an
     assert original["units"][0]["text"] == "项目背景；服务须在2小时内响应。"
     assert original["units"][1]["grid"] == native.raw["units"][1]["grid"]
     assert artifacts.read_bytes(document["original_ref"]) == b"synthetic original"
+
+
+async def test_unconfirmed_partial_extract_receipts_are_fixed_without_fake_roots(confirmed):
+    confirmed.row.update(status="failed", checklist_digest=None)
+    confirmed.row["artifacts"] = [entry for entry in confirmed.row["artifacts"] if entry["stage"] == "freeze"]
+    first = confirmed.artifacts.put_json({"schema_version": 2, "items": [
+        {"item_id": "partial", "text": "须提供服务", "evidence": []}]})
+    confirmed.row["artifacts"].append({**IDENTITY, "stage": "extract-pack", "scope": "first", "artifact_ref": first})
+    before = deepcopy(confirmed.row)
+    value = await read(confirmed, checklist_digest=None)
+    assert value["extract_refs"] == [first]
+    assert value["items_ref"] is None and value["verification_ref"] is None and value["confirmation_ref"] is None
+    assert value["checklist_digest"] is None and value["issues"]
+    assert confirmed.row == before
+    from docreader.tender.authoring import _OutlineContext
+    context = _OutlineContext(confirmed.artifacts, value)
+    assert context.payload["rules"][0]["item"]["item_id"] == "partial"
+    assert context.payload["rule_origin"] == "extraction"
+    assert any(issue["code"] == "authoring_unverified_items" for issue in context.payload["issues"])
+    assert context.validate({"schema_version": 2, "chapters": [], "findings": []})["issues"]
+
+
+async def test_hard_analysis_findings_are_retained_without_blocking_authoring(confirmed):
+    root = {**confirmed.roots["verify"], "hard_blocking": True, "blocking": True}
+    replace_root(confirmed, "verify", root)
+    value = await read(confirmed)
+    assert value["verification_ref"] is not None
+    assert any(issue["code"] == "authoring_analysis_issues" for issue in value["issues"])
+
+
+async def test_no_available_artifacts_still_produces_explicit_empty_input(confirmed):
+    confirmed.row.update(status="pending", checklist_digest=None, artifacts=[], confirmations=[])
+    value = await read(confirmed, checklist_digest=None)
+    assert all(value[field] is None for field in STAGES.values())
+    from docreader.tender.authoring import _OutlineContext
+    context = _OutlineContext(confirmed.artifacts, value)
+    assert context.payload["rules"] == [] and context.payload["source_views"] == []
+    assert len(context.payload["issues"]) >= len(STAGES)

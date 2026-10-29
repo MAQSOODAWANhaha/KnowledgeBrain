@@ -291,11 +291,30 @@ fn fuse_by_chunk_id(hits: Vec<Hit>) -> Vec<Hit> {
 pub async fn assembly_pg(
     pool: &sqlx::PgPool,
     req: &SearchRequest,
+    owner_user_id: Uuid,
 ) -> Result<AssemblyResponse, SearchError> {
     let product_id = req.product_id.ok_or(SearchError {
         code: "VALIDATION",
         message: "product_id required for assembly".into(),
     })?;
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_products p JOIN knowledge_workspaces w ON w.id=p.workspace_id
+         WHERE p.id=$1 AND w.owner_user_id=$2 AND w.deleted_at IS NULL)",
+    )
+    .bind(product_id)
+    .bind(owner_user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| SearchError {
+        code: "INTERNAL",
+        message: e.to_string(),
+    })?;
+    if !owned {
+        return Err(SearchError {
+            code: "NOT_FOUND",
+            message: "product not found".into(),
+        });
+    }
     let query = req.query.clone().unwrap_or_default();
     if query.trim().is_empty() {
         return Err(SearchError {
@@ -531,6 +550,7 @@ async fn graph_hits_for_version(
 pub async fn matching_pg(
     pool: &sqlx::PgPool,
     req: &SearchRequest,
+    owner_user_id: Uuid,
 ) -> Result<MatchingResponse, SearchError> {
     if req.product_id.is_some() {
         return Err(SearchError {
@@ -539,7 +559,7 @@ pub async fn matching_pg(
         });
     }
     if req.scope.as_deref() == Some("company") {
-        return matching_company_pg(pool, req).await;
+        return matching_company_pg(pool, req, owner_user_id).await;
     }
     let scoped_lines = req.scope.as_deref() == Some("product_lines");
     let workspace_id = if scoped_lines {
@@ -550,6 +570,19 @@ pub async fn matching_pg(
             message: "workspace required".into(),
         })?
     };
+    if !scoped_lines {
+        let owned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_workspaces WHERE id=$1 AND owner_user_id=$2 AND deleted_at IS NULL)",
+        ).bind(workspace_id).bind(owner_user_id).fetch_one(pool).await.map_err(|e| SearchError {
+            code: "INTERNAL", message: e.to_string(),
+        })?;
+        if !owned {
+            return Err(SearchError {
+                code: "NOT_FOUND",
+                message: "workspace not found".into(),
+            });
+        }
+    }
     let mut requirements = req.requirements.clone();
     if !scoped_lines
         && requirements.is_empty()
@@ -558,8 +591,8 @@ pub async fn matching_pg(
     {
         let model: String = sqlx::query_scalar(
             "SELECT COALESCE(pv.summary_model_id, 'stub-chat')
-             FROM products p
-             JOIN product_versions pv ON pv.id = p.current_version_id
+             FROM knowledge_products p
+             JOIN knowledge_product_versions pv ON pv.id = p.current_version_id
              WHERE p.workspace_id = $1 AND p.kind = 'product' AND pv.status = 'active'
              LIMIT 1",
         )
@@ -600,29 +633,31 @@ pub async fn matching_pg(
     }
     let all_active = req.version_scope == "all_active";
     if scoped_lines {
-        check_product_line_thresholds_pg(pool).await?;
+        check_product_line_thresholds_pg(pool, owner_user_id).await?;
     }
     let rows = if scoped_lines {
         sqlx::query(
             "SELECT p.id AS product_id, p.name AS product_name, pv.id AS version_id,
                     pv.label AS version_label, COALESCE(pv.embedding_model_id, '') AS emb
-             FROM products p
-             JOIN workspaces w ON w.id = p.workspace_id
-             JOIN product_versions pv ON pv.product_id = p.id
+             FROM knowledge_products p
+             JOIN knowledge_workspaces w ON w.id = p.workspace_id
+             JOIN knowledge_product_versions pv ON pv.product_id = p.id
              WHERE COALESCE(w.kind, 'product_line') = 'product_line'
                AND p.kind = 'product'
                AND pv.deleted_at IS NULL
                AND pv.status = 'active'
-               AND ($1 OR pv.id = p.current_version_id)",
+               AND ($1 OR pv.id = p.current_version_id)
+               AND w.owner_user_id=$2 AND w.deleted_at IS NULL",
         )
         .bind(all_active)
+        .bind(owner_user_id)
         .fetch_all(pool)
     } else {
         sqlx::query(
             "SELECT p.id AS product_id, p.name AS product_name, pv.id AS version_id,
                     pv.label AS version_label, COALESCE(pv.embedding_model_id, '') AS emb
-             FROM products p
-             JOIN product_versions pv ON pv.product_id = p.id
+             FROM knowledge_products p
+             JOIN knowledge_product_versions pv ON pv.product_id = p.id
              WHERE p.workspace_id = $1
                AND p.kind = 'product'
                AND pv.deleted_at IS NULL
@@ -683,8 +718,8 @@ pub async fn matching_pg(
     let lib_ids: Vec<Uuid> =
         if !scoped_lines && (req.include_library || requirements.iter().any(|r| r.use_library)) {
             sqlx::query_scalar(
-                "SELECT p.current_version_id FROM products p
-             JOIN product_versions pv ON pv.id = p.current_version_id
+                "SELECT p.current_version_id FROM knowledge_products p
+             JOIN knowledge_product_versions pv ON pv.id = p.current_version_id
              WHERE p.workspace_id = $1 AND p.kind = 'library'
                AND pv.status = 'active' AND pv.deleted_at IS NULL",
             )
@@ -828,11 +863,15 @@ pub async fn matching_pg(
     })
 }
 
-async fn check_product_line_thresholds_pg(pool: &sqlx::PgPool) -> Result<(), SearchError> {
+async fn check_product_line_thresholds_pg(
+    pool: &sqlx::PgPool,
+    owner_user_id: Uuid,
+) -> Result<(), SearchError> {
     let rows = sqlx::query(
         "SELECT DISTINCT w.retrieval_config
-         FROM workspaces w WHERE COALESCE(w.kind, 'product_line') = 'product_line'",
+         FROM knowledge_workspaces w WHERE w.kind = 'product_line' AND w.owner_user_id=$1 AND w.deleted_at IS NULL",
     )
+    .bind(owner_user_id)
     .fetch_all(pool)
     .await
     .map_err(|e| SearchError {
@@ -868,6 +907,7 @@ async fn check_product_line_thresholds_pg(pool: &sqlx::PgPool) -> Result<(), Sea
 async fn matching_company_pg(
     pool: &sqlx::PgPool,
     req: &SearchRequest,
+    owner_user_id: Uuid,
 ) -> Result<MatchingResponse, SearchError> {
     let mut requirements = req.requirements.clone();
     if requirements.is_empty()
@@ -892,12 +932,14 @@ async fn matching_company_pg(
     let version_rows = sqlx::query(
         "SELECT p.id AS product_id, pv.id AS version_id,
                 COALESCE(pv.embedding_model_id, '') AS emb
-         FROM products p
-         JOIN workspaces w ON w.id = p.workspace_id
-         JOIN product_versions pv ON pv.id = p.current_version_id
+         FROM knowledge_products p
+         JOIN knowledge_workspaces w ON w.id = p.workspace_id
+         JOIN knowledge_product_versions pv ON pv.id = p.current_version_id
          WHERE w.kind = 'company' AND p.kind = 'library'
+           AND w.owner_user_id=$1 AND w.deleted_at IS NULL
            AND pv.status = 'active' AND pv.deleted_at IS NULL",
     )
+    .bind(owner_user_id)
     .fetch_all(pool)
     .await
     .map_err(|e| SearchError {
@@ -1048,31 +1090,23 @@ mod tests {
     async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {
         let database_url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {
             sqlx::Error::Configuration(
-                "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for destructive PostgreSQL tests"
-                    .into(),
+                "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for isolated PostgreSQL tests".into(),
             )
         })?;
-        if database_url.contains(":15432/") {
+        let options: sqlx::postgres::PgConnectOptions = database_url.parse()?;
+        if options.get_host() != "127.0.0.1"
+            || !options
+                .get_database()
+                .is_some_and(|name| name.starts_with("knowledgebrain_test_"))
+        {
             return Err(sqlx::Error::Configuration(
-                "destructive PostgreSQL tests refuse the live :15432 database".into(),
+                "PostgreSQL tests require a loopback knowledgebrain_test_* database".into(),
             ));
         }
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(16)
-            .connect(&database_url)
+            .connect_with(options)
             .await
-    }
-
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../test-support/postgres.rs"
-    ));
-
-    async fn reset_fresh_schema(pool: &sqlx::PgPool) {
-        reset_isolated_schema(pool)
-            .await
-            .expect("reset isolated test schema");
-        platform::apply_fresh_baseline(pool).await.expect("migrate");
     }
 
     #[test]
@@ -1154,7 +1188,6 @@ mod tests {
             eprintln!("skip: isolated postgres test database not configured");
             return;
         };
-        reset_fresh_schema(&pool).await;
         let owner = Uuid::new_v4();
         crate::insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -1171,13 +1204,14 @@ mod tests {
             "product",
             "Switch",
             "switch",
-            Some(vid),
+            None,
         )
         .await
         .unwrap();
-        crate::insert_version(&pool, vid, pid, "v1", "active", None)
+        crate::insert_version(&pool, vid, pid, "v1", crate::VersionStatus::Active, None)
             .await
             .unwrap();
+        crate::set_product_current(&pool, pid, vid).await.unwrap();
         let did = Uuid::new_v4();
         crate::insert_document(
             &pool,
@@ -1193,11 +1227,6 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE documents SET enable_status = 'enabled' WHERE id = $1")
-            .bind(did)
-            .execute(&pool)
-            .await
-            .unwrap();
         let cid = Uuid::new_v4();
         let text = "40Gbps throughput line card";
         crate::replace_document_chunks(
@@ -1227,6 +1256,16 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let before = crate::workflow::capture_document_state(&mut tx, did)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE knowledge_documents SET enable_status='enabled',index_ready=true,parse_status='completed' WHERE id=$1")
+            .bind(did).execute(&mut *tx).await.unwrap();
+        crate::workflow::record_document_change(&mut tx, did, before)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
         let req = SearchRequest {
             mode: "matching".into(),
             query: None,
@@ -1252,13 +1291,12 @@ mod tests {
             group_by: "none".into(),
             tender_text: None,
         };
-        let pg = matching_pg(&pool, &req).await.unwrap();
+        let pg = matching_pg(&pool, &req, owner).await.unwrap();
         assert_eq!(pg.candidates.len(), 1);
         assert_eq!(pg.candidates[0].product_id, pid);
         assert!(pg.candidates[0].requirements[0].hit);
         assert!(!pg.candidates[0].requirements[0].hits.is_empty());
         let v = serde_json::to_value(&pg).unwrap();
         assert!(v.get("best_product_id").is_none());
-        reset_fresh_schema(&pool).await;
     }
 }

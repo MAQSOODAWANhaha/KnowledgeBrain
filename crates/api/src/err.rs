@@ -3,12 +3,12 @@ use axum::http::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub error: ErrorInner,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ErrorInner {
     pub code: String,
     pub message: String,

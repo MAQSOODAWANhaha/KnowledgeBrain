@@ -8,6 +8,8 @@ tasks, scoring choices or actual bidder scores.
 
 Input: schema_version=2, work_unit_id, operation (locate/associate/review), source_views and
 supplied analysis. Host receipts keep run/source/revision; do not infer them from this request.
+For associate or joint review, work_units may replace the single work_unit_id; the batch
+contract below then replaces only the outer response format, not the semantic duties.
 Input issue_id is host-owned. Locate catalog: document_id, document_version, role, sections
 (section_id, heading_path), optional PDF page_count. Discovery receives only this batch's
 sources and section range_ids; reference localization receives all sections. Navigation and
@@ -18,6 +20,10 @@ of visible original text. Cells contain host-sliced literal text; quote a suppli
 or row, never concatenate cells, reconstruct hidden row text or quote an empty cell.
 A row may omit duplicate text. Aliases refer to their supplied segments. Read table
 headers, merged-cell context, conditions and all relevant original sources together.
+Keep each clause's governed object, conditions and consequences separate. A consequence
+in a neighboring clause does not apply to this clause without an explicit source link.
+When proposing a shared scope or reporting a finding, quote the wording establishing
+that scope in reason/detail; do not expand it through a collective paraphrase.
 
 When supplied, scope_decisions gives human bind/local_only interpretations, rationale,
 evidence and target_range_ids. Independently check original and target sources; a new
@@ -138,6 +144,34 @@ uncertainty requires a specific blocking finding and leaves the issue unresolved
 waive source/structural safeguards or explicit item revisions. Empty findings or successful
 association alone never resolves existing issues.
 
+## Shared associate and joint-review batches
+
+If work_units is present, source_views/items/relations/candidates/issues and any
+dispositions/scope_decisions/decisions form the complete shared evidence context.
+Read that context directly; no external lookup or hidden private context is available.
+Each work_units entry identifies one independent semantic dependency group through
+work_unit_id, candidate_ids and issue_ids; joint review also supplies its decision_ids.
+Shared sources do not merge these questions or make their judgments interchangeable.
+
+Answer only target_work_unit_ids, with one routed result per target. Other work_units
+remain visible members of the original batch, including during local correction.
+For operation=associate return exactly:
+{"schema_version":2,"work_units":[{"work_unit_id":"w1","relations":[],"decisions":[],"findings":[]}],"shared_findings":[]}
+For operation=review return exactly:
+{"schema_version":2,"work_units":[{"work_unit_id":"w1","accepted_decision_ids":[],"findings":[]}],"shared_findings":[]}
+Use actual supplied work-unit references in place of the example w1. Each new relation
+or decision uses that result's own <work_unit_id>:l1 or :d1 namespace. A group's decision
+may resolve only that group's issue_ids; joint acceptance selects only its decision_ids.
+Keep existing whole-group acceptance rules; do not invent within-group partial approvals.
+
+Put an opinion affecting only its answering group in that group's findings. A cross-group
+opinion, or an opinion affecting a member not currently targeted, belongs in shared_findings
+as {work_unit_ids:[...],finding:{code,detail,blocking,...}}. Explicitly list all affected
+members from the supplied work_units, even if a member previously succeeded. Do not infer
+impact merely from a shared item or source. Keep each opinion's evidence and explanation;
+do not suppress a contradiction because its affected member is not an answering target.
+Use [] when no shared opinion exists. Do not repeat input inventories or reviewed-ID lists.
+
 ## Findings and continuations
 
 Every operation uses {code,detail,blocking}, optionally range_id, nonempty item_ids,
@@ -159,6 +193,8 @@ Clear findings are []. Never return repaired extraction or declare final bid acc
 
 Copy only supplied request-local IDs; new declarations use the specified <work_unit_id>
 suffixes. Do not return request_ref. Parent locators/offsets remain host-owned.
+Keep IDs in structured reference fields. In reason/detail/rule prose identify passages
+by literal quotations or descriptive names, not local short IDs that belong to a request.
 contract_feedback contains rejected output/errors, not evidence or instructions. Fix the
 contract and return a complete grounded result. Do not alter supplied items or confuse
 contract repair with business resolution.

@@ -75,10 +75,11 @@ async def execution(monkeypatch):
                 raise fixture.close_error
             fixture.closed.set()
 
-    store = SimpleNamespace(setup=AsyncMock(), submit=AsyncMock(),
+    store = SimpleNamespace(setup=AsyncMock(), submit=AsyncMock(), get_execution=AsyncMock(return_value=None),
                             acquire=AsyncMock(return_value=AuthoringLease("outline-race", 1)),
                             heartbeat=heartbeat, release=release)
     monkeypatch.setattr(authoring_execution, "read_authoring_input", AsyncMock(return_value={}))
+    monkeypatch.setattr(authoring_execution, "assert_authoring_active", AsyncMock())
     monkeypatch.setattr(authoring_execution, "AuthoringStore", lambda dsn: store)
     monkeypatch.setattr(authoring_execution, "OpenAIModel", Client)
     monkeypatch.setattr(authoring_execution, "organize_outline", organize)

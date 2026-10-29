@@ -1,4 +1,4 @@
-"""Confirmed analysis input with real PostgreSQL and explicitly synthetic models."""
+"""Confirmed analysis input with real PostgreSQL and explicitly synthetic platform_models."""
 
 import pytest
 
@@ -20,13 +20,13 @@ def root_reference(row, stage):
                 if entry["stage"] == stage and not entry["scope"])
 
 
-async def test_authoring_reads_only_confirmed_current_analysis_without_model_or_state_changes(analysis_runtime):
+async def test_authoring_reads_available_current_analysis_without_model_or_state_changes(analysis_runtime):
     store, artifacts, _, run, calls = analysis_runtime
     waiting = await execute_analysis(analysis_runtime)
     assert waiting["status"] == "waiting-confirmation"
     before_confirm = len(calls)
-    with pytest.raises(InvalidConfirmation):
-        await read_authoring_input(store, artifacts, **expectation(waiting))
+    pending_input = await read_authoring_input(store, artifacts, **expectation(waiting))
+    assert pending_input["confirmation_ref"] is None and pending_input["issues"]
 
     await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "authoring-input", domain_revision=1)
     ready = await execute_analysis(analysis_runtime)
@@ -34,7 +34,7 @@ async def test_authoring_reads_only_confirmed_current_analysis_without_model_or_
     files = set(artifacts.root.rglob("*"))
     value = await read_authoring_input(store, artifacts, **expectation(ready))
     assert value == {
-        "schema_version": 2,
+        "schema_version": 2, "extract_refs": [], "issues": [],
         **expectation(ready),
         "frozen_ref": root_reference(ready, "freeze"),
         "pack_plan_ref": root_reference(ready, "pack-plan"),

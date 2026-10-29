@@ -146,12 +146,12 @@ impl PostgresKnowledgeRetrievalAdapter {
         let rows = sqlx::query(
             "SELECT c.id AS source_chunk_id,c.content,d.id AS document_id,d.file_name,
                     p.id AS product_id,pv.id AS product_version_id,w.kind AS workspace_kind
-               FROM workspaces w
-               JOIN products p ON p.workspace_id=w.id
-               JOIN product_versions pv ON pv.product_id=p.id AND p.current_version_id=pv.id
-               LEFT JOIN documents d ON d.product_version_id=pv.id
+               FROM knowledge_workspaces w
+               JOIN knowledge_products p ON p.workspace_id=w.id
+               JOIN knowledge_product_versions pv ON pv.product_id=p.id AND p.current_version_id=pv.id
+               LEFT JOIN knowledge_documents d ON d.product_version_id=pv.id
                 AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND d.enable_status='enabled' AND d.index_ready
-               LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id AND c.generation=d.active_generation
+               LEFT JOIN knowledge_chunks c ON c.document_id=d.id AND c.product_version_id=pv.id AND c.generation=d.active_generation
                 AND octet_length(convert_to(c.content,'UTF8')) <= $3
               WHERE w.kind=$1 AND pv.status='active' AND pv.deleted_at IS NULL
                 AND (($1='product_line' AND p.kind='product') OR ($1='company' AND p.kind='library'))
@@ -499,14 +499,14 @@ impl PostgresKnowledgeRetrievalAdapter {
             "SELECT c.id AS source_chunk_id,c.content,c.chunk_type,
                     d.id AS document_id,d.file_name,
                     p.id AS product_id,pv.id AS product_version_id,w.kind AS workspace_kind
-               FROM workspaces w
-               JOIN products p ON p.workspace_id=w.id
-               JOIN product_versions pv ON pv.product_id=p.id
-               LEFT JOIN documents d ON d.product_version_id=pv.id
+               FROM knowledge_workspaces w
+               JOIN knowledge_products p ON p.workspace_id=w.id
+               JOIN knowledge_product_versions pv ON pv.product_id=p.id
+               LEFT JOIN knowledge_documents d ON d.product_version_id=pv.id
                 AND d.deleted_at IS NULL AND d.parse_status NOT IN ('deleting','deleted','cancelled') AND d.enable_status='enabled' AND d.index_ready
-               LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id AND c.generation=d.active_generation
+               LEFT JOIN knowledge_chunks c ON c.document_id=d.id AND c.product_version_id=pv.id AND c.generation=d.active_generation
                 AND c.chunk_type=ANY($3::text[])
-                AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
+                AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=c.id))
               WHERE w.kind=$1
                 AND (($1='product_line' AND p.kind='product') OR ($1='company' AND p.kind='library'))
                 AND pv.id=ANY($2::uuid[])
@@ -675,10 +675,10 @@ impl PostgresKnowledgeRetrievalAdapter {
                     reranker.canonical_revision_payload AS rerank_payload,
                     reranker.credential_ref AS rerank_credential_ref,
                     reranker.support_state AS rerank_support_state
-               FROM knowledge_retrieval_policies_v2 policy
-               JOIN embedding_revisions_v2 revision
+               FROM knowledge_retrieval_policies policy
+               JOIN knowledge_embedding_revisions revision
                  ON revision.revision_sha256=policy.embedding_revision_sha256
-               JOIN rerank_revisions_v2 reranker
+               JOIN knowledge_rerank_revisions reranker
                  ON reranker.revision_sha256=policy.rerank_revision_sha256
               WHERE policy.policy_sha256=$1",
         )
@@ -697,10 +697,18 @@ impl PostgresKnowledgeRetrievalAdapter {
         let max_hits = row.get::<i64, _>("max_hits");
         let max_chunk_bytes = row.get::<i64, _>("max_chunk_bytes");
         let max_total_bytes = row.get::<i64, _>("max_total_bytes");
-        let support_state = row.get::<String, _>("support_state");
-        if support_state != "supported"
-            || row.get::<String, _>("embedding_support_state") != "supported"
-            || row.get::<String, _>("rerank_support_state") != "supported"
+        let support_state = row
+            .try_get::<crate::SupportState, _>("support_state")
+            .map_err(database_unavailable)?;
+        if support_state != crate::SupportState::Supported
+            || row
+                .try_get::<crate::SupportState, _>("embedding_support_state")
+                .map_err(database_unavailable)?
+                != crate::SupportState::Supported
+            || row
+                .try_get::<crate::SupportState, _>("rerank_support_state")
+                .map_err(database_unavailable)?
+                != crate::SupportState::Supported
         {
             return Err(KnowledgeRetrievalError::PolicyRevoked(
                 "frozen knowledge-evidence-v2 policy or model revision is revoked".into(),
@@ -919,77 +927,12 @@ impl PostgresKnowledgeRetrievalAdapter {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RequirementEvidenceBatchesV2 {
-    pub route_id: Uuid,
-    pub requirement_artifact_id: Uuid,
-    pub requirement_identity_sha256: String,
-    pub requirement_text: String,
-    pub product_line: KnowledgeEvidenceBatchV3,
-    pub company: KnowledgeEvidenceBatchV3,
-}
-
-#[derive(Debug, Clone)]
-pub struct AttestedEvidenceScopeV2 {
-    pub attestation_id: Uuid,
-    pub attestation_sha256: String,
-    pub canonical_scope: serde_json::Value,
-}
-
-pub async fn freeze_retrieval_policy_identity_v1(
-    pool: &PgPool,
-) -> Result<
-    Option<crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1>,
-    KnowledgeRetrievalError,
-> {
-    let value: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT kb_knowledge_freeze_retrieval_identity_v1()")
-            .fetch_one(pool)
-            .await
-            .map_err(database_unavailable)?;
-    let Some(mut value) = value else {
-        return Ok(None);
-    };
-    let product_version_ids: Vec<Uuid> =
-        serde_json::from_value(value.get("product_version_ids").cloned().ok_or_else(|| {
-            KnowledgeRetrievalError::InvalidRequest("frozen product scope missing".into())
-        })?)
-        .map_err(|error| KnowledgeRetrievalError::InvalidRequest(error.to_string()))?;
-    let library_version_ids: Vec<Uuid> =
-        serde_json::from_value(value.get("library_version_ids").cloned().ok_or_else(|| {
-            KnowledgeRetrievalError::InvalidRequest("frozen library scope missing".into())
-        })?)
-        .map_err(|error| KnowledgeRetrievalError::InvalidRequest(error.to_string()))?;
-    let eligible_scope_sha256 =
-        crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1::eligible_scope_sha256_for(
-            &product_version_ids,
-            &library_version_ids,
-        )
-        .map_err(KnowledgeRetrievalError::InvalidRequest)?;
-    value
-        .as_object_mut()
-        .ok_or_else(|| {
-            KnowledgeRetrievalError::InvalidRequest("frozen retrieval identity invalid".into())
-        })?
-        .insert(
-            "eligible_scope_sha256".into(),
-            serde_json::json!(eligible_scope_sha256),
-        );
-    let frozen: crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1 =
-        serde_json::from_value(value)
-            .map_err(|error| KnowledgeRetrievalError::InvalidRequest(error.to_string()))?;
-    frozen
-        .validate()
-        .map_err(KnowledgeRetrievalError::InvalidRequest)?;
-    Ok(Some(frozen))
-}
-
 pub async fn latest_supported_retrieval_policy_v2(
     pool: &PgPool,
 ) -> Result<Option<RetrievalPolicyIdentityV1>, KnowledgeRetrievalError> {
     let row = sqlx::query(
         "SELECT policy_sha256,contract_version,max_hits,max_chunk_bytes,max_total_bytes
-        FROM knowledge_retrieval_policies_v2 WHERE support_state='supported'
+        FROM knowledge_retrieval_policies WHERE support_state='supported'
         ORDER BY created_at DESC,policy_sha256 LIMIT 1",
     )
     .fetch_optional(pool)
@@ -1009,190 +952,6 @@ pub async fn latest_supported_retrieval_policy_v2(
             KnowledgeRetrievalError::InvalidRequest("policy max_total_bytes out of range".into())
         })?,
     }))
-}
-
-fn deterministic_uuid_v2(parts: &[&str]) -> Uuid {
-    let mut digest = Sha256::new();
-    for part in parts {
-        digest.update((part.len() as u64).to_be_bytes());
-        digest.update(part.as_bytes());
-    }
-    let mut bytes: [u8; 16] = digest.finalize()[..16].try_into().expect("sha256 prefix");
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
-}
-
-pub fn compile_requirement_evidence_scope_v2(
-    policy: &RetrievalPolicyIdentityV1,
-    requirements: &[RequirementEvidenceBatchesV2],
-) -> Result<serde_json::Value, KnowledgeRetrievalError> {
-    let mut products = BTreeMap::<Uuid, EligibleEvidenceVersionV1>::new();
-    let mut requirement_values = Vec::with_capacity(requirements.len());
-    let mut frozen_hits = Vec::new();
-    for requirement in requirements {
-        for version in requirement
-            .product_line
-            .eligible_versions
-            .iter()
-            .chain(requirement.company.eligible_versions.iter())
-        {
-            products
-                .entry(version.product_version_id)
-                .or_insert_with(|| version.clone());
-        }
-        let mut exact = Vec::new();
-        let mut semantic = Vec::new();
-        for batch in [&requirement.product_line, &requirement.company] {
-            for hit in &batch.hits {
-                if hit.retrieval_rank <= batch.exact_prefix_hit_count {
-                    exact.push(hit.clone());
-                } else {
-                    semantic.push(hit.clone());
-                }
-            }
-        }
-        exact.sort_by_key(|hit| {
-            (
-                hit.product_id,
-                hit.product_version_id,
-                hit.document_id,
-                hit.source_chunk_id,
-            )
-        });
-        semantic.sort_by(|left, right| {
-            right
-                .retrieval_raw_score
-                .cmp(&left.retrieval_raw_score)
-                .then_with(|| left.pre_rerank_rrf_rank.cmp(&right.pre_rerank_rrf_rank))
-                .then_with(|| {
-                    (
-                        left.product_id,
-                        left.product_version_id,
-                        left.document_id,
-                        left.source_chunk_id,
-                    )
-                        .cmp(&(
-                            right.product_id,
-                            right.product_version_id,
-                            right.document_id,
-                            right.source_chunk_id,
-                        ))
-                })
-        });
-        let exact_count = exact.len().min(policy.max_hits as usize);
-        exact.extend(semantic);
-        exact.truncate(policy.max_hits as usize);
-        requirement_values.push(serde_json::json!({
-            "route_id":requirement.route_id,"requirement_artifact_id":requirement.requirement_artifact_id,
-            "requirement_identity_sha256":requirement.requirement_identity_sha256,
-            "requirement_text":requirement.requirement_text,"exact_prefix_hit_count":exact_count,
-        }));
-        for (index, hit) in exact.into_iter().enumerate() {
-            let hit_id = deterministic_uuid_v2(&[
-                &requirement.route_id.to_string(),
-                &requirement.requirement_artifact_id.to_string(),
-                &hit.product_version_id.to_string(),
-                &hit.document_id.to_string(),
-                &hit.source_chunk_id.to_string(),
-            ]);
-            frozen_hits.push(serde_json::json!({
-                "id":hit_id,"route_id":requirement.route_id,"requirement_artifact_id":requirement.requirement_artifact_id,
-                "product_version_artifact_id":hit.product_version_id,"document_id":hit.document_id,
-                "source_chunk_id":hit.source_chunk_id,"frozen_document_display_name":hit.frozen_document_display_name,
-                "chunk_utf8":hit.chunk_utf8,"chunk_sha256":hit.chunk_sha256,"chunk_byte_length":hit.chunk_byte_length,
-                "source_type":hit.source_type,"retrieval_rank":index+1,"retrieval_raw_score":hit.retrieval_raw_score,
-                "pre_rerank_rrf_rank":hit.pre_rerank_rrf_rank,"quote_start_offset":hit.quote_start_offset,
-                "quote_end_offset":hit.quote_end_offset,"offset_unit":hit.offset_unit,
-                "retrieval_contract_version":hit.retrieval_contract_version,"media":hit.media,
-            }));
-        }
-    }
-    let product_values=products.values().map(|version|serde_json::json!({
-        "id":version.product_version_id,"product_id":version.product_id,"product_version_id":version.product_version_id,
-        "workspace_kind":version.workspace_kind,"frozen_display_name":version.frozen_display_name,
-        "identity_sha256":hex::encode(Sha256::digest(format!("ProductVersionEvidenceV1:{}:{}:{}",
-            version.product_id,version.product_version_id,version.workspace_kind).as_bytes())),
-    })).collect::<Vec<_>>();
-    let product_line_versions = products
-        .values()
-        .filter(|version| version.workspace_kind == "product_line")
-        .map(|version| version.product_version_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    let company_versions = products
-        .values()
-        .filter(|version| version.workspace_kind == "company")
-        .map(|version| version.product_version_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut workspace_kinds = products
-        .values()
-        .map(|version| version.workspace_kind.clone())
-        .collect::<Vec<_>>();
-    workspace_kinds.sort();
-    workspace_kinds.dedup();
-    let scope = serde_json::json!({
-        "schema_version":2,"workspace_kinds":workspace_kinds,
-        "version_selections":{"product_line":product_line_versions,"company":company_versions},"products":product_values,
-        "retrieval_requirements":requirement_values,"frozen_hits":frozen_hits,"retrieval_policy":policy,
-    });
-    Ok(scope)
-}
-
-fn attestation_database_error(error: sqlx::Error) -> KnowledgeRetrievalError {
-    let Some(database) = error.as_database_error() else {
-        return KnowledgeRetrievalError::Unavailable(error.to_string());
-    };
-    let message = database.message();
-    if message == "KNOWLEDGE_MATCHING_RETRIEVAL_POLICY_V2_INVALID" {
-        KnowledgeRetrievalError::PolicyRevoked(message.to_owned())
-    } else if message.starts_with("KNOWLEDGE_MATCHING_") {
-        KnowledgeRetrievalError::DigestMismatch(message.to_owned())
-    } else {
-        KnowledgeRetrievalError::Unavailable(error.to_string())
-    }
-}
-
-pub async fn attest_compiled_requirement_evidence_v2(
-    tx: &mut Transaction<'_, Postgres>,
-    scope: &serde_json::Value,
-) -> Result<AttestedEvidenceScopeV2, KnowledgeRetrievalError> {
-    let attested: serde_json::Value =
-        sqlx::query_scalar("SELECT kb_knowledge_attest_matching_scope_v2($1)")
-            .bind(scope)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(attestation_database_error)?;
-    let attestation_id = attested
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| {
-            KnowledgeRetrievalError::InvalidHit("knowledge attestation id missing".into())
-        })?;
-    let attestation_sha256 = attested
-        .get("content_sha256")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            KnowledgeRetrievalError::InvalidHit("knowledge attestation digest missing".into())
-        })?
-        .to_owned();
-    Ok(AttestedEvidenceScopeV2 {
-        attestation_id,
-        attestation_sha256,
-        canonical_scope: scope.clone(),
-    })
-}
-
-pub async fn attest_requirement_evidence_v2(
-    pool: &PgPool,
-    policy: &RetrievalPolicyIdentityV1,
-    requirements: &[RequirementEvidenceBatchesV2],
-) -> Result<AttestedEvidenceScopeV2, KnowledgeRetrievalError> {
-    let scope = compile_requirement_evidence_scope_v2(policy, requirements)?;
-    let mut tx = pool.begin().await.map_err(database_unavailable)?;
-    let result = attest_compiled_requirement_evidence_v2(&mut tx, &scope).await?;
-    tx.commit().await.map_err(database_unavailable)?;
-    Ok(result)
 }
 
 fn exact_candidate_hit_v2(
@@ -1297,12 +1056,12 @@ async fn hydrate_evidence_media_v3(
     }
     let rows=sqlx::query("SELECT mapping.chunk_id,media.id image_artifact_revision_id,media.object_ref,
         media.content_sha256,media.media_type,media.width,media.height,media.page_ordinal,media.bounding_region
-      FROM knowledge_image_ocr_chunk_artifact_mappings mapping
+      FROM knowledge_image_chunk_links mapping
       JOIN knowledge_image_artifact_revisions media ON media.id=mapping.image_artifact_revision_id
         AND media.product_version_id=mapping.product_version_id AND media.document_id=mapping.document_id
         AND media.object_ref=mapping.object_ref AND media.content_sha256=mapping.content_sha256
         AND media.media_type=mapping.media_type AND media.object_state=mapping.object_state
-    JOIN available_object_registry registry ON registry.object_ref=media.object_ref AND registry.digest=media.content_sha256
+    JOIN platform_available_objects registry ON registry.object_ref=media.object_ref AND registry.content_sha256=media.content_sha256
     AND registry.media_type=media.media_type
     WHERE mapping.chunk_id=ANY($1::uuid[]) AND media.object_state='available'")
         .bind(&ids).fetch_all(&mut **tx).await.map_err(database_unavailable)?;
@@ -1349,7 +1108,8 @@ async fn lock_rerank_revision_v2(
 ) -> Result<(RerankRevisionV2, String), KnowledgeRetrievalError> {
     let row = sqlx::query(
         "SELECT canonical_revision_payload,credential_ref
-           FROM public.kb_knowledge_lock_rerank_revision_v2($1)",
+           FROM public.knowledge_rerank_revisions
+          WHERE revision_sha256=$1 AND support_state='supported' FOR SHARE",
     )
     .bind(&policy.rerank.revision_sha256)
     .fetch_optional(&mut **tx)

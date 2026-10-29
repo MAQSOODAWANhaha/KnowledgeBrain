@@ -12,11 +12,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from docreader.integrations.store import (
-    Cancelled, Conflict, InvalidConfirmation, RequestReplayBlocked, StaleExecution,
+    Cancelled, Conflict, RequestReplayBlocked, StaleExecution,
     StoreError, _recorded_first_data, _safe_metadata,
 )
 from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender.schema import ArtifactRef, AuthoringInput
+from docreader.tender.status import AuthoringExecutionStatus, ModelRequestStatus, RunStatus, status_row
 
 
 @dataclass(frozen=True)
@@ -24,40 +25,6 @@ class AuthoringLease:
     execution_id: str
     epoch: int
 
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS tender_authoring_executions (
-    execution_id text PRIMARY KEY,
-    authoring_input jsonb NOT NULL,
-    execution_spec jsonb NOT NULL,
-    status text NOT NULL DEFAULT 'pending',
-    epoch bigint NOT NULL DEFAULT 0,
-    lease_until timestamptz,
-    cancel_requested boolean NOT NULL DEFAULT false,
-    result_ref jsonb,
-    receipts jsonb NOT NULL DEFAULT '[]',
-    error jsonb,
-    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
-);
-CREATE TABLE IF NOT EXISTS tender_authoring_model_requests (
-    request_id text PRIMARY KEY,
-    execution_id text NOT NULL REFERENCES tender_authoring_executions(execution_id),
-    epoch bigint NOT NULL,
-    model text NOT NULL,
-    task text NOT NULL,
-    status text NOT NULL DEFAULT 'prepared',
-    metadata jsonb NOT NULL,
-    usage jsonb,
-    response_ref jsonb,
-    error jsonb,
-    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    sent_at timestamptz,
-    finished_at timestamptz
-);
-CREATE INDEX IF NOT EXISTS tender_authoring_requests_execution_idx
-    ON tender_authoring_model_requests(execution_id, created_at);
-"""
 
 
 def _duration(value):
@@ -83,17 +50,16 @@ class AuthoringStore:
 
     async def setup(self):
         async with self.transaction() as conn:
-            await conn.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema()), "
-                               "hashtext('tender_authoring_schema_v1'))")
-            await conn.execute(_SCHEMA)
+            await conn.execute("SELECT execution_id FROM tender_authoring_executions LIMIT 0")
+            await conn.execute("SELECT request_id FROM tender_authoring_model_requests LIMIT 0")
 
-    async def _execution(self, conn, execution_id, *, lock=False):
+    async def _execution(self, conn, execution_id, *, lock=False, missing_ok=False):
         query = ("SELECT *, lease_until > clock_timestamp() AS lease_live "
                  "FROM tender_authoring_executions WHERE execution_id = %s")
         row = await (await conn.execute(query + (" FOR UPDATE" if lock else ""), (execution_id,))).fetchone()
-        if row is None:
+        if row is None and not missing_ok:
             raise StoreError("authoring execution not found")
-        return row
+        return status_row(row, AuthoringExecutionStatus)
 
     async def submit(self, execution_id, authoring_input, execution_spec):
         if not isinstance(execution_id, str) or not execution_id.strip():
@@ -107,17 +73,20 @@ class AuthoringStore:
                 (execution_id, Jsonb(value), Jsonb(spec)),
             )
             row = await self._execution(conn, execution_id, lock=True)
-            if row["authoring_input"] != value or row["execution_spec"] != spec:
+            if (AuthoringInput.model_validate(row["authoring_input"]).model_dump() != value
+                    or row["execution_spec"] != spec):
                 raise Conflict("execution_id already identifies different authoring input or configuration")
             return row
 
-    async def get_execution(self, execution_id):
+    async def get_execution(self, execution_id, *, missing_ok=False):
         async with self.transaction() as conn:
-            row = await self._execution(conn, execution_id, lock=True)
-            row["requests"] = await (await conn.execute(
+            row = await self._execution(conn, execution_id, lock=True, missing_ok=missing_ok)
+            if row is None:
+                return None
+            row["requests"] = [status_row(entry, ModelRequestStatus) for entry in await (await conn.execute(
                 "SELECT * FROM tender_authoring_model_requests WHERE execution_id = %s ORDER BY created_at, request_id",
                 (execution_id,),
-            )).fetchall()
+            )).fetchall()]
             return row
 
     async def _abandon(self, conn, execution_id, error_type, *, before_epoch=None):
@@ -133,7 +102,7 @@ class AuthoringStore:
         _duration(lease_seconds)
         async with self.transaction() as conn:
             row = await self._execution(conn, execution_id, lock=True)
-            if row["cancel_requested"] or row["status"] in {"succeeded", "cancelled"} or row["lease_live"]:
+            if row["cancel_requested"] or row["status"] in {AuthoringExecutionStatus.SUCCEEDED, AuthoringExecutionStatus.CANCELLED} or row["lease_live"]:
                 return None
             epoch = row["epoch"] + 1
             await self._abandon(conn, execution_id, "executor_lost", before_epoch=epoch)
@@ -151,7 +120,7 @@ class AuthoringStore:
         row = await self._execution(conn, lease.execution_id, lock=True)
         if row["cancel_requested"]:
             raise Cancelled("authoring cancellation requested")
-        if row["epoch"] != lease.epoch or row["status"] != "running" or not row["lease_live"]:
+        if row["epoch"] != lease.epoch or row["status"] != AuthoringExecutionStatus.RUNNING or not row["lease_live"]:
             raise StaleExecution("authoring execution lease expired or was replaced")
         return row
 
@@ -164,27 +133,28 @@ class AuthoringStore:
                 "updated_at = clock_timestamp() WHERE execution_id = %s", (lease_seconds, lease.execution_id),
             )
 
-    async def release(self, lease, status, result_ref=None, error=None):
-        if status not in {"succeeded", "failed"}:
+    async def release(self, lease, status: AuthoringExecutionStatus, result_ref=None, error=None):
+        status = AuthoringExecutionStatus(status)
+        if status not in {AuthoringExecutionStatus.SUCCEEDED, AuthoringExecutionStatus.FAILED}:
             raise ValueError("invalid authoring execution result")
-        if status == "succeeded":
+        if status == AuthoringExecutionStatus.SUCCEEDED:
             result_ref = ArtifactRef.model_validate(result_ref).model_dump()
         async with self.transaction() as conn:
             row = await self.assert_fence(lease, conn)
-            if status == "succeeded":
+            if status == AuthoringExecutionStatus.SUCCEEDED:
                 expected = row["authoring_input"]
-                parent = await (await conn.execute(
-                    "SELECT * FROM tender_runs WHERE run_id = %s FOR UPDATE", (expected["run_id"],),
-                )).fetchone()
-                if (parent is None or parent["status"] != "analysis-ready" or parent["cancel_requested"]
-                        or any(parent[key] != expected[key] for key in (
-                            "run_id", "source_version", "domain_revision", "checklist_digest"))):
-                    raise InvalidConfirmation("authoring publication requires the still-current confirmed analysis")
+                parent = status_row(await (await conn.execute(
+                    "SELECT * FROM tender_analysis_runs WHERE run_id = %s FOR UPDATE", (expected["run_id"],),
+                )).fetchone(), RunStatus)
+                if parent is None:
+                    raise StoreError("authoring parent analysis not found")
+                if parent["cancel_requested"] or parent["status"] == RunStatus.CANCELLED:
+                    raise Cancelled("parent analysis cancellation requested")
             await self._abandon(conn, lease.execution_id, "execution_finished")
             await conn.execute(
                 "UPDATE tender_authoring_executions SET status = %s, result_ref = %s, error = %s, "
                 "lease_until = NULL, updated_at = clock_timestamp() WHERE execution_id = %s",
-                (status, Jsonb(result_ref) if status == "succeeded" else None,
+                (status, Jsonb(result_ref) if status == AuthoringExecutionStatus.SUCCEEDED else None,
                  Jsonb(_safe_metadata(error)), lease.execution_id),
             )
             return await self._execution(conn, lease.execution_id)
@@ -192,7 +162,7 @@ class AuthoringStore:
     async def cancel(self, execution_id):
         async with self.transaction() as conn:
             row = await self._execution(conn, execution_id, lock=True)
-            if row["status"] == "succeeded":
+            if row["status"] == AuthoringExecutionStatus.SUCCEEDED:
                 return row
             await conn.execute(
                 "UPDATE tender_authoring_executions SET status = 'cancelled', cancel_requested = true, "
@@ -233,8 +203,8 @@ class AuthoringStore:
             return receipt
 
     async def begin_request(self, lease, request_id, model, task, metadata):
-        if task != "outline":
-            raise ValueError("authoring executions accept only the outline task")
+        if task not in {"outline", "authoring_basis", "authoring_write", "authoring_review"}:
+            raise ValueError("unsupported authoring task")
         metadata = _safe_metadata(metadata)
         for key in ("request_digest", "logical_request_digest"):
             value = metadata.get(key)
@@ -242,30 +212,30 @@ class AuthoringStore:
                 raise ValueError(f"authoring model audit requires a lowercase SHA-256 {key}")
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
-            rows = await (await conn.execute(
+            rows = [status_row(entry, ModelRequestStatus) for entry in await (await conn.execute(
                 "SELECT * FROM tender_authoring_model_requests WHERE execution_id = %s ORDER BY created_at, request_id",
                 (lease.execution_id,),
-            )).fetchall()
-            if any(r["metadata"]["logical_request_digest"] != metadata["logical_request_digest"] for r in rows):
-                raise Conflict("authoring execution already identifies a different logical request")
-            cached = next((r for r in rows if r["task"] == task and r["status"] == "succeeded"
+            )).fetchall()]
+            matching = [r for r in rows if r["task"] == task and
+                        r["metadata"]["logical_request_digest"] == metadata["logical_request_digest"]]
+            cached = next((r for r in matching if r["status"] == ModelRequestStatus.SUCCEEDED
                            and r["metadata"]["request_digest"] == metadata["request_digest"]), None)
             if cached is not None:
                 return cached
-            active = next((r for r in rows if r["status"] == "sent"), None)
+            active = next((r for r in matching if r["status"] == ModelRequestStatus.SENT), None)
             if active is not None:
                 raise RequestReplayBlocked(active["request_id"], active["status"])
-            if sum(r["sent_at"] is not None and r["task"] == task and
-                   r["metadata"]["logical_request_digest"] == metadata["logical_request_digest"] for r in rows) >= 4:
+            if sum(r["sent_at"] is not None for r in matching) >= 4:
                 raise ModelWorkUnitExhausted(task)
-            return await (await conn.execute(
+            return status_row(await (await conn.execute(
                 "INSERT INTO tender_authoring_model_requests(request_id, execution_id, epoch, model, task, metadata) "
                 "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
                 (request_id, lease.execution_id, lease.epoch, model, task, Jsonb(metadata)),
-            )).fetchone()
+            )).fetchone(), ModelRequestStatus)
 
-    async def finish_request(self, request_id, status, usage=None, error=None, *, response_ref=None, activity=None):
-        if status not in {"sent", "succeeded", "failed", "uncertain"}:
+    async def finish_request(self, request_id, status: ModelRequestStatus, usage=None, error=None, *, response_ref=None, activity=None):
+        status = ModelRequestStatus(status)
+        if status not in {ModelRequestStatus.SENT, ModelRequestStatus.SUCCEEDED, ModelRequestStatus.FAILED, ModelRequestStatus.UNCERTAIN}:
             raise ValueError("invalid authoring model request status")
         if response_ref is not None:
             response_ref = ArtifactRef.model_validate(response_ref).model_dump()
@@ -276,31 +246,31 @@ class AuthoringStore:
             if request is None:
                 raise StoreError("authoring model request not registered")
             execution = await self._execution(conn, request["execution_id"], lock=True)
-            row = await (await conn.execute(
+            row = status_row(await (await conn.execute(
                 "SELECT * FROM tender_authoring_model_requests WHERE request_id = %s FOR UPDATE", (request_id,),
-            )).fetchone()
-            if status == "sent":
+            )).fetchone(), ModelRequestStatus)
+            if status == ModelRequestStatus.SENT:
                 await self.assert_fence(AuthoringLease(row["execution_id"], row["epoch"]), conn)
-                if row["status"] != "prepared":
+                if row["status"] != ModelRequestStatus.PREPARED:
                     raise RequestReplayBlocked(request_id, row["status"])
-                attempts = await (await conn.execute(
+                attempts = [status_row(entry, ModelRequestStatus) for entry in await (await conn.execute(
                     "SELECT * FROM tender_authoring_model_requests WHERE execution_id = %s AND sent_at IS NOT NULL",
                     (execution["execution_id"],),
-                )).fetchall()
-                active = next((r for r in attempts if r["status"] == "sent"), None)
+                )).fetchall()]
+                matching = [r for r in attempts if r["task"] == row["task"] and
+                            r["metadata"]["logical_request_digest"] == row["metadata"]["logical_request_digest"]]
+                active = next((r for r in matching if r["status"] == ModelRequestStatus.SENT), None)
                 if active is not None:
                     raise RequestReplayBlocked(active["request_id"], active["status"])
-                cached = next((r for r in attempts if r["status"] == "succeeded" and r["task"] == row["task"] and
+                cached = next((r for r in matching if r["status"] == ModelRequestStatus.SUCCEEDED and
                                r["metadata"]["request_digest"] == row["metadata"]["request_digest"]), None)
                 if cached is not None:
                     raise RequestReplayBlocked(cached["request_id"], cached["status"])
-                matching = [r for r in attempts if r["task"] == row["task"] and
-                            r["metadata"]["logical_request_digest"] == row["metadata"]["logical_request_digest"]]
                 if len(matching) >= 4:
                     raise ModelWorkUnitExhausted(row["task"])
             if row["response_ref"] is not None and response_ref is not None and row["response_ref"] != response_ref:
                 raise Conflict("authoring model response cannot replace immutable received content")
-            terminal = row["status"] in {"succeeded", "failed"}
+            terminal = row["status"] in {ModelRequestStatus.SUCCEEDED, ModelRequestStatus.FAILED}
             await conn.execute(
                 "UPDATE tender_authoring_model_requests SET status = %s, usage = COALESCE(usage, %s), "
                 "response_ref = COALESCE(response_ref, %s), error = %s, metadata = metadata || %s, "

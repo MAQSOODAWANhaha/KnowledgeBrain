@@ -15,7 +15,8 @@ class RequestBudget:
 
     No tokenizer is assumed for an unverified model name (including gpt-6-luna).
     UTF8 bytes conservatively estimate text tokens unless an explicitly
-    verified tokenizer is configured; it then counts TOKENIZED_TASKS only.
+    verified tokenizer is configured; it then counts TOKENIZED_TASKS and any
+    separately enabled, calibrated operation.
     Actual image data is excluded from text estimation and charged a documented
     16384-token estimate per image. Body/support are marginal contributions of
     those fields to decoded message text; locators, schema and other context
@@ -30,15 +31,19 @@ class RequestBudget:
     # Extract pack size stays bound by the byte estimate until its much larger
     # output is calibrated; a token-accurate input would merge packs.
     TOKENIZED_TASKS = frozenset({"verify"})
+    TOKENIZED_AUTHORING_TASKS = frozenset({"outline", "authoring_basis", "authoring_write", "authoring_review"})
     TOKENIZED_METHOD = "o200k_base_decoded_messages_v1"
     TOKENIZED_FRAMING_TOKENS = 512  # The relay adds a fixed hidden prompt of about 306 tokens.
     # Accurate input admits larger whole-ledger discovery requests whose output
     # grows with items; capped at a quarter of smaller provider windows.
     TOKENIZED_OUTPUT_RESERVE = 32768
+    ANALYSIS_BATCH_OUTPUT_PER_TARGET = 24576
+    ANALYSIS_BATCH_OUTPUT_MINIMUM = 32768
 
     def __init__(self, context_tokens: int | None = 131072, model: str = "gpt-6-luna",
                  prompts: Mapping[str, str] | None = None, output_reserve: int = 16384,
-                 *, correction: bool = False, tokenizer: str | None = None):
+                 *, correction: bool = False, tokenizer: str | None = None,
+                 tokenized_outline_assembly: bool = False, tokenized_authoring: bool = False):
         if context_tokens is not None and (type(context_tokens) is not int or context_tokens <= 0):
             raise ModelConfigurationError("request context capacity must be a positive integer")
         if type(output_reserve) is not int or output_reserve < 0:
@@ -47,7 +52,17 @@ class RequestBudget:
             raise ModelConfigurationError("correction input allowance requires a configured provider total context")
         if tokenizer is not None and tokenizer not in self.TOKENIZERS:
             raise ModelConfigurationError("unsupported request tokenizer")
+        if type(tokenized_outline_assembly) is not bool:
+            raise ModelConfigurationError("tokenized outline assembly requires a boolean flag")
+        if tokenized_outline_assembly and tokenizer != "o200k_base":
+            raise ModelConfigurationError("tokenized outline assembly requires the verified o200k_base tokenizer")
+        if type(tokenized_authoring) is not bool:
+            raise ModelConfigurationError("tokenized authoring requires a boolean flag")
+        if tokenized_authoring and tokenizer != "o200k_base":
+            raise ModelConfigurationError("tokenized authoring requires the verified o200k_base tokenizer")
         self.tokenizer = tokenizer
+        self.tokenized_outline_assembly = tokenized_outline_assembly
+        self.tokenized_authoring = tokenized_authoring
         if prompts is None:
             from docreader.tender.prompts import get_prompt
             prompts = {task: get_prompt(task) for task in get_args(Task)}
@@ -80,10 +95,15 @@ class RequestBudget:
                 "framing_tokens": self.FRAMING_TOKENS,
                 "prompts": {task: hashlib.sha256(prompt.encode()).hexdigest()
                             for task, prompt in sorted(self.prompts.items())}}
+        spec["analysis_batch_output"] = {"minimum": self.ANALYSIS_BATCH_OUTPUT_MINIMUM,
+                                         "per_target": self.ANALYSIS_BATCH_OUTPUT_PER_TARGET}
         if self.tokenizer is not None:
-            spec["tokenized"] = {"tokenizer": self.tokenizer, "tasks": sorted(self.TOKENIZED_TASKS),
+            tasks = self.TOKENIZED_TASKS | (self.TOKENIZED_AUTHORING_TASKS if self.tokenized_authoring else frozenset())
+            spec["tokenized"] = {"tokenizer": self.tokenizer, "tasks": sorted(tasks),
                                  "method": self.TOKENIZED_METHOD, "framing_tokens": self.TOKENIZED_FRAMING_TOKENS,
                                  "output_reserve": self.tokenized_output_reserve}
+            if self.tokenized_outline_assembly:
+                spec["tokenized"]["operations"] = {"outline": ["assemble"]}
         return spec
 
     def request(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
@@ -100,12 +120,22 @@ class RequestBudget:
     def measure(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
         return self.measure_request(self.request(task, payload, images), task)
 
-    def measure_request(self, request: dict, task: Task | None = None) -> dict:
+    def measure_request(self, request: dict, task: str | None = None) -> dict:
         """Count actual decoded text/schema/tools, without HTTP JSON escaping."""
-        tokenized = self.tokenizer is not None and task in self.TOKENIZED_TASKS
+        payload = json.loads(request["messages"][1]["content"][0]["text"])
+        tokenized_assembly = (self.tokenized_outline_assembly and task == "outline"
+                              and isinstance(payload, dict) and payload.get("operation") == "assemble")
+        tokenized = self.tokenizer is not None and (task in self.TOKENIZED_TASKS or tokenized_assembly
+                    or (self.tokenized_authoring and task in self.TOKENIZED_AUTHORING_TASKS))
         count = _o200k_tokens if tokenized else _utf8_bytes
         framing = self.TOKENIZED_FRAMING_TOKENS if tokenized else self.FRAMING_TOKENS
         output_reserve = self.tokenized_output_reserve if tokenized else self.output_reserve
+        if task == "verify" and isinstance(payload, dict) and "work_units" in payload:
+            targets = payload.get("target_work_unit_ids")
+            if not isinstance(targets, list) or not targets:
+                raise ModelConfigurationError("analysis batch requires explicit nonempty answering targets")
+            output_reserve = max(self.ANALYSIS_BATCH_OUTPUT_MINIMUM,
+                                 self.ANALYSIS_BATCH_OUTPUT_PER_TARGET * len(targets))
         image_count = 0
         text_tokens = 0
         for message in request["messages"]:
@@ -126,7 +156,6 @@ class RequestBudget:
                 text_tokens += count(_json(request[field]))
         if "json_schema" in request.get("response_format", {}):
             text_tokens += count(_json(request["response_format"]["json_schema"]))
-        payload = json.loads(request["messages"][1]["content"][0]["text"])
         # This JSON is the message content itself, with only its own escaping.
         source_views = payload.get("source_views", []) if isinstance(payload, dict) else []
         views = [payload, *source_views] if isinstance(source_views, list) else [payload]
@@ -157,7 +186,7 @@ class RequestBudget:
     def require(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = ()) -> dict:
         return self.require_request(self.request(task, payload, images), task)
 
-    def require_request(self, request: dict, task: Task | None = None) -> dict:
+    def require_request(self, request: dict, task: str | None = None) -> dict:
         measured = self.measure_request(request, task)
         if measured["fits"] is False:
             raise ModelBudgetError("complete request exceeds the input budget or provider total context after reserves")

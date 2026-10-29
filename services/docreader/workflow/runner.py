@@ -11,6 +11,7 @@ from docreader.integrations.store import Cancelled, StaleExecution, Store
 from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.workflow.graph import build_graph
 from docreader.workflow.persistence import FencedPostgresSaver
+from docreader.tender.status import RunStatus
 
 
 async def execute_command(run_id, command_id, source_version, settings, node_factory):
@@ -40,17 +41,17 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
                 value = None
             else:
                 value = {"run_id": run_id, "source_version": source_version,
-                         "domain_revision": lease.domain_revision, "status": "running"}
+                         "domain_revision": lease.domain_revision, "status": RunStatus.RUNNING}
             # sync durability ensures interrupt and node states finish saving before receipt.
             await graph.ainvoke(value, config, durability="sync")
             final = await graph.aget_state(config)
             state = final.values
             paused = any(task.interrupts for task in final.tasks)
-            status = "waiting-confirmation" if paused else state.get("status", "failed")
-            if status not in {"waiting-confirmation", "analysis-ready", "blocked", "failed"}:
+            status = RunStatus.WAITING_CONFIRMATION if paused else RunStatus(state["status"])
+            if status not in {RunStatus.WAITING_CONFIRMATION, RunStatus.ANALYSIS_READY, RunStatus.BLOCKED, RunStatus.FAILED}:
                 raise RuntimeError("graph ended without an explicit terminal state")
             metadata = None
-            if status == "waiting-confirmation" and state.get("verification_ref"):
+            if status == RunStatus.WAITING_CONFIRMATION and state.get("verification_ref"):
                 # Store.confirm validates human verdicts against this before persisting them.
                 checked = await asyncio.to_thread(artifacts.read_json, state["verification_ref"])
                 metadata = {"human_issue_ids": checked.get("human_issue_ids", [])}
@@ -72,7 +73,7 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
         return
     except ModelWorkUnitExhausted as error:
         with suppress(StaleExecution, psycopg.Error):
-            await store.release(lease, "failed", error=type(error).__name__,
+            await store.release(lease, RunStatus.FAILED, error=type(error).__name__,
                                 metadata={"reason": "model_work_unit_retries_exhausted"})
         raise
     except Exception as error:

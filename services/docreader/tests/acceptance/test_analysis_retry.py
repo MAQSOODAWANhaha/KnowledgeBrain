@@ -1,4 +1,4 @@
-"""Explicit same-revision analysis recovery with isolated synthetic models."""
+"""Explicit same-revision analysis recovery with isolated synthetic platform_models."""
 
 from collections import Counter
 from uuid import uuid4

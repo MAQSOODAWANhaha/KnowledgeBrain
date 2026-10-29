@@ -7,6 +7,8 @@
 
 ## 知识库拥有
 
+Workspace 按创建人隔离，产品、资料与派生成果继承其归属。API Key 是用户凭据，没有独立读写分级。数据库不执行用户授权或业务过程，索引发布、任务投递及解析代次由 Rust 服务事务维护；统一规则见 [数据库设计](../design/database-initialization.md)。
+
 - `Workspace`：产品线与公司资料空间；
 - `Product` / `ProductVersion`：产品、资料分类和版本；
 - `Document`：知识资产文件及其解析生命周期；
@@ -17,7 +19,7 @@
 
 ## 与招投标的边界
 
-招投标不得直接读取知识库表、复用知识库 `Document` 状态机或把招标文件写入产品索引。唯一跨域契约及 DTO 由 [`domain.md`](domain.md) 的 `KnowledgeRetrievalPortV3` 定义；招投标负责冻结采用证据。招投标如何冻结证据用于初稿/候选并经确认进入 DOCX，见 [`../bidding/authoring.md`](../bidding/authoring.md)，不在知识库重写编制流程。
+招投标不得复用知识库 `Document` 状态机或把招标文件写入产品索引。招投标负责冻结采用证据，当前编制及知识匹配入口见 [Python 编制设计](../design/python-tender-phase1/authoring-architecture.md)。知识库保持来源定位和资料归属，不在本域重写编制流程。
 
 ## 规范
 
@@ -28,4 +30,4 @@
 
 ## 计划
 
-知识库可靠性工作由[本域计划](../../plans/knowledge-base/README.md)独立管理。招投标的 knowledge 匹配与填充属于下一阶段，当前[生成整改](../design/check-execution-plan.md)不实施该业务；现有模块及测试不代表已经接通。
+知识库可靠性工作由[本域计划](../../plans/knowledge-base/README.md)独立管理。招投标的匹配与填充验收状态由 [Python 交接文档](../design/python-tender-phase1/handoff.md) 记录；知识库模块测试不代替完整编制验收。

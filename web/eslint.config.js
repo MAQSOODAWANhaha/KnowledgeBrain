@@ -15,10 +15,15 @@ export default tseslint.config(
       "e2e/artifacts/**",
       "postcss.config.cjs",
       "playwright.config.ts",
+      "public/onlyoffice-navigation/onlyoffice-plugins-8.3.3.js",
     ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    files: ["public/onlyoffice-navigation/*.js"],
+    languageOptions: { globals: { window: "readonly", URL: "readonly", MessageEvent: "readonly" } },
+  },
   {
     files: ["src/**/*.{ts,tsx}", "e2e/**/*.ts"],
     plugins: {

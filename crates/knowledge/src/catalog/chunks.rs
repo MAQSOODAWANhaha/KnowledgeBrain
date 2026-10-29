@@ -9,7 +9,7 @@ pub async fn delete_image_chunks(
     image_key: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "DELETE FROM chunks
+        "DELETE FROM knowledge_chunks
          WHERE document_id = $1
            AND context_header = $2
            AND chunk_type IN ('image_ocr', 'image_caption')",
@@ -154,9 +154,22 @@ async fn register_image_artifacts_tx(
     prepared: &[PreparedImage],
 ) -> Result<(), sqlx::Error> {
     for media in prepared {
-        sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
-            .bind(media.id).bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type)
-            .bind(media.byte_length).execute(&mut **tx).await?;
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_chunks WHERE id=$1 AND product_version_id=$2 AND document_id=$3 AND chunk_type='image_ocr')")
+            .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).fetch_one(&mut **tx).await?;
+        if !valid {
+            return Err(sqlx::Error::Protocol(
+                "KNOWLEDGE_IMAGE_OCR_MAPPING_SOURCE_INVALID".into(),
+            ));
+        }
+        platform::register_knowledge_image_object_in_tx(
+            tx,
+            media.id,
+            &media.object_ref,
+            &media.sha256,
+            &media.media_type,
+            media.byte_length,
+        )
+        .await?;
         let artifact_sha = hex::encode(Sha256::digest(&media.payload));
         sqlx::query("INSERT INTO knowledge_image_artifact_revisions(id,product_version_id,document_id,revision,
             object_ref,content_sha256,media_type,width,height,page_ordinal,bounding_region,source_image_key,canonical_payload,artifact_sha256)
@@ -176,12 +189,21 @@ async fn register_image_artifacts_tx(
                 "image artifact idempotency conflict".into(),
             ));
         }
-        sqlx::query("INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(chunk_id,product_version_id,document_id,
+        sqlx::query(
+            "INSERT INTO knowledge_image_chunk_links(chunk_id,product_version_id,document_id,
             image_artifact_revision_id,object_ref,content_sha256,media_type)
-          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(chunk_id) DO NOTHING")
-            .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
-            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).execute(&mut **tx).await?;
-        let mapping_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings
+          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(chunk_id) DO NOTHING",
+        )
+        .bind(media.chunk_id)
+        .bind(media.product_version_id)
+        .bind(media.document_id)
+        .bind(media.id)
+        .bind(&media.object_ref)
+        .bind(&media.sha256)
+        .bind(&media.media_type)
+        .execute(&mut **tx)
+        .await?;
+        let mapping_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_chunk_links
             WHERE chunk_id=$1 AND product_version_id=$2 AND document_id=$3 AND image_artifact_revision_id=$4
               AND object_ref=$5 AND content_sha256=$6 AND media_type=$7)")
             .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
@@ -204,11 +226,11 @@ pub(crate) async fn append_document_chunks_tx(
 ) -> Result<(), sqlx::Error> {
     for ch in chunks {
         sqlx::query(
-            "INSERT INTO chunks (
+            "INSERT INTO knowledge_chunks (
                 id, product_version_id, document_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions,
-                source_locator
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                context_header, start_offset, end_offset, parent_chunk_id, generated_questions,
+                source_locator, generation
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,(SELECT attempt FROM knowledge_documents WHERE id=$3 FOR SHARE))
              ON CONFLICT (id) DO UPDATE SET
                 content = EXCLUDED.content,
                 generated_questions = EXCLUDED.generated_questions,
@@ -232,7 +254,7 @@ pub(crate) async fn append_document_chunks_tx(
     for e in embeddings {
         let lit = vector_literal(&e.vector);
         sqlx::query(
-            "INSERT INTO chunk_embeddings
+            "INSERT INTO knowledge_chunk_embeddings
                 (chunk_id, product_version_id, document_id, embedding, tsv, content)
              VALUES ($1,$2,$3, CAST($4 AS vector), to_tsvector('simple', $5), $5)
              ON CONFLICT (chunk_id) DO UPDATE SET
@@ -278,7 +300,7 @@ pub async fn replace_image_chunks(
     let prepared = prepare_image_artifacts(chunks, ArtifactMode::Lenient).await?;
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "DELETE FROM chunks
+        "DELETE FROM knowledge_chunks
          WHERE document_id = $1
            AND context_header = $2
            AND chunk_type IN ('image_ocr', 'image_caption')",
@@ -295,7 +317,7 @@ pub async fn embeddings_schema_ready(pool: &PgPool) -> Result<bool, sqlx::Error>
     sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = 'chunk_embeddings'
+            WHERE table_schema = 'public' AND table_name = 'knowledge_chunk_embeddings'
         )",
     )
     .fetch_one(pool)
@@ -309,7 +331,7 @@ pub async fn delete_chunks_by_types(
     types: &[&str],
 ) -> Result<(), sqlx::Error> {
     let types: Vec<String> = types.iter().map(|s| (*s).to_string()).collect();
-    sqlx::query("DELETE FROM chunks WHERE document_id = $1 AND chunk_type = ANY($2)")
+    sqlx::query("DELETE FROM knowledge_chunks WHERE document_id = $1 AND chunk_type = ANY($2)")
         .bind(document_id)
         .bind(&types)
         .execute(pool)
@@ -334,11 +356,11 @@ async fn insert_document_chunks_tx(
 ) -> Result<(), sqlx::Error> {
     for ch in chunks {
         sqlx::query(
-            "INSERT INTO chunks (
+            "INSERT INTO knowledge_chunks (
                 id, product_version_id, document_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions,
-                source_locator
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                context_header, start_offset, end_offset, parent_chunk_id, generated_questions,
+                source_locator, generation
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,(SELECT attempt FROM knowledge_documents WHERE id=$3 FOR SHARE))",
         )
         .bind(ch.id)
         .bind(ch.product_version_id)
@@ -357,7 +379,7 @@ async fn insert_document_chunks_tx(
     for e in embeddings {
         let lit = vector_literal(&e.vector);
         sqlx::query(
-            "INSERT INTO chunk_embeddings
+            "INSERT INTO knowledge_chunk_embeddings
                 (chunk_id, product_version_id, document_id, embedding, tsv, content)
              VALUES ($1,$2,$3, CAST($4 AS vector), to_tsvector('simple', $5), $5)",
         )
@@ -392,7 +414,7 @@ pub async fn replace_document_chunks(
     // E2: DELETE + INSERT are now atomic; a crash between them no longer
     // leaves the document with zero chunks.
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM chunks WHERE document_id = $1")
+    sqlx::query("DELETE FROM knowledge_chunks WHERE document_id = $1")
         .bind(document_id)
         .execute(&mut *tx)
         .await?;
@@ -407,7 +429,7 @@ pub async fn replace_document_embeddings(
 ) -> Result<(), sqlx::Error> {
     // E2: same atomicity fix as replace_document_chunks.
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM chunk_embeddings WHERE document_id = $1")
+    sqlx::query("DELETE FROM knowledge_chunk_embeddings WHERE document_id = $1")
         .bind(document_id)
         .execute(&mut *tx)
         .await?;
@@ -421,10 +443,10 @@ pub async fn load_document_chunks(
 ) -> Result<Vec<crate::Chunk>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, document_id, product_version_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions,
+                context_header, start_offset AS start_at, end_offset AS end_at, parent_chunk_id, generated_questions,
                 source_locator
-         FROM chunks WHERE document_id = $1 AND generation = (SELECT attempt FROM documents WHERE id=$1)
-         ORDER BY start_at, id",
+         FROM knowledge_chunks WHERE document_id = $1 AND generation = (SELECT attempt FROM knowledge_documents WHERE id=$1)
+         ORDER BY start_offset, id",
     )
     .bind(document_id)
     .fetch_all(pool)

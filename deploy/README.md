@@ -1,12 +1,12 @@
 # KnowledgeBrain 部署
 
-默认招标栈：API、Worker、Retention、DocReader、PostgreSQL、Redis、MinIO。
+默认招标栈：API、Worker、Retention、DocReader、Python招标worker/dispatcher、PostgreSQL、Redis、MinIO。
 Neo4j（`knowledge` profile）与 OnlyOffice（`editing` profile）不随招标栈自动启动。
 原图复核使用 Chat；OCR 可继承已确认支持图像的 Chat，或显式指定独立 VLM。
 
 默认 Compose 项目名为 `kb`，容器统一命名为 `kb_<服务名>`，例如 `kb_api`、`kb_postgres`。
-项目的网络和数据卷也使用 `kb` 命名空间。Python 招标工作流通过同一 Compose 的
-`python-tender` profile 启用，复用 PostgreSQL、应用数据库账号和 Redis；不再单独部署
+项目的网络和数据卷也使用 `kb` 命名空间。Python 招标工作流随 `runtime` 启用，也可通过
+`python-tender` profile 独立启动，复用 PostgreSQL、应用数据库账号和 Redis；不再单独部署
 数据库、Redis 或配置另一组连接地址。
 
 ## 最少配置
@@ -16,6 +16,7 @@ Neo4j（`knowledge` profile）与 OnlyOffice（`editing` profile）不随招标�
 - `POSTGRES_USER/PASSWORD`：唯一应用数据库账号，所有应用组件共用；不得使用 `postgres`。
 - `KB_ADMIN_USERNAME/PASSWORD`：本地登录管理员（选择 LDAP 时不要求本地引导）。
 - `JWT_SECRET`：独立 JWT 密钥，没有固定秘密回退。
+- `GRPC_AUTH_TOKEN`：API与DocReader共享的独立认证密钥，Python业务桥接要求显式配置。
 - `MINIO_ROOT_USER/PASSWORD`：标准内置对象存储账号；外部 S3 使用自己的访问凭据。
 - `KNOWLEDGEBRAIN_CHAT_BASE_URL/API_KEY/MODEL` 和整数 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS`。
 
@@ -38,9 +39,9 @@ Python 初始化和 dispatcher 仅接收各自需要的存储、队列或数据�
 
 标准初始化 wrapper 仅在新卷初始化数据库：引擎管理员 `postgres` 无密码且只允许容器本地
 Unix socket 管理，TCP 使用 SCRAM；用户提供的应用账号无 superuser/建库/建角色权限，拥有应用
-schema，所有应用进程共享此账号。`migrate` 是独立的一次性 fresh baseline 步骤，API/Worker
+schema，所有应用进程共享此账号。`migrate` 统一初始化业务表，API/Worker
 不执行 DDL。共享账号意味着不再有运行角色级权限隔离；业务授权、租约和引用保护仍保留。
-已有不兼容数据库拒绝启动，不迁移、接管、清库或重置旧账号。
+只支持全新数据库，不提供旧库兼容或升级；不接管、清库或重置旧账号。数据库不承担用户资源授权，不检查应用账号的固定权限布局。
 
 Rust 从 `POSTGRES_HOST/PORT/DB/USER/PASSWORD` 安全组装一个连接；无需用户 URL 编码密码。
 完整 `DATABASE_URL` 属于外部/宿主高级覆盖，若同时设置 split 字段必须一致，否则拒绝。
@@ -52,13 +53,19 @@ Rust 从 `POSTGRES_HOST/PORT/DB/USER/PASSWORD` 安全组装一个连接；无需
 不可把 `postgres`、`redis` 等 Compose DNS 直接交给宿主进程。
 S3 仅在默认内部 `http://minio:9000` 且未提供访问凭据时派生 MinIO 账号；外部地址要求独立凭据。
 跨主机 DocReader 的 TLS/证书策略需显式部署 overlay，禁止缺证书时降级；标准私有单机网络
-可选 `GRPC_AUTH_TOKEN` 会同时注入客户端与服务端。
+要求显式配置 `GRPC_AUTH_TOKEN`，同值注入客户端与服务端。
 
 Python 使用同一组 `.env` 的 `POSTGRES_*` 值，由 Compose 映射为 libpq 标准
 `PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`，避免在 Compose 中拼接带密码的 URL；
 显式 `DATABASE_URL` 也可复用。Redis 使用相同 `REDIS_URL`，Dramatiq 的
-`python-tender` namespace 与 Rust 的 `kb:` 前缀区分。Python 只初始化自己的 `tender_*`
-运行表及 LangGraph checkpoint 表，产物由三个 Python 角色共享 `python-tender-artifacts` 卷。
+`python-tender` namespace 与 Rust 的 `kb:` 前缀区分。业务表由共享migrator初始化，
+Python init只读核验业务表并初始化LangGraph checkpoint；DocReader与三个Python角色共享
+`python-tender-artifacts` 卷。
+
+网页正文编制可选择知识资产的固定版本；后台回读地址由
+`KNOWLEDGEBRAIN_INTERNAL_API_URL` 指定，Compose默认为容器内 `http://api:8080`。
+宿主运行Python时须显式使用宿主可达的API地址。回读凭据由共享`GRPC_AUTH_TOKEN`
+临时签发，任务只保存产品/版本ID；未选择资料版本时不依赖此地址或知识库配置。
 
 ## 招投标编辑接入状态
 
@@ -66,12 +73,16 @@ OnlyOffice 不属于招标读取／Discover／Organize／Check 的前置条件�
 `editing` profile，提供其 JWT/能力密钥及浏览器/API origin；没有固定秘密回退。
 其现有业务与验收边界见 [接入计划](../plans/bidding/onlyoffice-integration.md)。
 
-## Fresh 启动
+## 数据库初始化与升级
 
-当前尚未发布，按 [未发布 baseline 策略](../plans/platform/runtime-foundation.md#2-fresh-baseline)直接修正三份 migration；不建设历史升级链。当前运行方式只支持 clean-slate fresh deploy，不承诺发布后的保数据升级。修改 baseline 不授权对运行库执行迁移、清库或部署。
+Python运行及Word版本映射统一在初始迁移 `20261028000003_tender.sql`，后续结构变化新增时间戳SQL。
+本次重建从全新数据库开始，不兼容此前未登记迁移的历史结构；采用新迁移链后支持正常增量升级。
+修改迁移文件不授权对运行库执行迁移、清库或部署。
 
-`migrate` job 在一个事务中按
-`shared_platform_baseline` → `knowledge_base_baseline` → `bidding_v2_baseline` 建立应用表和函数。初始化不生成 schema snapshot、catalog manifest 或结构摘要；API、Worker、Retention 不比较 schema 版本/hash，也不执行 DDL 或在线修复。
+`migrate` job 使用 SQLx按时间戳顺序执行 `migrations/`：初始三个版本依次建立平台、知识库和招标表，
+后续仅应用未执行版本。`_sqlx_migrations`保留版本和校验和；已执行文件不可改写。
+每份SQL独立事务，失败后从未完成版本重试。数据库不创建自定义业务函数或触发器。
+业务表由migrator统一拥有建表入口，API、Worker、Retention和Python请求不执行业务DDL或在线修复。
 
 ```bash
 cp deploy/.env.example deploy/.env
@@ -79,7 +90,7 @@ cp deploy/.env.example deploy/.env
 ./deploy/deploy.sh create
 ```
 
-启用 Python 工作流（复用同一项目内的 PostgreSQL/Redis，缺少时启动，并先完成共享数据库初始化）：
+单独启动 Python 工作流（`runtime`已包含它；复用同一项目内的 PostgreSQL/Redis）：
 
 ```bash
 docker compose --env-file deploy/.env \
@@ -87,12 +98,21 @@ docker compose --env-file deploy/.env \
   --profile python-tender up -d --build python-tender-worker python-tender-dispatcher
 ```
 
-先由 `migrate` 完成共享数据库 baseline，再由 `python-tender-init` 创建 Python 表及
-checkpoint，最后启动 worker/dispatcher，避免 Python 表先建立而触发空库初始化拒绝。
+先由 `migrate` 完成共享数据库baseline，再由 `python-tender-init` 核验业务表并创建
+checkpoint，最后启动worker/dispatcher。
+两角色的健康检查实际执行 `docreader.jobs.healthcheck worker|dispatcher`，只读检查本容器
+角色进程、数据库必要表/列及Redis；探针总时限8秒，Compose健康检查时限10秒。
+探针核对统一业务表及checkpoint；缺表/缺列即失败，不由首次页面请求补建业务表。
 三者没有新增宿主端口。该 profile 不自动切换 Rust 链路，也不会自行提交文件或调用模型。
 原件提交、状态核对和人工确认见[工作流运行手册](../docs/design/python-tender-phase1/runbook.md)。
 
 生产发布使用 `deploy/release-descriptor-v1.json`：
+
+`knowledgebrain-release` 将八个应用服务映射到五份镜像：Python init/worker/dispatcher
+复用descriptor中的DocReader镜像，不扩大镜像协议。启动保持 `--no-deps`，依次确认
+数据依赖、migrator退出0、Python初始化退出0、DocReader及两Python角色健康，最后启动
+API、Rust worker及retention；Python角色command严格校验，不注入Rust的BIN参数。
+合同及隔离探针验证不代表正式发布验收，本轮没有执行生产发布。
 
 ```json
 {
@@ -128,7 +148,11 @@ knowledgebrain-release --descriptor deploy/release-descriptor-v1.json \
 
 添加 `--check-only` 只验证本地输入并计算 hash，不调用 Docker、不验证镜像或数据库。`--compose-file` 默认 `deploy/docker-compose.yml`，`--timeout-seconds` 默认 300，为每条 Docker 命令设置上限。
 
-实际执行先解析 Compose、把所有容器名限定到显式 project，检查已有组件/依赖的身份和健康状态，再 pull 并 inspect 全部 digest 引用。mode-0700 临时目录内的 mode-0600 override 写入五组件 exact image，四个 Rust 组件额外写入 `BIN`。先等待 Compose 数据面及 DocReader，再运行 migrator，确认其 image/config、环境和 exit 0 后才启动 API/Worker/Retention。最后逐组件 inspect，并实际执行配置中已核对一致的健康探针。镜像 manifest RepoDigest 与本地 image config ID 分别校验，不能混用。
+实际执行先解析Compose、把所有容器名限定到显式project，检查已有组件/依赖的身份和健康状态，再pull并inspect全部digest引用。
+mode-0700临时目录内的mode-0600 override将八个服务映射到五份exact image，仅四个Rust组件额外写入BIN。
+先等待数据依赖，再确认migrator和Python init的image/config、固定command及exit 0；随后启动
+DocReader与两个Python角色并确认健康，最后启动API/Worker/Retention。逐服务inspect时实际执行
+配置中已核对一致的健康探针。镜像manifest RepoDigest与本地image config ID分别校验，不能混用。
 
 发布工具在宿主侧验证实际镜像及健康探针，不向数据库写入 release receipt；应用不要求 descriptor 环境变量或挂载。已有部署不一致时拒绝自动替换；全部服务符合时只检查，不重新初始化或启动。失败只停止本次标签且 project 一致的容器，保留既有容器与数据卷。
 
@@ -186,40 +210,26 @@ OnlyOffice 的浏览器 origin。
 本仓库的开发 release descriptor 不能当作生产身份。
 生产走上文说明的 release 工具并提供真实 descriptor；禁止以伪造摘要绕过校验。
 
-## 招投标 V2 Worker
+## Python 招标任务与恢复
 
-`bid-authoring-v2` 物理队列注册以下五类粗粒度任务，且都必须有 active handler：
+招标分析与编制由 Python dispatcher/worker 执行，Rust API 负责登录、项目归属、文件上传与 Word 编辑。旧 Rust `bid-authoring-v2` 队列、worker 和发布过程已删除，不能再使用旧 V2 招标运维脚本。
 
-- `bid:tender_document_process:v2`
-- `bid:requirement_set_compile:v2`
-- `bid:docx_compose:v2`（用户触发填充当前已保存 DOCX，复用冻结大纲运行合同；整链验收状态见统一方案）
-- `bid:content_generate:v2`
-- `bid:submission_export:v2`
+业务表统一由 `migrator` 执行时间戳迁移来初始化和升级；Python 的 `setup` 只检查表是否可读。Python init 仍调用 LangGraph 自带的 checkpoint 迁移，第三方内部表由该库维护，不复制到业务迁移。
 
-不得恢复 EvidenceMatch continuation、旧 Part/Gate Job 或 default queue fallback。队列声明以
-`deploy/queue-registry.toml` 为唯一运行注册表，启动时会校验 handler、payload 和唯一身份公式。
+失败任务通过现有重试/恢复接口继续，保留租约围栏、模型调用回执和已完成产物。Word 保存保留版本并发检查，缺少资料的响应位置继续留空。上传暂存与对象引用由业务事务登记，retention 负责无引用对象回收。
 
-## 故障恢复
-
-- TenderDocument 技术解析失败：修复 DocReader/OCR/VLM/ObjectRegistry 后，由用户调用 V2 retry；不要改表或复用旧请求身份。
-- Requirement/Composition/Content/Export delivery 使用原 frozen Request。首次 POST 或用户显式同 idempotency-key replay 均 exact 重载同一 payload 并调用 pinned Oxana 2.1.3 official `enqueue`；Redis unavailable/unknown 返回可重试 503。PostgreSQL 不保存 delivery reservation/budget 或扫描 Request 恢复 transport；Stage receipt 与 AgentRun owner fence 保证同一输入幂等。
-- Workspace CAS 返回 409 时，客户端重新 GET 当前 ETag 后显式重放用户意图；服务端不得覆盖并发编辑。
-- `NO_EVIDENCE`、未覆盖要求等业务 Assessment 只产生 warning；Schema、CAS、资产 digest、事务和 renderer 错误必须 fail-closed。
-- 失败上传由 retention 回收 `object_upload_staging`；已进入 Artifact/Manifest 的对象通过 ObjectRegistry owner reference 保留，禁止直接删除对象或业务行。
-- 不兼容数据库不做在线修复、迁移或自动清理。新实例使用独立新空库；初始化失败先核对错误和资源范围，不能清除已有业务数据。
-
-更详细的招投标运行与验收见 [`../docs/bidding/backend-runbook.md`](../docs/bidding/backend-runbook.md)。
+当前流程与真实验收状态见 [Python 交接文档](../docs/design/python-tender-phase1/handoff.md)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
 
 ## 健康与验收
 
 以下仅记录已存在、获准保留的实现增量与历史本地验证，不代表本轮重跑或整体运行验收。方案已确认；普通实施与隔离开发验证的任务及授权边界见[实施台账](../plans/implementation-tasks.md)，不含采购、生产部署、现有数据操作或提交。
 
-`schema-contract` 验证 fresh DDL 与单账号权限，旧 catalog/receipt 漂移测试已删除。业务清理验收继续按 [平台 §6](../plans/platform/runtime-foundation.md#6-retention-consumer) 区分交接、实际消费和最终回收；不得削弱引用保护、幂等和失败恢复断言。
+`schema-contract` 验证全新 DDL 与重复初始化行为，旧 catalog/receipt 漂移测试已删除。业务清理验收继续按 [平台 §6](../plans/platform/runtime-foundation.md#6-retention-consumer) 区分交接、实际消费和最终回收；不得削弱引用保护、幂等和失败恢复断言。
 
 - `GET /live`：进程存活；
 - `GET /ready`：PostgreSQL、维护门和 queue registry 可用；
 - `GET /api/v1/ops/queues`：共享平台队列（不是招投标 V1 API）；
-- `scripts/fresh_schema_acceptance.sh`：仅面向显式授权的隔离 PostgreSQL 空库，验证单一非超级用户应用账号、fresh DDL 和数据库权限边界。运行前核对脚本限制，不连接实际业务数据库。
-- `scripts/bidding_v2_deletion_scan.sh`：Legacy 招投标生产源码零匹配扫描。
+- `crates/platform/tests/fresh_database_postgres.rs`：显式隔离空库验证当前业务表、无数据库业务授权函数与重复初始化。
+- Python workflow/acceptance：隔离 PostgreSQL 验证租约、回执、归属和编制流程，合成模型测试不等于真实模型质量验收。
 
 Release 必须由 named required jobs `schema-contract`, `queue-faults`, `outline-scripted-e2e`, `web-export-e2e`, `release-descriptor` 执行。依赖缺失、测试为零、ignored/skipped suite 或 cleanup 失败均使 job 失败；目前仅已接入上述 `schema-contract`，其余 required jobs 尚未齐备；只能称 development checks，不得称 release accepted。

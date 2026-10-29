@@ -1,7 +1,8 @@
 """Small checkpoint state: business documents live behind immutable file references."""
 from typing import TypedDict
 
-from docreader.tender.schema import ArtifactRef, RunStatus
+from docreader.tender.schema import ArtifactRef
+from docreader.tender.status import RunStatus
 
 
 class TenderState(TypedDict, total=False):
@@ -18,4 +19,4 @@ class TenderState(TypedDict, total=False):
 
 
 STAGES = ("register", "freeze", "extract", "verify", "confirm")
-WORKFLOW_PROTOCOL = {"schema_version": 2, "normalization_version": 8, "stages": list(STAGES)}
+WORKFLOW_PROTOCOL = {"schema_version": 2, "normalization_version": 12, "stages": list(STAGES)}

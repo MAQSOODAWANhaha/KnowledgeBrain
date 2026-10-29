@@ -20,3 +20,10 @@ async def tender_command(run_id: str, command_id: str, source_version: int):
     from docreader.workflow.nodes import TenderNodes
 
     await execute_command(run_id, command_id, source_version, Settings.from_env(), TenderNodes)
+
+
+@dramatiq.actor(broker=broker, queue_name="tender", max_retries=0, time_limit=float("inf"))
+async def tender_authoring(execution_id: str):
+    from docreader.integrations.web import execute_authoring_job
+
+    await execute_authoring_job(execution_id, Settings.from_env())

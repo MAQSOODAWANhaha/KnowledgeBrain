@@ -17,7 +17,7 @@ pub async fn embedding_models_for_versions(
     }
     let rows = sqlx::query(
         "SELECT id, COALESCE(embedding_model_id, '') AS emb
-         FROM product_versions WHERE id = ANY($1)",
+         FROM knowledge_product_versions WHERE id = ANY($1)",
     )
     .bind(version_ids)
     .fetch_all(pool)

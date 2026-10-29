@@ -10,6 +10,7 @@ from docreader.llm.budget import RequestBudget
 from docreader.llm.request import ModelBudgetError, ModelConfigurationError, ModelContractError
 from docreader.llm.wire import WirePayload
 from docreader.tender.authoring import _OutlineContext, load_outline_source, organize_outline
+from docreader.tender.authoring_templates import prepare_template_parts
 from docreader.tender.evidence.references import SourceIndex
 from docreader.tender.schema import AuthoringOutline
 
@@ -24,6 +25,7 @@ def authoring_input(artifacts, plan, items, verification):
     return {"schema_version": 2, **IDENTITY, "checklist_digest": "a" * 64,
             "frozen_ref": plan["frozen_ref"], "pack_plan_ref": artifacts.put_json(plan),
             "items_ref": items_ref, "verification_ref": artifacts.put_json(verification),
+            "extract_refs": [], "issues": [],
             "confirmation_ref": artifacts.put_json({"source_version": IDENTITY["source_version"],
                 "domain_revision": IDENTITY["domain_revision"], "checklist_digest": "a" * 64})}
 
@@ -54,6 +56,80 @@ def targets(outline):
     return list(chapter_targets(outline["chapters"]))
 
 
+async def test_search_intents_bind_rules_and_actual_sources_in_the_shared_outline_context(tmp_path):
+    _, _, ctx = await context(tmp_path)
+    rule_id, range_id = next(iter(ctx.rules)), next(iter(ctx.sources))
+    raw = response([target([rule_id], range_ids=[range_id])])
+    raw["chapters"][0]["targets"][0]["support_origins"] = ["tender", "knowledge"]
+    raw["search_intents"] = [{"query": "角色权限管理", "for_ids": [rule_id, range_id, rule_id]}]
+    outlined = ctx.validate(raw)
+    intent = outlined["search_intents"][0]
+    assert intent["rule_refs"] == [ctx.rules[rule_id]]
+    assert all(ref in intent["source_refs"] for ref in ctx.sources[range_id])
+    assert range_id in intent["range_ids"]
+    assert targets(outlined)[0]["support_origins"] == ["tender", "knowledge"]
+    assert AuthoringOutline.model_validate(outlined).model_dump(exclude_unset=True) == outlined
+    for invalid in ("unknown-rule", "unknown-range"):
+        with pytest.raises(ModelContractError):
+            ctx.validate({**raw, "search_intents": [{"query": "角色权限管理", "for_ids": [invalid]}]})
+
+
+async def test_source_only_query_keeps_its_actual_range_without_inventing_rule_identity(tmp_path):
+    _, _, ctx = await context(tmp_path)
+    ctx.rules = {}
+    ctx.payload["rules"] = []
+    range_id = next(iter(ctx.sources))
+    raw = response([target(range_ids=[range_id])])
+    raw["search_intents"] = [{"query": "培训服务", "for_ids": [range_id]}]
+    outlined = ctx.validate(raw)
+    assert outlined["search_intents"] == [{"query": "培训服务", "rule_refs": [],
+        "source_refs": ctx.sources[range_id], "range_ids": [range_id]}]
+
+
+@pytest.mark.parametrize("source_read", [True, False])
+async def test_source_supported_reference_position_does_not_require_unrelated_rule_binding(tmp_path, source_read):
+    _, _, ctx = await context(tmp_path)
+    assert ctx.rules
+    range_id = next(iter(ctx.sources))
+    references = ctx.sources[range_id]
+    keys = {(ref["source_index_ref"]["sha256"], ref["unit_id"]) for ref in references}
+    if source_read:
+        ctx.read_units.update(keys)
+    else:
+        ctx.read_units.difference_update(keys)
+    raw = response([{**target(range_ids=[range_id]),
+                     "purpose": "保留原文规定的参见位置，由全局组装关联实际应答。"}])
+
+    outlined = ctx.validate(raw)
+
+    selected = targets(outlined)[0]
+    assert selected["source_refs"] == references
+    assert selected["rule_refs"] == []
+    assert not any(issue["code"] == "outline_target_unbound" for issue in outlined["issues"])
+    assert any(issue["code"] == "outline_source_not_read" for issue in outlined["issues"]) is not source_read
+    # Selecting a source is not a semantic disposition of any existing rule.
+    unassigned = {json.dumps(ref, sort_keys=True) for issue in outlined["issues"]
+                  if issue["code"] == "outline_rule_unassigned" for ref in issue["rule_refs"]}
+    assert unassigned == {json.dumps(ref, sort_keys=True) for ref in ctx.rules.values()}
+
+
+async def test_native_template_position_is_grounded_without_invented_rule_binding(tmp_path):
+    artifacts, _, ctx = await context(tmp_path)
+    _, parts = prepare_template_parts(artifacts, ctx)
+    assert parts and ctx.rules
+    part_id = parts[0]["part_id"]
+    raw = response([{**target(kind="form"), "template_part_ids": [part_id]}])
+
+    outlined = ctx.validate(raw)
+
+    selected = targets(outlined)[0]
+    assert selected["rule_refs"] == selected["source_refs"] == []
+    assert selected["template_refs"] == [ctx.template_parts[part_id]]
+    assert not any(issue["code"] in {"outline_target_unbound", "outline_template_missing"}
+                   for issue in outlined["issues"])
+    assert load_outline_source(artifacts, selected["template_refs"][0]["source_ref"])["unit"]
+
+
 async def test_one_rule_has_multiple_response_positions_with_host_owned_identities(tmp_path):
     _, value, ctx = await context(tmp_path)
     rule_id = next(iter(ctx.rules))
@@ -76,7 +152,8 @@ async def test_unassigned_rules_and_unbound_targets_keep_partial_outline_usable(
     raw = response([target(), target([next(iter(ctx.rules))])])
     outlined = ctx.validate(raw)
     assert len(targets(outlined)) == 2 and "blocking" not in outlined
-    assert any(issue["code"] == "outline_target_unbound" for issue in outlined["issues"])
+    assert [issue["target_id"] for issue in outlined["issues"] if issue["code"] == "outline_target_unbound"] == [
+        targets(outlined)[0]["target_id"]]
     missing = {json.dumps(ctx.rules[rule_id], sort_keys=True) for rule_id in list(ctx.rules)[1:]}
     reported = {json.dumps(reference, sort_keys=True) for issue in outlined["issues"]
                 if issue["code"] == "outline_rule_unassigned" for reference in issue["rule_refs"]}
@@ -228,6 +305,7 @@ async def test_unsendable_outline_never_calls_executor_or_writes_artifacts(tmp_p
         pytest.fail("An unadmitted outline must not reach the executor")
 
     monkeypatch.setattr("docreader.tender.authoring.read_authoring_input", confirmed)
+    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", confirmed)
     budget = RequestBudget(context_tokens=capacity, model="synthetic", prompts={}, output_reserve=reserve)
     with pytest.raises(error):
         await organize_outline(None, artifacts, execute, budget, **IDENTITY, checklist_digest=value["checklist_digest"])
@@ -247,8 +325,62 @@ async def test_organizer_uses_the_execution_prompt_snapshot(tmp_path, monkeypatc
         return validate({"schema_version": 2, "chapters": [], "findings": []})
 
     monkeypatch.setattr("docreader.tender.authoring.read_authoring_input", confirmed)
+    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", confirmed)
     budget = RequestBudget(context_tokens=131072, model="synthetic", output_reserve=32768,
                            prompts={"outline": "本次执行固定的编制提示"})
     reference = await organize_outline(None, artifacts, execute, budget, **IDENTITY,
                                       checklist_digest=value["checklist_digest"])
     assert len(calls) == 1 and artifacts.read_json(reference)["authoring_input"] == value
+
+
+async def test_independent_outline_entry_binds_new_intents_from_actual_wire_refs(tmp_path, monkeypatch):
+    artifacts, value, ctx = await context(tmp_path)
+    prepare_template_parts(artifacts, ctx)
+
+    async def confirmed(*args, **kwargs):
+        return value
+
+    async def execute(request, validate):
+        sent = json.loads(request["messages"][1]["content"][0]["text"])
+        assert sent["grounding_policy"] == "knowledge_required_v2"
+        rule_id = sent["rules"][0]["rule_id"]
+        assert "source_views" not in sent
+        range_id = sent["sources"][0]["range_id"]
+        assert all(set(part["range_ids"]) <= {entry["range_id"] for entry in sent["sources"]}
+                   for part in sent["template_parts"])
+        raw = response([target([rule_id], range_ids=[range_id])])
+        raw["search_intents"] = [{"query": "技术实施服务", "for_ids": [rule_id, range_id]}]
+        return validate(raw)
+
+    monkeypatch.setattr("docreader.tender.authoring.read_authoring_input", confirmed)
+    monkeypatch.setattr("docreader.tender.authoring.assert_authoring_active", confirmed)
+    reference = await organize_outline(None, artifacts, execute,
+        RequestBudget(context_tokens=131072, model="synthetic", output_reserve=32768), **IDENTITY,
+        checklist_digest=value["checklist_digest"])
+    intent = artifacts.read_json(reference)["search_intents"][0]
+    assert intent["query"] == "技术实施服务"
+    assert intent["rule_refs"] == [ctx.rules[next(iter(ctx.rules))]]
+    assert intent["source_refs"] and all(identity in ctx.sources for identity in intent["range_ids"])
+
+
+async def test_source_only_snapshot_supplies_original_text_without_waiting_for_extraction(tmp_path):
+    artifacts, value, original = await context(tmp_path)
+    value.update(items_ref=None, verification_ref=None, confirmation_ref=None, checklist_digest=None)
+    available = _OutlineContext(artifacts, value)
+    assert available.payload["rules"] == []
+    assert available.payload["rule_origin"] == "source_only"
+    assert original.payload["rule_origin"] == "verified_projection"
+    assert available.payload["source_views"]
+    assert available.read_units.issuperset(original.read_units)
+    assert available.validate(response([target()]))["authoring_input"]["items_ref"] is None
+
+
+async def test_missing_item_artifact_becomes_diagnostic_and_keeps_available_sources(tmp_path):
+    artifacts, value, _ = await context(tmp_path)
+    verification = artifacts.read_json(value["verification_ref"])
+    reference = verification["item_refs"][0]["artifact_ref"]
+    artifacts.path(reference).unlink()
+    available = _OutlineContext(artifacts, value)
+    assert available.sources
+    assert any(issue["code"] == "authoring_projection_unavailable" for issue in available.payload["issues"])
+    assert available.validate(response())["issues"]

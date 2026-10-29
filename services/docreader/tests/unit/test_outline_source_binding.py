@@ -9,6 +9,7 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.request import ModelContractError
 from docreader.llm.wire import WirePayload
 from docreader.tender.authoring import _OutlineContext, load_outline_source
+from docreader.tender.authoring_templates import load_template_part, prepare_template_parts
 from docreader.tender.evidence import freeze_sources
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment, selector
 
@@ -45,10 +46,11 @@ def outline_context(artifacts, index, *, body=None, evidence_source=None):
     return _OutlineContext(artifacts, value), source_ref
 
 
-def form_response(ctx, range_ids):
+def form_response(ctx, range_ids, template_part_ids=()):
     return {"schema_version": 2, "chapters": [{"title": "规定响应格式", "children": [],
         "targets": [{"kind": "form", "purpose": "保留原始格式填写人员及响应说明。",
-                     "rule_ids": [next(iter(ctx.rules))], "range_ids": range_ids}]}], "findings": []}
+                     "rule_ids": [next(iter(ctx.rules))], "range_ids": range_ids,
+                     "template_part_ids": list(template_part_ids)}]}], "findings": []}
 
 
 def spreadsheet(artifacts, table_count):
@@ -100,7 +102,7 @@ def test_virtual_blank_pages_are_neither_catalog_templates_nor_selectable_source
     with pytest.raises(ModelContractError) as caught:
         ctx.validate(form_response(ctx, [blank["range_id"]]))
     assert caught.value.errors[0]["code"] == "outline_unknown_reference"
-    assert caught.value.errors[0]["path"][-1] == "range_ids"
+    assert caught.value.errors[0]["path"] == ["chapters", 0, "targets", 0, "range_ids", 0]
     for entry in ctx.payload["source_catalog"]:
         outlined = ctx.validate(form_response(ctx, [entry["range_id"]]))
         assert all(load_outline_source(artifacts, ref)["unit"]["unit_id"] == ref["unit_id"]
@@ -115,11 +117,19 @@ def test_spreadsheet_row_choices_bind_all_complete_grid_units_and_read_full_tabl
     assert all("cell_refs" in unit["locator"] and "grid" not in unit
                for unit in index.raw["units"] if unit["kind"] == "table_row")
     ctx, source_ref = outline_context(artifacts, index)
-    outlined = ctx.validate(form_response(ctx, [index.ranges[0]["range_id"]]))
+    records, parts = prepare_template_parts(artifacts, ctx)
+    assert len(records) == 1
+    assert {row["range_id"] for row in records[0]["sources"]} == {row["range_id"] for row in index.ranges}
+    assert len(parts) == table_count
+    assert all(set(part["range_ids"]) == {row["range_id"] for row in index.ranges} for part in parts)
+    outlined = ctx.validate(form_response(ctx, [index.ranges[0]["range_id"]],
+                                          [part["part_id"] for part in parts]))
     target = outlined["chapters"][0]["targets"][0]
     assert target["source_refs"] == [
         {"source_index_ref": source_ref, "unit_id": table["unit_id"]} for table in tables]
     assert [load_outline_source(artifacts, ref)["unit"] for ref in target["source_refs"]] == tables
+    assert [load_template_part(artifacts, ref)["unit"] for ref in target["template_refs"]] == tables
+    assert all(part["selectors"] == [] for part in target["template_refs"])
     read_ids = {row["range_id"] for view in ctx.payload["source_views"]
                 for role in ("body", "supporting") for row in view.get(role, [])}
     assert {row["range_id"] for row in index.ranges} <= read_ids
@@ -131,11 +141,14 @@ def test_multiple_spreadsheet_rows_do_not_duplicate_shared_template_grids(tmp_pa
     artifacts = ArtifactStore(tmp_path)
     index, tables = spreadsheet(artifacts, 2)
     ctx, source_ref = outline_context(artifacts, index)
+    _, parts = prepare_template_parts(artifacts, ctx)
     selected = [row["range_id"] for row in index.ranges]
-    outlined = ctx.validate(form_response(ctx, [*selected, selected[0]]))
+    selected_parts = [part["part_id"] for part in parts]
+    outlined = ctx.validate(form_response(ctx, [*selected, selected[0]], [*selected_parts, selected_parts[0]]))
     target = outlined["chapters"][0]["targets"][0]
     assert target["source_refs"] == [
         {"source_index_ref": source_ref, "unit_id": table["unit_id"]} for table in tables]
+    assert target["template_refs"] == [ctx.template_parts[identity] for identity in selected_parts]
 
 
 def test_fragment_evidence_uses_text_free_alias_and_short_selection_preserves_full_native_source(tmp_path):

@@ -148,7 +148,7 @@ def _conflicts(requirements: list[dict], sources: dict) -> list[dict]:
             for second in group[index + 1:]:
                 second_documents = {sources.get(e["range_id"], {}).get("document_id") for e in second["evidence"]}
                 if first_documents != second_documents and numeric_values(first["text"]) != numeric_values(second["text"]):
-                    findings.append(issue("potential_cross_document_conflict", "Same subject, conditions and wording have differing numeric obligations across documents.", requirement_ids=[first["requirement_id"], second["requirement_id"]]))
+                    findings.append(issue("potential_cross_document_conflict", "Same subject, conditions and wording have differing numeric obligations across knowledge_documents.", requirement_ids=[first["requirement_id"], second["requirement_id"]]))
     return findings
 
 

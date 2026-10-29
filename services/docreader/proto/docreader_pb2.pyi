@@ -24,6 +24,22 @@ STRUCTURED_SOURCE_UNIT_KIND_FORM_REGION: StructuredSourceUnitKind
 STRUCTURED_SOURCE_UNIT_KIND_ATTACHMENT_REGION: StructuredSourceUnitKind
 STRUCTURED_SOURCE_UNIT_KIND_IMAGE_REGION: StructuredSourceUnitKind
 
+class TenderCommandRequest(_message.Message):
+    __slots__ = ("json_payload", "blob")
+    JSON_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    BLOB_FIELD_NUMBER: _ClassVar[int]
+    json_payload: bytes
+    blob: bytes
+    def __init__(self, json_payload: _Optional[bytes] = ..., blob: _Optional[bytes] = ...) -> None: ...
+
+class TenderCommandResponse(_message.Message):
+    __slots__ = ("json_payload", "blob")
+    JSON_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
+    BLOB_FIELD_NUMBER: _ClassVar[int]
+    json_payload: bytes
+    blob: bytes
+    def __init__(self, json_payload: _Optional[bytes] = ..., blob: _Optional[bytes] = ...) -> None: ...
+
 class SourceViewRequest(_message.Message):
     __slots__ = ("file_content", "media_type", "source_sha256", "page_ordinal", "max_edge", "max_image_bytes")
     FILE_CONTENT_FIELD_NUMBER: _ClassVar[int]
@@ -202,16 +218,36 @@ class TableGrid(_message.Message):
     def __init__(self, row_count: _Optional[int] = ..., column_count: _Optional[int] = ..., cells: _Optional[_Iterable[_Union[PdfTableCell, _Mapping]]] = ..., widths_mm: _Optional[_Iterable[float]] = ...) -> None: ...
 
 class SpreadsheetCell(_message.Message):
-    __slots__ = ("address", "row", "column", "text")
+    __slots__ = ("address", "row", "column", "text", "raw_value", "value_type", "number_format", "display_text", "display_complete", "display_incomplete_reason", "formula", "formula_references", "cached_value", "cached_value_type")
     ADDRESS_FIELD_NUMBER: _ClassVar[int]
     ROW_FIELD_NUMBER: _ClassVar[int]
     COLUMN_FIELD_NUMBER: _ClassVar[int]
     TEXT_FIELD_NUMBER: _ClassVar[int]
+    RAW_VALUE_FIELD_NUMBER: _ClassVar[int]
+    VALUE_TYPE_FIELD_NUMBER: _ClassVar[int]
+    NUMBER_FORMAT_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_TEXT_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_COMPLETE_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_INCOMPLETE_REASON_FIELD_NUMBER: _ClassVar[int]
+    FORMULA_FIELD_NUMBER: _ClassVar[int]
+    FORMULA_REFERENCES_FIELD_NUMBER: _ClassVar[int]
+    CACHED_VALUE_FIELD_NUMBER: _ClassVar[int]
+    CACHED_VALUE_TYPE_FIELD_NUMBER: _ClassVar[int]
     address: str
     row: int
     column: int
     text: str
-    def __init__(self, address: _Optional[str] = ..., row: _Optional[int] = ..., column: _Optional[int] = ..., text: _Optional[str] = ...) -> None: ...
+    raw_value: str
+    value_type: str
+    number_format: str
+    display_text: str
+    display_complete: bool
+    display_incomplete_reason: str
+    formula: str
+    formula_references: _containers.RepeatedScalarFieldContainer[str]
+    cached_value: str
+    cached_value_type: str
+    def __init__(self, address: _Optional[str] = ..., row: _Optional[int] = ..., column: _Optional[int] = ..., text: _Optional[str] = ..., raw_value: _Optional[str] = ..., value_type: _Optional[str] = ..., number_format: _Optional[str] = ..., display_text: _Optional[str] = ..., display_complete: _Optional[bool] = ..., display_incomplete_reason: _Optional[str] = ..., formula: _Optional[str] = ..., formula_references: _Optional[_Iterable[str]] = ..., cached_value: _Optional[str] = ..., cached_value_type: _Optional[str] = ...) -> None: ...
 
 class SpreadsheetRange(_message.Message):
     __slots__ = ("a1_range", "start_row", "start_column", "end_row", "end_column")

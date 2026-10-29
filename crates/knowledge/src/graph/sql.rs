@@ -27,11 +27,11 @@ pub(crate) async fn persist_graph_maps_tx(
 ) -> Result<(), sqlx::Error> {
     for n in graph.values().filter(|n| n.document_id == document_id) {
         sqlx::query(
-            "INSERT INTO graph_nodes (product_version_id, document_id, name, chunk_ids)
-             VALUES ($1,$2,$3,$4)
+            "INSERT INTO knowledge_graph_nodes (product_version_id, document_id, name, chunk_ids, generation)
+             VALUES ($1,$2,$3,$4,(SELECT attempt FROM knowledge_documents WHERE id=$2 FOR SHARE))
              ON CONFLICT (product_version_id, document_id, name, generation)
              DO UPDATE SET chunk_ids = (
-                 SELECT ARRAY(SELECT DISTINCT x FROM unnest(graph_nodes.chunk_ids || EXCLUDED.chunk_ids) AS x)
+                 SELECT ARRAY(SELECT DISTINCT x FROM unnest(knowledge_graph_nodes.chunk_ids || EXCLUDED.chunk_ids) AS x)
              )",
         )
         .bind(n.version_id)
@@ -43,9 +43,9 @@ pub(crate) async fn persist_graph_maps_tx(
     }
     for r in relations.values().filter(|r| r.document_id == document_id) {
         sqlx::query(
-            "INSERT INTO graph_relations
-                (product_version_id, document_id, node1, node2, rel_type)
-             VALUES ($1,$2,$3,$4,$5)
+            "INSERT INTO knowledge_graph_relations
+                (product_version_id, document_id, source_node_name, target_node_name, relation_type, generation)
+             VALUES ($1,$2,$3,$4,$5,(SELECT attempt FROM knowledge_documents WHERE id=$2 FOR SHARE))
              ON CONFLICT DO NOTHING",
         )
         .bind(r.version_id)
@@ -63,11 +63,11 @@ pub async fn delete_graph_for_document(
     pool: &PgPool,
     document_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM graph_relations WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)")
+    sqlx::query("DELETE FROM knowledge_graph_relations WHERE document_id = $1 AND generation=(SELECT attempt FROM knowledge_documents WHERE id=$1)")
         .bind(document_id)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM graph_nodes WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)")
+    sqlx::query("DELETE FROM knowledge_graph_nodes WHERE document_id = $1 AND generation=(SELECT attempt FROM knowledge_documents WHERE id=$1)")
         .bind(document_id)
         .execute(pool)
         .await?;
@@ -103,28 +103,28 @@ pub async fn graph_hits_pg(
         "SELECT n.name, n.document_id, d.title,
                 COALESCE(c.id, '00000000-0000-0000-0000-000000000000'::uuid) AS chunk_id,
                 COALESCE(c.content, '') AS content,
-                COALESCE(c.start_at, 0) AS start_at,
-                COALESCE(c.end_at, 0) AS end_at,
+                COALESCE(c.start_offset, 0) AS start_at,
+                COALESCE(c.end_offset, 0) AS end_at,
                 p.id AS product_id, p.kind AS product_kind,
                 pv.id AS version_id, pv.label AS version_label,
                 (p.current_version_id = pv.id) AS is_current,
                 COALESCE((
                     SELECT array_agg(dt.tag_id)
-                    FROM document_tags dt WHERE dt.document_id = d.id
+                    FROM knowledge_document_tags dt WHERE dt.document_id = d.id
                 ), ARRAY[]::uuid[]) AS tag_ids,
                 COALESCE((
                     SELECT array_agg(t.slug)
-                    FROM document_tags dt
-                    JOIN tags t ON t.id = dt.tag_id
+                    FROM knowledge_document_tags dt
+                    JOIN knowledge_tags t ON t.id = dt.tag_id
                     WHERE dt.document_id = d.id
                 ), ARRAY[]::text[]) AS tag_slugs
-         FROM graph_nodes n
-         JOIN documents d ON d.id = n.document_id
-         JOIN product_versions pv ON pv.id = n.product_version_id
-         JOIN products p ON p.id = pv.product_id
+         FROM knowledge_graph_nodes n
+         JOIN knowledge_documents d ON d.id = n.document_id
+         JOIN knowledge_product_versions pv ON pv.id = n.product_version_id
+         JOIN knowledge_products p ON p.id = pv.product_id
          LEFT JOIN LATERAL (
-            SELECT id, content, start_at, end_at
-            FROM chunks
+            SELECT id, content, start_offset, end_offset
+            FROM knowledge_chunks
             WHERE id = ANY(n.chunk_ids)
             LIMIT 1
          ) c ON true
@@ -137,7 +137,7 @@ pub async fn graph_hits_pg(
            AND (
                 cardinality($4::uuid[]) = 0
                 OR EXISTS (
-                    SELECT 1 FROM document_tags dt
+                    SELECT 1 FROM knowledge_document_tags dt
                     WHERE dt.document_id = d.id AND dt.tag_id = ANY($4)
                 )
            )
@@ -184,7 +184,7 @@ pub async fn load_graph_for_document(
     let mut graph = std::collections::HashMap::new();
     let nodes = sqlx::query(
         "SELECT product_version_id, document_id, name, chunk_ids
-         FROM graph_nodes WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)",
+         FROM knowledge_graph_nodes WHERE document_id = $1 AND generation=(SELECT attempt FROM knowledge_documents WHERE id=$1)",
     )
     .bind(document_id)
     .fetch_all(pool)
@@ -206,8 +206,8 @@ pub async fn load_graph_for_document(
     }
     let mut relations = std::collections::HashMap::new();
     let rows = sqlx::query(
-        "SELECT product_version_id, document_id, node1, node2, rel_type
-         FROM graph_relations WHERE document_id = $1 AND generation=(SELECT attempt FROM documents WHERE id=$1)",
+        "SELECT product_version_id, document_id, source_node_name AS node1, target_node_name AS node2, relation_type AS rel_type
+         FROM knowledge_graph_relations WHERE document_id = $1 AND generation=(SELECT attempt FROM knowledge_documents WHERE id=$1)",
     )
     .bind(document_id)
     .fetch_all(pool)

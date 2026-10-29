@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   authoringHref,
+  AUTHORING_STEPS,
   parseAuthoringRoute,
   type AuthoringRoute,
   type AuthoringStep,
@@ -36,11 +37,7 @@ export type BidStep = AuthoringStep;
 export type BidRoute = AuthoringRoute;
 export { authoringHref as bidHref, parseAuthoringRoute as parseBidRoute };
 
-export const BID_STEPS = [
-  { key: "files", n: "1", label: "文件" },
-  { key: "authoring", n: "2", label: "编制" },
-  { key: "export", n: "3", label: "导出" },
-] as const;
+export const BID_STEPS = AUTHORING_STEPS;
 
 export type AssetRoute =
   | { kind: "company" }

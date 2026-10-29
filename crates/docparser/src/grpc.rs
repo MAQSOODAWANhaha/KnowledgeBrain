@@ -86,6 +86,58 @@ impl Interceptor for AuthInterceptor {
 type Client =
     DocReaderClient<tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>>;
 
+/// The host adapter shares DocReader's endpoint, TLS and authentication policy.
+pub async fn tender_command(
+    json_payload: Vec<u8>,
+    blob: Vec<u8>,
+) -> Result<(Vec<u8>, Vec<u8>), ConvertError> {
+    use crate::proto::tender_bridge_client::TenderBridgeClient;
+    let addr = reader_addr().ok_or_else(|| ConvertError(NOT_CONFIGURED.into()))?;
+    let max = max_message_size();
+    if json_payload
+        .len()
+        .saturating_add(blob.len())
+        .saturating_add(64)
+        > max
+    {
+        return Err(ConvertError(
+            "tender command exceeds DocReader message limit".into(),
+        ));
+    }
+    let request = crate::proto::TenderCommandRequest { json_payload, blob };
+    timeout(Duration::from_secs(60), async {
+        let url = endpoint_url(&addr);
+        let mut endpoint = Channel::from_shared(url.clone())
+            .map_err(|_| ConvertError("invalid DocReader endpoint".into()))?
+            .connect_timeout(Duration::from_secs(10));
+        if url.starts_with("https://") || tls_enabled() {
+            endpoint = endpoint
+                .tls_config(ClientTlsConfig::new().with_native_roots())
+                .map_err(|_| ConvertError("invalid DocReader TLS configuration".into()))?;
+        }
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|_| ConvertError("DocReader is unavailable".into()))?;
+        let mut client = TenderBridgeClient::with_interceptor(
+            channel,
+            AuthInterceptor {
+                token: auth_token(),
+            },
+        )
+        .max_decoding_message_size(max)
+        .max_encoding_message_size(max);
+        let reply = client
+            .command(request)
+            .await
+            .map_err(|error| ConvertError(format!("tender bridge: {}", error.code())))?
+            .into_inner();
+        Ok((reply.json_payload, reply.blob))
+    })
+    .await
+    .map_err(|_| ConvertError("tender bridge timeout".into()))?
+}
+
 pub struct ConvertRequest {
     pub file_content: Vec<u8>,
     pub file_name: String,

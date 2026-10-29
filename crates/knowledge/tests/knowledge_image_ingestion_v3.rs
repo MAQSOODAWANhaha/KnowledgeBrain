@@ -37,7 +37,7 @@ fn chunk(
 
 #[tokio::test]
 async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
-    let Ok(database_url) = std::env::var("BIDDING_V2_TEST_DATABASE_URL") else {
+    let Ok(database_url) = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL") else {
         return;
     };
     let pool = PgPoolOptions::new()
@@ -54,14 +54,20 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
     let source_sha = hex::encode(Sha256::digest(&source_bytes));
     let source_ref = platform::object_ref(&source_sha);
     let mut fixture = pool.begin().await.expect("fixture transaction");
-    sqlx::query("INSERT INTO workspaces(id,name,slug,kind) VALUES($1,$2,$2,'company')")
+    sqlx::query("INSERT INTO platform_users(id,email) VALUES($1,$2)")
+        .bind(workspace_id)
+        .bind(format!("{workspace_id}@test.invalid"))
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO knowledge_workspaces(id,name,slug,kind,owner_user_id) VALUES($1,$2,$2,'company',$1)")
         .bind(workspace_id)
         .bind(&slug)
         .execute(&mut *fixture)
         .await
         .expect("workspace fixture");
     sqlx::query(
-        "INSERT INTO products(id,workspace_id,kind,name,slug) VALUES($1,$2,'library',$3,$3)",
+        "INSERT INTO knowledge_products(id,workspace_id,kind,name,slug) VALUES($1,$2,'library',$3,$3)",
     )
     .bind(product_id)
     .bind(workspace_id)
@@ -70,33 +76,34 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
     .await
     .expect("product fixture");
     sqlx::query(
-        "INSERT INTO product_versions(id,product_id,label,status) VALUES($1,$2,'v1','active')",
+        "INSERT INTO knowledge_product_versions(id,product_id,label,status) VALUES($1,$2,'v1','active')",
     )
     .bind(version_id)
     .bind(product_id)
     .execute(&mut *fixture)
     .await
     .expect("version fixture");
-    sqlx::query("UPDATE products SET current_version_id=$1 WHERE id=$2")
+    sqlx::query("UPDATE knowledge_products SET current_version_id=$1 WHERE id=$2")
         .bind(version_id)
         .bind(product_id)
         .execute(&mut *fixture)
         .await
         .expect("current version fixture");
-    sqlx::query(
-        "SELECT kb_object_reference_add($1::kb_object_ref,$2::kb_sha256,'text/plain',$3,
-          'knowledge_document',$4,'original',NULL)",
+    platform::add_object_reference(
+        &mut fixture,
+        &source_ref,
+        &source_sha,
+        "text/plain",
+        source_bytes.len() as i64,
+        "knowledge_document",
+        document_id,
+        "original",
     )
-    .bind(&source_ref)
-    .bind(&source_sha)
-    .bind(source_bytes.len() as i64)
-    .bind(document_id)
-    .execute(&mut *fixture)
     .await
     .expect("source object fixture");
     sqlx::query(
-        "INSERT INTO documents(id,product_version_id,title,parse_status,enable_status,index_ready,
-          file_name,file_size,file_hash,object_ref)
+        "INSERT INTO knowledge_documents(id,product_version_id,title,parse_status,enable_status,index_ready,
+          file_name,byte_length,content_sha256,object_ref)
          VALUES($1,$2,'verified source','completed','enabled',true,'verified-source.txt',$3,$4,$5)",
     )
     .bind(document_id)
@@ -129,10 +136,10 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
     let published:(i64,i64,i64,i64,i32,i32)=sqlx::query_as(
         "SELECT registry.byte_length,
           (SELECT count(*) FROM knowledge_image_artifact_revisions artifact WHERE artifact.object_ref=registry.object_ref),
-          (SELECT count(*) FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=$1),
-          (SELECT count(*) FROM object_owner_references owner WHERE owner.object_ref=registry.object_ref AND owner.owner_kind='knowledge_image_artifact'),
+          (SELECT count(*) FROM knowledge_image_chunk_links mapping WHERE mapping.chunk_id=$1),
+          (SELECT count(*) FROM platform_object_references owner WHERE owner.object_ref=registry.object_ref AND owner.owner_kind='knowledge_image_artifact'),
           artifact.width,artifact.height
-         FROM object_registry registry JOIN knowledge_image_artifact_revisions artifact ON artifact.object_ref=registry.object_ref
+         FROM platform_objects registry JOIN knowledge_image_artifact_revisions artifact ON artifact.object_ref=registry.object_ref
          WHERE registry.object_ref=$2")
         .bind(chunk_id).bind(platform::object_ref(&first_sha)).fetch_one(&pool).await.expect("published identities");
     assert_eq!(published, (first_bytes.len() as i64, 1, 1, 1, 4, 4));
@@ -164,7 +171,7 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
         .await
         .expect_err("identity conflict");
     assert!(error.to_string().contains("idempotency conflict"));
-    let rollback:(bool,bool)=sqlx::query_as("SELECT EXISTS(SELECT 1 FROM chunks WHERE id=$1),EXISTS(SELECT 1 FROM object_registry WHERE object_ref=$2)")
+    let rollback:(bool,bool)=sqlx::query_as("SELECT EXISTS(SELECT 1 FROM knowledge_chunks WHERE id=$1),EXISTS(SELECT 1 FROM platform_objects WHERE object_ref=$2)")
         .bind(ordinary_id).bind(platform::object_ref(&second_sha)).fetch_one(&pool).await.expect("rollback state");
     assert_eq!(rollback, (false, false));
 
@@ -183,35 +190,34 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
             .contains("objects/{sha256}")
     );
     let invalid_persisted: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunks WHERE id=$1)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_chunks WHERE id=$1)")
             .bind(invalid_id)
             .fetch_one(&pool)
             .await
             .expect("invalid input state");
     assert!(!invalid_persisted);
 
-    let original:(String,String,String,i64)=sqlx::query_as("SELECT registry.object_ref,registry.digest,registry.media_type,registry.byte_length
-        FROM documents document JOIN object_registry registry ON registry.object_ref=document.object_ref WHERE document.id=$1")
+    let original:(String,String,String,i64)=sqlx::query_as("SELECT registry.object_ref,registry.content_sha256 AS digest,registry.media_type,registry.byte_length
+        FROM knowledge_documents document JOIN platform_objects registry ON registry.object_ref=document.object_ref WHERE document.id=$1")
         .bind(document_id).fetch_one(&pool).await.expect("original source identity");
     let mut retirement = pool.begin().await.expect("retirement transaction");
-    sqlx::query("SELECT kb_object_reference_remove($1,'knowledge_document',$2,'original',$3)")
-        .bind(&original.0)
-        .bind(document_id)
-        .bind(Uuid::new_v4())
-        .execute(&mut *retirement)
-        .await
-        .expect("release live owner");
-    sqlx::query("UPDATE documents SET deleted_at=clock_timestamp() WHERE id=$1")
+    platform::release_object_reference(
+        &mut retirement,
+        &original.0,
+        "knowledge_document",
+        document_id,
+        "original",
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("release live owner");
+    sqlx::query("UPDATE knowledge_documents SET deleted_at=clock_timestamp() WHERE id=$1")
         .bind(document_id)
         .execute(&mut *retirement)
         .await
         .expect("retire source document");
-    sqlx::query("SET CONSTRAINTS documents_object_reference_contract IMMEDIATE")
-        .execute(&mut *retirement)
-        .await
-        .expect("validate source retirement");
     let owner_retained: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM object_owner_references owner
+        "SELECT EXISTS(SELECT 1 FROM platform_object_references owner
         WHERE owner.object_ref=$1 AND owner.owner_kind='knowledge_image_artifact')",
     )
     .bind(platform::object_ref(&first_sha))

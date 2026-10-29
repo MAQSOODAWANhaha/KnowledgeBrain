@@ -13,7 +13,7 @@ from docreader.main import DocReaderServicer
 from docreader.proto.docreader_pb2 import ReadRequest
 
 REPO = Path(__file__).resolve().parents[3]
-EXPECTATIONS = REPO / "crates/bidding/tests/fixtures/tender-analysis-golden-v1.json"
+EXPECTATIONS = Path(__file__).parent / "fixtures/tender-analysis-golden-v1.json"
 
 
 def _sample_ready() -> bool:

@@ -1,8 +1,8 @@
-fn bootstrap_diagnostic(error: &platform::SchemaError) -> String {
+fn postgres_diagnostic(error: &sqlx::Error) -> String {
     // Never log database messages, queries, details or connection strings: they may
     // contain caller data. Only SQLSTATE and numeric original-source position escape.
     match error {
-        platform::SchemaError::Sql(sqlx::Error::Database(database)) => {
+        sqlx::Error::Database(database) => {
             let position = database
                 .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
                 .and_then(|error| match error.position() {
@@ -10,11 +10,29 @@ fn bootstrap_diagnostic(error: &platform::SchemaError) -> String {
                     _ => None,
                 });
             format!(
-                " SQLSTATE={} position={position:?}",
+                "postgres operation failed SQLSTATE={} position={position:?}",
                 database.code().unwrap_or_default()
             )
         }
-        _ => String::new(),
+        _ => "postgres operation failed".into(),
+    }
+}
+
+fn migration_diagnostic(error: &sqlx::migrate::MigrateError) -> String {
+    use sqlx::migrate::MigrateError;
+    match error {
+        MigrateError::Execute(error) => postgres_diagnostic(error),
+        MigrateError::ExecuteMigration(error, version) => {
+            format!("version={version} {}", postgres_diagnostic(error))
+        }
+        MigrateError::VersionMissing(version) => {
+            format!("applied version={version} is missing from migration files")
+        }
+        MigrateError::VersionMismatch(version) => {
+            format!("applied version={version} checksum differs from migration file")
+        }
+        MigrateError::Dirty(version) => format!("version={version} is partially applied"),
+        _ => "migration validation failed".into(),
     }
 }
 
@@ -22,25 +40,34 @@ fn bootstrap_diagnostic(error: &platform::SchemaError) -> String {
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
-    let pool = platform::connect()
-        .await
-        .unwrap_or_else(|error| panic!("postgres bootstrap connection failed: {error}"));
-    platform::apply_fresh_baseline(&pool)
+    let pool = platform::connect().await.unwrap_or_else(|error| {
+        panic!(
+            "migration connection failed: {}",
+            postgres_diagnostic(&error)
+        )
+    });
+    platform::migrate_database(&pool)
         .await
         .unwrap_or_else(|error| {
-            let diagnostic = bootstrap_diagnostic(&error);
-            panic!("fresh schema bootstrap failed: {error}{diagnostic}")
+            panic!(
+                "database migration failed: {}",
+                migration_diagnostic(&error)
+            )
         });
-    tracing::info!("fresh schema bootstrap complete");
+    tracing::info!("database migrations complete");
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn bootstrap_diagnostic_does_not_expose_driver_message() {
-        let error =
-            platform::SchemaError::Sql(sqlx::Error::Protocol("private driver payload".into()));
-        assert_eq!(super::bootstrap_diagnostic(&error), "");
-        assert_eq!(error.to_string(), "postgres operation failed");
+    fn migration_diagnostic_does_not_expose_driver_message() {
+        let error = sqlx::migrate::MigrateError::ExecuteMigration(
+            sqlx::Error::Protocol("private driver payload".into()),
+            20261028000001,
+        );
+        assert_eq!(
+            super::migration_diagnostic(&error),
+            "version=20261028000001 postgres operation failed"
+        );
     }
 }

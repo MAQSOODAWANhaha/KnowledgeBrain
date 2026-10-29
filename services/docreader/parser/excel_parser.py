@@ -2,7 +2,7 @@
 Excel Parser Module
 
 This module provides functionality to parse Excel files (.xlsx, .xls) into
-structured Document objects with text content and chunks. It supports multiple
+structured Document objects with text content and knowledge_chunks. It supports multiple
 sheets and handles various Excel formats using pandas.
 """
 import logging

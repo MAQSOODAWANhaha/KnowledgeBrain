@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use platform::ReleaseDescriptorV1;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -147,7 +147,7 @@ impl Input {
         Ok(())
     }
 
-    fn components(&self) -> [(&str, &str, &str); 5] {
+    fn components(&self) -> [(&str, &str, &str); 8] {
         let i = &self.descriptor.images;
         [
             ("migrate", "migrator", &i.migrator),
@@ -155,6 +155,13 @@ impl Input {
             ("worker", "worker", &i.worker),
             ("retention", "retention", &i.retention),
             ("docreader", "docreader", &i.docreader),
+            ("python-tender-init", "python-tender-init", &i.docreader),
+            ("python-tender-worker", "python-tender-worker", &i.docreader),
+            (
+                "python-tender-dispatcher",
+                "python-tender-dispatcher",
+                &i.docreader,
+            ),
         ]
     }
 }
@@ -246,10 +253,55 @@ fn image_id(value: &Value, expected: &str) -> Result<String> {
     Ok(id.into())
 }
 
-fn verify_process(image: &Value, container: &Value) -> Result<()> {
+fn one_shot(kind: &str) -> bool {
+    matches!(kind, "migrator" | "python-tender-init")
+}
+
+fn python_command(kind: &str) -> Option<Value> {
+    match kind {
+        "python-tender-init" => Some(json!([
+            "uv",
+            "run",
+            "--frozen",
+            "--no-dev",
+            "--no-sync",
+            "python",
+            "-m",
+            "docreader.integrations.cli",
+            "init"
+        ])),
+        "python-tender-worker" => Some(json!([
+            "uv",
+            "run",
+            "--frozen",
+            "--no-dev",
+            "--no-sync",
+            "dramatiq",
+            "docreader.jobs.tasks",
+            "--processes",
+            "1",
+            "--threads",
+            "4"
+        ])),
+        "python-tender-dispatcher" => Some(json!([
+            "uv",
+            "run",
+            "--frozen",
+            "--no-dev",
+            "--no-sync",
+            "python",
+            "-m",
+            "docreader.jobs.dispatcher"
+        ])),
+        _ => None,
+    }
+}
+
+fn verify_process(image: &Value, container: &Value, kind: &str) -> Result<()> {
     let image = &one(image)?["Config"];
     let container = &one(container)?["Config"];
-    if container["Cmd"] != image["Cmd"] || container["Entrypoint"] != image["Entrypoint"] {
+    let expected_command = python_command(kind).unwrap_or_else(|| image["Cmd"].clone());
+    if container["Cmd"] != expected_command || container["Entrypoint"] != image["Entrypoint"] {
         return Err("component command differs from verified image".into());
     }
     Ok(())
@@ -275,16 +327,16 @@ fn verify_container(
     if container["Name"] != format!("/{}-{service}", input.project) {
         return Err("container name is outside release project".into());
     }
-    if kind == "migrator" {
+    if one_shot(kind) {
         if container["State"]["Status"] != "exited" || container["State"]["ExitCode"] != 0 {
-            return Err("migrator has not completed successfully".into());
+            return Err("initialization has not completed successfully".into());
         }
     } else if container["State"]["Running"] != true
         || container["State"]["Health"]["Status"] != "healthy"
     {
         return Err("runtime container is not healthy".into());
     }
-    if kind != "migrator"
+    if !one_shot(kind)
         && (expected["healthcheck"]["test"]
             .as_array()
             .is_none_or(|v| v.len() < 2)
@@ -366,7 +418,7 @@ impl Override {
         for (service, kind, image) in input.components() {
             let mut entry = json!({"image":image,"pull_policy":"never", "labels":{ATTEMPT_LABEL:attempt},
                 "container_name":format!("{}-{service}", input.project)});
-            if kind != "docreader" {
+            if matches!(kind, "migrator" | "api" | "worker" | "retention") {
                 entry["environment"] = json!({"BIN":kind});
             }
             services.insert(service.into(), entry);
@@ -452,8 +504,8 @@ async fn inspect(
             &container,
             &config["services"][service],
         )?;
-        verify_process(&image_value, &container)?;
-        if kind != "migrator" {
+        verify_process(&image_value, &container, kind)?;
+        if !one_shot(kind) {
             probe(
                 engine,
                 &id,
@@ -556,12 +608,12 @@ async fn release(input: &Input, engine: &mut impl Engine) -> Result<Value> {
     for (service, kind, image) in input.components() {
         let expected = &config["services"][service];
         if expected["image"] != image
-            || !expected["command"].is_null()
+            || expected["command"] != python_command(kind).unwrap_or(Value::Null)
             || !expected["entrypoint"].is_null()
         {
             return Err("resolved component image or command mismatch".into());
         }
-        if kind != "migrator" {
+        if !one_shot(kind) {
             probe_args("validation", &expected["healthcheck"]["test"])?;
         }
     }
@@ -612,7 +664,12 @@ async fn release(input: &Input, engine: &mut impl Engine) -> Result<Value> {
         ));
     }
     let result = async {
-        for (_, _, image) in input.components() {
+        let images: BTreeSet<_> = input
+            .components()
+            .into_iter()
+            .map(|(_, _, image)| image)
+            .collect();
+        for image in images {
             input.unchanged()?;
             engine.run(&strings(&["pull", image])).await?;
             image_id(
@@ -631,8 +688,6 @@ async fn release(input: &Input, engine: &mut impl Engine) -> Result<Value> {
                 &dependency_digest(image)?,
             )?;
         }
-        let mut dependencies = dependencies.clone();
-        dependencies.push("docreader");
         let timeout = input.timeout.to_string();
         if !dependencies.is_empty() {
             let mut up = vec![
@@ -651,75 +706,84 @@ async fn release(input: &Input, engine: &mut impl Engine) -> Result<Value> {
             input.unchanged()?;
             engine.run(&compose(input, &extra, &up)).await?;
         }
-        if container_id(engine, input, &extra, "migrate")
-            .await?
-            .is_none()
-        {
-            input.unchanged()?;
-            engine
-                .run(&compose(
-                    input,
-                    &extra,
-                    &[
-                        "up",
-                        "--no-deps",
-                        "--no-build",
-                        "--pull",
-                        "never",
-                        "--no-recreate",
-                        "--abort-on-container-exit",
-                        "--exit-code-from",
-                        "migrate",
-                        "migrate",
-                    ],
-                ))
-                .await?;
-        }
-        let migration = container_id(engine, input, &extra, "migrate")
-            .await?
-            .ok_or("migrator disappeared")?;
-        let image = &input.descriptor.images.migrator;
-        let migration_image = parsed(&engine.run(&strings(&["image", "inspect", image])).await?)?;
-        let actual = image_id(&migration_image, image)?;
-        let migration_container = parsed(
-            &engine
-                .run(&strings(&["container", "inspect", &migration]))
-                .await?,
-        )?;
-        verify_container(
-            input,
-            "migrate",
-            "migrator",
-            image,
-            &actual,
-            &migration_container,
-            &config["services"]["migrate"],
-        )?;
-        verify_process(&migration_image, &migration_container)?;
-        input.unchanged()?;
-        engine
-            .run(&compose(
+        for service in ["migrate", "python-tender-init"] {
+            let (_, kind, image) = input
+                .components()
+                .into_iter()
+                .find(|(name, _, _)| *name == service)
+                .ok_or("initialization component missing")?;
+            if container_id(engine, input, &extra, service)
+                .await?
+                .is_none()
+            {
+                input.unchanged()?;
+                engine
+                    .run(&compose(
+                        input,
+                        &extra,
+                        &[
+                            "up",
+                            "--no-deps",
+                            "--no-build",
+                            "--pull",
+                            "never",
+                            "--no-recreate",
+                            "--abort-on-container-exit",
+                            "--exit-code-from",
+                            service,
+                            service,
+                        ],
+                    ))
+                    .await?;
+            }
+            let migration = container_id(engine, input, &extra, service)
+                .await?
+                .ok_or("initialization container disappeared")?;
+            let migration_image =
+                parsed(&engine.run(&strings(&["image", "inspect", image])).await?)?;
+            let actual = image_id(&migration_image, image)?;
+            let migration_container = parsed(
+                &engine
+                    .run(&strings(&["container", "inspect", &migration]))
+                    .await?,
+            )?;
+            verify_container(
                 input,
-                &extra,
-                &[
-                    "up",
-                    "-d",
-                    "--wait",
-                    "--wait-timeout",
-                    &timeout,
-                    "--no-build",
-                    "--pull",
-                    "never",
-                    "--no-recreate",
-                    "--no-deps",
-                    "api",
-                    "worker",
-                    "retention",
-                ],
-            ))
-            .await?;
+                service,
+                kind,
+                image,
+                &actual,
+                &migration_container,
+                &config["services"][service],
+            )?;
+            verify_process(&migration_image, &migration_container, kind)?;
+        }
+        for runtime in [
+            &[
+                "docreader",
+                "python-tender-worker",
+                "python-tender-dispatcher",
+            ][..],
+            &["api", "worker", "retention"][..],
+        ] {
+            input.unchanged()?;
+            let mut up = vec![
+                "up",
+                "-d",
+                "--wait",
+                "--wait-timeout",
+                &timeout,
+                "--no-build",
+                "--pull",
+                "never",
+                "--no-recreate",
+                "--no-deps",
+            ];
+            up.extend(runtime.iter().copied());
+            engine.run(&compose(input, &extra, &up)).await?;
+        }
         inspect(engine, input, &extra, true, &config).await?;
-        for service in dependencies.iter().filter(|s| **s != "docreader") {
+        for service in &dependencies {
             let expected = &services[*service];
             let image = expected["image"]
                 .as_str()

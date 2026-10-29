@@ -2,6 +2,22 @@ syntax = "proto3";
 
 package docreader;
 
+// Host-only adapter over the existing authenticated transport. It does not
+// change model messages or grant callers access to arbitrary artifact paths.
+service TenderBridge {
+  rpc Command(TenderCommandRequest) returns (TenderCommandResponse) {}
+}
+
+message TenderCommandRequest {
+  bytes json_payload = 1;
+  bytes blob = 2;
+}
+
+message TenderCommandResponse {
+  bytes json_payload = 1;
+  bytes blob = 2;
+}
+
 service DocReader {
   rpc Read(ReadRequest) returns (ReadResponse) {}
   // ReadStream is the streaming counterpart of Read. It first emits one

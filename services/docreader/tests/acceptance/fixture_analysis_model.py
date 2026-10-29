@@ -20,6 +20,13 @@ class AnalysisFixtureModel:
 
     def response(self, task, payload, images=()):
         assert task != "plan", "analysis must end at confirmation"
+        if "work_units" in payload:
+            from docreader.tender.checks.analysis_batches import member_payload
+
+            return {"schema_version": 2, "shared_findings": [], "work_units": [
+                {"work_unit_id": identity, **{key: value for key, value in self.response(
+                    task, member_payload(payload, identity), images).items() if key != "schema_version"}}
+                for identity in payload["target_work_unit_ids"]]}
         if task == "ocr":
             assert images
             return {"text": "The supplier must provide the illustrated maintenance schedule.",

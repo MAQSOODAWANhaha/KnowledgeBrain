@@ -14,7 +14,7 @@ class BaseParser(ABC):
     """Base parser interface.
 
     After the lightweight refactoring, BaseParser only extracts markdown text
-    and raw image references from documents. Chunking, image storage, OCR,
+    and raw image references from knowledge_documents. Chunking, image storage, OCR,
     and VLM caption are handled by the Go App module.
     """
 

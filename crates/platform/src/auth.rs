@@ -99,7 +99,7 @@ async fn initialize_local_admin_in_transaction(
         .await
         .map_err(|_| "local account initialization lock failed")?;
     let existing: Option<Option<String>> =
-        sqlx::query_scalar("SELECT password_hash FROM users WHERE email=$1")
+        sqlx::query_scalar("SELECT password_hash FROM platform_users WHERE email=$1")
             .bind(&config.username)
             .fetch_optional(&mut **tx)
             .await
@@ -115,7 +115,7 @@ async fn initialize_local_admin_in_transaction(
             );
         }
     } else {
-        let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users)")
+        let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM platform_users)")
             .fetch_one(&mut **tx)
             .await
             .map_err(|_| "local account lookup failed")?;
@@ -129,7 +129,7 @@ async fn initialize_local_admin_in_transaction(
         let hash = tokio::task::spawn_blocking(move || hash_user_password(&password))
             .await
             .map_err(|_| "password hashing failed")??;
-        sqlx::query("INSERT INTO users (id,email,password_hash) VALUES ($1,$2,$3)")
+        sqlx::query("INSERT INTO platform_users (id,email,password_hash) VALUES ($1,$2,$3)")
             .bind(Uuid::new_v4())
             .bind(&config.username)
             .bind(hash)
@@ -340,7 +340,7 @@ mod tests {
             .await
             .unwrap();
         let mut tx = pool.begin().await.unwrap();
-        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_users")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
@@ -353,7 +353,7 @@ mod tests {
         initialize_local_admin_in_transaction(&mut tx, &config)
             .await
             .unwrap();
-        let first: String = sqlx::query_scalar("SELECT password_hash FROM users")
+        let first: String = sqlx::query_scalar("SELECT password_hash FROM platform_users")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
@@ -366,7 +366,7 @@ mod tests {
         initialize_local_admin_in_transaction(&mut tx, &changed)
             .await
             .unwrap();
-        let after: String = sqlx::query_scalar("SELECT password_hash FROM users")
+        let after: String = sqlx::query_scalar("SELECT password_hash FROM platform_users")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
@@ -380,7 +380,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_users")
             .fetch_one(&mut *tx)
             .await
             .unwrap();

@@ -7,16 +7,16 @@
 
 共享平台只提供两类业务都需要的基础能力，不拥有知识库或招投标业务状态机。
 
-投标大纲运行在 `crates/bidding`（见 [大纲运行时](../design/evidence-runtime-contract.md)），复用本域 Worker、调用预约、执行权、检查点和对象能力，不新增平台 Agent 服务或第二套队列。SDK `AgentRun` 与领域执行 token/lease 不同，前者不能授权业务副作用或发布。
+招标分析与编制运行在 `services/docreader`，Rust 提供 API 桥接、知识服务和通用对象/队列能力。旧 `crates/bidding` 及其专用运行入口已删除。领域执行状态、租约与模型回执由 Python 工作流维护。
 
 ## 共享平台拥有
 
-- LDAP/本地登录、JWT、API key 与 authenticated-global 访问边界；
+- LDAP/本地登录、JWT 与 API Key 身份认证；业务服务按创建人校验资源归属，Key 沿用其所属用户身份；
 - API/worker/docreader 进程拓扑、队列注册；Oxana 负责 transport retry/resurrection/dead queue；显式 Agent-bound Request 的业务副作用由领域 AgentRun token/lease 与 logical-call ledger fence，不能镜像 Oxana phase；
-- 通用 actor identity、幂等结果、append-only audit 基础设施；
+- 通用 actor identity 与审计；实际命令的幂等结果归各业务持久化模块；
 - `ObjectRegistry`、不可变 deletion identity、Oxana typed retention job 与 owner-fenced 完成 tombstone；
 - 维护门、健康检查、日志、tracing、metrics 与部署验收基础；
-- PostgreSQL/Redis/对象存储的启动、权限与运行安全基线；三 baseline fresh 初始化与依赖就绪检查。
+- PostgreSQL/Redis/对象存储的启动与依赖就绪检查；三份全新初始化基线只定义表、索引、约束，不定义业务角色、自定义函数或触发器。对象生命周期在 Rust 事务中完成。
 
 ## 共享平台不拥有
 

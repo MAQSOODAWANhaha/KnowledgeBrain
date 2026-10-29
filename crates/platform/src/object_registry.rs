@@ -2,69 +2,26 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+mod knowledge;
+mod lifecycle;
+pub use knowledge::*;
+pub use lifecycle::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ObjectState {
+    Available,
+    Deleting,
+    Deleted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectDeletionIdentity {
     pub deletion_id: Uuid,
     pub object_ref: String,
     pub digest: String,
     pub byte_length: i64,
-}
-
-pub async fn stage_object_upload(
-    pool: &PgPool,
-    staging_id: Uuid,
-    object_ref: &str,
-    digest: &str,
-    media_type: &str,
-    byte_length: i64,
-    actor_identity: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT kb_object_upload_stage(
-            $1,$2::kb_object_ref,$3::kb_sha256,$4,$5,$6::kb_actor_identity
-        )",
-    )
-    .bind(staging_id)
-    .bind(object_ref)
-    .bind(digest)
-    .bind(media_type)
-    .bind(byte_length)
-    .bind(actor_identity)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn abandon_object_upload(
-    pool: &PgPool,
-    staging_id: Uuid,
-    actor_identity: Option<&str>,
-) -> Result<Option<ObjectDeletionIdentity>, sqlx::Error> {
-    let value: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT kb_object_upload_abandon($1,$2::kb_actor_identity)")
-            .bind(staging_id)
-            .bind(actor_identity)
-            .fetch_one(pool)
-            .await?;
-    value
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
-}
-
-/// End an explicitly abandoned producer lease without dropping its durable
-/// staging identity. Queue delivery and physical retention happen afterwards.
-pub async fn request_object_upload_expiry(
-    pool: &PgPool,
-    staging_id: Uuid,
-    actor_identity: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT kb_object_upload_request_expiry($1,$2::kb_actor_identity)")
-        .bind(staging_id)
-        .bind(actor_identity)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 pub async fn schedule_object_upload_cleanup(staging_id: Uuid) -> Result<(), String> {
@@ -243,10 +200,7 @@ where
     F: Fn(Uuid) -> Fut,
     Fut: std::future::Future<Output = Result<Option<String>, String>>,
 {
-    let staging_ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT * FROM kb_object_upload_expiry_candidates()")
-            .fetch_all(pool)
-            .await?;
+    let staging_ids = expired_object_upload_candidates(pool).await?;
     for staging_id in &staging_ids {
         enqueue(*staging_id)
             .await
@@ -258,113 +212,25 @@ where
     i32::try_from(staging_ids.len()).map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ObjectUploadExpiryResult {
-    state: String,
-    staging_id: Uuid,
-    deletion: Option<ObjectDeletionIdentity>,
-}
-
-pub async fn expire_one_object_upload(
-    pool: &PgPool,
-    staging_id: Uuid,
-) -> Result<Option<ObjectDeletionIdentity>, String> {
-    let value: serde_json::Value = sqlx::query_scalar("SELECT kb_object_upload_expire_one($1)")
-        .bind(staging_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    let result: ObjectUploadExpiryResult =
-        serde_json::from_value(value).map_err(|error| error.to_string())?;
-    if result.staging_id != staging_id
-        || !matches!(result.state.as_str(), "expired" | "not_current")
-    {
-        return Err("upload expiry returned an invalid closed result".into());
-    }
-    Ok(result.deletion)
-}
-
-pub async fn register_knowledge_document_object(
-    pool: &PgPool,
-    document_id: Uuid,
-    media_type: &str,
-    idempotency_key: &str,
-) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT kb_register_knowledge_document_object($1,$2,NULL::kb_actor_identity,$3,$4)",
-    )
-    .bind(document_id)
-    .bind(media_type)
-    .bind(idempotency_key)
-    .bind(Uuid::new_v4())
-    .fetch_one(pool)
-    .await
-}
-
-pub async fn release_knowledge_document_object(
-    pool: &PgPool,
-    document_id: Uuid,
-    idempotency_key: &str,
-) -> Result<Option<ObjectDeletionIdentity>, sqlx::Error> {
-    let value: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT kb_release_knowledge_document_object($1,NULL::kb_actor_identity,$2,$3)",
-    )
-    .bind(document_id)
-    .bind(idempotency_key)
-    .bind(Uuid::new_v4())
-    .fetch_one(pool)
-    .await?;
-    value
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
-}
-
-pub async fn process_object_deletion(
-    pool: &PgPool,
-    deletion: &ObjectDeletionIdentity,
-) -> Result<(), String> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Preflight {
-        state: String,
-    }
-    let value: serde_json::Value =
-        sqlx::query_scalar("SELECT kb_retention_preflight($1,$2::kb_object_ref,$3::kb_sha256,$4)")
-            .bind(deletion.deletion_id)
-            .bind(&deletion.object_ref)
-            .bind(&deletion.digest)
-            .bind(deletion.byte_length)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| error.to_string())?;
-    let preflight: Preflight = serde_json::from_value(value).map_err(|error| error.to_string())?;
-    match preflight.state.as_str() {
-        "completed" => return Ok(()),
-        "current" => {}
-        "mismatch" => return Err("object deletion business fence is not current".into()),
-        _ => return Err("retention preflight returned an invalid closed state".into()),
-    }
-    crate::delete_retained_blob(&deletion.digest).await?;
-    let completed: bool =
-        sqlx::query_scalar("SELECT kb_retention_complete($1,$2::kb_object_ref,$3::kb_sha256)")
-            .bind(deletion.deletion_id)
-            .bind(&deletion.object_ref)
-            .bind(&deletion.digest)
-            .fetch_one(pool)
-            .await
-            .map_err(|error| error.to_string())?;
-    if completed {
-        Ok(())
-    } else {
-        Err("object deletion completion was not acknowledged".into())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_state_preserves_wire_values_and_rejects_unknown_values() {
+        for (state, wire) in [
+            (ObjectState::Available, "available"),
+            (ObjectState::Deleting, "deleting"),
+            (ObjectState::Deleted, "deleted"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ObjectState>(serde_json::json!(wire)).unwrap(),
+                state
+            );
+        }
+        assert!(serde_json::from_str::<ObjectState>("\"pending\"").is_err());
+    }
 
     #[tokio::test]
     async fn staging_guard_registration_and_disarm_are_closed() {

@@ -674,7 +674,7 @@ impl oxana::Worker<ImageMultimodalJob> for ImageMultimodalWorker {
                 pool,
                 document_id,
                 attempt,
-                "failed",
+                knowledge::ParseStatus::Failed,
                 &format!("ocr_error: {error}; caption_error: {error}"),
             )
             .await;

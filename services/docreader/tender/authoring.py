@@ -10,19 +10,22 @@ from importlib.resources import files
 from pydantic import ValidationError
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
-from docreader.integrations.authoring import read_authoring_input
+from docreader.integrations.authoring import assert_authoring_active, read_authoring_input
 from docreader.llm.request import ModelConfigurationError, ModelContractError, build_request
 from docreader.llm.wire import WirePayload
 from docreader.tender.checks.analysis import current_items
 from docreader.tender.evidence.references import EvidenceRepository
 from docreader.tender.evidence.view import source_view
-from docreader.tender.schema import AuthoringInput, AuthoringOutline, OutlineResponse, SourceUnitRef
+from docreader.tender.schema import (
+    AUTHORING_GROUNDING_POLICY, AuthoringInput, AuthoringOutline, OutlineResponse, SourceUnitRef,
+)
 
 
-def load_outline_source(artifacts, reference: dict) -> dict:
+def load_outline_source(artifacts, reference: dict, *, repository=None) -> dict:
     """Load the unchanged native unit and its frozen OCR/image/cell dependencies."""
     value = SourceUnitRef.model_validate(reference).model_dump()
-    index = EvidenceRepository(artifacts).source_index(value["source_index_ref"])
+    repository = repository if repository is not None else EvidenceRepository(artifacts)
+    index = repository.source_index(value["source_index_ref"])
     unit = next((u for u in index.raw["units"] if u["unit_id"] == value["unit_id"]), None)
     if unit is None:
         raise ArtifactIntegrityError("outline source refers to an unknown frozen unit")
@@ -49,15 +52,66 @@ def load_outline_source(artifacts, reference: dict) -> dict:
     return loaded
 
 
+def project_source_sections(sources):
+    """Share complete heading paths once, without changing host source records."""
+    paths, projected = {}, []
+    for source in sources:
+        heading = source.get("heading_path", "")
+        if heading not in paths:
+            paths[heading] = f"outline-section-{len(paths) + 1}"
+        projected.append({**{key: value for key, value in source.items() if key != "heading_path"},
+                          "section_id": paths[heading]})
+    return [{"section_id": identity, "heading_path": heading} for heading, identity in paths.items()], projected
+
+
+def _check_reference_ids(identities, allowed, path, detail="Select references supplied in this request.",
+                         *, code="outline_unknown_reference"):
+    for number, identity in enumerate(identities):
+        if identity not in allowed:
+            raise ModelContractError([{"path": [*path, number], "code": code,
+                                       "detail": detail}])
+
+
+def validate_outline_references(value, *, rule_ids, source_ids, template_part_ids, constraint_source_ids=None):
+    """Check a parsed outline against its actual request, reporting one scalar.
+
+    Context/evidence aliases remain useful to targets but do not authorize a
+    submission constraint whose complete source was absent from this read.
+    """
+    rule_ids, source_ids, template_part_ids = set(rule_ids), set(source_ids), set(template_part_ids)
+    constraint_sources = source_ids if constraint_source_ids is None else set(constraint_source_ids)
+    _check_reference_ids(value["constraint_rule_ids"], rule_ids, ["constraint_rule_ids"])
+    _check_reference_ids(value["constraint_range_ids"], constraint_sources, ["constraint_range_ids"],
+                         "Select actual sources supplied in this request.")
+
+    def chapters(entries, path):
+        for number, chapter in enumerate(entries):
+            current = [*path, number]
+            for ordinal, target in enumerate(chapter["targets"]):
+                for field, allowed in (("rule_ids", rule_ids), ("range_ids", source_ids),
+                                       ("template_part_ids", template_part_ids)):
+                    _check_reference_ids(target[field], allowed, [*current, "targets", ordinal, field])
+            chapters(chapter["children"], [*current, "children"])
+
+    chapters(value["chapters"], ["chapters"])
+    for number, finding in enumerate(value["findings"]):
+        _check_reference_ids(finding["rule_ids"], rule_ids, ["findings", number, "rule_ids"])
+    for number, intent in enumerate(value["search_intents"]):
+        _check_reference_ids(intent["for_ids"], rule_ids | source_ids, ["search_intents", number, "for_ids"])
+
+
 class _OutlineContext:
     def __init__(self, artifacts, authoring_input: dict):
         self.artifacts = artifacts
+        self.repository = EvidenceRepository(artifacts)
         self.input = AuthoringInput.model_validate(authoring_input).model_dump()
-        verification = artifacts.read_json(self.input["verification_ref"])
-        plan = artifacts.read_json(self.input["pack_plan_ref"])
-        confirmation = artifacts.read_json(self.input["confirmation_ref"])
+        self.availability_issues = deepcopy(self.input["issues"])
+        self.rule_origin = "source_only"
+        verification = self._read(self.input["verification_ref"], "核验", {})
+        plan = self._read(self.input["pack_plan_ref"], "分包计划", {})
+        confirmation = self._read(self.input["confirmation_ref"], "人工确认", {})
         self.rules, rule_views, retained = {}, [], Counter()
-        for ordinal, entry in enumerate(current_items(artifacts, verification), 1):
+        for ordinal, entry in enumerate(self._items(verification), 1):
             identity = f"rule-{ordinal}"
             reference = {"item_ref": entry["item_ref"]}
             if "effective_rule" in entry:
@@ -69,25 +123,71 @@ class _OutlineContext:
                 semantic = {"item": entry["item"]}
             self.rules[identity] = reference
             rule_views.append({"rule_id": identity, **semantic})
-        self.payload = {"schema_version": 2, "rules": rule_views,
-                        "relations": artifacts.read_json(verification["relations_ref"]),
-                        "unverified_relation_ids": verification["unverified_relation_ids"],
-                        "issues": verification["issues"],
+        self.payload = {"schema_version": 2, "grounding_policy": AUTHORING_GROUNDING_POLICY,
+                        "rules": rule_views, "rule_origin": self.rule_origin,
+                        "relations": self._read(verification.get("relations_ref"), "事项关系", []),
+                        "unverified_relation_ids": verification.get("unverified_relation_ids", []),
+                        "issues": [*verification.get("issues", []), *self.availability_issues],
                         "issue_resolutions": confirmation.get("issue_resolutions"),
                         "scope_decisions": plan.get("scope_decisions", [])}
-        self.sources, self.read_units = {}, set()
+        self.sources, self.read_units, self.range_roots, self.template_parts = {}, set(), {}, {}
         self._sources(plan)
 
+    def _read(self, reference, label, default):
+        if reference is None:
+            return deepcopy(default)
+        try:
+            value = self.artifacts.read_json(reference)
+            if not isinstance(value, type(default)):
+                raise ValueError("unexpected authoring artifact shape")
+            return value
+        except (OSError, ValueError, TypeError):
+            self.availability_issues.append({"code": "authoring_input_unavailable",
+                                            "detail": f"{label}资料无法读取，保留待补充位置。"})
+            return deepcopy(default)
+
+    def _items(self, verification):
+        if verification:
+            try:
+                items = current_items(self.artifacts, verification)
+                self.rule_origin = "verified_projection"
+                return items
+            except (OSError, ValueError, KeyError, TypeError):
+                self.availability_issues.append({"code": "authoring_projection_unavailable",
+                    "detail": "核验后的有效事项投影不可读取；以下为已有抽取事项，尚需核对补遗和适用范围。"})
+        index = self._read(self.input["items_ref"], "事项台账", {})
+        refs = [entry["artifact_ref"] for entry in index.get("packs", [])]
+        refs.extend(self.input["extract_refs"])
+        items, seen = [], set()
+        for reference in refs:
+            if reference["sha256"] in seen:
+                continue
+            seen.add(reference["sha256"])
+            for item in self._read(reference, "抽取事项", {}).get("items", []):
+                items.append({"item_ref": {"item_id": item["item_id"], "artifact_ref": reference}, "item": item})
+        if items:
+            self.rule_origin = "extraction"
+            self.availability_issues.append({"code": "authoring_unverified_items",
+                "detail": "使用已有抽取事项继续编制，尚未形成可读的有效事项投影；补遗及适用范围需核对。"})
+        return items
+
     def _sources(self, plan):
-        repository = EvidenceRepository(self.artifacts)
-        documents = self.artifacts.read_json(self.input["frozen_ref"])["documents"]
-        indexes = {d["source_index_ref"]["sha256"]: repository.source_index(d["source_index_ref"])
-                   for d in documents}
+        documents, indexes = [], {}
+        frozen = self._read(self.input["frozen_ref"], "冻结原文", {})
+        for document in frozen.get("documents", []):
+            try:
+                reference = document["source_index_ref"]
+                indexes[reference["sha256"]] = self.repository.source_index(reference)
+                documents.append(document)
+            except (OSError, ValueError, KeyError, TypeError):
+                self.availability_issues.append({"code": "authoring_source_unavailable",
+                    "detail": "部分原文索引不可读取，相关位置保留待补充。"})
         native_units = {digest: {unit["unit_id"]: unit for unit in index.raw["units"]}
                         for digest, index in indexes.items()}
         ranges, catalog, packs = {}, [], []
 
         def bind(source, source_ref):
+            self.range_roots[source["range_id"]] = source.get("source_range_id", source["range_id"])
             units = native_units[source_ref["sha256"]]
             # Spreadsheet rows can cover several side-by-side table grids.
             tables = source.get("table_ids") or [source.get("table_id")]
@@ -121,8 +221,10 @@ class _OutlineContext:
                     catalog.append({"range_id": source["range_id"], "document_id": document["document_id"],
                                     "role": document["role"], "kind": source["kind"],
                                     "heading_path": source.get("heading_path", "")})
-        for descriptor in plan["packs"]:
-            pack = self.artifacts.read_json(descriptor["artifact_ref"])
+        for descriptor in plan.get("packs", []):
+            pack = self._read(descriptor["artifact_ref"], "来源分包", {})
+            if not pack or pack["source_index_ref"]["sha256"] not in indexes:
+                continue
             index = indexes[pack["source_index_ref"]["sha256"]]
             packs.append(pack)
             for reference in [*pack["body"], *pack["supporting"],
@@ -148,8 +250,11 @@ class _OutlineContext:
         for rule in self.payload["rules"]:
             for evidence in rule.get("item", rule.get("effective_rule"))["evidence"]:
                 if evidence["range_id"] not in self.sources:
-                    raise ArtifactIntegrityError("effective rule refers to an unknown frozen source")
+                    self.availability_issues.append({"code": "authoring_source_unavailable",
+                        "detail": "部分事项的原文位置不可读取，保留事项并提示核对来源。"})
         collect(self.payload)
+        if not self.payload["rules"]:
+            needed.update(self.sources)
 
         def unit_keys(range_id):
             return {(reference["source_index_ref"]["sha256"], reference["unit_id"])
@@ -176,6 +281,8 @@ class _OutlineContext:
                 "scope_bindings": [b for p in local_packs for b in p.get("scope_bindings", [])],
                 "pending_scope_context": [b for p in local_packs for b in p.get("pending_scope_context", [])]}))
         self.payload.update(source_views=views, source_catalog=catalog)
+        self.payload["issues"] = [*self.payload["issues"],
+                                 *(i for i in self.availability_issues if i not in self.payload["issues"])]
 
     def validate(self, response: dict) -> dict:
         try:
@@ -183,13 +290,11 @@ class _OutlineContext:
         except ValidationError as error:
             raise ModelContractError([{"path": list(e["loc"]), "code": e["type"], "detail": e["msg"]}
                                       for e in error.errors(include_input=False)]) from None
-        issues, assigned = [], set()
+        issues = [{**issue, "rule_refs": []} for issue in self.availability_issues]
+        assigned = set()
 
         def references(identities, mapping, path):
-            unknown = [identity for identity in identities if identity not in mapping]
-            if unknown:
-                raise ModelContractError([{"path": path, "code": "outline_unknown_reference",
-                                           "detail": "Select references supplied in this request."}])
+            _check_reference_ids(identities, mapping, path)
             return [deepcopy(mapping[i]) for i in dict.fromkeys(identities)]
 
         def problem(code, detail, refs, target_id=None):
@@ -210,20 +315,49 @@ class _OutlineContext:
                     sources = [source for group in references(target["range_ids"], self.sources, [*target_path, "range_ids"])
                                for source in group]
                     sources = list({(s["source_index_ref"]["sha256"], s["unit_id"]): s for s in sources}.values())
+                    templates = references(target["template_part_ids"], self.template_parts,
+                                           [*target_path, "template_part_ids"])
                     assigned.update(target["rule_ids"])
-                    if not refs:
-                        problem("outline_target_unbound", "该响应位置尚未绑定有效要求，需核对其用途。", [], target_id)
-                    if target["kind"] == "form" and not sources:
+                    if not (refs or sources or templates):
+                        problem("outline_target_unbound", "该响应位置尚无规则、来源或原格式依据，需核对其用途。", [], target_id)
+                    if target["kind"] == "form" and not templates:
                         problem("outline_template_missing", "规定格式/表格尚未定位源模板，需补充来源。", refs, target_id)
                     if any((s["source_index_ref"]["sha256"], s["unit_id"]) not in self.read_units for s in sources):
                         problem("outline_source_not_read", "已定位目录来源，但模型尚未阅读正文，生成前须装载核对。", refs, target_id)
                     targets.append({"target_id": target_id, "kind": target["kind"], "purpose": target["purpose"],
-                                    "rule_refs": refs, "source_refs": sources})
+                                    "rule_refs": refs, "source_refs": sources, "template_refs": templates,
+                                    "manual_fill": target["manual_fill"],
+                                    "support_origins": target["support_origins"]})
                 result.append({"chapter_id": chapter_id, "title": chapter["title"], "targets": targets,
+                               "is_volume": chapter["is_volume"],
                                "children": chapters(chapter["children"], position, (*current_path, "children"))})
             return result
 
         organized = chapters(parsed["chapters"])
+        search_intents = []
+        views = {entry["rule_id"]: entry for entry in self.payload["rules"]}
+        for ordinal, intent in enumerate(parsed["search_intents"]):
+            _check_reference_ids(intent["for_ids"], self.rules.keys() | self.sources.keys(),
+                                 ["search_intents", ordinal, "for_ids"])
+            identities = list(dict.fromkeys(intent["for_ids"]))
+            rule_ids = [identity for identity in identities if identity in self.rules]
+            range_ids = [identity for identity in identities if identity in self.sources]
+            for identity in rule_ids:
+                rule = views[identity]
+                semantic = rule.get("item", rule.get("effective_rule", {}))
+                range_ids.extend(e["range_id"] for e in semantic.get("evidence", [])
+                                 if e["range_id"] in self.sources)
+            range_ids = list(dict.fromkeys(range_ids))
+            refs = [ref for identity in range_ids for ref in self.sources[identity]]
+            refs = list({(ref["source_index_ref"]["sha256"], ref["unit_id"]): ref for ref in refs}.values())
+            search_intents.append({"query": intent["query"], "rule_refs": [deepcopy(self.rules[i]) for i in rule_ids],
+                                   "source_refs": deepcopy(refs), "range_ids": range_ids})
+        constraint_refs = references(parsed["constraint_rule_ids"], self.rules, ["constraint_rule_ids"])
+        submission_refs = [source for group in references(parsed["constraint_range_ids"], self.sources,
+                                                         ["constraint_range_ids"]) for source in group]
+        submission_refs = list({(ref["source_index_ref"]["sha256"], ref["unit_id"]): ref
+                                for ref in submission_refs}.values())
+        assigned.update(parsed["constraint_rule_ids"])
         for ordinal, finding in enumerate(parsed["findings"]):
             refs = references(finding["rule_ids"], self.rules, ["findings", ordinal, "rule_ids"])
             problem(finding["code"], finding["detail"], refs)
@@ -231,11 +365,15 @@ class _OutlineContext:
             if identity not in assigned:
                 problem("outline_rule_unassigned", "该有效规则尚未安排响应位置，需补充大纲映射。", [self.rules[identity]])
         return AuthoringOutline.model_validate({"schema_version": 2, "authoring_input": self.input,
-                                                "chapters": organized, "issues": issues}).model_dump(exclude_unset=True)
+                                                "chapters": organized, "issues": issues,
+                                                "constraint_rule_refs": constraint_refs,
+                                                "submission_refs": submission_refs,
+                                                "search_intents": search_intents}).model_dump(exclude_unset=True)
 
 
 async def organize_outline(store, artifacts, execute, budget, *, run_id: str, source_version: int,
-                           domain_revision: int, checklist_digest: str) -> dict:
+                           domain_revision: int, checklist_digest: str | None = None,
+                           authoring_input: dict | None = None) -> dict:
     """The injected executor owns sending, durable retry and response correction.
 
     It receives the complete request and a synchronous validator, and returns
@@ -243,8 +381,19 @@ async def organize_outline(store, artifacts, execute, budget, *, run_id: str, so
     """
     identity = {"run_id": run_id, "source_version": source_version,
                 "domain_revision": domain_revision, "checklist_digest": checklist_digest}
-    approved = await read_authoring_input(store, artifacts, **identity)
+    approved = (await read_authoring_input(store, artifacts, **identity) if authoring_input is None
+                else AuthoringInput.model_validate(authoring_input).model_dump())
     context = await asyncio.to_thread(_OutlineContext, artifacts, approved)
+    from docreader.tender.authoring_templates import prepare_template_parts
+    records, parts = await asyncio.to_thread(prepare_template_parts, artifacts, context)
+    sources = [source for record in records for source in record.get(
+        "sources", [record["source"]] if "source" in record else [])]
+    context.payload.pop("source_views", None)
+    context.payload.pop("source_catalog", None)
+    sections, projected = project_source_sections(sources)
+    context.payload.update(sources=projected, sections=sections, template_parts=parts)
+    context.read_units.update((ref["source_index_ref"]["sha256"], ref["unit_id"])
+                              for source in sources for ref in context.sources.get(source["range_id"], []))
     if budget.output_reserve <= 0:
         raise ModelConfigurationError("outline requires an explicit positive output reserve")
     prompt = budget.prompts.get("outline")
@@ -254,7 +403,6 @@ async def organize_outline(store, artifacts, execute, budget, *, run_id: str, so
     request = build_request(budget.model, prompt, wire.payload)
     budget.require_request(request)
     result = await execute(request, lambda response: context.validate(wire.decode(response)))
-    # A model call may outlive the confirmed analysis it was based on.
-    if await read_authoring_input(store, artifacts, **identity) != approved:
-        raise ArtifactIntegrityError("confirmed analysis references changed during outline organization")
+    # Keep the fixed version even when analysis progresses while the model works.
+    await assert_authoring_active(store, approved)
     return await asyncio.to_thread(artifacts.put_json, result)

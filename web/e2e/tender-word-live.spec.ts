@@ -1,0 +1,130 @@
+import { expect, test } from "@playwright/test";
+import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+// A task-owned API, database and synthetic Word are required. This test never
+// starts analysis or authoring and never uses a real tender or model account.
+test("real ONLYOFFICE navigation, save and session closing preserve immutable Word versions", async ({ page }, info) => {
+  const fixtureFile = process.env.KB_TENDER_WORD_FIXTURE;
+  test.skip(!fixtureFile, "requires the isolated synthetic Word fixture");
+  test.setTimeout(120_000);
+  const fixture = JSON.parse(await readFile(fixtureFile!, "utf8")) as {
+    project_id: string; token?: string; token_path?: string;
+  };
+  const token = fixture.token ?? (await readFile(fixture.token_path!, "utf8")).trim();
+  await page.addInitScript(value => localStorage.setItem("kb.token", value), token);
+  const path = `/api/v3/tender-projects/${fixture.project_id}`;
+  await page.goto(`/#/bids/${fixture.project_id}/authoring`);
+  await expect(page.getByTestId("docx-status")).toContainText("当前保存版本已载入", { timeout: 60_000 });
+  const before = await page.evaluate(async address => {
+    const response = await fetch(`${address}/docx/current`, { headers: { Authorization: `Bearer ${localStorage.getItem("kb.token")}` } });
+    if (!response.ok) throw new Error("isolated Word metadata read failed");
+    return response.json();
+  }, path) as { version_id: string; revision: number; docx_sha256: string; outline: { chapters: Array<{ title: string; bookmark?: string }> } };
+  const original = await page.request.get(`${path}/docx/versions/${before.version_id}/download`, { headers: { Authorization: `Bearer ${token}` } });
+  expect(original.ok()).toBeTruthy();
+  const originalBytes = await original.body();
+  expect(createHash("sha256").update(originalBytes).digest("hex")).toBe(before.docx_sha256);
+  await writeFile(info.outputPath("original-synthetic.docx"), originalBytes);
+  const heading = before.outline.chapters.find(chapter => !!chapter.bookmark);
+  expect(heading).toBeTruthy();
+  await page.getByRole("complementary", { name: "文件与章节目录" }).getByRole("button", { name: heading!.title, exact: true }).click();
+  await expect(page.getByText("已定位 Word 中的书签位置。", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId("docx-mode").click();
+  await expect(page.getByTestId("docx-save")).toBeVisible();
+  await expect(page.getByTestId("docx-status")).toContainText("当前保存版本已载入", { timeout: 60_000 });
+  const office = page.frames().find(frame => frame.url().includes("/web-apps/apps/documenteditor/"));
+  expect(office).toBeTruthy();
+  const firstRunTip = office!.getByText("知道了", { exact: true });
+  if (await firstRunTip.isVisible()) await firstRunTip.click();
+  await office!.locator("#id_main").click({ timeout: 15_000 });
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  const marker = `KB_SYNTHETIC_EXPLICIT_SAVE_${Date.now()}`;
+  await page.keyboard.type(marker, { delay: 30 });
+  await expect(page.getByTestId("docx-status")).toContainText("未保存", { timeout: 15_000 });
+  await expect(page.getByTestId("docx-download-boundary")).toContainText(`已保存的 Word v${before.revision}`);
+  const dirtyDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载已保存稿", exact: true }).click();
+  const dirtyFile = await dirtyDownload;
+  expect(dirtyFile.suggestedFilename()).toBe(`投标文件-${before.revision}.docx`);
+  await dirtyFile.saveAs(info.outputPath("dirty-download-synthetic.docx"));
+  expect(createHash("sha256").update(await readFile(info.outputPath("dirty-download-synthetic.docx"))).digest("hex")).toBe(before.docx_sha256);
+  await expect(page.getByTestId("docx-save")).toBeEnabled({ timeout: 15_000 });
+  await page.getByTestId("docx-save").click();
+  await expect(page.getByTestId("docx-status")).toHaveText("已保存", { timeout: 60_000 });
+  await expect(page.getByTestId("docx-download-boundary")).toHaveCount(0);
+  const after = await page.evaluate(async address => {
+    const response = await fetch(`${address}/docx/current`, { headers: { Authorization: `Bearer ${localStorage.getItem("kb.token")}` } });
+    if (!response.ok) throw new Error("saved Word metadata read failed");
+    return response.json();
+  }, path) as typeof before;
+  expect(after.version_id).not.toBe(before.version_id);
+  expect(after.revision).toBeGreaterThan(before.revision);
+  expect(after.docx_sha256).not.toBe(before.docx_sha256);
+  const response = await page.request.get(`${path}/docx/versions/${after.version_id}/download`, { headers: { Authorization: `Bearer ${token}` } });
+  expect(response.ok()).toBeTruthy();
+  const bytes = await response.body();
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe(after.docx_sha256);
+  await writeFile(info.outputPath("saved-synthetic.docx"), bytes);
+  await promisify(execFile)("python3", ["-c", "import sys,zipfile,xml.etree.ElementTree as E; r=E.fromstring(zipfile.ZipFile(sys.argv[1]).read('word/document.xml')); text=''.join(r.itertext()); assert sys.argv[2] in text, 'saved Word does not contain the typed marker'", info.outputPath("saved-synthetic.docx"), marker]);
+  const historical = await page.request.get(`${path}/docx/versions/${before.version_id}/download`, { headers: { Authorization: `Bearer ${token}` } });
+  expect(historical.ok()).toBeTruthy();
+  expect(createHash("sha256").update(await historical.body()).digest("hex")).toBe(before.docx_sha256);
+  await writeFile(info.outputPath("version-evidence.json"), JSON.stringify({ before, after, marker, historical_unchanged: true }, null, 2));
+  await page.getByRole("complementary", { name: "文件与章节目录" }).getByRole("button", { name: heading!.title, exact: true }).click();
+  await expect(page.getByText("已定位 Word 中的书签位置。", { exact: true })).toBeVisible({ timeout: 15_000 });
+  await page.screenshot({ path: info.outputPath("word-after-save.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const label of ["收起核对栏", "收起目录"]) {
+    const close = page.getByRole("button", { name: label, exact: true });
+    if (await close.isVisible()) await close.click({ timeout: 10_000 });
+  }
+  for (const button of [page.getByRole("button", { name: "下载已保存稿", exact: true }), page.getByTestId("docx-save")]) {
+    await button.scrollIntoViewIfNeeded();
+    await expect(button).toBeInViewport({ ratio: 1 });
+    const box = await button.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+  }
+  const mobileDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载已保存稿", exact: true }).click();
+  const mobileFile = await mobileDownload;
+  expect(mobileFile.suggestedFilename()).toBe(`投标文件-${after.revision}.docx`);
+  await mobileFile.saveAs(info.outputPath("mobile-download-synthetic.docx"));
+  expect(createHash("sha256").update(await readFile(info.outputPath("mobile-download-synthetic.docx"))).digest("hex")).toBe(after.docx_sha256);
+  await page.screenshot({ path: info.outputPath("word-mobile-controls.png"), fullPage: true });
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const currentSession = () => page.evaluate(async address => {
+    const response = await fetch(`${address}/docx/current`, { headers: { Authorization: `Bearer ${localStorage.getItem("kb.token")}` } });
+    if (!response.ok) throw new Error("Word session metadata read failed");
+    return response.json();
+  }, path) as Promise<typeof before & { editor: { key: string | null; pending_save_id: string | null } }>;
+  await expect(page.getByTestId("docx-mode")).toHaveText("返回阅读");
+  await expect(page.getByTestId("docx-mode")).toBeEnabled();
+  await page.getByTestId("docx-mode").click();
+  await expect(page.getByTestId("docx-status")).toContainText("当前保存版本已载入", { timeout: 60_000 });
+  await expect(page.getByTestId("docx-mode")).toHaveText("编辑 Word");
+  await expect.poll(async () => (await currentSession()).editor.key).toBeNull();
+  const reading = await currentSession();
+  expect(reading.version_id).toBe(after.version_id);
+  expect(reading.docx_sha256).toBe(after.docx_sha256);
+  await page.getByTestId("docx-mode").click();
+  await expect(page.getByTestId("docx-status")).toContainText("当前保存版本已载入", { timeout: 60_000 });
+  await expect(page.getByTestId("docx-mode")).toHaveText("返回阅读");
+  await expect.poll(async () => (await currentSession()).editor.key).not.toBeNull();
+  const editing = await currentSession();
+  await expect(page.getByTestId("docx-close")).toBeEnabled();
+  await page.getByTestId("docx-close").click();
+  await expect(page.getByTestId("docx-status")).toHaveText("编辑器已关闭");
+  await expect(page.getByTestId("docx-editor").locator("iframe")).toHaveCount(0);
+  await expect.poll(async () => (await currentSession()).editor.key).toBeNull();
+  const closed = await currentSession();
+  expect(closed.editor.pending_save_id).toBeNull();
+  expect(closed.version_id).toBe(after.version_id);
+  expect(closed.docx_sha256).toBe(after.docx_sha256);
+  await writeFile(info.outputPath("session-lifecycle-evidence.json"), JSON.stringify({ reading, editing, closed }, null, 2));
+  await page.screenshot({ path: info.outputPath("word-session-closed.png"), fullPage: true });
+});

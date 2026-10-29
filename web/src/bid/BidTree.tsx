@@ -3,6 +3,7 @@ import {
   IconFileText,
   IconFolder,
   IconPencil,
+  IconListDetails,
 } from "@tabler/icons-react";
 import { cn } from "../lib/utils";
 import type { BidProjectView } from "./api";
@@ -10,9 +11,23 @@ import { AUTHORING_STEPS, authoringHref, type AuthoringStep } from "./authoring/
 
 const STEP_ICON = {
   files: IconFileText,
+  analysis: IconListDetails,
   authoring: IconPencil,
   export: IconDownload,
 } as const;
+
+export function ProjectNav({ projectId, currentStep }: { projectId: string; currentStep: AuthoringStep }) {
+  return <nav aria-label="项目分区" className="flex shrink-0 gap-5 overflow-x-auto border-b border-line">
+    {AUTHORING_STEPS.map((step) => <a key={step.key}
+      href={`#${authoringHref(projectId, step.key)}`}
+      aria-current={currentStep === step.key ? "page" : undefined}
+      data-testid={`wizard-${step.key}`}
+      className={cn("shrink-0 border-b-2 px-1 pb-3 pt-1 text-[13px] font-medium",
+        currentStep === step.key ? "border-sky text-sky-ink" : "border-transparent text-quiet hover:text-ink")}>
+      {step.label}
+    </a>)}
+  </nav>;
+}
 
 export function BidTree({
   rows,

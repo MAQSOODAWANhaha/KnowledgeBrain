@@ -12,6 +12,8 @@ from PIL import Image, ImageDraw
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 import pytest
+
+from docreader.tests.database import initialize_schema
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
@@ -82,6 +84,7 @@ async def runtime(tmp_path):
     isolated_dsn = make_conninfo(dsn, options=f"-c search_path={schema}")
     settings = Settings(isolated_dsn, os.environ.get("TENDER_TEST_REDIS_URL", "redis://127.0.0.1:16379/1"), tmp_path / "artifacts")
     store, artifacts = Store(isolated_dsn), ArtifactStore(settings.artifact_root)
+    await initialize_schema(store.dsn)
     await store.setup()
     await initialize_checkpoints(isolated_dsn)
     registered = await asyncio.to_thread(register_manifest, mixed_manifest(tmp_path), artifacts)

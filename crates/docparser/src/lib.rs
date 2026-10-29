@@ -26,7 +26,7 @@ pub use engines::{
     EffectiveEngineConfig, EngineCatalog, EngineInfo, list_all_engines, local_engines,
     merge_engines, resolve_effective_engine_config,
 };
-pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr, source_view};
+pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr, source_view, tender_command};
 pub use images::{rewrite_images, rewrite_images_with_contract, rewrite_inline};
 pub use output_inventory::{
     OUTPUT_INVENTORY_PROFILE, OutputInventoryEntry, OutputInventoryManifest, OutputInventoryRead,

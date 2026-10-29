@@ -1,9 +1,14 @@
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-pub async fn workspace_slug_taken(pool: &PgPool, slug: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workspaces WHERE slug = $1)")
+pub async fn workspace_slug_taken(
+    pool: &PgPool,
+    owner_user_id: Uuid,
+    slug: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_workspaces WHERE owner_user_id = $2 AND slug = $1 AND deleted_at IS NULL)")
         .bind(slug)
+        .bind(owner_user_id)
         .fetch_one(pool)
         .await
 }
@@ -12,10 +17,12 @@ pub async fn list_tags_for_workspace(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<Vec<crate::Tag>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id, name, slug FROM tags WHERE workspace_id = $1 ORDER BY name")
-        .bind(workspace_id)
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT id, name, slug FROM knowledge_tags WHERE workspace_id = $1 ORDER BY name",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
     let mut out = Vec::new();
     for t in rows {
         let id: Uuid = t.try_get("id")?;
@@ -30,7 +37,7 @@ pub async fn list_tags_for_workspace(
 }
 
 pub async fn load_tag(pool: &PgPool, tag_id: Uuid) -> Result<Option<crate::Tag>, sqlx::Error> {
-    let t = sqlx::query("SELECT id, workspace_id, name, slug FROM tags WHERE id = $1")
+    let t = sqlx::query("SELECT id, workspace_id, name, slug FROM knowledge_tags WHERE id = $1")
         .bind(tag_id)
         .fetch_optional(pool)
         .await?;
@@ -53,7 +60,7 @@ pub async fn tags_in_workspace(
     if tag_ids.is_empty() {
         return Ok(Vec::new());
     }
-    sqlx::query_scalar("SELECT id FROM tags WHERE workspace_id = $1 AND id = ANY($2)")
+    sqlx::query_scalar("SELECT id FROM knowledge_tags WHERE workspace_id = $1 AND id = ANY($2)")
         .bind(workspace_id)
         .bind(tag_ids)
         .fetch_all(pool)
@@ -106,7 +113,7 @@ fn wiki_page_from_row(p: &sqlx::postgres::PgRow) -> Result<crate::WikiPage, sqlx
         title: p.try_get("title")?,
         content: p.try_get("content").unwrap_or_default(),
         page_type: p.try_get("page_type").unwrap_or_else(|_| "summary".into()),
-        status: p.try_get("status").unwrap_or_else(|_| "draft".into()),
+        status: p.try_get("status")?,
         summary: p.try_get("summary").unwrap_or_default(),
         aliases,
         source_refs: refs
@@ -130,7 +137,7 @@ pub async fn list_wiki_pages(
         "SELECT id, product_version_id, slug, title, content, page_type, status,
                 COALESCE(summary, '') AS summary, aliases, source_refs,
                 COALESCE(chunk_refs, '[]'::jsonb) AS chunk_refs, category_path, folder_id
-         FROM wiki_pages WHERE product_version_id = $1 AND deleted_at IS NULL
+         FROM knowledge_wiki_pages WHERE product_version_id = $1 AND deleted_at IS NULL
          ORDER BY slug",
     )
     .bind(version_id)
@@ -148,7 +155,7 @@ pub async fn load_wiki_page(
         "SELECT id, product_version_id, slug, title, content, page_type, status,
                 COALESCE(summary, '') AS summary, aliases, source_refs,
                 COALESCE(chunk_refs, '[]'::jsonb) AS chunk_refs, category_path, folder_id
-         FROM wiki_pages WHERE product_version_id = $1 AND slug = $2 AND deleted_at IS NULL",
+         FROM knowledge_wiki_pages WHERE product_version_id = $1 AND slug = $2 AND deleted_at IS NULL",
     )
     .bind(version_id)
     .bind(slug)
@@ -163,15 +170,13 @@ fn api_key_from_row(r: sqlx::postgres::PgRow) -> Result<crate::ApiKey, sqlx::Err
         name: r.try_get("name")?,
         key_hash: r.try_get("key_hash")?,
         prefix: r.try_get("prefix")?,
-        scope_type: r.try_get("scope_type")?,
-        scope_id: r.try_get("scope_id")?,
-        scopes: r.try_get("scopes")?,
+        owner_user_id: r.try_get("owner_user_id")?,
     })
 }
 
 pub async fn load_api_key(pool: &PgPool, id: Uuid) -> Result<Option<crate::ApiKey>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, name, key_hash, prefix, scope_type, scope_id, scopes FROM api_keys WHERE id = $1",
+        "SELECT id, name, key_hash, prefix, owner_user_id FROM platform_api_keys WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -179,20 +184,15 @@ pub async fn load_api_key(pool: &PgPool, id: Uuid) -> Result<Option<crate::ApiKe
     row.map(api_key_from_row).transpose()
 }
 
-pub async fn list_api_keys_for_workspace(
+pub async fn list_api_keys_for_user(
     pool: &PgPool,
-    workspace_id: Uuid,
+    owner_user_id: Uuid,
 ) -> Result<Vec<crate::ApiKey>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, name, key_hash, prefix, scope_type, scope_id, scopes
-         FROM api_keys
-         WHERE (scope_type = 'workspace' AND scope_id = $1)
-            OR (scope_type = 'product' AND scope_id IN (
-                    SELECT id FROM products WHERE workspace_id = $1
-                ))
-         ORDER BY prefix",
+        "SELECT id, name, key_hash, prefix, owner_user_id
+         FROM platform_api_keys WHERE owner_user_id = $1 ORDER BY created_at",
     )
-    .bind(workspace_id)
+    .bind(owner_user_id)
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(api_key_from_row).collect()

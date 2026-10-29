@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ParseStatus {
     Pending,
     Processing,
@@ -10,6 +11,7 @@ pub enum ParseStatus {
     Failed,
     Cancelled,
     Deleting,
+    Deleted,
 }
 
 impl ParseStatus {
@@ -22,22 +24,14 @@ impl ParseStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Deleting => "deleting",
+            Self::Deleted => "deleted",
         }
-    }
-
-    pub fn is_aborted(self) -> bool {
-        matches!(self, Self::Cancelled | Self::Deleting)
-    }
-
-    /// Worker entry: skip completed; abort cancelled/deleting; failed may retry.
-    pub fn worker_should_exit(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Deleting)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum SummaryStatus {
     #[default]
     None,
@@ -47,13 +41,170 @@ pub enum SummaryStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl SummaryStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pending => "pending",
+            Self::Processing => "processing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum VersionStatus {
     Cloning,
     Active,
     Archived,
     Failed,
+}
+
+impl VersionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloning => "cloning",
+            Self::Active => "active",
+            Self::Archived => "archived",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum EnableStatus {
+    Disabled,
+    Enabled,
+}
+
+impl EnableStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum WikiStatus {
+    Draft,
+    Published,
+    Archived,
+}
+
+impl WikiStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Published => "published",
+            Self::Archived => "archived",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum OutboxState {
+    Pending,
+    Published,
+    Complete,
+    Failed,
+}
+
+impl OutboxState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Published => "published",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum SemanticIndexIntentStatus {
+    Pending,
+    Completed,
+    Terminal,
+    Superseded,
+}
+
+impl SemanticIndexIntentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Completed => "completed",
+            Self::Terminal => "terminal",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum SupportState {
+    Supported,
+    Revoked,
+}
+
+impl SupportState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum SpanStatus {
+    Pending,
+    Running,
+    #[serde(alias = "ok")]
+    Done,
+    #[serde(alias = "error")]
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+impl SpanStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl ParseStatus {
+    pub fn is_aborted(self) -> bool {
+        matches!(self, Self::Cancelled | Self::Deleting | Self::Deleted)
+    }
+
+    /// Completed and removed documents cannot be entered by a delayed worker.
+    pub fn worker_should_exit(self) -> bool {
+        self == Self::Completed || self.is_aborted()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -89,36 +240,18 @@ impl WorkspaceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    Owner,
-    Admin,
-    Contributor,
-    Viewer,
-}
-
-impl Role {
-    pub fn can_write(self) -> bool {
-        !matches!(self, Self::Viewer)
-    }
-
-    pub fn can_admin(self) -> bool {
-        matches!(self, Self::Owner | Self::Admin)
-    }
-
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "owner" => Self::Owner,
-            "admin" => Self::Admin,
-            "contributor" => Self::Contributor,
-            _ => Self::Viewer,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deleted_document_status_is_a_supported_terminal_value() {
+        let parsed = serde_json::from_str::<super::ParseStatus>("\"deleted\"");
+        assert!(
+            parsed.is_ok(),
+            "stored deleted documents must decode: {parsed:?}"
+        );
+        assert!(parsed.unwrap().worker_should_exit());
+    }
+
     #[test]
     fn task_type_strings_match_brain() {
         assert_eq!(platform::TYPE_DOCUMENT_PROCESS, "document:process");

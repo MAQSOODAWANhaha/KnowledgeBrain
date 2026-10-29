@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+
+from docreader.tests.database import initialize_schema
 import pytest_asyncio
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
@@ -25,6 +27,7 @@ async def store(tmp_path):
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
         await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     adapter = Store(make_conninfo(dsn, options=f"-c search_path={schema}"))
+    await initialize_schema(adapter.dsn)
     await adapter.setup()
     adapter.test_artifacts = ArtifactStore(tmp_path)
     try:
@@ -48,7 +51,7 @@ def request_metadata(identity, **fields):
 async def expire(store, run_id):
     async with store.transaction() as conn:
         await conn.execute(
-            "UPDATE tender_runs SET lease_until = clock_timestamp() - interval '1 second' WHERE run_id = %s",
+            "UPDATE tender_analysis_runs SET lease_until = clock_timestamp() - interval '1 second' WHERE run_id = %s",
             (run_id,),
         )
 
@@ -106,7 +109,7 @@ async def test_publish_failure_token_fencing_and_unexecuted_redelivery(store):
     assert await store.mark_published(command["command_id"], second["claim_token"])
     assert not await store.claim_commands()
     async with store.transaction() as conn:
-        await conn.execute("UPDATE tender_commands SET published_at = clock_timestamp() - interval '2 minutes'")
+        await conn.execute("UPDATE tender_analysis_commands SET published_at = clock_timestamp() - interval '2 minutes'")
     third = (await store.claim_commands())[0]
     assert third["delivery_count"] == 3
     assert third["receipt"] is None

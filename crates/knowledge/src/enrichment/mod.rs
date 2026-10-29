@@ -1131,6 +1131,7 @@ mod tests {
 
     #[test]
     fn generate_questions_uses_version_count() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.question_count = 5;
         let vid = v.id;
@@ -1197,6 +1198,7 @@ mod tests {
 
     #[test]
     fn question_skips_empty_and_non_text() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
@@ -1264,6 +1266,7 @@ mod tests {
 
     #[test]
     fn question_uses_payload_neighbors() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());

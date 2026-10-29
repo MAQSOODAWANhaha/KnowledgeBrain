@@ -49,11 +49,14 @@ async def _submit(runtime, *, ballast=False, ballast_repeats=70, document_ids=("
     return await store.submit(artifacts.put_json(registered), uuid4().hex)
 
 
-def _executor(runtime, run, *, scope_repeats=11, fail_operation=None, candidates=False,
+def _executor(runtime, run, *, scope_repeats=88, fail_operation=None, candidates=False,
               unknown_candidate=False, include_conditions=False, accept_decisions=True, relation_repeats=1,
               reason_repeats=10, scattered_failures=False):
     store, artifacts, settings, _ = runtime
-    budget = RequestBudget(context_tokens=32768)
+    # A batch reserves at least 32k output, in addition to the real prompt and
+    # evidence. Keep a small usable window, and enlarge the synthetic scope
+    # below so complete-input partition/rejection boundaries remain exercised.
+    budget = RequestBudget(context_tokens=65536)
     calls, attempts = [], Counter()
     work_units, unit_attempts = {}, Counter()
     failed = False
@@ -64,6 +67,8 @@ def _executor(runtime, run, *, scope_repeats=11, fail_operation=None, candidates
 
         def response(self, task, payload, images=()):
             result = super().response(task, payload, images)
+            if "work_units" in payload:
+                return result  # The base fixture recursively calls this method for each target.
             if task == "extract":
                 for item in result["items"]:
                     # Deliberate source-backed repetition stresses complete input
@@ -124,9 +129,7 @@ def _executor(runtime, run, *, scope_repeats=11, fail_operation=None, candidates
         async def call(self, task, payload, images=()):
             nonlocal failed
             budget.require(task, payload, images)
-            operation = payload.get("operation", task)
-            if operation == "review" and payload["work_unit_id"].startswith("joint-"):
-                operation = "joint"
+            operation = _operation(payload, task)
             attempts[operation] += 1
             calls.append((self.lease.domain_revision, task, deepcopy(payload)))
             error = None
@@ -186,10 +189,19 @@ async def _correct(runtime, row, edited):
                         artifacts.put_json(index), uuid4().hex, "Review complete analysis against frozen evidence")
 
 
+def _operation(payload, task="verify"):
+    operation = payload.get("operation", task)
+    identities = payload.get("target_work_unit_ids", [payload.get("work_unit_id", "")])
+    return "joint" if operation == "review" and all(identity.startswith("joint-") for identity in identities) else operation
+
+
 def _calls(calls, operation, revision=1):
-    return [payload for current, task, payload in calls if task == "verify" and current == revision
-            and ((operation == "joint" and payload["work_unit_id"].startswith("joint-")) or
-                 (payload["operation"] == operation and not payload["work_unit_id"].startswith("joint-")))]
+    from docreader.tender.checks.analysis_batches import member_payload
+
+    return [member for current, task, payload in calls if task == "verify" and current == revision
+            and _operation(payload) == operation
+            for member in ([member_payload(payload, identity) for identity in payload["target_work_unit_ids"]]
+                           if "work_units" in payload else [payload])]
 
 
 def _assert_extract_budget(artifacts, row, calls, budget):
@@ -255,7 +267,7 @@ async def test_indivisible_complete_review_blocks_before_affected_model_send(run
 async def test_joint_review_budget_includes_full_proposed_relation_and_blocks_before_send(runtime):
     _, artifacts, _, _ = runtime
     run = await _submit(runtime, suffixes="ab")
-    execute, calls, budget = _executor(runtime, run, scope_repeats=1, candidates=True, relation_repeats=200)
+    execute, calls, budget = _executor(runtime, run, scope_repeats=1, candidates=True, relation_repeats=320)
     row = await execute()
     checked = output(artifacts, row, "verify")
     assert row["status"] == "blocked"
@@ -266,19 +278,23 @@ async def test_joint_review_budget_includes_full_proposed_relation_and_blocks_be
     receipts = [entry for entry in row["artifacts"] if entry["stage"] == "analysis-associate"]
     assert len(receipts) == 1
     proposal = artifacts.read_json(receipts[0]["artifact_ref"])
-    joint_payload = {**associations[0], "operation": "review",
-                     "work_unit_id": associations[0]["work_unit_id"].replace("associate-", "joint-", 1),
-                     "dispositions": [],
-                     "relations": [*associations[0]["relations"], *proposal["relations"]],
+    original = next(payload for _, task, payload in calls if task == "verify" and _operation(payload) == "associate")
+    joint_id = associations[0]["work_unit_id"].replace("associate-", "joint-", 1)
+    joint_payload = {**original, "operation": "review", "dispositions": [],
+                     "target_work_unit_ids": [joint_id],
+                     "work_units": [{**original["work_units"][0], "work_unit_id": joint_id,
+                                     "decision_ids": [d["decision_id"] for d in proposal["decisions"]]}],
+                     "relations": [*original["relations"], *proposal["relations"]],
                      "decisions": proposal["decisions"]}
     plan = artifacts.read_json(checked["joint_plan_ref"])
     assert len(plan["requests"]) == 1
     descriptor = plan["requests"][0]
-    assert descriptor["relation_ids"] == [entry["relation_id"] for entry in proposal["relations"]]
+    assert descriptor["work_unit_ids"] == descriptor["target_work_unit_ids"] == [joint_id]
     assert descriptor["budget"] == budget.measure("verify", joint_payload)
     assert descriptor["budget"]["fits"] is False
     without_relations = budget.measure("verify", {**joint_payload, "relations": []})
     assert without_relations["input_tokens"] < descriptor["budget"]["input_tokens"]
+    assert without_relations["fits"] is True
     assert "analysis_budget_exceeded" in {problem["code"] for problem in checked["issues"]}
     assert "analysis_review_incomplete" in {problem["code"] for problem in checked["issues"]}
 
@@ -288,7 +304,7 @@ async def test_partial_analysis_success_reuses_durable_operation_receipts(runtim
     store, artifacts, _, _ = runtime
     run = await _submit(runtime)
     # Association/joint need complete candidate components that fit together.
-    execute, calls, _ = _executor(runtime, run, scope_repeats=2 if operation in {"associate", "joint"} else 11,
+    execute, calls, _ = _executor(runtime, run, scope_repeats=2 if operation in {"associate", "joint"} else 88,
                                   fail_operation=operation, candidates=operation in {"associate", "joint"},
                                   reason_repeats=1 if operation in {"associate", "joint"} else 10)
     recovered = await execute()
@@ -323,7 +339,7 @@ async def test_partial_analysis_success_reuses_durable_operation_receipts(runtim
 async def test_same_source_revision_invalidates_analysis_operations_and_confirmation(runtime):
     store, artifacts, _, _ = runtime
     run = await _submit(runtime)
-    execute, calls, _ = _executor(runtime, run, scope_repeats=6)
+    execute, calls, _ = _executor(runtime, run, scope_repeats=48)
     first = await execute()
     await store.confirm(run["run_id"], 1, first["checklist_digest"], "confirm-one")
     ready = await execute()
@@ -349,7 +365,7 @@ async def test_same_source_revision_invalidates_analysis_operations_and_confirma
 async def test_single_item_correction_resends_only_affected_verify_requests(runtime):
     store, artifacts, _, _ = runtime
     run = await _submit(runtime)
-    execute, calls, _ = _executor(runtime, run, scope_repeats=6)
+    execute, calls, _ = _executor(runtime, run, scope_repeats=48)
     first = await execute()
     assert first["status"] == "waiting-confirmation"
     first_verify = {row["metadata"]["request_digest"]: row
@@ -492,7 +508,7 @@ async def test_interrupted_sse_retries_preserve_receipts_and_completed_response_
 async def test_scattered_extract_and_verify_failures_recover_in_one_command(runtime):
     _, artifacts, _, _ = runtime
     run = await _submit(runtime, document_ids=("first-extract", "second-extract"))
-    execute, calls, _ = _executor(runtime, run, scope_repeats=6, reason_repeats=2, scattered_failures=True)
+    execute, calls, _ = _executor(runtime, run, scope_repeats=48, reason_repeats=2, scattered_failures=True)
     row = await execute()
     checked = output(artifacts, row, "verify")
     assert row["status"] == "waiting-confirmation", checked["issues"]
@@ -552,7 +568,7 @@ async def test_explicit_resolution_requires_independent_acceptance(runtime, acce
 
 async def test_original_condition_evidence_remains_available_to_independent_review(runtime):
     _, artifacts, _, _ = runtime
-    run = await _submit(runtime, ballast=True, ballast_repeats=30, condition=True, suffixes="abcd")
+    run = await _submit(runtime, ballast=True, ballast_repeats=180, condition=True, suffixes="abcd")
     execute, calls, budget = _executor(runtime, run, scope_repeats=1, include_conditions=True)
     row = await execute()
     assert row["status"] == "waiting-confirmation", output(artifacts, row, "verify")["issues"]

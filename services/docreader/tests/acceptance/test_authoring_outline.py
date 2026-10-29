@@ -5,7 +5,6 @@ import json
 import pytest
 
 from docreader.integrations.authoring import read_authoring_input
-from docreader.integrations.store import InvalidConfirmation
 from docreader.llm.budget import RequestBudget
 from docreader.tender.authoring import organize_outline
 from docreader.tender.checks.analysis import current_items
@@ -73,9 +72,10 @@ async def test_confirmed_analysis_organizes_one_outline_with_durable_scoring_and
 
     waiting = await execute_analysis(analysis_runtime)
     before = len(calls)
-    with pytest.raises(InvalidConfirmation):
-        await organize_outline(store, artifacts, execute, budget(), **expectation(waiting))
-    assert executed == [] and len(calls) == before
+    pending_ref = await organize_outline(store, artifacts, execute, budget(), **expectation(waiting))
+    assert artifacts.read_json(pending_ref)["authoring_input"]["confirmation_ref"] is None
+    assert len(executed) == 1 and len(calls) == before
+    executed.clear()
 
     await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "outline-confirm", domain_revision=1)
     ready = await execute_analysis(analysis_runtime)
@@ -111,7 +111,7 @@ async def test_confirmed_analysis_organizes_one_outline_with_durable_scoring_and
     assert await store.get_run(run["run_id"]) == ready
 
 
-async def test_outline_rechecks_current_confirmation_after_execution_before_publishing(analysis_runtime):
+async def test_outline_keeps_fixed_input_when_analysis_changes_during_execution(analysis_runtime):
     store, artifacts, _, run, calls = analysis_runtime
     waiting = await execute_analysis(analysis_runtime)
     await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "outline-inflight", domain_revision=1)
@@ -128,8 +128,8 @@ async def test_outline_rechecks_current_confirmation_after_execution_before_publ
                             "outline-inflight-correction", "Synthetic revision while outline execution is in progress")
         return value
 
-    with pytest.raises(InvalidConfirmation):
-        await organize_outline(store, artifacts, execute, budget(), **expectation(ready))
+    reference = await organize_outline(store, artifacts, execute, budget(), **expectation(ready))
+    assert artifacts.read_json(reference)["authoring_input"] == input_value
     changed = await store.get_run(run["run_id"])
     assert changed["domain_revision"] == 2 and changed["status"] == "pending"
     assert not changed["confirmations"] and changed["history"]["confirmations"]

@@ -30,6 +30,8 @@ from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
 class OpenAIModel:
+    supports_group_attempts = True
+
     def __init__(self, config: ModelConfig, store, lease, prompts: Mapping[str, str] | None = None,
                  concurrency: int = 2, timeout_seconds: float = 180,
                  *, artifacts=None, transport: httpx.AsyncBaseTransport | None = None):
@@ -103,7 +105,8 @@ class OpenAIModel:
     async def __aexit__(self, *args):
         await self.close()
 
-    async def call(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = (), *, correction: bool = False) -> dict:
+    async def call(self, task: Task, payload: dict, images: Sequence[str | ImageInput] = (), *, correction: bool = False,
+                   group_attempt: dict | None = None) -> dict:
         from docreader.llm.wire import WirePayload
 
         wire = WirePayload(task, payload)
@@ -112,6 +115,10 @@ class OpenAIModel:
         request = budget.request(task, payload, images)
         context = budget.require_request(request, task)
         context.update(operation=payload.get("operation", task), work_unit_id=payload.get("work_unit_id", ""))
+        if payload.get("work_units") and payload.get("operation") == "review":
+            context["operation"] = "joint"  # Host progress; wire operation remains independent review.
+        if group_attempt is not None:
+            context.update(group_attempt)
         digest = request_digest(endpoint.base_url, request)
         logical_digest = digest
         if "contract_feedback" in payload:
@@ -140,7 +147,7 @@ class OpenAIModel:
         endpoint = self.config.chat
         if request.get("model") != endpoint.model or budget.model != endpoint.model:
             raise ModelConfigurationError("prepared request model does not match its configured endpoint")
-        context = budget.require_request(request)
+        context = budget.require_request(request, task)
         digest = request_digest(endpoint.base_url, request)
         logical_digest = request_digest(endpoint.base_url, logical_request if logical_request is not None else request)
         async with self._semaphore:
@@ -153,10 +160,13 @@ class OpenAIModel:
             **context, "request_digest": digest, "logical_request_digest": logical_digest,
             "operation": context.get("operation", task), "work_unit_id": context.get("work_unit_id", ""),
         })
-        if row["status"] == "succeeded":
+        request_id = row["request_id"]
+        if row["status"] == ModelRequestStatus.SUCCEEDED:
             return await self._cached_response(row, digest)
+        if context.get("group_attempt_id") and row["status"] in {ModelRequestStatus.FAILED, ModelRequestStatus.UNCERTAIN}:
+            await self._replay_group_failure(row, digest)
         # Durable attempt limits and active-send fencing happen before HTTP.
-        await self.store.finish_request(request_id, "sent")
+        await self.store.finish_request(request_id, ModelRequestStatus.SENT)
         started = time.monotonic()
         stream = StreamResponse()
         deadline = IdleDeadline(self._timeout)
@@ -184,14 +194,14 @@ class OpenAIModel:
                 raise ModelSemanticError("model endpoint did not return an SSE response")
             result = stream.result()
         except asyncio.CancelledError:
-            await asyncio.shield(self._finish_stream(request_id, "uncertain", stream, digest,
+            await asyncio.shield(self._finish_stream(request_id, ModelRequestStatus.UNCERTAIN, stream, digest,
                                                      "cancelled_after_send", started))
             raise
         except APIStatusError as error:
             # A received HTTP rejection is distinct from a lost response.
             status = error.status_code
             response_ref, usage = await self._received_rejection(error.response, digest)
-            await self._finish(request_id, "failed", usage, f"http_{status}", started, response_ref)
+            await self._finish(request_id, ModelRequestStatus.FAILED, usage, f"http_{status}", started, response_ref)
             _, failure = http_failure(status)
             if failure is ModelInfrastructureError:
                 raise ModelInfrastructureError(f"model endpoint returned HTTP {status}") from None
@@ -201,20 +211,20 @@ class OpenAIModel:
         except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
             cause = error.__cause__ if isinstance(error, APIConnectionError) else error
             if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-                await self._finish_stream(request_id, "failed", stream, digest, "connection_before_send", started)
+                await self._finish_stream(request_id, ModelRequestStatus.FAILED, stream, digest, "connection_before_send", started)
                 raise ModelInfrastructureError("model connection failed before send") from None
             if isinstance(cause, (TimeoutError, httpx.ReadTimeout)):
                 if not stream.counts["raw_received_chunks"]:
                     # Owner-accepted risk: the relay may have billed an execution that sent no byte.
-                    await self._finish_stream(request_id, "failed", stream, digest, "first_data_idle_timeout", started)
+                    await self._finish_stream(request_id, ModelRequestStatus.FAILED, stream, digest, "first_data_idle_timeout", started)
                     raise ModelInfrastructureError("model endpoint sent no data before the idle deadline") from None
                 failure = "between_data_idle_timeout"
             else:
                 failure = "transport_response_unknown"
-            await self._finish_stream(request_id, "uncertain", stream, digest, failure, started)
+            await self._finish_stream(request_id, ModelRequestStatus.UNCERTAIN, stream, digest, failure, started)
             raise UncertainModelResponse("model response was lost after send; provider execution and billing are uncertain") from None
         except UncertainModelResponse:
-            await self._finish_stream(request_id, "uncertain", stream, digest,
+            await self._finish_stream(request_id, ModelRequestStatus.UNCERTAIN, stream, digest,
                                       stream.failure or "stream_missing_done", started)
             raise
         except httpx.DecodingError:
@@ -222,26 +232,45 @@ class OpenAIModel:
             # It is not a complete semantic rejection or permission to resend.
             stream.failure = "invalid_stream_encoding"
             try:
-                await self._finish_stream(request_id, "uncertain", stream, digest, stream.failure, started)
+                await self._finish_stream(request_id, ModelRequestStatus.UNCERTAIN, stream, digest, stream.failure, started)
             except Exception:
                 # An unavailable audit store leaves the active sent fence in
                 # place. Recovery cannot send concurrently with that attempt.
                 raise UncertainModelResponse("model response decoding and audit failed; provider execution and billing are uncertain") from None
             raise UncertainModelResponse("model response decoding failed after send; provider execution and billing are uncertain") from None
         except ModelJSONError as error:
-            await self._finish_stream(request_id, "failed", stream, digest, "invalid_json_response", started)
+            await self._finish_stream(request_id, ModelRequestStatus.FAILED, stream, digest, "invalid_json_response", started)
             error.redact(endpoint.api_key for endpoint in (self.config.chat, self.config.vision)
                          if endpoint is not None)
             raise
         except ModelSemanticError:
-            await self._finish_stream(request_id, "failed", stream, digest,
+            await self._finish_stream(request_id, ModelRequestStatus.FAILED, stream, digest,
                                       stream.failure or "invalid_json_response", started)
             raise ModelSemanticError("model endpoint returned an invalid or incomplete JSON stream") from None
         finally:
             if raw_response is not None:
                 await raw_response.close()
-        await self._finish_stream(request_id, "succeeded", stream, digest, None, started)
+        await self._finish_stream(request_id, ModelRequestStatus.SUCCEEDED, stream, digest, None, started)
         return result
+
+    async def _replay_group_failure(self, row, digest):
+        """A crashed attempt replays its recorded failure; a new reservation may retry it."""
+        if self.artifacts is not None and row.get("response_ref") is not None:
+            envelope = await asyncio.to_thread(self.artifacts.read_json, row["response_ref"])
+            if envelope.get("request_digest") != digest:
+                raise ModelCorrectionStalled("recorded group failure belongs to another request")
+            if envelope.get("protocol") == StreamResponse.PROTOCOL:
+                stream = StreamResponse()
+                stream.feed(envelope["raw_body"].encode("utf-8"))
+                try:
+                    stream.result()
+                except ModelJSONError:
+                    raise
+                except (ModelSemanticError, UncertainModelResponse):
+                    pass
+        if row["status"] == ModelRequestStatus.UNCERTAIN:
+            raise UncertainModelResponse("recorded group attempt has an uncertain provider outcome")
+        raise ModelInfrastructureError("recorded group attempt failed before a complete response")
 
     async def _cached_response(self, row: dict, digest: str) -> dict:
         # ArtifactStore verifies size, path and SHA256 before decoding. Recovery

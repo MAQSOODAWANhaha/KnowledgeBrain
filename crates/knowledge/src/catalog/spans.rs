@@ -1,24 +1,21 @@
 //! SQL persistence split from persist.rs (behavior unchanged).
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
+
+async fn lock_span_document(
+    conn: &mut PgConnection,
+    document_id: Uuid,
+    attempt: i32,
+) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_,Uuid>("SELECT id FROM knowledge_documents WHERE id=$1 AND attempt=$2 AND deleted_at IS NULL AND parse_status NOT IN ('cancelled','deleting','deleted') FOR UPDATE")
+        .bind(document_id).bind(attempt).fetch_optional(conn).await?.is_some())
+}
 
 pub(crate) fn span_kind(name: &str) -> &'static str {
     match name {
         "document_processing" => "root",
         "docreader" | "chunking" | "embedding" | "multimodal" | "postprocess" => "stage",
         _ => "subspan",
-    }
-}
-
-pub(crate) fn span_status(status: &str) -> &'static str {
-    match status {
-        "ok" | "done" => "done",
-        "error" | "failed" => "failed",
-        "running" => "running",
-        "pending" => "pending",
-        "skipped" => "skipped",
-        "cancelled" => "cancelled",
-        _ => "done",
     }
 }
 
@@ -29,7 +26,7 @@ pub(crate) async fn lookup_span_id(
     name: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT span_id FROM document_processing_spans
+        "SELECT span_id FROM knowledge_document_processing_spans
          WHERE document_id = $1 AND attempt = $2 AND name = $3",
     )
     .bind(document_id)
@@ -55,6 +52,10 @@ pub async fn open_attempt(
     )
     .await?;
     let root = lookup_span_id(pool, document_id, attempt, "document_processing").await?;
+    let mut tx = pool.begin().await?;
+    if !lock_span_document(&mut tx, document_id, attempt).await? {
+        return Ok(());
+    }
     for name in [
         "docreader",
         "chunking",
@@ -63,7 +64,7 @@ pub async fn open_attempt(
         "postprocess",
     ] {
         sqlx::query(
-            "INSERT INTO document_processing_spans
+            "INSERT INTO knowledge_document_processing_spans
                 (document_id, attempt, name, span_id, parent_span_id, kind, status, started_at)
              VALUES ($1, $2, $3, $4, $5, 'stage', 'pending', NULL)
              ON CONFLICT (document_id, attempt, name) DO NOTHING",
@@ -73,9 +74,10 @@ pub async fn open_attempt(
         .bind(name)
         .bind(Uuid::new_v4())
         .bind(root)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -97,16 +99,20 @@ pub async fn start_span(
     } else {
         None
     };
+    let mut tx = pool.begin().await?;
+    if !lock_span_document(&mut tx, document_id, attempt).await? {
+        return Ok(());
+    }
     let kind = span_kind(name);
     sqlx::query(
-        "INSERT INTO document_processing_spans
+        "INSERT INTO knowledge_document_processing_spans
             (document_id, attempt, name, span_id, parent_span_id, kind, status, input,
              started_at, finished_at, duration_ms)
          VALUES ($1, $2, $3, $4, $5, $6, 'running', $7, now(), NULL, NULL)
          ON CONFLICT (document_id, attempt, name) DO UPDATE SET
             status = 'running',
-            input = COALESCE(EXCLUDED.input, document_processing_spans.input),
-            parent_span_id = COALESCE(EXCLUDED.parent_span_id, document_processing_spans.parent_span_id),
+            input = COALESCE(EXCLUDED.input, knowledge_document_processing_spans.input),
+            parent_span_id = COALESCE(EXCLUDED.parent_span_id, knowledge_document_processing_spans.parent_span_id),
             kind = EXCLUDED.kind,
             started_at = now(),
             finished_at = NULL,
@@ -120,12 +126,13 @@ pub async fn start_span(
     .bind(parent_id)
     .bind(kind)
     .bind(input)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE documents SET updated_at = now() WHERE id = $1 AND attempt=$2 AND parse_status NOT IN ('cancelled','deleting','deleted')")
+    sqlx::query("UPDATE knowledge_documents SET updated_at = now() WHERE id = $1 AND attempt=$2 AND parse_status NOT IN ('cancelled','deleting','deleted')")
         .bind(document_id).bind(attempt)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -134,11 +141,10 @@ pub async fn finish_span(
     document_id: Uuid,
     attempt: i32,
     name: &str,
-    status: &str,
+    status: crate::SpanStatus,
     output: Option<serde_json::Value>,
 ) -> Result<(), sqlx::Error> {
-    let status = span_status(status);
-    let err = if status == "failed" {
+    let err = if status == crate::SpanStatus::Failed {
         output
             .as_ref()
             .and_then(|v| v.get("error"))
@@ -147,8 +153,12 @@ pub async fn finish_span(
     } else {
         None
     };
+    let mut tx = pool.begin().await?;
+    if !lock_span_document(&mut tx, document_id, attempt).await? {
+        return Ok(());
+    }
     let n = sqlx::query(
-        "UPDATE document_processing_spans SET
+        "UPDATE knowledge_document_processing_spans SET
             status = $4,
             output = $5,
             error_message = $6,
@@ -162,16 +172,17 @@ pub async fn finish_span(
     .bind(status)
     .bind(&output)
     .bind(&err)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
     if n == 0 {
-        upsert_span(pool, document_id, attempt, name, status, output).await?;
+        upsert_span_in_tx(&mut tx, document_id, attempt, name, status, output).await?;
     }
-    sqlx::query("UPDATE documents SET updated_at = now() WHERE id = $1 AND attempt=$2 AND parse_status NOT IN ('cancelled','deleting','deleted')")
+    sqlx::query("UPDATE knowledge_documents SET updated_at = now() WHERE id = $1 AND attempt=$2 AND parse_status NOT IN ('cancelled','deleting','deleted')")
         .bind(document_id).bind(attempt)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -191,8 +202,12 @@ pub async fn skip_span(
         None,
     )
     .await?;
+    let mut tx = pool.begin().await?;
+    if !lock_span_document(&mut tx, document_id, attempt).await? {
+        return Ok(());
+    }
     sqlx::query(
-        "UPDATE document_processing_spans SET
+        "UPDATE knowledge_document_processing_spans SET
             status = 'skipped',
             error_message = $4,
             finished_at = now(),
@@ -203,8 +218,9 @@ pub async fn skip_span(
     .bind(attempt)
     .bind(name)
     .bind(reason)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -223,9 +239,13 @@ pub async fn cancel_dependent_stages(
     if deps.is_empty() {
         return Ok(());
     }
+    let mut tx = pool.begin().await?;
+    if !lock_span_document(&mut tx, document_id, attempt).await? {
+        return Ok(());
+    }
     let names: Vec<String> = deps.iter().map(|s| (*s).to_string()).collect();
     sqlx::query(
-        "UPDATE document_processing_spans SET
+        "UPDATE knowledge_document_processing_spans SET
             status = 'cancelled',
             error_message = $4,
             finished_at = now()
@@ -237,8 +257,9 @@ pub async fn cancel_dependent_stages(
     .bind(attempt)
     .bind(&names)
     .bind(format!("upstream {failed_stage} failed"))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -247,12 +268,28 @@ pub async fn upsert_span(
     document_id: Uuid,
     attempt: i32,
     name: &str,
-    status: &str,
+    status: crate::SpanStatus,
     output: Option<serde_json::Value>,
 ) -> Result<(), sqlx::Error> {
-    let running = status == "running";
+    let mut tx = pool.begin().await?;
+    if !lock_span_document(&mut tx, document_id, attempt).await? {
+        return Ok(());
+    }
+    upsert_span_in_tx(&mut tx, document_id, attempt, name, status, output).await?;
+    tx.commit().await
+}
+
+async fn upsert_span_in_tx(
+    conn: &mut PgConnection,
+    document_id: Uuid,
+    attempt: i32,
+    name: &str,
+    status: crate::SpanStatus,
+    output: Option<serde_json::Value>,
+) -> Result<(), sqlx::Error> {
+    let running = status == crate::SpanStatus::Running;
     sqlx::query(
-        "INSERT INTO document_processing_spans
+        "INSERT INTO knowledge_document_processing_spans
             (document_id, attempt, name, span_id, kind, status, output, started_at, finished_at)
          VALUES ($1, $2, $3, $4, $3, $5, $6, now(), CASE WHEN $7 THEN NULL ELSE now() END)
          ON CONFLICT (document_id, attempt, name) DO UPDATE SET
@@ -260,7 +297,7 @@ pub async fn upsert_span(
             output = EXCLUDED.output,
             finished_at = CASE WHEN $7 THEN NULL ELSE now() END,
             duration_ms = CASE WHEN $7 THEN NULL
-                ELSE (EXTRACT(EPOCH FROM (now() - document_processing_spans.started_at)) * 1000)::bigint
+                ELSE (EXTRACT(EPOCH FROM (now() - knowledge_document_processing_spans.started_at)) * 1000)::bigint
             END",
     )
     .bind(document_id)
@@ -270,7 +307,7 @@ pub async fn upsert_span(
     .bind(status)
     .bind(output)
     .bind(running)
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }
@@ -283,7 +320,7 @@ pub struct SpanRow {
     pub span_id: Option<Uuid>,
     pub parent_span_id: Option<Uuid>,
     pub kind: Option<String>,
-    pub status: Option<String>,
+    pub status: crate::SpanStatus,
     pub output: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -300,7 +337,7 @@ impl SpanRow {
             name: self.name,
             parent_span_id: self.parent_span_id,
             kind: self.kind.unwrap_or_else(|| "stage".into()),
-            status: self.status.unwrap_or_else(|| "pending".into()),
+            status: self.status,
             output: self.output,
             error_message: self.error_message.unwrap_or_default(),
             started_at: self.started_at.unwrap_or_else(chrono::Utc::now),
@@ -312,7 +349,7 @@ impl SpanRow {
 
 pub async fn latest_span_attempt(pool: &PgPool, document_id: Uuid) -> Result<i32, sqlx::Error> {
     let n: Option<i32> = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(attempt), 0) FROM document_processing_spans WHERE document_id = $1",
+        "SELECT COALESCE(MAX(attempt), 0) FROM knowledge_document_processing_spans WHERE document_id = $1",
     )
     .bind(document_id)
     .fetch_one(pool)
@@ -324,7 +361,7 @@ pub async fn list_spans(pool: &PgPool, document_id: Uuid) -> Result<Vec<SpanRow>
     let rows = sqlx::query(
         "SELECT document_id, attempt, name, span_id, parent_span_id, kind, status,
                 output, error_message, started_at, finished_at, duration_ms
-         FROM document_processing_spans
+         FROM knowledge_document_processing_spans
          WHERE document_id = $1
          ORDER BY started_at NULLS LAST, name",
     )
@@ -359,7 +396,7 @@ pub async fn list_spans_attempt(
     let rows = sqlx::query(
         "SELECT document_id, attempt, name, span_id, parent_span_id, kind, status,
                 output, error_message, started_at, finished_at, duration_ms
-         FROM document_processing_spans
+         FROM knowledge_document_processing_spans
          WHERE document_id = $1 AND attempt = $2
          ORDER BY started_at NULLS LAST, name",
     )

@@ -27,9 +27,8 @@ COPY rustfmt.toml Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY migrations migrations
 COPY services/docreader/proto services/docreader/proto
-RUN mkdir -p deploy/postgres-init
+RUN mkdir -p deploy
 COPY deploy/queue-registry.toml deploy/queue-registry.toml
-COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-runtime-identities.sh
 # Compile-time platform contracts; keep deployment credentials outside the image.
 COPY deploy/release-descriptor-v1.schema.json deploy/
 RUN cargo build --locked --release -p api -p worker -p retention -p platform

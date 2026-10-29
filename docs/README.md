@@ -1,10 +1,8 @@
 # KnowledgeBrain 文档导航
 
-本目录保存已经确认的产品与领域定义。领域入口链接各自唯一实施计划；招投标计划在 [design/check-execution-plan.md](design/check-execution-plan.md)，其余见[计划导航](../plans/README.md)。
+本目录保存已经确认的产品与领域定义。招投标当前实施计划在 [Python 实施计划](design/python-tender-phase1/implementation.md)，其余见[计划导航](../plans/README.md)。
 
-新增 Python 独立路径的当前实施入口为 [招标第一期](design/python-tender-phase1/README.md)：
-先完成 Python 阶段 1–6 并独立验收，再另行决定 Rust 接入。现有 Rust 生产路径及历史验收仍按原文档理解；
-新路径的状态、合同和证据只由该入口记录，不把独立验收视为生产切换完成。
+招标分析与编制统一使用 [Python 路径](design/python-tender-phase1/README.md)，Rust 提供 API、知识库和基础服务。旧 Rust 招标流程、专用表和运行入口已退出；相关历史文档不再定义当前执行合同。当前初始化与创建人权限见 [数据库设计](design/database-initialization.md)。隔离回归和历史真实验收不能代替当前版本部署验收。
 
 仓库级产品与界面规范仍保留在标准入口：[`../PRODUCT.md`](../PRODUCT.md) 与 [`../DESIGN.md`](../DESIGN.md)。
 
@@ -22,7 +20,7 @@
 | --- | --- | --- |
 | 共享平台 | [`platform/README.md`](platform/README.md) | 鉴权、运行时、队列、幂等与审计基础设施、对象注册表、可观测性 |
 | 知识库 | [`knowledge-base/README.md`](knowledge-base/README.md) | Workspace、Product、ProductVersion、Document、解析、索引、检索 |
-| 招投标 | [`bidding/README.md`](bidding/README.md) | 解析完成后的一次大纲运行（章节 + 规定模板）。业务：[PRD](bidding/README.md)；运行时：[大纲](design/evidence-runtime-contract.md)；边界：[模块](bidding/authoring.md)；编辑：[ONLYOFFICE](bidding/onlyoffice.md)；缺口：[计划](design/check-execution-plan.md) |
+| 招投标 | [`design/python-tender-phase1/README.md`](design/python-tender-phase1/README.md) | 文件分析、要求核验、编制依据、大纲与章节、Word 编辑及出件；状态以交接文档为准 |
 | 调研材料 | [`research/README.md`](research/README.md) | 外部对标、实验和非规范性分析 |
 
 ## 现有综合规格

@@ -16,7 +16,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 async-trait = "0.1"
 axum.workspace = true
-bidding = { path = "../bidding" }
 dotenvy.workspace = true
 knowledge = { path = "../knowledge" }
 libc.workspace = true

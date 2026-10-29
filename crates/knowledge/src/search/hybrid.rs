@@ -79,7 +79,7 @@ pub async fn hybrid_search_pg(
         .await
         .unwrap_or(50) as i64;
     const VEC_SQL: &str = "SELECT c.id AS chunk_id, c.content, c.chunk_type, c.document_id,
-                c.start_at, c.end_at, COALESCE(c.context_header, '') AS context_header,
+                c.start_offset AS start_at, c.end_offset AS end_at, COALESCE(c.context_header, '') AS context_header,
                 COALESCE(d.object_ref, '') AS document_object_ref, d.title,
                 p.id AS product_id, p.kind AS product_kind,
                 pv.id AS version_id, pv.label AS version_label,
@@ -87,19 +87,19 @@ pub async fn hybrid_search_pg(
                 COALESCE(1.0 - (e.embedding <=> CAST($2 AS vector)), 0.0) AS vec_score,
                 COALESCE(ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)), 0.0)::double precision AS kw_score,
                 COALESCE(
-                    (SELECT array_agg(dt.tag_id) FROM document_tags dt WHERE dt.document_id = d.id),
+                    (SELECT array_agg(dt.tag_id) FROM knowledge_document_tags dt WHERE dt.document_id = d.id),
                     '{}'::uuid[]
                 ) AS tag_ids,
                 COALESCE(
-                    (SELECT array_agg(t.slug) FROM document_tags dt
-                     JOIN tags t ON t.id = dt.tag_id WHERE dt.document_id = d.id),
+                    (SELECT array_agg(t.slug) FROM knowledge_document_tags dt
+                     JOIN knowledge_tags t ON t.id = dt.tag_id WHERE dt.document_id = d.id),
                     '{}'::text[]
                 ) AS tag_slugs
-         FROM chunk_embeddings e
-         JOIN chunks c ON c.id = e.chunk_id
-         JOIN documents d ON d.id = e.document_id
-         JOIN product_versions pv ON pv.id = e.product_version_id
-         JOIN products p ON p.id = pv.product_id
+         FROM knowledge_chunk_embeddings e
+         JOIN knowledge_chunks c ON c.id = e.chunk_id
+         JOIN knowledge_documents d ON d.id = e.document_id
+         JOIN knowledge_product_versions pv ON pv.id = e.product_version_id
+         JOIN knowledge_products p ON p.id = pv.product_id
          WHERE e.product_version_id = $1
            AND d.enable_status = 'enabled'
            AND d.deleted_at IS NULL
@@ -111,14 +111,14 @@ pub async fn hybrid_search_pg(
            AND (
                 cardinality($5::uuid[]) = 0
                 OR EXISTS (
-                    SELECT 1 FROM document_tags dt
+                    SELECT 1 FROM knowledge_document_tags dt
                     WHERE dt.document_id = d.id AND dt.tag_id = ANY($5)
                 )
            )
          ORDER BY e.embedding <=> CAST($2 AS vector)
          LIMIT $6";
     const KW_SQL: &str = "SELECT c.id AS chunk_id, c.content, c.chunk_type, c.document_id,
-                c.start_at, c.end_at, COALESCE(c.context_header, '') AS context_header,
+                c.start_offset AS start_at, c.end_offset AS end_at, COALESCE(c.context_header, '') AS context_header,
                 COALESCE(d.object_ref, '') AS document_object_ref, d.title,
                 p.id AS product_id, p.kind AS product_kind,
                 pv.id AS version_id, pv.label AS version_label,
@@ -126,19 +126,19 @@ pub async fn hybrid_search_pg(
                 COALESCE(1.0 - (e.embedding <=> CAST($2 AS vector)), 0.0) AS vec_score,
                 COALESCE(ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)), 0.0)::double precision AS kw_score,
                 COALESCE(
-                    (SELECT array_agg(dt.tag_id) FROM document_tags dt WHERE dt.document_id = d.id),
+                    (SELECT array_agg(dt.tag_id) FROM knowledge_document_tags dt WHERE dt.document_id = d.id),
                     '{}'::uuid[]
                 ) AS tag_ids,
                 COALESCE(
-                    (SELECT array_agg(t.slug) FROM document_tags dt
-                     JOIN tags t ON t.id = dt.tag_id WHERE dt.document_id = d.id),
+                    (SELECT array_agg(t.slug) FROM knowledge_document_tags dt
+                     JOIN knowledge_tags t ON t.id = dt.tag_id WHERE dt.document_id = d.id),
                     '{}'::text[]
                 ) AS tag_slugs
-         FROM chunk_embeddings e
-         JOIN chunks c ON c.id = e.chunk_id
-         JOIN documents d ON d.id = e.document_id
-         JOIN product_versions pv ON pv.id = e.product_version_id
-         JOIN products p ON p.id = pv.product_id
+         FROM knowledge_chunk_embeddings e
+         JOIN knowledge_chunks c ON c.id = e.chunk_id
+         JOIN knowledge_documents d ON d.id = e.document_id
+         JOIN knowledge_product_versions pv ON pv.id = e.product_version_id
+         JOIN knowledge_products p ON p.id = pv.product_id
          WHERE e.product_version_id = $1
            AND d.enable_status = 'enabled'
            AND d.deleted_at IS NULL
@@ -150,7 +150,7 @@ pub async fn hybrid_search_pg(
            AND (
                 cardinality($5::uuid[]) = 0
                 OR EXISTS (
-                    SELECT 1 FROM document_tags dt
+                    SELECT 1 FROM knowledge_document_tags dt
                     WHERE dt.document_id = d.id AND dt.tag_id = ANY($5)
                 )
            )
@@ -232,7 +232,7 @@ pub async fn resolve_pg_assembly_targets(
     if let Some(vs) = version_id {
         if vs == "current" {
             let id = sqlx::query_scalar::<_, Option<Uuid>>(
-                "SELECT current_version_id FROM products WHERE id = $1",
+                "SELECT current_version_id FROM knowledge_products WHERE id = $1",
             )
             .bind(product_id)
             .fetch_optional(pool)
@@ -244,7 +244,7 @@ pub async fn resolve_pg_assembly_targets(
             targets.push(id);
         } else if let Ok(id) = Uuid::parse_str(vs) {
             let ok: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM product_versions WHERE id = $1 AND product_id = $2)",
+                "SELECT EXISTS(SELECT 1 FROM knowledge_product_versions WHERE id = $1 AND product_id = $2)",
             )
             .bind(id)
             .bind(product_id)
@@ -256,7 +256,7 @@ pub async fn resolve_pg_assembly_targets(
         }
     } else {
         let ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM product_versions
+            "SELECT id FROM knowledge_product_versions
              WHERE product_id = $1 AND status = 'active' AND deleted_at IS NULL",
         )
         .bind(product_id)
@@ -265,20 +265,21 @@ pub async fn resolve_pg_assembly_targets(
         targets.extend(ids);
     }
     if include_library {
-        let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM products WHERE id = $1")
-            .bind(product_id)
-            .fetch_optional(pool)
-            .await?;
+        let kind: Option<String> =
+            sqlx::query_scalar("SELECT kind FROM knowledge_products WHERE id = $1")
+                .bind(product_id)
+                .fetch_optional(pool)
+                .await?;
         if kind.as_deref() != Some("library") {
             let ws: Option<Uuid> =
-                sqlx::query_scalar("SELECT workspace_id FROM products WHERE id = $1")
+                sqlx::query_scalar("SELECT workspace_id FROM knowledge_products WHERE id = $1")
                     .bind(product_id)
                     .fetch_optional(pool)
                     .await?;
             if let Some(ws) = ws {
                 let libs: Vec<Uuid> = sqlx::query_scalar(
-                    "SELECT p.current_version_id FROM products p
-                     JOIN product_versions pv ON pv.id = p.current_version_id
+                    "SELECT p.current_version_id FROM knowledge_products p
+                     JOIN knowledge_product_versions pv ON pv.id = p.current_version_id
                      WHERE p.workspace_id = $1 AND p.kind = 'library'
                        AND pv.status = 'active' AND pv.deleted_at IS NULL",
                 )

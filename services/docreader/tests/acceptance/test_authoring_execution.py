@@ -9,7 +9,7 @@ import pytest
 
 from docreader.integrations.authoring import read_authoring_input
 from docreader.integrations.authoring_store import AuthoringStore
-from docreader.integrations.store import Cancelled, Conflict, InvalidConfirmation
+from docreader.integrations.store import Cancelled, Conflict
 from docreader.llm.budget import RequestBudget
 from docreader.llm.config import ModelConfig, ModelEndpoint
 from docreader.llm.request import ModelBudgetError, ModelWorkUnitExhausted
@@ -296,7 +296,7 @@ async def test_four_sends_exhaust_persisted_allowance_and_reentry_cannot_reset_i
     assert len(calls) == before and await store.get_run(run["run_id"]) == ready
 
 
-async def test_parent_revision_during_send_keeps_http_receipt_but_forbids_publication(analysis_runtime):
+async def test_parent_revision_during_send_preserves_fixed_snapshot_and_success_cache(analysis_runtime):
     store, artifacts, settings, run, calls = analysis_runtime
     ready = await confirmed(analysis_runtime)
     input_value = await read_authoring_input(store, artifacts, **expectation(ready))
@@ -311,12 +311,15 @@ async def test_parent_revision_during_send_keeps_http_receipt_but_forbids_public
                             "durable-outline-correction", "Synthetic parent revision while outline is in flight")
         return response(outline_response(body))
 
-    with pytest.raises(InvalidConfirmation):
-        await execute_outline(store, artifacts, config(), budget(), execution_id=execution_id,
-                              **expectation(ready), transport=httpx.MockTransport(handler))
+    reference = await execute_outline(store, artifacts, config(), budget(), execution_id=execution_id,
+                                      **expectation(ready), transport=httpx.MockTransport(handler))
     execution = await AuthoringStore(settings.dsn).get_execution(execution_id)
     assert len(sent) == len(execution["requests"]) == 1
-    assert execution["status"] == "failed" and not execution["result_ref"]
+    assert execution["status"] == "succeeded" and execution["result_ref"] == reference
+    assert artifacts.read_json(reference)["authoring_input"] == input_value
+    assert await execute_outline(store, artifacts, config(), budget(), execution_id=execution_id,
+                                 **expectation(ready), transport=httpx.MockTransport(handler)) == reference
+    assert len(sent) == 1
     assert execution["requests"][0]["status"] == "succeeded"
     artifacts.read_json(execution["requests"][0]["response_ref"])
     changed = await store.get_run(run["run_id"])

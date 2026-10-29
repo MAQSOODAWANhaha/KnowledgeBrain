@@ -36,7 +36,7 @@ export type DocxSavedReceipt = DocxIdentity & {
 };
 export type DocxApi = {
   current(workspace: string): Promise<DocxCurrent | null>;
-  open(workspace: string, expected: DocxIdentity, attempt: MutationAttempt): Promise<DocxOpened>;
+  open(workspace: string, expected: DocxIdentity, attempt: MutationAttempt, options?: { language?: string }): Promise<DocxOpened>;
   save(workspace: string, body: DocxSave, attempt: MutationAttempt): Promise<DocxSaveReceipt>;
   saved(workspace: string, editorKey: string, saveId: string): Promise<DocxSavedReceipt | null>;
   download(workspace: string, version: string): Promise<Blob>;
@@ -58,8 +58,8 @@ export const docxApi: DocxApi & DocxRoundApi = {
     return receipt;
   },
   async current(workspace) { return (await v2Request<DocxCurrent | null>(`${path(workspace)}/current`)).data; },
-  async open(workspace, expected, attempt) {
-    const language = document.documentElement.lang || navigator.language;
+  async open(workspace, expected, attempt, options) {
+    const language = options?.language ?? (document.documentElement.lang || navigator.language);
     return (await v2Request<DocxOpened>(`${path(workspace)}/editor`,
       { method: "POST", body: JSON.stringify({ ...expected, ...(language ? { language } : {}) }) }, { attempt })).data;
   },

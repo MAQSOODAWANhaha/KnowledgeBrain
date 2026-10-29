@@ -7,13 +7,7 @@ cd "$root"
 : "${DEFAULT_BRANCH:?}"
 : "${CI_POSTGRES_PORT:?}"
 : "${CI_REDIS_PORT:?}"
-: "${CI_CONTENT_POSTGRES_TESTS:?}"
-: "${CI_REQUEST_DELIVERY_TEST:?}"
-: "${CI_CONTRACT_FEATURES:?}"
-: "${CI_DOCREADER_FEATURE:?}"
 : "${CI_DOCREADER_PYTEST_PATHS:?}"
-: "${CI_SOURCE_CAPTIONS_PYTEST:?}"
-: "${CI_DOCREADER_PYTHONPATH:?}"
 : "${CI_RUNNER:?}"
 : "${CI_ACTION_CHECKOUT:?}"
 : "${CI_ACTION_SETUP_NODE:?}"
@@ -90,33 +84,9 @@ while IFS= read -r line; do
   fi
 done < <(grep -E '^[[:space:]]*(- )?uses:' "$workflow")
 
-case " ${CI_CONTENT_POSTGRES_TESTS} " in
-  *" ${CI_REQUEST_DELIVERY_TEST} "*) ;;
-  *)
-    echo "CI_REQUEST_DELIVERY_TEST is not in CI_CONTENT_POSTGRES_TESTS" >&2
-    exit 1
-    ;;
-esac
-case ",${CI_CONTRACT_FEATURES}," in
-  *",${CI_DOCREADER_FEATURE},"*) ;;
-  *)
-    echo "CI_DOCREADER_FEATURE is not in CI_CONTRACT_FEATURES" >&2
-    exit 1
-    ;;
-esac
-
-grep -Fq "url.port != ${CI_POSTGRES_PORT}" scripts/fresh_schema_acceptance.sh
-grep -Fq "get_port() == ${CI_POSTGRES_PORT}" crates/bidding/tests/support/mod.rs
-grep -Fq "127.0.0.1:${CI_POSTGRES_PORT}" scripts/bidding_v2_phase_fixture_acceptance.sh
-grep -Fq "127.0.0.1:${CI_POSTGRES_PORT}:5432" scripts/bidding_v2_content_stack_e2e.sh
-grep -Fq "redis_port=\$((${CI_REDIS_PORT} + offset))" scripts/bidding_v2_content_stack_e2e.sh
-grep -Fq 'Path("deploy/images.lock.json")' scripts/bidding_v2_content_stack_e2e.sh
-sample_test=$(realpath -m "services/docreader/${CI_SOURCE_CAPTIONS_PYTEST}")
 docreader_tests=$(realpath -m "services/docreader/${CI_DOCREADER_PYTEST_PATHS}")
-[[ -f "$sample_test" ]] || { echo "missing source-caption test $sample_test" >&2; exit 1; }
 [[ -d "$docreader_tests" ]] || { echo "missing docreader pytest path $docreader_tests" >&2; exit 1; }
-if grep -Fq 'pgvector/pgvector@sha256:' scripts/bidding_v2_content_stack_e2e.sh \
-  || grep -Fq 'redis@sha256:' scripts/bidding_v2_content_stack_e2e.sh; then
-  echo "content e2e repeats an image digest that belongs in deploy/images.lock.json" >&2
+if rg -n 'crates/bidding|bidding_v2_baseline|CI_TENDER_PREPARE_BIN|bid-authoring-v2' Cargo.toml deploy/queue-registry.toml .github/workflows/ci.yml; then
+  echo "retired Rust tender workflow remains in active build configuration" >&2
   exit 1
 fi

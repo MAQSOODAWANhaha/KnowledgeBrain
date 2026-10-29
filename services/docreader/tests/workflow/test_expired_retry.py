@@ -115,7 +115,7 @@ async def test_old_unaccounted_executor_losses_do_not_start_an_eighth_execution(
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
     async with store.transaction() as conn:
-        await conn.execute("UPDATE tender_commands SET execution_count = 7 WHERE command_id = %s", (command["command_id"],))
+        await conn.execute("UPDATE tender_analysis_commands SET execution_count = 7 WHERE command_id = %s", (command["command_id"],))
     await expire(store, run["run_id"])
     await store.claim_commands()
     assert await store.acquire(run["run_id"], command["command_id"], 1) is None

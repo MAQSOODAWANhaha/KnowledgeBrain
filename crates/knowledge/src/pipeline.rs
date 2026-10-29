@@ -307,7 +307,7 @@ pub async fn finalize_multimodal(pool: &PgPool, document_id: Uuid, attempt: i32)
         pool,
         document_id,
         attempt,
-        "failed",
+        crate::ParseStatus::Failed,
         "required image processing exhausted retries; incomplete evidence",
     )
     .await;
@@ -625,7 +625,7 @@ async fn schedule_semantic_index_for_document_v2(
     document_id: Uuid,
 ) -> Result<(), String> {
     let product_version_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT product_version_id FROM documents WHERE id=$1 AND deleted_at IS NULL",
+        "SELECT product_version_id FROM knowledge_documents WHERE id=$1 AND deleted_at IS NULL",
     )
     .bind(document_id)
     .fetch_optional(pool)
@@ -649,8 +649,7 @@ pub async fn run_summary(
     if crate::document_parse_status(pool, document_id)
         .await
         .map_err(|error| error.to_string())?
-        .as_deref()
-        == Some("completed")
+        == Some(crate::ParseStatus::Completed)
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
@@ -701,8 +700,7 @@ pub async fn run_questions(
     if crate::document_parse_status(pool, document_id)
         .await
         .map_err(|error| error.to_string())?
-        .as_deref()
-        == Some("completed")
+        == Some(crate::ParseStatus::Completed)
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
@@ -747,8 +745,7 @@ pub async fn run_extract(
     if crate::document_parse_status(pool, document_id)
         .await
         .map_err(|error| error.to_string())?
-        .as_deref()
-        == Some("completed")
+        == Some(crate::ParseStatus::Completed)
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
@@ -767,7 +764,7 @@ pub async fn run_extract(
 }
 
 pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
-    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM documents WHERE id=$1")
+    let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM knowledge_documents WHERE id=$1")
         .bind(document_id)
         .fetch_optional(pool)
         .await
@@ -776,14 +773,14 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
     let status = crate::document_parse_status(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    if status.as_deref() != Some("deleting") {
+    if status != Some(crate::ParseStatus::Deleting) {
         return Ok(());
     }
     let ws = crate::document_workspace_id(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
     let vid: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
+        sqlx::query_scalar("SELECT product_version_id FROM knowledge_documents WHERE id = $1")
             .bind(document_id)
             .fetch_optional(pool)
             .await
@@ -795,26 +792,26 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
     crate::purge_document_index(pool, document_id)
         .await
         .map_err(|error| error.to_string())?;
-    let deletion = platform::release_knowledge_document_object(
-        pool,
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let before = workflow::capture_document_state(&mut tx, document_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let deletion = platform::release_knowledge_document_object_in_tx(
+        &mut tx,
         document_id,
         &format!("knowledge-document-delete:{document_id}"),
     )
     .await
     .map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE knowledge_documents SET deleted_at=COALESCE(deleted_at,now()),parse_status='deleted',updated_at=now() WHERE id=$1 AND parse_status='deleting'")
+        .bind(document_id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+    workflow::record_document_change(&mut tx, document_id, before)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     if let Some(deletion) = deletion {
         platform::dispatch_object_deletion(pool, deletion).await?;
     }
-    // D4: mark the document row deleted only after all cleanup succeeded.
-    // documents.parse_status allows 'deleted' in knowledge_base_baseline.sql.
-    sqlx::query(
-        "UPDATE documents SET deleted_at = now(), parse_status = 'deleted', updated_at = now()
-         WHERE id = $1 AND parse_status = 'deleting'",
-    )
-    .bind(document_id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
     let _ = ws;
     workflow::dispatch(pool).await?;
     Ok(())
@@ -945,7 +942,7 @@ fn datatable_chunks(
     })?;
     let col_content =
         format!("# Table Column Information\n\nTable name: {table_name}\n\n{col_raw}");
-    // D3: table chunks carry a Spreadsheet source locator (sheet = this file).
+    // D3: table knowledge_chunks carry a Spreadsheet source locator (sheet = this file).
     let table_locator = serde_json::json!([{
         "key": format!("datatable:{table_name}"),
         "ordinal": 0u32,

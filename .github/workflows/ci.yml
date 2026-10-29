@@ -52,12 +52,10 @@ jobs:
           set -euo pipefail
           log="$RUNNER_TEMP/workspace-tests.log"
           cargo test --locked --workspace --no-fail-fast 2>&1 | tee "$log"
-          bash scripts/ci_assert_workspace_tests.sh "$log"
       - name: runtime binaries
         run: |
           set -euo pipefail
           cargo build --locked -p "$CI_API_BIN" -p "$CI_WORKER_BIN"
-          cargo build --locked -p bidding --bin "$CI_TENDER_PREPARE_BIN"
           cargo build --locked -p "$CI_PLATFORM_PACKAGE" --bin "$CI_MIGRATOR_BIN"
       - name: Package dev binaries and integration tests
         run: bash scripts/ci_package_binaries.sh
@@ -85,12 +83,6 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Live bidding schema acceptance
-        run: |
-          python -m venv "$RUNNER_TEMP/kb-schema-validation"
-          "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip install -r scripts/requirements-schema-validation.txt
-          "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip check
-          "$RUNNER_TEMP/kb-schema-validation/bin/python" scripts/bid_authoring_schema_validation.py
       - name: PostgreSQL client
         run: |
           if ! command -v psql >/dev/null || ! command -v createdb >/dev/null; then
@@ -103,56 +95,10 @@ jobs:
           export CI_POSTGRES_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export CI_POSTGRES_DB="$CI_APP_POSTGRES_DB"
           bash scripts/ci_services.sh start both
-      - name: bootstrap isolated PostgreSQL acceptance schema
+      - name: Apply pending business migrations
         run: |
-          export PGHOST="$CI_POSTGRES_HOST" PGPORT="$CI_POSTGRES_PORT"
-          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
-          POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER" POSTGRES_DB="$CI_APP_POSTGRES_DB" \
-            KB_APP_DB_USER="$CI_APP_POSTGRES_USER" KB_APP_DB_PASSWORD="$CI_APP_POSTGRES_PASSWORD" \
-            sh deploy/postgres-init/010-runtime-identities.sh
-          { echo 'BEGIN;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql migrations/bidding_v2_baseline.sql; echo 'COMMIT;'; } \
-            | PGPASSWORD="$CI_APP_POSTGRES_PASSWORD" psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_APP_POSTGRES_DB" -v ON_ERROR_STOP=1
-      - name: Content AgentRun and typed cleanup delivery PostgreSQL acceptance
-        env:
-          KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
-          KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
-        run: |
-          set -euo pipefail
-          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
-          export KNOWLEDGEBRAIN_TEST_ADMIN_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
-          export REDIS_URL="redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/"
-          export OBJECT_DIR
-          OBJECT_DIR=$(mktemp -d "$RUNNER_TEMP/request-delivery-objects.XXXXXX")
-          cleanup() {
-            result=$?
-            trap - EXIT
-            rm -rf -- "$OBJECT_DIR" || result=1
-            test ! -e "$OBJECT_DIR" || result=1
-            exit "$result"
-          }
-          trap cleanup EXIT
-          read -r -a suites <<< "$CI_CONTENT_POSTGRES_TESTS"
-          for suite in "${suites[@]}"; do
-            log="$RUNNER_TEMP/$suite.log"
-            bash scripts/ci_run_packaged_test.sh "$suite" "$log" --unfiltered -- --test-threads=1 --nocapture
-            if grep -Eq 'skipped .*contract:' "$log"; then
-              echo "required PostgreSQL suite $suite skipped a contract" >&2
-              exit 1
-            fi
-            if [ "$suite" = "$CI_REQUEST_DELIVERY_TEST" ]; then
-              grep -Eq '^test cleanup_native_duplicates_protect_references_and_retry_failed_blob_deletion \.\.\.' "$log"
-              grep -Eq '^test cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker \.\.\.' "$log"
-              grep -q 'native retry observed job=' "$log"
-              grep -q 'unconfirmed mode=configuration-error' "$log"
-              grep -q 'unconfirmed mode=unresponsive-redis' "$log"
-            fi
-          done
-      - name: Tender analysis publication and fencing PostgreSQL acceptance
-        run: |
-          set -euo pipefail
-          export KB_TENDER_AGENT_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
-          log="$RUNNER_TEMP/tender-analysis.log"
-          bash scripts/ci_run_packaged_test.sh "$CI_TENDER_TEST" "$log" -- --ignored --test-threads=1 --nocapture
+          export DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          "$KB_MIGRATOR_BIN"
       - name: Knowledge generation and durable outbox fault acceptance
         run: |
           set -euo pipefail
@@ -164,33 +110,18 @@ jobs:
             log="$RUNNER_TEMP/${test_name}.log"
             bash scripts/ci_run_packaged_test.sh "$test_name" "$log" -- --ignored --test-threads=1 --nocapture
           done
-      - name: Frozen exact-version retrieval PostgreSQL acceptance
+      - name: Knowledge vector index publication acceptance
         run: |
-          set -euo pipefail
-          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS=1
-          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_FROZEN_DATABASE}"
-          cleanup() { dropdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_SCHEMA_POSTGRES_USER" --if-exists --force "$CI_FROZEN_DATABASE"; }
-          trap cleanup EXIT
-          createdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_SCHEMA_POSTGRES_USER" -T template0 "$CI_FROZEN_DATABASE"
-          psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_SCHEMA_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
-          CREATE EXTENSION pgcrypto;
-          CREATE EXTENSION vector;
-          ALTER SCHEMA public OWNER TO "$CI_APP_POSTGRES_USER";
-          REVOKE TEMPORARY,CREATE ON DATABASE ${CI_FROZEN_DATABASE} FROM PUBLIC;
-          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-          SQL
-          { echo 'BEGIN;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql; echo 'COMMIT;'; } \
-            | PGPASSWORD="$CI_APP_POSTGRES_PASSWORD" psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1
-          log="$RUNNER_TEMP/frozen-exact.log"
-          bash scripts/ci_run_packaged_test.sh "$CI_FROZEN_TEST_BIN" "$log" -- "$CI_FROZEN_EXACT_TEST" --exact --test-threads=1
-      - name: Outline/response SQL publish acceptance
-        run: |
-          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
-          export KNOWLEDGEBRAIN_TEST_ADMIN_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
-          export KNOWLEDGEBRAIN_TEST_ADMIN_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/postgres"
-          bash scripts/bidding_v2_phase_fixture_acceptance.sh
+          bash scripts/ci_run_packaged_test.sh vector_index_postgres "$RUNNER_TEMP/vector-index.log" --unfiltered -- --test-threads=1
+      - name: User and API key ownership isolation
+        run: |
+          export DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          export KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED=true
+          export OBJECT_DIR="$RUNNER_TEMP/owner-access-objects"
+          mkdir -p "$OBJECT_DIR"
+          bash scripts/ci_run_packaged_test.sh owner_access_postgres "$RUNNER_TEMP/owner-access.log" -- --ignored --test-threads=1
       - name: Stop services
         if: always()
         run: bash scripts/ci_services.sh stop
@@ -221,46 +152,16 @@ jobs:
           export CI_POSTGRES_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           export CI_POSTGRES_DB="$CI_SCHEMA_POSTGRES_DB"
           bash scripts/ci_services.sh start postgres
-      - name: Fresh baseline and application permissions acceptance
+      - name: Migration initialization, upgrade and recovery acceptance
         run: |
           set -euo pipefail
-          export PGHOST="$CI_POSTGRES_HOST"
-          export PGPORT="$CI_POSTGRES_PORT"
-          export PGUSER="$CI_SCHEMA_POSTGRES_USER"
-          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
-          export POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER"
-          export KB_APP_DB_USER="$CI_APP_POSTGRES_USER" KB_APP_DB_PASSWORD="$CI_APP_POSTGRES_PASSWORD"
-          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_SCHEMA_LIFECYCLE_DATABASE}"
-          created_databases=()
-          cleanup() {
-            result=$?
-            trap - EXIT
-            for database in "${created_databases[@]}"; do
-              dropdb --force "$database" || result=1
-            done
-            exit "$result"
-          }
-          trap cleanup EXIT
-          database="$CI_SCHEMA_LIFECYCLE_DATABASE"
-          bash scripts/ci_services.sh createdb -T template0 "$database"
-          created_databases+=("$database")
-          POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
-          unset POSTGRES_USER POSTGRES_DB
-          bash scripts/fresh_schema_acceptance.sh
+          export PGHOST="$CI_POSTGRES_HOST" PGPORT="$CI_POSTGRES_PORT"
+          export PGUSER="$CI_SCHEMA_POSTGRES_USER" PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
           bash scripts/ci_services.sh createdb -T template0 "$CI_FRESH_DATABASE"
-          created_databases+=("$CI_FRESH_DATABASE")
-          psql -d "$CI_FRESH_DATABASE" -v ON_ERROR_STOP=1 -v app_user="$CI_APP_POSTGRES_USER" <<'SQL'
-          CREATE EXTENSION vector;
-          CREATE EXTENSION pgcrypto;
-          SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database()) \gexec
-          SELECT format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'app_user') \gexec
-          SELECT format('ALTER SCHEMA public OWNER TO %I', :'app_user') \gexec
-          REVOKE ALL ON SCHEMA public FROM PUBLIC;
-          SQL
+          trap 'dropdb --if-exists --force "$CI_FRESH_DATABASE"' EXIT
           export KNOWLEDGEBRAIN_FRESH_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_FRESH_DATABASE}"
           export KNOWLEDGEBRAIN_REQUIRE_FRESH_DATABASE_TEST=1
-          log="$RUNNER_TEMP/${CI_FRESH_TEST}.log"
-          bash scripts/ci_run_packaged_test.sh "$CI_FRESH_TEST" "$log" --unfiltered -- --test-threads=1
+          bash scripts/ci_run_packaged_test.sh "$CI_FRESH_TEST" "$RUNNER_TEMP/${CI_FRESH_TEST}.log" --unfiltered -- --test-threads=1
       - name: Stop services
         if: always()
         run: bash scripts/ci_services.sh stop
@@ -304,25 +205,6 @@ jobs:
         if: always()
         run: bash scripts/ci_services.sh stop
 
-  content-e2e:
-    needs: rust-build
-    runs-on: *runner
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-      - name: Load CI config
-        run: bash scripts/ci_load_config.sh
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ env.CI_ARTIFACT_NAME }}
-          path: ${{ env.CI_BIN_DIR }}
-      - name: Bind packaged binaries
-        run: bash scripts/ci_bind_binaries.sh
-      - name: Content E2E fail-closed cleanup contract
-        run: bash scripts/tests/bidding_v2_content_e2e_cleanup_test.sh
-      - name: Hermetic Content API Redis Worker E2E
-        run: bash scripts/bidding_v2_content_stack_e2e.sh
-
   web:
     runs-on: *runner
     steps:
@@ -357,38 +239,27 @@ jobs:
           enable-cache: true
       - name: sync
         run: uv sync --frozen
+      - name: Start isolated Python workflow database
+        working-directory: .
+        run: |
+          export CI_POSTGRES_USER="$CI_APP_POSTGRES_USER"
+          export CI_POSTGRES_PASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export CI_POSTGRES_DB="$CI_APP_POSTGRES_DB"
+          bash scripts/ci_services.sh start both
+          echo "TENDER_TEST_DSN=postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}" >> "$GITHUB_ENV"
+          echo "TENDER_TEST_DATABASE_URL=postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}" >> "$GITHUB_ENV"
+          echo "TENDER_TEST_REDIS_URL=redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/15" >> "$GITHUB_ENV"
       - name: pytest
         run: |
           set -euo pipefail
           uv run pytest ${CI_DOCREADER_PYTEST_PATHS:?}
-          PYTHONPATH=${CI_DOCREADER_PYTHONPATH:?} uv run pytest ${CI_SOURCE_CAPTIONS_PYTEST:?}
-
-  docreader-replay:
-    needs: rust-build
-    runs-on: *runner
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - name: Load CI config
-        run: bash scripts/ci_load_config.sh
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ env.CI_ARTIFACT_NAME }}
-          path: ${{ env.CI_BIN_DIR }}
-      - name: Bind packaged binaries
-        run: bash scripts/ci_bind_binaries.sh
-      - uses: astral-sh/setup-uv@v10.2.0
-        with:
-          enable-cache: true
-      - name: sync
-        working-directory: services/docreader
-        run: uv sync --frozen
-      - name: Required Rust replay contract against real DocReader service
-        working-directory: services/docreader
-        run: uv run python ../../scripts/docreader_replay_acceptance.py
+      - name: Stop isolated Python services
+        if: always()
+        working-directory: .
+        run: bash scripts/ci_services.sh stop
 
   images:
-    needs: [rust-build, postgres-acceptance, schema-contract, queue-faults, content-e2e, web, python, docreader-replay]
+    needs: [rust-build, postgres-acceptance, schema-contract, queue-faults, web, python]
     if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: *runner
     timeout-minutes: 120

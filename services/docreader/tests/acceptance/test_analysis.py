@@ -12,6 +12,8 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 import pytest
 
+from docreader.tests.database import initialize_schema
+
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.cli import _correction_ref
 from docreader.integrations.store import Conflict, InvalidConfirmation, Store
@@ -106,6 +108,7 @@ async def analysis_runtime(tmp_path):
     dsn = make_conninfo(base_dsn, options=f"-c search_path={schema}")
     settings = Settings(dsn, os.environ.get("TENDER_TEST_REDIS_URL", "redis://127.0.0.1:16379/1"), tmp_path / "artifacts")
     store, artifacts = Store(dsn), ArtifactStore(settings.artifact_root)
+    await initialize_schema(store.dsn)
     await store.setup()
     await initialize_checkpoints(dsn)
     documents = []

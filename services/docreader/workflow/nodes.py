@@ -10,6 +10,7 @@ from docreader.integrations.store import Cancelled, InvalidConfirmation, StaleEx
 from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
 from docreader.tender.schema import OCRStatus, validate_issue_resolutions
+from docreader.tender.status import RunStatus
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
@@ -125,6 +126,12 @@ class TenderNodes:
 
         return await call_validated(self._ensure_model(), self.store, self.artifacts,
                                     self.lease, task, payload, validate)
+
+    async def call_groups_validated(self, task, payload, validate, *, validate_shared):
+        from docreader.llm.recovery import call_groups_validated
+
+        return await call_groups_validated(self._ensure_model(), self.store, self.artifacts,
+            self.lease, task, payload, validate, validate_shared=validate_shared)
 
     async def close(self):
         if self.model is not None and hasattr(self.model, "close"):
@@ -338,7 +345,7 @@ class TenderNodes:
             "items_ref": state["items_ref"], "verification_ref": ref,
         }, sort_keys=True).encode()).hexdigest()
         return {"verification_ref": ref, "checklist_digest": digest,
-                "status": "blocked" if checked["hard_blocking"] else "waiting-confirmation"}
+                "status": RunStatus.BLOCKED if checked["hard_blocking"] else RunStatus.WAITING_CONFIRMATION}
 
     async def confirm(self, state):
         approved = interrupt({"run_id": self.lease.run_id, "source_version": self.lease.source_version,
@@ -367,4 +374,4 @@ class TenderNodes:
             return approved
 
         await self._save("confirm", produce, inputs={"checklist_digest": state["checklist_digest"]})
-        return {"status": "analysis-ready"}
+        return {"status": RunStatus.ANALYSIS_READY}

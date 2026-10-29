@@ -1,0 +1,18 @@
+{
+  "name": "KnowledgeBrain 章节定位",
+  "guid": "asc.{0A2B83C0-6CD7-4D77-A5DE-17372E05C1B8}",
+  "version": "1.0.0",
+  "variations": [{
+    "description": "定位已保存稿件中的章节与响应位置",
+    "url": "index.html",
+    "isViewer": true,
+    "isDisplayedInViewer": true,
+    "EditorsSupport": ["word"],
+    "isVisual": false,
+    "isModal": false,
+    "isInsideMode": false,
+    "initDataType": "none",
+    "initData": "",
+    "buttons": []
+  }]
+}

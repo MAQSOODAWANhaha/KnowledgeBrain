@@ -1,0 +1,11 @@
+.analysis-business-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; padding: 14px; border: 1px solid #dce3eb; border-radius: 6px; }
+.analysis-business-fields label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.analysis-business-fields input, .analysis-business-fields select, .analysis-business-fields textarea { box-sizing: border-box; width: 100%; border: 1px solid #cfd9e6; border-radius: 5px; padding: 8px; font: inherit; background: #fff; }
+.analysis-business-fields textarea { min-height: 80px; resize: vertical; line-height: 1.6; }
+.analysis-business-fields > label:has(textarea), .analysis-business-fields > fieldset { grid-column: 1 / -1; }
+.analysis-business-fields > fieldset { display: flex; flex-wrap: wrap; gap: 12px; min-width: 0; border: 1px solid #e2e8f0; padding: 12px; }
+.analysis-business-fields > fieldset > label { flex: 1 1 180px; }
+.analysis-business-fields > fieldset > div { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; width: 100%; }
+.analysis-business-fields > fieldset > div > label { flex: 1 1 120px; }
+.analysis-business-fields :disabled { background: #f5f7fa; }
+@media (max-width: 700px) { .analysis-business-fields { grid-template-columns: minmax(0, 1fr); } }

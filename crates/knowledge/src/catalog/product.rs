@@ -9,7 +9,7 @@ pub async fn list_products_in_workspace(
     workspace_id: Uuid,
 ) -> Result<Vec<crate::Product>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, kind, name, slug, current_version_id FROM products WHERE workspace_id = $1",
+        "SELECT id, kind, name, slug, current_version_id FROM knowledge_products WHERE workspace_id = $1",
     )
     .bind(workspace_id)
     .fetch_all(pool)
@@ -36,7 +36,7 @@ pub async fn load_product(
     product_id: Uuid,
 ) -> Result<Option<crate::Product>, sqlx::Error> {
     let p = sqlx::query(
-        "SELECT id, workspace_id, kind, name, slug, current_version_id FROM products WHERE id = $1",
+        "SELECT id, workspace_id, kind, name, slug, current_version_id FROM knowledge_products WHERE id = $1",
     )
     .bind(product_id)
     .fetch_optional(pool)
@@ -62,7 +62,7 @@ pub async fn product_slug_taken(
     slug: &str,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM products WHERE workspace_id = $1 AND slug = $2)",
+        "SELECT EXISTS(SELECT 1 FROM knowledge_products WHERE workspace_id = $1 AND slug = $2)",
     )
     .bind(workspace_id)
     .bind(slug)
@@ -76,7 +76,7 @@ pub async fn clear_product_current_if(
     version_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE products SET current_version_id = NULL WHERE id = $1 AND current_version_id = $2",
+        "UPDATE knowledge_products SET current_version_id = NULL WHERE id = $1 AND current_version_id = $2",
     )
     .bind(product_id)
     .bind(version_id)
@@ -95,7 +95,7 @@ pub async fn insert_product(
     current_version_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO products (id, workspace_id, kind, name, slug, current_version_id)
+        "INSERT INTO knowledge_products (id, workspace_id, kind, name, slug, current_version_id)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (id) DO NOTHING",
     )
@@ -115,7 +115,7 @@ pub async fn set_product_current(
     product_id: Uuid,
     version_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE products SET current_version_id = $2 WHERE id = $1")
+    sqlx::query("UPDATE knowledge_products SET current_version_id = $2 WHERE id = $1")
         .bind(product_id)
         .bind(version_id)
         .execute(pool)
@@ -127,14 +127,14 @@ pub async fn product_workspace_id(
     pool: &PgPool,
     product_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT workspace_id FROM products WHERE id = $1")
+    sqlx::query_scalar("SELECT workspace_id FROM knowledge_products WHERE id = $1")
         .bind(product_id)
         .fetch_optional(pool)
         .await
 }
 
 pub async fn delete_product(pool: &PgPool, product_id: Uuid) -> Result<(), PersistError> {
-    let row = sqlx::query("SELECT kind, slug FROM products WHERE id = $1")
+    let row = sqlx::query("SELECT kind, slug FROM knowledge_products WHERE id = $1")
         .bind(product_id)
         .fetch_optional(pool)
         .await?;
@@ -146,7 +146,7 @@ pub async fn delete_product(pool: &PgPool, product_id: Uuid) -> Result<(), Persi
     if kind == "library" && slug == "library" {
         return Err(PersistError::DefaultLibrary);
     }
-    sqlx::query("DELETE FROM products WHERE id = $1")
+    sqlx::query("DELETE FROM knowledge_products WHERE id = $1")
         .bind(product_id)
         .execute(pool)
         .await?;
@@ -158,7 +158,7 @@ pub async fn update_product_name(
     product_id: Uuid,
     name: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE products SET name = $2 WHERE id = $1")
+    sqlx::query("UPDATE knowledge_products SET name = $2 WHERE id = $1")
         .bind(product_id)
         .bind(name)
         .execute(pool)
@@ -168,7 +168,7 @@ pub async fn update_product_name(
 
 pub async fn delete_empty_product(pool: &PgPool, product_id: Uuid) -> Result<bool, sqlx::Error> {
     let left: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM product_versions WHERE product_id = $1 AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM knowledge_product_versions WHERE product_id = $1 AND deleted_at IS NULL",
     )
     .bind(product_id)
     .fetch_one(pool)
@@ -176,23 +176,25 @@ pub async fn delete_empty_product(pool: &PgPool, product_id: Uuid) -> Result<boo
     if left > 0 {
         return Ok(false);
     }
-    sqlx::query("UPDATE products SET current_version_id = NULL WHERE id = $1")
+    sqlx::query("UPDATE knowledge_products SET current_version_id = NULL WHERE id = $1")
         .bind(product_id)
         .execute(pool)
         .await?;
     sqlx::query(
-        "DELETE FROM documents WHERE product_version_id IN (
-            SELECT id FROM product_versions WHERE product_id = $1 AND deleted_at IS NOT NULL
+        "DELETE FROM knowledge_documents WHERE product_version_id IN (
+            SELECT id FROM knowledge_product_versions WHERE product_id = $1 AND deleted_at IS NOT NULL
          )",
     )
     .bind(product_id)
     .execute(pool)
     .await?;
-    sqlx::query("DELETE FROM product_versions WHERE product_id = $1 AND deleted_at IS NOT NULL")
-        .bind(product_id)
-        .execute(pool)
-        .await?;
-    let row = sqlx::query("SELECT kind, slug, workspace_id FROM products WHERE id = $1")
+    sqlx::query(
+        "DELETE FROM knowledge_product_versions WHERE product_id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(product_id)
+    .execute(pool)
+    .await?;
+    let row = sqlx::query("SELECT kind, slug, workspace_id FROM knowledge_products WHERE id = $1")
         .bind(product_id)
         .fetch_optional(pool)
         .await?;
@@ -205,14 +207,15 @@ pub async fn delete_empty_product(pool: &PgPool, product_id: Uuid) -> Result<boo
     if kind == "library" && slug == "library" {
         return Ok(false);
     }
-    sqlx::query("DELETE FROM products WHERE id = $1")
+    sqlx::query("DELETE FROM knowledge_products WHERE id = $1")
         .bind(product_id)
         .execute(pool)
         .await?;
-    let products: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE workspace_id = $1")
-        .bind(ws)
-        .fetch_one(pool)
-        .await?;
+    let products: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_products WHERE workspace_id = $1")
+            .bind(ws)
+            .fetch_one(pool)
+            .await?;
     if products == 0 {
         retire_workspace(pool, ws).await?;
     }
@@ -220,7 +223,7 @@ pub async fn delete_empty_product(pool: &PgPool, product_id: Uuid) -> Result<boo
 }
 
 pub async fn product_name(pool: &PgPool, product_id: Uuid) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT name FROM products WHERE id = $1")
+    sqlx::query_scalar("SELECT name FROM knowledge_products WHERE id = $1")
         .bind(product_id)
         .fetch_optional(pool)
         .await

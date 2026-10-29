@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, setToken, token } from "./api";
 import { Assets } from "./assets/Assets";
-import { createBidV2Client, type BidProjectView } from "./bid/api";
+import { type BidProjectView } from "./bid/api";
+import { tenderApi } from "./bid/api/workbench";
 import { authoringHref } from "./bid/authoring/routes";
 import { BidTree } from "./bid/BidTree";
 import { Workbench } from "./bid/Workbench";
-import { shanghaiEndOfDay } from "./bid/helpers";
 import { Alert } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -26,7 +26,7 @@ import { go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
 import { cn } from "./lib/utils";
 import { Shell } from "./Shell";
 
-const bidApi = createBidV2Client();
+const bidApi = tenderApi;
 
 function Login() {
   const [email, setEmail] = useState("");
@@ -100,18 +100,22 @@ function Login() {
 
 function Bids({ email }: { email: string }) {
   const [rows, setRows] = useState<BidProjectView[] | null>(null);
+  const [listError, setListError] = useState(false);
+  const [listRetry, setListRetry] = useState(0);
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
-  const [when, setWhen] = useState("");
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState<"all" | "open" | "ended">("all");
   const [query, setQuery] = useState("");
   useEffect(() => {
+    let canceled = false;
+    setListError(false);
     bidApi
       .listProjects()
-      .then(setRows)
-      .catch(() => setRows([]));
-  }, []);
+      .then((value) => { if (!canceled) setRows(value); })
+      .catch(() => { if (!canceled) setListError(true); });
+    return () => { canceled = true; };
+  }, [listRetry]);
   const shown = (rows ?? []).filter((p) => {
     if (
       query.trim() &&
@@ -137,7 +141,11 @@ function Bids({ email }: { email: string }) {
       tree={<BidTree rows={rows} />}
     >
       <div className="wrap stack">
-        {rows === null ? (
+        {listError && <Alert role="alert">
+          项目读取失败，已有项目不会因此被清空。
+          <Button size="sm" className="ml-3" onClick={() => setListRetry((value) => value + 1)}>重试读取项目</Button>
+        </Alert>}
+        {rows === null ? listError ? null : (
           <div className="panel space-y-3 p-4">
             <Skeleton className="h-12" />
             <Skeleton className="h-12" />
@@ -184,7 +192,7 @@ function Bids({ email }: { email: string }) {
               <TableHeader>
                 <TableRow>
                   <TableHead>项目</TableHead>
-                  <TableHead className="w-[140px]">招标结束</TableHead>
+                  <TableHead className="w-[140px]">结束时间</TableHead>
                   <TableHead className="w-[88px]">状态</TableHead>
                 </TableRow>
               </TableHeader>
@@ -197,7 +205,7 @@ function Bids({ email }: { email: string }) {
                   >
                     <TableCell className="font-semibold">{p.title}</TableCell>
                     <TableCell className="text-quiet">
-                      {p.ends_at ? p.ends_at.slice(0, 10) : "—"}
+                      {p.ended_at ? p.ended_at.slice(0, 10) : "—"}
                     </TableCell>
                     <TableCell>
                       <Badge tone={p.status === "ended" ? "gray" : "sky"}>
@@ -222,14 +230,9 @@ function Bids({ email }: { email: string }) {
                 setErr("先写项目名称");
                 return;
               }
-              if (!when) {
-                setErr("先选招标结束日");
-                return;
-              }
               try {
                 const p = await bidApi.createProject({
                   title: title.trim(),
-                  ends_at: shanghaiEndOfDay(when),
                 });
                 go(authoringHref(p.id, "files"));
               } catch (ex) {
@@ -251,17 +254,6 @@ function Bids({ email }: { email: string }) {
               <Label>负责人</Label>
               <Input value={email} readOnly />
             </div>
-            <div>
-              <Label htmlFor="bid-ends">招标结束日</Label>
-              <Input
-                id="bid-ends"
-                data-testid="bid-ends"
-                type="date"
-                value={when}
-                onChange={(e) => setWhen(e.currentTarget.value)}
-                required
-              />
-            </div>
             {err ? <Alert>{err}</Alert> : null}
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" type="button" onClick={() => setOpen(false)}>
@@ -280,10 +272,14 @@ function Bids({ email }: { email: string }) {
 
 export function App() {
   const path = useHash();
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState<string | null>(null);
+  const [verifiedToken, setVerifiedToken] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [sessionError, setSessionError] = useState(false);
+  const [sessionRetry, setSessionRetry] = useState(0);
 
   useEffect(() => {
+    let canceled = false;
     if (path === "/login") {
       setReady(true);
       return;
@@ -293,18 +289,27 @@ export function App() {
       setReady(true);
       return;
     }
+    const requestToken = token();
+    setSessionError(false);
     api
       .me()
       .then((m) => {
+        if (canceled || token() !== requestToken) return;
         setEmail(m.email);
+        setVerifiedToken(requestToken);
         setReady(true);
       })
-      .catch(() => {
-        setToken(null);
-        go("/login");
+      .catch((error: unknown) => {
+        if (canceled || token() !== requestToken) return;
+        if (error instanceof ApiError && error.status === 401) {
+          setToken(null);
+          setEmail(null);
+          go("/login");
+        } else setSessionError(true);
         setReady(true);
       });
-  }, [path]);
+    return () => { canceled = true; };
+  }, [path, sessionRetry]);
 
   if (!ready) {
     return (
@@ -316,8 +321,18 @@ export function App() {
     );
   }
   if (path === "/login") return <Login />;
+  const retrySession = <Button size="sm" onClick={() => setSessionRetry((value) => value + 1)}>重试验证登录</Button>;
+  if (email === null || verifiedToken !== token()) return <div className="grid min-h-dvh place-items-center bg-canvas p-6">
+    <div role={sessionError ? "alert" : "status"} className="panel max-w-md space-y-4 p-6">
+      <p>{sessionError ? "暂时无法验证登录状态，登录信息已保留。" : "正在验证登录状态…"}</p>
+      {sessionError && retrySession}
+    </div>
+  </div>;
   const asset = parseAssetRoute(path);
-  if (asset) return <Assets email={email} route={asset} />;
-  if (parseBidRoute(path)) return <Workbench email={email} />;
-  return <Bids email={email} />;
+  return <>
+    {sessionError && <div role="alert" className="fixed right-4 top-16 z-50 flex max-w-lg items-center gap-3 rounded-md border border-line bg-white p-3 text-sm shadow-lg">
+      暂时无法验证登录状态，当前页面和登录信息已保留。{retrySession}
+    </div>}
+    {asset ? <Assets email={email} route={asset} /> : parseBidRoute(path) ? <Workbench email={email} /> : <Bids email={email} />}
+  </>;
 }

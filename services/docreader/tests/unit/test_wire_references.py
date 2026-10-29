@@ -86,3 +86,15 @@ def test_unheaded_catalog_and_shared_section_labels_keep_document_identity():
     assert documents[0]['document_id'] != documents[1]['document_id']
     restored = wire.decode({'section_refs': [{'document_id': documents[1]['document_id'], 'section_id': None}]})
     assert restored == {'section_refs': [{'document_id': 'annex-doc', 'section_id': None}]}
+
+
+def test_search_intents_resolve_mixed_rule_and_source_refs_without_registering_unknown_ids():
+    wire = WirePayload('outline', {'schema_version': 2,
+        'rules': [{'rule_id': 'long-rule'}], 'sources': [{'range_id': 'long-range'}],
+        'search_intents': [{'query': '原样保留 e1/r1', 'for_ids': ['long-rule', 'long-range']}]})
+    assert wire.payload['search_intents'] == [{'query': '原样保留 e1/r1', 'for_ids': ['e1', 'r1']}]
+    assert wire.decode({'search_intents': [{'query': '角色权限', 'for_ids': ['e1', 'r1']}]}) == {
+        'search_intents': [{'query': '角色权限', 'for_ids': ['long-rule', 'long-range']}]}
+    for identity in ('long-rule', 'long-range', 'e2', 'r2', 'i1'):
+        assert wire.decode({'search_intents': [{'query': '角色权限', 'for_ids': [identity]}]})[
+            'search_intents'][0]['for_ids'] == ['!unbound:' + identity]

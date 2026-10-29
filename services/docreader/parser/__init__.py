@@ -9,7 +9,7 @@ This module provides document parsers for various file formats including:
 - Images with text content
 - Web pages
 
-The parsers extract content from documents and can split them into
+The parsers extract content from knowledge_documents and can split them into
 meaningful chunks for further processing and indexing.
 """
 

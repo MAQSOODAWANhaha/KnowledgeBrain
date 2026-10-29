@@ -1,5 +1,8 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+// Historical V2 live scenario. Its retired wizard/Word export assertions are not
+// V3 workbench acceptance; migrate this explicitly before running live services.
+
 async function activateWithKeyboard(locator: Locator) {
   await expect(locator).toBeEnabled();
   await locator.focus();

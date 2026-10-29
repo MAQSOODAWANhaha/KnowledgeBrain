@@ -51,10 +51,66 @@ fn config(input: &Input) -> Value {
         }
         config["services"][service] = value;
     }
+    for (service, command) in python_commands() {
+        let mut role = json!({"image":"knowledgebrain-docreader:local","command":command,
+            "environment":{},"container_name":format!("{}-{service}",input.project)});
+        if service != "python-tender-init" {
+            role["healthcheck"] = json!({"test":["CMD","health-probe",service]});
+        }
+        config["services"][service] = role;
+    }
     config["services"]["postgres"] = json!({"image":format!("registry.test/pg:v1@sha256:{}","a".repeat(64)),
         "container_name":format!("{}-postgres",input.project),"environment":{"POSTGRES_DB":"release-test"},
         "healthcheck":{"test":["CMD","pg_isready"]}});
     config
+}
+
+fn python_commands() -> [(&'static str, Value); 3] {
+    [
+        (
+            "python-tender-init",
+            json!([
+                "uv",
+                "run",
+                "--frozen",
+                "--no-dev",
+                "--no-sync",
+                "python",
+                "-m",
+                "docreader.integrations.cli",
+                "init"
+            ]),
+        ),
+        (
+            "python-tender-worker",
+            json!([
+                "uv",
+                "run",
+                "--frozen",
+                "--no-dev",
+                "--no-sync",
+                "dramatiq",
+                "docreader.jobs.tasks",
+                "--processes",
+                "1",
+                "--threads",
+                "4"
+            ]),
+        ),
+        (
+            "python-tender-dispatcher",
+            json!([
+                "uv",
+                "run",
+                "--frozen",
+                "--no-dev",
+                "--no-sync",
+                "python",
+                "-m",
+                "docreader.jobs.dispatcher"
+            ]),
+        ),
+    ]
 }
 
 fn image_value(image: &str) -> Value {
@@ -63,6 +119,7 @@ fn image_value(image: &str) -> Value {
 }
 
 fn container_value(input: &Input, service: &str, expected: &Value) -> Value {
+    let completed = matches!(service, "migrate" | "python-tender-init");
     let env: Vec<_> = expected["environment"]
         .as_object()
         .into_iter()
@@ -71,9 +128,9 @@ fn container_value(input: &Input, service: &str, expected: &Value) -> Value {
         .collect();
     json!([{"Id":service,"Name":format!("/{}-{service}",input.project),"Image":format!("sha256:{}","f".repeat(64)),
         "Config":{"Image":expected["image"],"Labels":{"com.docker.compose.project":input.project,"com.docker.compose.service":service},
-            "Env":env,"Cmd":null,"Entrypoint":["/image-entrypoint"],"Healthcheck":{"Test":expected["healthcheck"]["test"]}},
+            "Env":env,"Cmd":expected["command"],"Entrypoint":["/image-entrypoint"],"Healthcheck":{"Test":expected["healthcheck"]["test"]}},
         "Mounts":[],
-        "State":{"Status":if service=="migrate" {"exited"} else {"running"},"Running":service!="migrate","ExitCode":0,"Health":{"Status":"healthy"}}}])
+        "State":{"Status":if completed {"exited"} else {"running"},"Running":!completed,"ExitCode":0,"Health":{"Status":"healthy"}}}])
 }
 
 struct FakeEngine {
@@ -166,6 +223,7 @@ impl Engine for FakeEngine {
             }
             if args.iter().any(|s| s == "up") {
                 assert!(args.iter().any(|s| s == "--no-recreate"));
+                assert!(args.iter().any(|s| s == "--no-deps"));
                 let names: Vec<_> = args
                     .iter()
                     .filter(|s| self.config["services"].get(s.as_str()).is_some())
@@ -180,6 +238,37 @@ impl Engine for FakeEngine {
                         .unwrap();
                     assert!(checked < self.calls.len() - 1);
                 }
+                if names.iter().any(|s| {
+                    matches!(
+                        s.as_str(),
+                        "python-tender-init"
+                            | "docreader"
+                            | "python-tender-worker"
+                            | "python-tender-dispatcher"
+                    )
+                }) {
+                    assert_eq!(
+                        self.containers["migrate"][0]["State"]["ExitCode"], 0,
+                        "Rust migration must finish before Python roles"
+                    );
+                    assert!(
+                        self.calls
+                            .iter()
+                            .any(|a| a == &strings(&["container", "inspect", "migrate"]))
+                    );
+                }
+                if names.iter().any(|s| {
+                    matches!(
+                        s.as_str(),
+                        "docreader" | "python-tender-worker" | "python-tender-dispatcher"
+                    )
+                }) {
+                    assert_eq!(
+                        self.containers["python-tender-init"][0]["State"]["ExitCode"], 0,
+                        "Python initialization must finish before Python runtimes"
+                    );
+                    assert!(self.calls.iter().any(|a| a == &strings(&["container", "inspect", "python-tender-init"])));
+                }
                 for name in names {
                     if !self.containers.contains_key(&name) {
                         self.add(&name);
@@ -189,8 +278,19 @@ impl Engine for FakeEngine {
                 if self.fault == Some("migrator") && self.containers.contains_key("migrate") {
                     self.containers.get_mut("migrate").unwrap()[0]["State"]["ExitCode"] = json!(1);
                 }
+                if self.fault == Some("python-init")
+                    && self.containers.contains_key("python-tender-init")
+                {
+                    self.containers.get_mut("python-tender-init").unwrap()[0]["State"]["ExitCode"] =
+                        json!(1);
+                }
                 if self.fault == Some("runtime") && self.containers.contains_key("api") {
                     return Err("simulated runtime failure".into());
+                }
+                if self.fault == Some("python-runtime")
+                    && self.containers.contains_key("python-tender-worker")
+                {
+                    return Err("simulated Python runtime readiness failure".into());
                 }
                 return Ok(String::new());
             }
@@ -283,7 +383,7 @@ async fn fresh_start_verifies_migration_before_runtime_and_replay_is_read_only()
         release(&input, &mut engine).await.unwrap()["status"],
         "healthy"
     );
-    assert_eq!(engine.created.len(), 6);
+    assert_eq!(engine.created.len(), 9);
     assert_eq!(engine.calls.iter().filter(|a| a[0] == "pull").count(), 6);
     assert!(engine.stopped.is_empty());
     engine.assert_clean();
@@ -294,7 +394,7 @@ async fn fresh_start_verifies_migration_before_runtime_and_replay_is_read_only()
         "already_healthy"
     );
     assert!(engine.mutations().is_empty());
-    assert_eq!(engine.calls.iter().filter(|a| a[0] == "exec").count(), 4);
+    assert_eq!(engine.calls.iter().filter(|a| a[0] == "exec").count(), 6);
     engine.assert_clean();
 }
 
@@ -322,7 +422,15 @@ async fn dependency_without_explicit_environment_starts_and_replays() {
 
 #[tokio::test]
 async fn failures_stop_only_this_attempt_and_preserve_inputs() {
-    for fault in ["pull", "migrator", "command", "runtime", "probe"] {
+    for fault in [
+        "pull",
+        "migrator",
+        "python-init",
+        "python-runtime",
+        "command",
+        "runtime",
+        "probe",
+    ] {
         let f = Fixture::new();
         let input = f.input();
         let mut engine = FakeEngine::new(f.input());
@@ -332,9 +440,92 @@ async fn failures_stop_only_this_attempt_and_preserve_inputs() {
         assert!(release(&input, &mut engine).await.is_err(), "{fault}");
         assert_eq!(engine.created, engine.stopped, "{fault}");
         assert!(!engine.stopped.iter().any(|s| s == "postgres"));
-        if matches!(fault, "migrator" | "command" | "pull") {
+        if matches!(
+            fault,
+            "migrator" | "python-init" | "python-runtime" | "command" | "pull"
+        ) {
             assert!(!engine.created.iter().any(|s| s == "api"));
         }
+        if fault == "python-init" {
+            assert!(!engine.created.iter().any(|s| matches!(
+                s.as_str(),
+                "docreader" | "python-tender-worker" | "python-tender-dispatcher"
+            )));
+        }
+        engine.assert_clean();
+    }
+}
+
+#[tokio::test]
+async fn python_roles_reuse_the_docreader_image_and_only_missing_runtime_is_started() {
+    let f = Fixture::new();
+    let input = f.input();
+    let mut engine = FakeEngine::new(f.input());
+    release(&input, &mut engine).await.unwrap();
+    for (service, command) in python_commands() {
+        let role = &engine.containers[service][0];
+        assert_eq!(role["Config"]["Image"], input.descriptor.images.docreader);
+        assert_eq!(role["Config"]["Cmd"], command);
+        assert!(
+            role["Config"]["Env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| !v.as_str().unwrap().starts_with("BIN="))
+        );
+    }
+    engine.containers.remove("python-tender-worker");
+    engine.calls.clear();
+    engine.created.clear();
+    release(&input, &mut engine).await.unwrap();
+    assert_eq!(engine.created, ["python-tender-worker"]);
+    assert!(
+        engine
+            .calls
+            .iter()
+            .filter(|a| a.iter().any(|s| s == "up"))
+            .all(|a| !a
+                .iter()
+                .any(|s| matches!(s.as_str(), "migrate" | "python-tender-init")))
+    );
+    engine.assert_clean();
+}
+
+#[tokio::test]
+async fn python_command_overrides_and_missing_probes_fail_before_mutation() {
+    for (service, _) in python_commands() {
+        let f = Fixture::new();
+        let input = f.input();
+        let mut engine = FakeEngine::new(f.input());
+        engine.config["services"][service]["command"] = json!(["true"]);
+        assert!(release(&input, &mut engine).await.is_err());
+        assert!(engine.mutations().is_empty());
+        engine.assert_clean();
+    }
+    let f = Fixture::new();
+    let input = f.input();
+    let mut engine = FakeEngine::new(f.input());
+    engine.config["services"]["python-tender-worker"]
+        .as_object_mut()
+        .unwrap()
+        .remove("healthcheck");
+    assert!(release(&input, &mut engine).await.is_err());
+    assert!(engine.mutations().is_empty());
+    engine.assert_clean();
+}
+
+#[tokio::test]
+async fn existing_python_command_drift_is_rejected_without_replacement() {
+    for (service, _) in python_commands() {
+        let f = Fixture::new();
+        let input = f.input();
+        let mut engine = FakeEngine::new(f.input());
+        release(&input, &mut engine).await.unwrap();
+        engine.containers.get_mut(service).unwrap()[0]["Config"]["Cmd"] = json!(["true"]);
+        engine.calls.clear();
+        engine.created.clear();
+        assert!(release(&input, &mut engine).await.is_err());
+        assert!(engine.mutations().is_empty());
         engine.assert_clean();
     }
 }

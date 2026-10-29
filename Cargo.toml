@@ -4,7 +4,6 @@ members = [
   "crates/platform",
   "crates/knowledge",
   "crates/docparser",
-  "crates/bidding",
   "crates/api",
   "crates/worker",
   "crates/retention",

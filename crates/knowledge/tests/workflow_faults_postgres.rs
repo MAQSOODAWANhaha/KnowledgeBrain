@@ -20,17 +20,20 @@ async fn seed(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
     let pid = Uuid::new_v4();
     let vid = Uuid::new_v4();
     let did = Uuid::new_v4();
+    knowledge::insert_user(pool, wid, &format!("{wid}@test.invalid"), None)
+        .await
+        .unwrap();
     sqlx::query(
-        "INSERT INTO workspaces(id,name,slug,kind) VALUES($1,'workflow',$2,'product_line')",
+        "INSERT INTO knowledge_workspaces(id,name,slug,kind,owner_user_id) VALUES($1,'workflow',$2,'product_line',$1)",
     )
     .bind(wid)
     .bind(wid.to_string())
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','workflow','workflow')").bind(pid).bind(wid).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO product_versions(id,product_id,label,status,indexing_strategy,embedding_model_id) VALUES($1,$2,'v1','active','{\"vector\":false,\"keyword\":true,\"wiki\":false,\"graph\":false}','invalid-no-provider')").bind(vid).bind(pid).execute(pool).await.unwrap();
-    sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+    sqlx::query("INSERT INTO knowledge_products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','workflow','workflow')").bind(pid).bind(wid).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO knowledge_product_versions(id,product_id,label,status,indexing_strategy,embedding_model_id) VALUES($1,$2,'v1','active','{\"vector\":false,\"keyword\":true,\"wiki\":false,\"graph\":false}','invalid-no-provider')").bind(vid).bind(pid).execute(pool).await.unwrap();
+    sqlx::query("UPDATE knowledge_products SET current_version_id=$2 WHERE id=$1")
         .bind(pid)
         .bind(vid)
         .execute(pool)
@@ -51,9 +54,7 @@ async fn seed(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-        .bind(did)
-        .execute(pool)
+    knowledge::set_parse_status(pool, did, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     (pid, vid, did)
@@ -76,6 +77,96 @@ fn chunk(did: Uuid, vid: Uuid, content: &str) -> Chunk {
 
 #[tokio::test]
 #[ignore = "requires isolated PostgreSQL baseline"]
+async fn explicit_state_mutations_keep_obligations_without_noop_revisions() {
+    let pool = pool().await;
+    let (_, _, did) = seed(&pool).await;
+    let initial: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=1 AND job_key='convert' AND payload->>'kind'='convert')")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    assert!(
+        initial,
+        "document creation must commit its conversion obligation"
+    );
+    let before: i64 = sqlx::query_scalar("SELECT revision FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=1 AND job_key='reconcile'")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
+        .await
+        .unwrap();
+    let after: i64 = sqlx::query_scalar("SELECT revision FROM knowledge_job_outbox WHERE document_id=$1 AND attempt=1 AND job_key='reconcile'")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        before, after,
+        "no-op status writes must not restart reconciliation"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL baseline"]
+async fn stale_span_updates_are_ignored_and_single_connection_open_does_not_deadlock() {
+    let pool = pool().await;
+    let (_, _, did) = seed(&pool).await;
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        knowledge::open_attempt(&single, did, 1),
+    )
+    .await
+    .expect("span lifecycle must not acquire a second pooled connection")
+    .unwrap();
+    knowledge::start_span(&single, did, 1, "embedding", None, None)
+        .await
+        .unwrap();
+    workflow::retry_document(&single, did).await.unwrap();
+    knowledge::finish_span(
+        &single,
+        did,
+        1,
+        "embedding",
+        knowledge::SpanStatus::Done,
+        None,
+    )
+    .await
+    .unwrap();
+    knowledge::upsert_span(
+        &single,
+        did,
+        1,
+        "late-worker",
+        knowledge::SpanStatus::Done,
+        None,
+    )
+    .await
+    .unwrap();
+    let old: String=sqlx::query_scalar("SELECT status FROM knowledge_document_processing_spans WHERE document_id=$1 AND attempt=1 AND name='embedding'")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    assert_eq!(old, "running");
+    let late: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_document_processing_spans WHERE document_id=$1 AND name='late-worker')")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    assert!(!late);
+    knowledge::open_attempt(&single, did, 2).await.unwrap();
+    knowledge::set_parse_status(&single, did, knowledge::ParseStatus::Cancelled, "")
+        .await
+        .unwrap();
+    knowledge::finish_span(
+        &single,
+        did,
+        2,
+        "document_processing",
+        knowledge::SpanStatus::Done,
+        None,
+    )
+    .await
+    .unwrap();
+    let current: String=sqlx::query_scalar("SELECT status FROM knowledge_document_processing_spans WHERE document_id=$1 AND attempt=2 AND name='document_processing'")
+        .bind(did).fetch_one(&pool).await.unwrap();
+    assert_eq!(current, "running");
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL baseline"]
 async fn queue_failure_keeps_obligation_and_duplicate_summary_has_one_commit() {
     let pool = pool().await;
     let (_, vid, did) = seed(&pool).await;
@@ -89,7 +180,7 @@ async fn queue_failure_keeps_obligation_and_duplicate_summary_has_one_commit() {
     // domain transaction, without losing the summary or decrementing its count.
     workflow::dispatch(&pool).await.unwrap();
     let state: (String, i32, String) = sqlx::query_as(
-        "SELECT parse_status,pending_subtasks_count,summary_status FROM documents WHERE id=$1",
+        "SELECT parse_status,pending_subtasks_count,summary_status FROM knowledge_documents WHERE id=$1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -108,7 +199,7 @@ async fn queue_failure_keeps_obligation_and_duplicate_summary_has_one_commit() {
     );
     assert_eq!(usize::from(left.unwrap()) + usize::from(right.unwrap()), 1);
     let state: (String, i32, String) = sqlx::query_as(
-        "SELECT parse_status,pending_subtasks_count,summary_status FROM documents WHERE id=$1",
+        "SELECT parse_status,pending_subtasks_count,summary_status FROM knowledge_documents WHERE id=$1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -129,9 +220,7 @@ async fn stale_attempt_writes_and_old_cleanup_cannot_touch_new_generation() {
         .unwrap();
     workflow::publish_empty(&pool, did, 1).await.unwrap();
     assert_eq!(workflow::retry_document(&pool, did).await.unwrap(), 2);
-    sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     let new = chunk(did, vid, "new");
@@ -150,7 +239,7 @@ async fn stale_attempt_writes_and_old_cleanup_cannot_touch_new_generation() {
         .unwrap();
     workflow::delete_generation(&pool, did, 1).await.unwrap();
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM chunks WHERE document_id=$1")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM knowledge_chunks WHERE document_id=$1")
             .bind(did)
             .fetch_one(&pool)
             .await
@@ -159,26 +248,21 @@ async fn stale_attempt_writes_and_old_cleanup_cannot_touch_new_generation() {
     );
     workflow::publish_empty(&pool, did, 2).await.unwrap();
     workflow::delete_generation(&pool, did, 1).await.unwrap();
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM chunks WHERE document_id=$1")
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM knowledge_chunks WHERE document_id=$1")
         .bind(did)
         .fetch_all(&pool)
         .await
         .unwrap();
     assert_eq!(ids, vec![new.id]);
-    sqlx::query("UPDATE documents SET parse_status='deleting' WHERE id=$1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Deleting, "")
         .await
         .unwrap();
     knowledge::ingest::fail_now(&pool, did, 2, "late failure")
         .await
         .unwrap();
     assert_eq!(
-        knowledge::document_parse_status(&pool, did)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("deleting")
+        knowledge::document_parse_status(&pool, did).await.unwrap(),
+        Some(knowledge::ParseStatus::Deleting)
     );
 }
 
@@ -203,9 +287,7 @@ async fn keyword_retrieval_and_source_reconcile_survive_deletion_without_embeddi
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-        .bind(survivor)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, survivor, knowledge::ParseStatus::Processing, "")
         .await
         .unwrap();
     for did in [deleted, survivor] {
@@ -223,25 +305,21 @@ async fn keyword_retrieval_and_source_reconcile_survive_deletion_without_embeddi
             .unwrap();
         workflow::publish_empty(&pool, did, 1).await.unwrap();
     }
-    let before: (String, i64) = sqlx::query_as(
-        "SELECT source_snapshot_sha256,chunk_count FROM kb_knowledge_source_snapshot_v2($1,$2)",
+    let before = knowledge::knowledge_index_v2::source_snapshot_v2(
+        &mut pool.acquire().await.unwrap(),
+        vid,
+        &"a".repeat(64),
     )
-    .bind(vid)
-    .bind("a".repeat(64))
-    .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status='deleting' WHERE id=$1")
-        .bind(deleted)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, deleted, knowledge::ParseStatus::Deleting, "")
         .await
         .unwrap();
-    let after: (String, i64) = sqlx::query_as(
-        "SELECT source_snapshot_sha256,chunk_count FROM kb_knowledge_source_snapshot_v2($1,$2)",
+    let after = knowledge::knowledge_index_v2::source_snapshot_v2(
+        &mut pool.acquire().await.unwrap(),
+        vid,
+        &"a".repeat(64),
     )
-    .bind(vid)
-    .bind("a".repeat(64))
-    .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!((before.1, after.1), (2, 1));
@@ -249,7 +327,9 @@ async fn keyword_retrieval_and_source_reconcile_survive_deletion_without_embeddi
     let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_job_outbox WHERE document_id=$1 AND job_key='reconcile' AND state='pending')").bind(deleted).fetch_one(&pool).await.unwrap();
     assert!(pending);
     let req:knowledge::search::SearchRequest=serde_json::from_value(serde_json::json!({"product_id":pid,"query":"needle","expand_wiki":false,"expand_graph":false})).unwrap();
-    let hits = knowledge::search::assembly_pg(&pool, &req)
+    let owner_id: Uuid = sqlx::query_scalar("SELECT w.owner_user_id FROM knowledge_products p JOIN knowledge_workspaces w ON w.id=p.workspace_id WHERE p.id=$1")
+        .bind(pid).fetch_one(&pool).await.unwrap();
+    let hits = knowledge::search::assembly_pg(&pool, &req, owner_id)
         .await
         .unwrap()
         .hits;
@@ -269,7 +349,7 @@ async fn exhausted_obligation_is_explicit_and_retry_opens_fresh_attempt() {
         .await
         .unwrap();
     let state: (String, String) =
-        sqlx::query_as("SELECT parse_status,summary_status FROM documents WHERE id=$1")
+        sqlx::query_as("SELECT parse_status,summary_status FROM knowledge_documents WHERE id=$1")
             .bind(did)
             .fetch_one(&pool)
             .await
@@ -289,14 +369,11 @@ async fn exhausted_obligation_is_explicit_and_retry_opens_fresh_attempt() {
     .await
     .unwrap();
     assert_eq!(
-        knowledge::document_parse_status(&pool, did)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("failed")
+        knowledge::document_parse_status(&pool, did).await.unwrap(),
+        Some(knowledge::ParseStatus::Failed)
     );
     // Ordinary API uploads store JSON null rather than SQL NULL passages.
-    sqlx::query("UPDATE documents SET source_passages='null'::jsonb WHERE id=$1")
+    sqlx::query("UPDATE knowledge_documents SET source_passages='null'::jsonb WHERE id=$1")
         .bind(did)
         .execute(&pool)
         .await
@@ -321,27 +398,25 @@ async fn duplicate_conversion_cannot_fail_active_owner_and_stalled_owner_gets_ne
         .await
         .unwrap();
     assert_eq!(
-        knowledge::document_parse_status(&pool, did)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("processing")
+        knowledge::document_parse_status(&pool, did).await.unwrap(),
+        Some(knowledge::ParseStatus::Processing)
     );
-    let row: (i32, String) =
-        sqlx::query_as("SELECT attempt,COALESCE(error_message,'') FROM documents WHERE id=$1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let row: (i32, String) = sqlx::query_as(
+        "SELECT attempt,COALESCE(error_message,'') FROM knowledge_documents WHERE id=$1",
+    )
+    .bind(did)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row, (1, String::new()));
-    sqlx::query("UPDATE documents SET updated_at=now()-interval '3 hours' WHERE id=$1")
+    sqlx::query("UPDATE knowledge_documents SET updated_at=now()-interval '3 hours' WHERE id=$1")
         .bind(did)
         .execute(&pool)
         .await
         .unwrap();
     workflow::dispatch(&pool).await.unwrap();
     let row: (i32, String) =
-        sqlx::query_as("SELECT attempt,parse_status FROM documents WHERE id=$1")
+        sqlx::query_as("SELECT attempt,parse_status FROM knowledge_documents WHERE id=$1")
             .bind(did)
             .fetch_one(&pool)
             .await
@@ -366,12 +441,12 @@ async fn duplicate_conversion_cannot_fail_active_owner_and_stalled_owner_gets_ne
 async fn empty_conversion_publication_failure_rolls_back_its_receipt() {
     let pool = pool().await;
     let (_, vid, did) = seed(&pool).await;
-    sqlx::query("UPDATE documents SET title='reject-empty-test' WHERE id=$1")
+    sqlx::query("UPDATE knowledge_documents SET title='reject-empty-test' WHERE id=$1")
         .bind(did)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::raw_sql("CREATE FUNCTION knowledge_test_reject_complete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.title='reject-empty-test' AND NEW.parse_status='completed' THEN RAISE EXCEPTION 'injected publication failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER knowledge_test_reject_complete BEFORE UPDATE ON documents FOR EACH ROW EXECUTE FUNCTION knowledge_test_reject_complete();").execute(&pool).await.unwrap();
+    sqlx::raw_sql("CREATE FUNCTION knowledge_test_reject_complete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.title='reject-empty-test' AND NEW.parse_status='completed' THEN RAISE EXCEPTION 'injected publication failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER knowledge_test_reject_complete BEFORE UPDATE ON knowledge_documents FOR EACH ROW EXECUTE FUNCTION knowledge_test_reject_complete();").execute(&pool).await.unwrap();
     assert!(
         knowledge::ingest::after_index_fanout(&pool, did, vid, 1, 0, &[], "")
             .await
@@ -380,18 +455,15 @@ async fn empty_conversion_publication_failure_rolls_back_its_receipt() {
     let receipt:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_job_receipts WHERE document_id=$1 AND job_key='convert')").bind(did).fetch_one(&pool).await.unwrap();
     assert!(!receipt);
     assert_eq!(
-        knowledge::document_parse_status(&pool, did)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("processing")
+        knowledge::document_parse_status(&pool, did).await.unwrap(),
+        Some(knowledge::ParseStatus::Processing)
     );
-    sqlx::raw_sql("DROP TRIGGER knowledge_test_reject_complete ON documents; DROP FUNCTION knowledge_test_reject_complete();").execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP TRIGGER knowledge_test_reject_complete ON knowledge_documents; DROP FUNCTION knowledge_test_reject_complete();").execute(&pool).await.unwrap();
     knowledge::ingest::after_index_fanout(&pool, did, vid, 1, 0, &[], "")
         .await
         .unwrap();
     let done: (String, i32, bool) = sqlx::query_as(
-        "SELECT parse_status,active_generation,index_ready FROM documents WHERE id=$1",
+        "SELECT parse_status,active_generation,index_ready FROM knowledge_documents WHERE id=$1",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -412,9 +484,7 @@ async fn source_change_invalidates_an_older_reconcile_acknowledgement() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE documents SET parse_status='deleting' WHERE id=$1")
-        .bind(did)
-        .execute(&pool)
+    knowledge::set_parse_status(&pool, did, knowledge::ParseStatus::Deleting, "")
         .await
         .unwrap();
     let stale_ack=sqlx::query("UPDATE knowledge_job_outbox SET state='complete' WHERE document_id=$1 AND job_key='reconcile' AND revision=$2").bind(did).bind(old).execute(&pool).await.unwrap();
@@ -440,18 +510,15 @@ async fn delayed_reparse_envelope_preserves_completed_generation() {
         .unwrap();
     workflow::publish_empty(&pool, did, 1).await.unwrap();
     knowledge::ingest::run_reparse(&pool, did, 1).await.unwrap();
-    let id: Uuid = sqlx::query_scalar("SELECT id FROM chunks WHERE document_id=$1")
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM knowledge_chunks WHERE document_id=$1")
         .bind(did)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(id, c.id);
     assert_eq!(
-        knowledge::document_parse_status(&pool, did)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("completed")
+        knowledge::document_parse_status(&pool, did).await.unwrap(),
+        Some(knowledge::ParseStatus::Completed)
     );
 }
 
@@ -460,7 +527,7 @@ async fn delayed_reparse_envelope_preserves_completed_generation() {
 async fn last_image_receipt_commits_stage_and_next_obligation_atomically() {
     let pool = pool().await;
     let (_, vid, did) = seed(&pool).await;
-    sqlx::query("INSERT INTO document_processing_spans(document_id,attempt,name,status,started_at) VALUES($1,1,'multimodal','running',now())")
+    sqlx::query("INSERT INTO knowledge_document_processing_spans(document_id,attempt,name,status,started_at) VALUES($1,1,'multimodal','running',now())")
         .bind(did).execute(&pool).await.unwrap();
     for image_key in ["first", "last"] {
         workflow::put(
@@ -499,7 +566,7 @@ async fn last_image_receipt_commits_stage_and_next_obligation_atomically() {
             .unwrap()
     );
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM document_processing_spans WHERE document_id=$1 AND name='multimodal'",
+        "SELECT status FROM knowledge_document_processing_spans WHERE document_id=$1 AND name='multimodal'",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -516,7 +583,7 @@ async fn last_image_receipt_commits_stage_and_next_obligation_atomically() {
             .unwrap()
     );
     let status: String = sqlx::query_scalar(
-        "SELECT status FROM document_processing_spans WHERE document_id=$1 AND name='multimodal'",
+        "SELECT status FROM knowledge_document_processing_spans WHERE document_id=$1 AND name='multimodal'",
     )
     .bind(did)
     .fetch_one(&pool)
@@ -547,9 +614,7 @@ async fn delayed_wiki_reducer_cannot_resurrect_tombstoned_or_reparsed_source() {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-            .bind(host)
-            .execute(&pool)
+        knowledge::set_parse_status(&pool, host, knowledge::ParseStatus::Processing, "")
             .await
             .unwrap();
         workflow::put(&pool, host, vid, 1, Work::Wiki)
@@ -562,7 +627,7 @@ async fn delayed_wiki_reducer_cannot_resurrect_tombstoned_or_reparsed_source() {
             title: "shared".into(),
             content: "stale source text".into(),
             page_type: "entity".into(),
-            status: "published".into(),
+            status: knowledge::WikiStatus::Published,
             summary: String::new(),
             aliases: vec![],
             source_refs: vec![source, host],
@@ -571,16 +636,12 @@ async fn delayed_wiki_reducer_cannot_resurrect_tombstoned_or_reparsed_source() {
             folder_id: None,
         };
         if tombstone {
-            sqlx::query("UPDATE documents SET parse_status='deleting' WHERE id=$1")
-                .bind(source)
-                .execute(&pool)
+            knowledge::set_parse_status(&pool, source, knowledge::ParseStatus::Deleting, "")
                 .await
                 .unwrap();
         } else {
             workflow::retry_document(&pool, source).await.unwrap();
-            sqlx::query("UPDATE documents SET parse_status='processing' WHERE id=$1")
-                .bind(source)
-                .execute(&pool)
+            knowledge::set_parse_status(&pool, source, knowledge::ParseStatus::Processing, "")
                 .await
                 .unwrap();
             workflow::publish_empty(&pool, source, 2).await.unwrap();
@@ -604,12 +665,13 @@ async fn delayed_wiki_reducer_cannot_resurrect_tombstoned_or_reparsed_source() {
             "stale source snapshot must fail before publication"
         );
         assert!(workflow::pending(&pool, host, 1, "wiki").await.unwrap());
-        let pages: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM wiki_pages WHERE product_version_id=$1")
-                .bind(vid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let pages: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_wiki_pages WHERE product_version_id=$1",
+        )
+        .bind(vid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(pages, 0);
     }
 }

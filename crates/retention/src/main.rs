@@ -39,11 +39,6 @@ async fn main() {
         .context("retention postgres connection failed")
         .unwrap_or_else(fail);
 
-    platform::verify_application_role(&pool)
-        .await
-        .context("invalid application database role")
-        .unwrap_or_else(fail);
-
     let _expiry_task = spawn_upload_staging_expiry(pool.clone(), UPLOAD_STAGING_EXPIRY_INTERVAL);
 
     let storage = platform::oxana_connect()
@@ -164,11 +159,11 @@ mod tests {
 
     async fn retention_test_schema_is_ready(pool: &PgPool) -> bool {
         let ready = sqlx::query_scalar(
-            "SELECT to_regclass('public.object_upload_staging') IS NOT NULL
-                 AND to_regprocedure('public.kb_object_upload_stage(uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity)') IS NOT NULL
-                 AND to_regprocedure('public.kb_object_upload_expiry_candidates()') IS NOT NULL
-                 AND to_regprocedure('public.kb_object_upload_expire_one(uuid)') IS NOT NULL
-                 AND to_regprocedure('public.kb_retention_preflight(uuid,kb_object_ref,kb_sha256,bigint)') IS NOT NULL",
+            "SELECT to_regclass('public.platform_object_uploads') IS NOT NULL
+                 AND to_regclass('public.platform_objects') IS NOT NULL
+                 AND to_regclass('public.platform_object_references') IS NOT NULL
+                 AND to_regclass('public.platform_object_deletion_requests') IS NOT NULL
+                 AND to_regclass('public.platform_object_deletion_receipts') IS NOT NULL",
         )
         .fetch_one(pool)
         .await;
@@ -189,6 +184,17 @@ mod tests {
                 false
             }
         }
+    }
+
+    async fn upload_owner(pool: &PgPool) -> Uuid {
+        let owner_user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO platform_users(id,email) VALUES($1,$2)")
+            .bind(owner_user_id)
+            .bind(format!("retention-{owner_user_id}@example.invalid"))
+            .execute(pool)
+            .await
+            .unwrap();
+        owner_user_id
     }
 
     async fn retention_application_identity_pool() -> Option<PgPool> {
@@ -227,23 +233,24 @@ mod tests {
             platform::inspect_readiness(&pool, platform::ReleaseComponentKind::Retention).await;
         if require_ready {
             match check {
-                platform::ReadyCheck::Ready { gate_mode, .. } => assert_eq!(gate_mode, "open"),
+                platform::ReadyCheck::Ready { gate_mode, .. } => {
+                    assert_eq!(gate_mode, platform::MaintenanceMode::Open)
+                }
                 check => panic!("required retention readiness was not ready: {check:?}"),
             }
             return;
         }
         match check {
-            platform::ReadyCheck::Ready { gate_mode, .. }
+            platform::ReadyCheck::Ready { .. }
             | platform::ReadyCheck::NotReady {
-                gate_mode: Some(gate_mode),
-                ..
-            } => assert!(!gate_mode.is_empty()),
+                gate_mode: Some(_), ..
+            } => {}
             check => panic!("retention readiness could not read its schema/gate inputs: {check:?}"),
         }
     }
 
     #[tokio::test]
-    async fn retention_application_identity_preserves_fenced_preflight_and_completion() {
+    async fn retention_transactions_preserve_preflight_and_completion() {
         let _guard = db_lock().await;
         let Some(admin) = admin_test_pool().await else {
             return;
@@ -273,18 +280,6 @@ mod tests {
             .await
             .unwrap()
             .expect("sole staged owner creates deletion identity");
-        let registry_acl: (bool, bool) = sqlx::query_as(
-            "SELECT has_table_privilege(current_user,'object_registry','SELECT'),
-                    has_table_privilege('public','object_registry','SELECT')",
-        )
-        .fetch_one(&retention)
-        .await
-        .unwrap();
-        assert_eq!(
-            registry_acl,
-            (true, false),
-            "shared owner can inspect registry; PUBLIC cannot"
-        );
         platform::process_object_deletion(&retention, &deletion)
             .await
             .unwrap();
@@ -292,7 +287,7 @@ mod tests {
             .await
             .unwrap();
         let tombstone: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM object_retention_tombstones WHERE deletion_id=$1)",
+            "SELECT EXISTS(SELECT 1 FROM platform_object_deletion_receipts WHERE deletion_id=$1)",
         )
         .bind(deletion.deletion_id)
         .fetch_one(&admin)
@@ -363,7 +358,7 @@ mod tests {
         let mut completed = false;
         for _ in 0..100 {
             completed = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM object_retention_tombstones WHERE deletion_id=$1)",
+                "SELECT EXISTS(SELECT 1 FROM platform_object_deletion_receipts WHERE deletion_id=$1)",
             )
             .bind(deletion.deletion_id)
             .fetch_one(&admin)
@@ -392,7 +387,7 @@ mod tests {
             return;
         }
         let staging_id = Uuid::new_v4();
-        let actor = format!("user:{}", Uuid::new_v4());
+        let owner_user_id = upload_owner(&pool).await;
         let bytes = format!("expired retention staging {staging_id}").into_bytes();
         let digest = platform::sha256_hex(&bytes);
         let object_ref = platform::object_ref(&digest);
@@ -403,12 +398,12 @@ mod tests {
             &digest,
             "application/pdf",
             bytes.len() as i64,
-            Some(&actor),
+            Some(owner_user_id),
         )
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE object_upload_staging
+            "UPDATE platform_object_uploads
                 SET created_at=clock_timestamp()-interval '2 seconds',
                     expires_at=clock_timestamp()-interval '1 second'
               WHERE id=$1",
@@ -421,7 +416,7 @@ mod tests {
         let queued = expire_upload_staging_once(&pool).await.unwrap();
         assert!((1..=100).contains(&queued));
         let retained: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE id=$1")
+            sqlx::query_scalar("SELECT count(*) FROM platform_object_uploads WHERE id=$1")
                 .bind(staging_id)
                 .fetch_one(&pool)
                 .await
@@ -436,7 +431,7 @@ mod tests {
                 .unwrap();
         }
         let remaining: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE id=$1")
+            sqlx::query_scalar("SELECT count(*) FROM platform_object_uploads WHERE id=$1")
                 .bind(staging_id)
                 .fetch_one(&pool)
                 .await
@@ -454,7 +449,7 @@ mod tests {
             return;
         }
         let staging_id = Uuid::new_v4();
-        let actor = format!("user:{}", Uuid::new_v4());
+        let owner_user_id = upload_owner(&pool).await;
         let bytes = format!("redis failure {staging_id}").into_bytes();
         let digest = platform::sha256_hex(&bytes);
         platform::stage_object_upload(
@@ -464,11 +459,11 @@ mod tests {
             &digest,
             "application/pdf",
             bytes.len() as i64,
-            Some(&actor),
+            Some(owner_user_id),
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE object_upload_staging SET created_at=clock_timestamp()-interval '2 seconds', expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
+        sqlx::query("UPDATE platform_object_uploads SET created_at=clock_timestamp()-interval '2 seconds', expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
             .bind(staging_id).execute(&pool).await.unwrap();
         let error = platform::enqueue_expired_object_uploads_with(&pool, |_| async {
             Err("redis unavailable".to_string())
@@ -477,7 +472,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("redis unavailable"));
         let retained: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM object_upload_staging WHERE id=$1)")
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM platform_object_uploads WHERE id=$1)")
                 .bind(staging_id)
                 .fetch_one(&pool)
                 .await
@@ -499,8 +494,8 @@ mod tests {
         if !retention_test_schema_is_ready(&pool).await {
             return;
         }
-        let actor = format!("user:{}", Uuid::new_v4());
-        let bytes = format!("bounded retention staging {actor}").into_bytes();
+        let owner_user_id = upload_owner(&pool).await;
+        let bytes = format!("bounded retention staging {owner_user_id}").into_bytes();
         let digest = platform::sha256_hex(&bytes);
         let object_ref = platform::object_ref(&digest);
         for _ in 0..=EXPECTED_BATCH_LIMIT {
@@ -511,40 +506,39 @@ mod tests {
                 &digest,
                 "application/pdf",
                 bytes.len() as i64,
-                Some(&actor),
+                Some(owner_user_id),
             )
             .await
             .unwrap();
         }
         sqlx::query(
-            "UPDATE object_upload_staging
+            "UPDATE platform_object_uploads
                 SET created_at=clock_timestamp()-interval '2 seconds',
                     expires_at=clock_timestamp()-interval '1 second'
-              WHERE created_by=$1",
+              WHERE owner_user_id=$1",
         )
-        .bind(&actor)
+        .bind(owner_user_id)
         .execute(&pool)
         .await
         .unwrap();
 
         let first_expired = expire_upload_staging_once(&pool).await.unwrap();
-        let after_first: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE created_by=$1")
-                .bind(&actor)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let after_first: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM platform_object_uploads WHERE owner_user_id=$1",
+        )
+        .bind(owner_user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(first_expired, EXPECTED_BATCH_LIMIT as i32);
         assert_eq!(
             after_first,
             (EXPECTED_BATCH_LIMIT + 1) as i64,
             "enqueueing must not mutate business rows"
         );
-        let candidates: Vec<Uuid> =
-            sqlx::query_scalar("SELECT * FROM kb_object_upload_expiry_candidates()")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let candidates = platform::expired_object_upload_candidates(&pool)
+            .await
+            .unwrap();
         assert_eq!(candidates.len(), EXPECTED_BATCH_LIMIT);
         for staging_id in candidates {
             let _ = platform::expire_one_object_upload(&pool, staging_id)
@@ -553,18 +547,19 @@ mod tests {
         }
 
         let second_expired = expire_upload_staging_once(&pool).await.unwrap();
-        let after_second: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE created_by=$1")
-                .bind(&actor)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let after_second: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM platform_object_uploads WHERE owner_user_id=$1",
+        )
+        .bind(owner_user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(second_expired, 1);
         assert_eq!(after_second, 1);
         let remaining_ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM object_upload_staging WHERE created_by=$1 ORDER BY id",
+            "SELECT id FROM platform_object_uploads WHERE owner_user_id=$1 ORDER BY id",
         )
-        .bind(&actor)
+        .bind(owner_user_id)
         .fetch_all(&pool)
         .await
         .unwrap();

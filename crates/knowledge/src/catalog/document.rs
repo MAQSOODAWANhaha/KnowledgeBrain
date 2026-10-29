@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 pub(crate) fn document_from_row(d: sqlx::postgres::PgRow) -> Result<crate::Document, sqlx::Error> {
     let did: Uuid = d.try_get("id")?;
-    let st: String = d.try_get("parse_status")?;
     let title: String = d.try_get("title")?;
     let file_name: String = d.try_get("file_name")?;
     let file_size: i64 = d.try_get("file_size")?;
@@ -15,21 +14,13 @@ pub(crate) fn document_from_row(d: sqlx::postgres::PgRow) -> Result<crate::Docum
     let vid: Uuid = d.try_get("product_version_id")?;
     let mut doc = crate::Document::new(vid, title, file_name, file_size, file_hash, object_ref);
     doc.id = did;
-    doc.parse_status = parse_parse_status(&st);
+    doc.parse_status = d.try_get("parse_status")?;
     doc.enable_status = d.try_get("enable_status")?;
     doc.pending_subtasks_count = d.try_get("pending_subtasks_count")?;
     doc.error_message = d.try_get("error_message")?;
     doc.attempt = d.try_get("attempt").unwrap_or(1);
     doc.description = d.try_get("description").unwrap_or_default();
-    if let Ok(sum) = d.try_get::<String, _>("summary_status") {
-        doc.summary_status = match sum.as_str() {
-            "pending" => crate::SummaryStatus::Pending,
-            "processing" => crate::SummaryStatus::Processing,
-            "completed" => crate::SummaryStatus::Completed,
-            "failed" => crate::SummaryStatus::Failed,
-            _ => crate::SummaryStatus::None,
-        };
-    }
+    doc.summary_status = d.try_get("summary_status")?;
     doc.index_ready = d.try_get("index_ready").unwrap_or(false);
     doc.doc_type = d.try_get("doc_type").unwrap_or_else(|_| "file".into());
     if let Ok(Some(raw)) = d.try_get::<Option<serde_json::Value>, _>("source_passages") {
@@ -44,21 +35,21 @@ pub(crate) fn document_from_row(d: sqlx::postgres::PgRow) -> Result<crate::Docum
 pub async fn list_documents_in_version(
     pool: &PgPool,
     version_id: Uuid,
-    parse_status: Option<&str>,
+    parse_status: Option<crate::ParseStatus>,
     keyword: Option<&str>,
     tag_id: Option<Uuid>,
 ) -> Result<Vec<crate::Document>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, title, file_name, file_size, file_hash, object_ref,
+        "SELECT id, title, file_name, byte_length AS file_size, content_sha256 AS file_hash, object_ref,
                 parse_status, enable_status, pending_subtasks_count,
                 COALESCE(error_message, '') AS error_message,
                 process_overrides,
-                COALESCE(type, 'file') AS doc_type,
+                COALESCE(document_kind, 'file') AS doc_type,
                 COALESCE(attempt, 1) AS attempt,
                 COALESCE(description, '') AS description,
                 COALESCE(summary_status, 'none') AS summary_status,
                 source_passages, index_ready, product_version_id
-         FROM documents
+         FROM knowledge_documents
          WHERE product_version_id = $1 AND deleted_at IS NULL
            AND ($2::text IS NULL OR parse_status = $2)
            AND (
@@ -70,8 +61,8 @@ pub async fn list_documents_in_version(
            AND (
              $4::uuid IS NULL
              OR EXISTS (
-                SELECT 1 FROM document_tags dt
-                WHERE dt.document_id = documents.id AND dt.tag_id = $4
+                SELECT 1 FROM knowledge_document_tags dt
+                WHERE dt.document_id = knowledge_documents.id AND dt.tag_id = $4
              )
            )
          ORDER BY updated_at DESC",
@@ -90,33 +81,21 @@ pub async fn load_document(
     document_id: Uuid,
 ) -> Result<Option<crate::Document>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, title, file_name, file_size, file_hash, object_ref,
+        "SELECT id, title, file_name, byte_length AS file_size, content_sha256 AS file_hash, object_ref,
                 parse_status, enable_status, pending_subtasks_count,
                 COALESCE(error_message, '') AS error_message,
                 process_overrides,
-                COALESCE(type, 'file') AS doc_type,
+                COALESCE(document_kind, 'file') AS doc_type,
                 COALESCE(attempt, 1) AS attempt,
                 COALESCE(description, '') AS description,
                 COALESCE(summary_status, 'none') AS summary_status,
                 source_passages, index_ready, product_version_id
-         FROM documents WHERE id = $1 AND deleted_at IS NULL",
+         FROM knowledge_documents WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(document_id)
     .fetch_optional(pool)
     .await?;
     row.map(document_from_row).transpose()
-}
-
-pub(crate) fn parse_parse_status(s: &str) -> crate::ParseStatus {
-    match s {
-        "processing" => crate::ParseStatus::Processing,
-        "finalizing" => crate::ParseStatus::Finalizing,
-        "completed" => crate::ParseStatus::Completed,
-        "failed" => crate::ParseStatus::Failed,
-        "cancelled" => crate::ParseStatus::Cancelled,
-        "deleting" => crate::ParseStatus::Deleting,
-        _ => crate::ParseStatus::Pending,
-    }
 }
 
 /// Load one document plus its version/product/workspace and that document's chunks.
@@ -125,9 +104,9 @@ pub async fn document_workspace_id(
     document_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT p.workspace_id FROM documents d
-         JOIN product_versions pv ON pv.id = d.product_version_id
-         JOIN products p ON p.id = pv.product_id
+        "SELECT p.workspace_id FROM knowledge_documents d
+         JOIN knowledge_product_versions pv ON pv.id = d.product_version_id
+         JOIN knowledge_products p ON p.id = pv.product_id
          WHERE d.id = $1",
     )
     .bind(document_id)
@@ -161,9 +140,9 @@ pub async fn find_duplicate_document(
     file_hash: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT id FROM documents
-         WHERE product_version_id = $1 AND file_name = $2 AND file_size = $3
-           AND file_hash = $4 AND deleted_at IS NULL",
+        "SELECT id FROM knowledge_documents
+         WHERE product_version_id = $1 AND file_name = $2 AND byte_length = $3
+           AND content_sha256 = $4 AND deleted_at IS NULL",
     )
     .bind(version_id)
     .bind(file_name)
@@ -195,9 +174,9 @@ pub async fn insert_ingest_document(
         .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO documents (
+        "INSERT INTO knowledge_documents (
             id, product_version_id, title, parse_status, enable_status,
-            file_name, file_size, file_hash, object_ref, type,
+            file_name, byte_length, content_sha256, object_ref, document_kind,
             source_passages, process_overrides
          ) VALUES ($1,$2,$3,'pending','disabled',$4,$5,$6,$7,$8,$9,$10)",
     )
@@ -213,18 +192,16 @@ pub async fn insert_ingest_document(
     .bind(process_overrides)
     .execute(&mut *tx)
     .await?;
-    sqlx::query_scalar::<_, String>(
-        "SELECT kb_register_knowledge_document_object(
-            $1,'application/octet-stream',NULL::kb_actor_identity,$2,$3)",
+    platform::register_knowledge_document_object_in_tx(
+        &mut tx,
+        doc.id,
+        "application/octet-stream",
+        &format!("knowledge-document:{}", doc.id),
     )
-    .bind(doc.id)
-    .bind(format!("knowledge-document:{}", doc.id))
-    .bind(Uuid::new_v4())
-    .fetch_one(&mut *tx)
     .await?;
     for tag_id in tag_ids {
         sqlx::query(
-            "INSERT INTO document_tags (document_id,tag_id) VALUES ($1,$2)
+            "INSERT INTO knowledge_document_tags (document_id,tag_id) VALUES ($1,$2)
              ON CONFLICT DO NOTHING",
         )
         .bind(doc.id)
@@ -232,15 +209,16 @@ pub async fn insert_ingest_document(
         .execute(&mut *tx)
         .await?;
     }
+    crate::workflow::record_document_change(&mut tx, doc.id, None).await?;
     tx.commit().await
 }
 
 pub async fn insert_document(pool: &PgPool, doc: NewDocument<'_>) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO documents (
+        "INSERT INTO knowledge_documents (
             id, product_version_id, title, parse_status, enable_status,
-            file_name, file_size, file_hash, object_ref, type
+            file_name, byte_length, content_sha256, object_ref, document_kind
          ) VALUES ($1, $2, $3, 'pending', 'disabled', $4, $5, $6, $7, 'file')",
     )
     .bind(doc.id)
@@ -252,15 +230,14 @@ pub async fn insert_document(pool: &PgPool, doc: NewDocument<'_>) -> Result<(), 
     .bind(doc.object_ref)
     .execute(&mut *tx)
     .await?;
-    sqlx::query_scalar::<_, String>(
-        "SELECT kb_register_knowledge_document_object(
-            $1,'application/octet-stream',NULL::kb_actor_identity,$2,$3)",
+    platform::register_knowledge_document_object_in_tx(
+        &mut tx,
+        doc.id,
+        "application/octet-stream",
+        &format!("knowledge-document:{}", doc.id),
     )
-    .bind(doc.id)
-    .bind(format!("knowledge-document:{}", doc.id))
-    .bind(Uuid::new_v4())
-    .fetch_one(&mut *tx)
     .await?;
+    crate::workflow::record_document_change(&mut tx, doc.id, None).await?;
     tx.commit().await
 }
 
@@ -269,11 +246,17 @@ pub async fn set_index_ready(
     document_id: Uuid,
     ready: bool,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE documents SET index_ready = $2, updated_at = now() WHERE id = $1")
-        .bind(document_id)
-        .bind(ready)
-        .execute(pool)
-        .await?;
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
+    sqlx::query(
+        "UPDATE knowledge_documents SET index_ready = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(document_id)
+    .bind(ready)
+    .execute(&mut *tx)
+    .await?;
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -289,7 +272,7 @@ pub async fn set_document_source(
         serde_json::json!(passages)
     };
     sqlx::query(
-        "UPDATE documents SET type = $2, source_passages = $3, updated_at = now() WHERE id = $1",
+        "UPDATE knowledge_documents SET document_kind = $2, source_passages = $3, updated_at = now() WHERE id = $1",
     )
     .bind(document_id)
     .bind(doc_type)
@@ -329,7 +312,7 @@ pub async fn persist_question_maps(
 ) -> Result<(), sqlx::Error> {
     if !parent_ids.is_empty() {
         sqlx::query(
-            "DELETE FROM chunks
+            "DELETE FROM knowledge_chunks
              WHERE document_id = $1
                AND (
                     chunk_type = 'question'
@@ -345,7 +328,7 @@ pub async fn persist_question_maps(
         .await?;
     }
     for ch in chunks.values().filter(|c| parent_ids.contains(&c.id)) {
-        sqlx::query("UPDATE chunks SET generated_questions = $2 WHERE id = $1")
+        sqlx::query("UPDATE knowledge_chunks SET generated_questions = $2 WHERE id = $1")
             .bind(ch.id)
             .bind(serde_json::json!(ch.generated_questions))
             .execute(pool)
@@ -376,11 +359,13 @@ pub async fn set_process_overrides(
     overrides: &crate::ProcessOverrides,
 ) -> Result<(), sqlx::Error> {
     let raw = serde_json::to_value(overrides).unwrap_or(serde_json::Value::Null);
-    sqlx::query("UPDATE documents SET process_overrides = $2, updated_at = now() WHERE id = $1")
-        .bind(document_id)
-        .bind(raw)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE knowledge_documents SET process_overrides = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(document_id)
+    .bind(raw)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -390,64 +375,82 @@ pub async fn set_finalizing(
     document_id: Uuid,
     pending_subtasks_count: i32,
 ) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
     let n = sqlx::query(
-        "UPDATE documents SET parse_status = 'finalizing', pending_subtasks_count = $2,
+        "UPDATE knowledge_documents SET parse_status = 'finalizing', pending_subtasks_count = $2,
                 updated_at = now()
          WHERE id = $1 AND parse_status = 'processing'",
     )
     .bind(document_id)
     .bind(pending_subtasks_count)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(n == 1)
 }
 
 pub async fn set_document_progress(
     pool: &PgPool,
     document_id: Uuid,
-    status: &str,
+    status: crate::ParseStatus,
     pending_subtasks_count: i32,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
     sqlx::query(
-        "UPDATE documents SET parse_status = $2, pending_subtasks_count = $3,
+        "UPDATE knowledge_documents SET parse_status = $2, pending_subtasks_count = $3,
                 updated_at = now() WHERE id = $1",
     )
     .bind(document_id)
     .bind(status)
     .bind(pending_subtasks_count)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(())
 }
 
 pub async fn set_summary_status(
     pool: &PgPool,
     document_id: Uuid,
-    status: &str,
+    status: crate::SummaryStatus,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE documents SET summary_status = $2, updated_at = now() WHERE id = $1")
-        .bind(document_id)
-        .bind(status)
-        .execute(pool)
-        .await?;
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
+    sqlx::query(
+        "UPDATE knowledge_documents SET summary_status = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(document_id)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?;
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(())
 }
 
 pub async fn set_parse_status(
     pool: &PgPool,
     document_id: Uuid,
-    status: &str,
+    status: crate::ParseStatus,
     error_message: &str,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
     sqlx::query(
-        "UPDATE documents SET parse_status = $2, error_message = $3, updated_at = now() WHERE id = $1",
+        "UPDATE knowledge_documents SET parse_status = $2, error_message = $3, updated_at = now() WHERE id = $1",
     )
         .bind(document_id)
         .bind(status)
         .bind(error_message)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -458,31 +461,37 @@ pub async fn set_parse_status(
 /// `housekeep_documents` (resets them to `failed`), hence `failed` — not
 /// `finalizing` — is the legal re-entry state here.
 pub async fn try_set_processing(pool: &PgPool, document_id: Uuid) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
     let n = sqlx::query(
-        "UPDATE documents SET parse_status = 'processing', error_message = '', updated_at = now()
+        "UPDATE knowledge_documents SET parse_status = 'processing', error_message = '', updated_at = now()
          WHERE id = $1
            AND parse_status IN ('pending', 'failed')",
     )
     .bind(document_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(n > 0)
 }
 
 pub async fn document_parse_status(
     pool: &PgPool,
     document_id: Uuid,
-) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
+) -> Result<Option<crate::ParseStatus>, sqlx::Error> {
+    sqlx::query_scalar("SELECT parse_status FROM knowledge_documents WHERE id = $1")
         .bind(document_id)
         .fetch_optional(pool)
         .await
 }
 
 pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<i32, sqlx::Error> {
-    sqlx::query_scalar(
-        "UPDATE documents SET
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
+    let attempt = sqlx::query_scalar(
+        "UPDATE knowledge_documents SET
             attempt = CASE
                 WHEN parse_status='pending' AND enable_status='disabled' THEN attempt
                 ELSE attempt+1
@@ -497,65 +506,79 @@ pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<i32
          RETURNING attempt",
     )
     .bind(document_id)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *tx)
+    .await?;
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
+    Ok(attempt)
 }
 
 pub async fn cancel_active_docs_for_versions(
     pool: &PgPool,
     version_ids: &[Uuid],
 ) -> Result<u64, sqlx::Error> {
-    if version_ids.is_empty() {
-        return Ok(0);
-    }
-    let res = sqlx::query(
-        "UPDATE documents SET parse_status = 'cancelled', updated_at = now()
-         WHERE product_version_id = ANY($1)
-           AND parse_status IN ('pending', 'processing', 'finalizing')
-           AND deleted_at IS NULL",
+    let mut tx = pool.begin().await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM knowledge_documents WHERE product_version_id=ANY($1)
+         AND parse_status IN ('pending','processing','finalizing') AND deleted_at IS NULL
+         ORDER BY id FOR UPDATE",
     )
     .bind(version_ids)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(res.rows_affected())
+    for id in &ids {
+        let before = crate::workflow::capture_document_state(&mut tx, *id).await?;
+        sqlx::query(
+            "UPDATE knowledge_documents SET parse_status='cancelled',updated_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        crate::workflow::record_document_change(&mut tx, *id, before).await?;
+    }
+    tx.commit().await?;
+    Ok(ids.len() as u64)
 }
 
 /// Fail pending/processing/finalizing rows whose last heartbeat
 /// (span finished/started, else `updated_at`) is older than `stale_secs`.
 pub async fn housekeep_documents(pool: &PgPool, stale_secs: i64) -> Result<u64, sqlx::Error> {
     let msg = format!("task stuck in processing > {stale_secs}s, recovered by housekeeping");
+    let mut tx = pool.begin().await?;
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE documents d
-         SET parse_status = 'failed',
-             error_message = $2,
-             pending_subtasks_count = 0,
-             updated_at = now()
-         WHERE d.parse_status IN ('processing', 'finalizing')
+        "SELECT d.id FROM knowledge_documents d WHERE d.parse_status IN ('processing', 'finalizing')
            AND NOT EXISTS(SELECT 1 FROM knowledge_job_outbox o WHERE o.document_id=d.id AND o.attempt=d.attempt AND o.state IN ('pending','published'))
            AND COALESCE(
                  (SELECT MAX(COALESCE(finished_at, started_at))
-                    FROM document_processing_spans s
+                    FROM knowledge_document_processing_spans s
                    WHERE s.document_id = d.id),
                  d.updated_at
                ) < now() - make_interval(secs => $1::double precision)
-         RETURNING d.id",
+         ORDER BY d.id FOR UPDATE",
     )
     .bind(stale_secs)
-    .bind(&msg)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    for id in &ids {
+        let before = crate::workflow::capture_document_state(&mut tx, *id).await?;
+        sqlx::query("UPDATE knowledge_documents SET parse_status='failed',error_message=$2,pending_subtasks_count=0,updated_at=now() WHERE id=$1")
+            .bind(id).bind(&msg).execute(&mut *tx).await?;
+        crate::workflow::record_document_change(&mut tx, *id, before).await?;
+    }
     if !ids.is_empty() {
-        let _ = sqlx::query(
-            "UPDATE document_processing_spans
+        sqlx::query(
+            "UPDATE knowledge_document_processing_spans
              SET status = 'failed', finished_at = COALESCE(finished_at, now()),
                  duration_ms = COALESCE(duration_ms, 0)
              WHERE document_id = ANY($1)
+               AND attempt=(SELECT attempt FROM knowledge_documents WHERE id=knowledge_document_processing_spans.document_id)
                AND status IN ('running', 'pending')",
         )
         .bind(&ids)
-        .execute(pool)
-        .await;
+        .execute(&mut *tx)
+        .await?;
     }
+    tx.commit().await?;
     Ok(ids.len() as u64)
 }
 
@@ -564,17 +587,21 @@ pub async fn set_document_description(
     document_id: Uuid,
     description: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE documents SET description = $2, updated_at = now() WHERE id = $1")
-        .bind(document_id)
-        .bind(description)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE knowledge_documents SET description = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(document_id)
+    .bind(description)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 pub async fn bump_document_attempt(pool: &PgPool, document_id: Uuid) -> Result<i32, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before = crate::workflow::capture_document_state(&mut tx, document_id).await?;
     let n: i32 = sqlx::query_scalar(
-        "UPDATE documents SET
+        "UPDATE knowledge_documents SET
             attempt = attempt + 1,
             parse_status = 'pending',
             enable_status = 'disabled',
@@ -586,8 +613,10 @@ pub async fn bump_document_attempt(pool: &PgPool, document_id: Uuid) -> Result<i
          RETURNING attempt",
     )
     .bind(document_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    crate::workflow::record_document_change(&mut tx, document_id, before).await?;
+    tx.commit().await?;
     Ok(n)
 }
 
@@ -595,26 +624,28 @@ pub async fn bump_document_attempt(pool: &PgPool, document_id: Uuid) -> Result<i
 /// document-wide purge; new attempts are protected by the locked status gate.
 pub async fn purge_document_index(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let deleted:Option<Uuid>=sqlx::query_scalar("SELECT id FROM documents WHERE id=$1 AND parse_status IN ('deleting','deleted') FOR UPDATE").bind(document_id).fetch_optional(&mut *tx).await?;
+    let deleted:Option<Uuid>=sqlx::query_scalar("SELECT id FROM knowledge_documents WHERE id=$1 AND parse_status IN ('deleting','deleted') FOR UPDATE").bind(document_id).fetch_optional(&mut *tx).await?;
     if deleted.is_none() {
         return Ok(());
     }
-    sqlx::query("DELETE FROM graph_relations WHERE document_id=$1")
+    sqlx::query("DELETE FROM knowledge_graph_relations WHERE document_id=$1")
         .bind(document_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM graph_nodes WHERE document_id=$1")
+    sqlx::query("DELETE FROM knowledge_graph_nodes WHERE document_id=$1")
         .bind(document_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM chunks WHERE document_id=$1 AND chunk_type<>'wiki_page'")
+    sqlx::query("DELETE FROM knowledge_chunks WHERE document_id=$1 AND chunk_type<>'wiki_page'")
         .bind(document_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM wiki_pages WHERE source_refs @> jsonb_build_array($1::text)")
-        .bind(document_id.to_string())
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "DELETE FROM knowledge_wiki_pages WHERE source_refs @> jsonb_build_array($1::text)",
+    )
+    .bind(document_id.to_string())
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await
 }
 
@@ -646,7 +677,7 @@ pub(crate) async fn copy_document_index_tx(
     target_version_id: Uuid,
 ) -> Result<usize, sqlx::Error> {
     let source: Option<(Uuid, i32)> = sqlx::query_as(
-        "SELECT product_version_id, active_generation FROM documents
+        "SELECT product_version_id, active_generation FROM knowledge_documents
          WHERE id = $1 AND deleted_at IS NULL
            AND parse_status NOT IN ('cancelled','deleting','deleted') FOR SHARE",
     )
@@ -656,8 +687,8 @@ pub(crate) async fn copy_document_index_tx(
     let Some((source_version_id, source_generation)) = source else {
         return Ok(0);
     };
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM documents WHERE id = $1 AND product_version_id = $2
+    let target_generation = sqlx::query_scalar::<_, i32>(
+        "SELECT attempt FROM knowledge_documents WHERE id = $1 AND product_version_id = $2
          AND deleted_at IS NULL AND parse_status IN ('pending','processing') FOR UPDATE",
     )
     .bind(target_document_id)
@@ -665,9 +696,9 @@ pub(crate) async fn copy_document_index_tx(
     .fetch_one(&mut **tx)
     .await?;
     let rows = sqlx::query(
-        "SELECT id, chunk_type, content, context_header, start_at, end_at,
+        "SELECT id, chunk_type, content, context_header, start_offset AS start_at, end_offset AS end_at,
                 parent_chunk_id, generated_questions, source_locator
-         FROM chunks WHERE document_id = $1 AND generation = $2
+         FROM knowledge_chunks WHERE document_id = $1 AND generation = $2
            AND chunk_type <> 'wiki_page'",
     )
     .bind(source_document_id)
@@ -711,9 +742,9 @@ pub(crate) async fn copy_document_index_tx(
     }
     for batch in copies.chunks(1000) {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO chunks (id, product_version_id, document_id, chunk_type, content,
-               context_header, start_at, end_at, parent_chunk_id, generated_questions,
-               source_locator) ",
+            "INSERT INTO knowledge_chunks (id, product_version_id, document_id, chunk_type, content,
+               context_header, start_offset, end_offset, parent_chunk_id, generated_questions,
+               source_locator, generation) ",
         );
         qb.push_values(batch, |mut b, c| {
             b.push_bind(c.new_id)
@@ -726,7 +757,8 @@ pub(crate) async fn copy_document_index_tx(
                 .push_bind(c.end_at)
                 .push_bind(c.parent_chunk_id)
                 .push_bind(&c.generated_questions)
-                .push_bind(&c.source_locator);
+                .push_bind(&c.source_locator)
+                .push_bind(target_generation);
         });
         qb.build().execute(&mut **tx).await?;
     }
@@ -735,10 +767,10 @@ pub(crate) async fn copy_document_index_tx(
         let old_ids: Vec<Uuid> = id_map.keys().copied().collect();
         let new_ids: Vec<Uuid> = old_ids.iter().map(|o| id_map[o]).collect();
         sqlx::query(
-            "INSERT INTO chunk_embeddings
+            "INSERT INTO knowledge_chunk_embeddings
                 (chunk_id, product_version_id, document_id, embedding, tsv, content)
              SELECT m.new_id, $1, $2, e.embedding, e.tsv, e.content
-             FROM chunk_embeddings e
+             FROM knowledge_chunk_embeddings e
              JOIN (SELECT * FROM unnest($3::uuid[], $4::uuid[])) AS m(old_id, new_id)
                ON m.old_id = e.chunk_id",
         )
@@ -755,11 +787,11 @@ pub(crate) async fn copy_document_index_tx(
             "SELECT mapping.chunk_id, artifact.id, artifact.canonical_payload,
                     artifact.object_ref, artifact.content_sha256, artifact.media_type,
                     registry.byte_length
-             FROM knowledge_image_ocr_chunk_artifact_mappings mapping
+             FROM knowledge_image_chunk_links mapping
              JOIN knowledge_image_artifact_revisions artifact
                ON artifact.id = mapping.image_artifact_revision_id
-             JOIN available_object_registry registry ON registry.object_ref = artifact.object_ref
-             WHERE mapping.chunk_id = ANY($1)",
+             JOIN platform_available_objects registry ON registry.object_ref = artifact.object_ref
+             WHERE mapping.chunk_id = ANY($1) AND EXISTS(SELECT 1 FROM knowledge_chunks WHERE id=mapping.chunk_id AND chunk_type='image_ocr')",
         )
         .bind(&old_ids)
         .fetch_all(&mut **tx)
@@ -777,13 +809,15 @@ pub(crate) async fn copy_document_index_tx(
             let payload =
                 serde_json::to_vec(&payload).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
             let artifact_sha = platform::sha256_hex(&payload);
-            sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
-                .bind(artifact_id)
-                .bind(artifact.try_get::<String, _>("object_ref")?)
-                .bind(artifact.try_get::<String, _>("content_sha256")?)
-                .bind(artifact.try_get::<String, _>("media_type")?)
-                .bind(artifact.try_get::<i64, _>("byte_length")?)
-                .execute(&mut **tx).await?;
+            platform::register_knowledge_image_object_in_tx(
+                tx,
+                artifact_id,
+                &artifact.try_get::<String, _>("object_ref")?,
+                &artifact.try_get::<String, _>("content_sha256")?,
+                &artifact.try_get::<String, _>("media_type")?,
+                artifact.try_get::<i64, _>("byte_length")?,
+            )
+            .await?;
             sqlx::query(
                 "INSERT INTO knowledge_image_artifact_revisions(
                     id,product_version_id,document_id,revision,object_ref,content_sha256,
@@ -802,11 +836,11 @@ pub(crate) async fn copy_document_index_tx(
             .execute(&mut **tx)
             .await?;
             sqlx::query(
-                "INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(
+                "INSERT INTO knowledge_image_chunk_links(
                     chunk_id,product_version_id,document_id,image_artifact_revision_id,
                     object_ref,content_sha256,media_type)
                  SELECT $1,$2,$3,$4,object_ref,content_sha256,media_type
-                 FROM knowledge_image_ocr_chunk_artifact_mappings WHERE chunk_id=$5",
+                 FROM knowledge_image_chunk_links WHERE chunk_id=$5",
             )
             .bind(id_map[&old_chunk_id])
             .bind(target_version_id)
@@ -819,7 +853,7 @@ pub(crate) async fn copy_document_index_tx(
     }
     // D7: deep-copy the per-document graph, remapping chunk_ids to the new ids.
     let graph_nodes = sqlx::query(
-        "SELECT name, chunk_ids FROM graph_nodes
+        "SELECT name, chunk_ids FROM knowledge_graph_nodes
          WHERE product_version_id = $1 AND document_id = $2 AND generation = $3",
     )
     .bind(source_version_id)
@@ -841,23 +875,24 @@ pub(crate) async fn copy_document_index_tx(
     }
     for batch in node_copies.chunks(1000) {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO graph_nodes (product_version_id, document_id, name, chunk_ids) ",
+            "INSERT INTO knowledge_graph_nodes (product_version_id, document_id, name, chunk_ids, generation) ",
         );
         qb.push_values(batch, |mut b, (name, chunk_ids)| {
             b.push_bind(target_version_id)
                 .push_bind(target_document_id)
                 .push_bind(name)
-                .push_bind(chunk_ids);
+                .push_bind(chunk_ids)
+                .push_bind(target_generation);
         });
         qb.push(" ON CONFLICT DO NOTHING");
         qb.build().execute(&mut **tx).await?;
     }
     sqlx::query(
-        "INSERT INTO graph_relations
-            (product_version_id, document_id, node1, node2, rel_type)
-         SELECT $1, $2, node1, node2, rel_type FROM graph_relations
+        "INSERT INTO knowledge_graph_relations
+            (product_version_id, document_id, source_node_name, target_node_name, relation_type, generation)
+         SELECT $1, $2, source_node_name AS node1, target_node_name AS node2, relation_type AS rel_type, (SELECT attempt FROM knowledge_documents WHERE id=$2) FROM knowledge_graph_relations
          WHERE product_version_id = $3 AND document_id = $4 AND generation = $5
-           AND node1 = ANY($6::text[]) AND node2 = ANY($6::text[])
+           AND source_node_name = ANY($6::text[]) AND target_node_name = ANY($6::text[])
          ON CONFLICT DO NOTHING",
     )
     .bind(target_version_id)
@@ -872,7 +907,7 @@ pub(crate) async fn copy_document_index_tx(
 }
 
 pub async fn document_chunk_count(pool: &PgPool, document_id: Uuid) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+    sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
         .bind(document_id)
         .fetch_one(pool)
         .await
@@ -884,7 +919,7 @@ pub async fn document_file_meta(
 ) -> Result<Option<(String, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT COALESCE(file_name, ''), COALESCE(object_ref, '')
-         FROM documents WHERE id = $1 AND deleted_at IS NULL",
+         FROM knowledge_documents WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(document_id)
     .fetch_optional(pool)
@@ -896,7 +931,7 @@ pub async fn document_image_object_refs(
     document_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT DISTINCT context_header FROM chunks
+        "SELECT DISTINCT context_header FROM knowledge_chunks
          WHERE document_id = $1
            AND chunk_type IN ('image_ocr', 'image_caption')
            AND context_header IS NOT NULL AND context_header <> ''",

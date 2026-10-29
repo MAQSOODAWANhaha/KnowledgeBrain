@@ -10,11 +10,13 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 import pytest
+
+from docreader.tests.database import initialize_schema
 import pytest_asyncio
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.authoring_store import AuthoringStore
-from docreader.integrations.store import Cancelled, Conflict, InvalidConfirmation, RequestReplayBlocked, StaleExecution
+from docreader.integrations.store import Cancelled, Conflict, RequestReplayBlocked, StaleExecution
 from docreader.llm.request import ModelWorkUnitExhausted
 
 
@@ -27,6 +29,7 @@ async def authoring_store(tmp_path):
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
         await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     store = AuthoringStore(make_conninfo(dsn, options=f"-c search_path={schema}"))
+    await initialize_schema(store.dsn, sections=("authoring",))
     await store.setup()
     store.test_artifacts = ArtifactStore(tmp_path)
     try:
@@ -39,7 +42,7 @@ async def authoring_store(tmp_path):
 def input_value(store):
     ref = store.test_artifacts.put_json({"synthetic": True})
     return {"schema_version": 2, "run_id": "parent-analysis", "source_version": 1, "domain_revision": 2,
-            "checklist_digest": "a" * 64,
+            "checklist_digest": "a" * 64, "extract_refs": [], "issues": [],
             **{key: ref for key in ("frozen_ref", "pack_plan_ref", "items_ref", "verification_ref", "confirmation_ref")}}
 
 
@@ -64,9 +67,9 @@ async def parent(store):
     # The Store under test creates only authoring tables. This minimal real parent
     # table supplies the existing analysis columns involved in atomic publication.
     async with store.transaction() as conn:
-        await conn.execute("CREATE TABLE tender_runs (run_id text PRIMARY KEY, source_version integer, "
+        await conn.execute("CREATE TABLE tender_analysis_runs (run_id text PRIMARY KEY, source_version integer, "
                            "domain_revision integer, checklist_digest text, status text, cancel_requested boolean)")
-        await conn.execute("INSERT INTO tender_runs VALUES (%s, 1, 2, %s, 'analysis-ready', false)",
+        await conn.execute("INSERT INTO tender_analysis_runs VALUES (%s, 1, 2, %s, 'analysis-ready', false)",
                            ("parent-analysis", "a" * 64))
 
 
@@ -92,7 +95,7 @@ async def test_two_tables_submission_identity_and_configuration_are_independent(
         await store.pin_execution_spec(lease, {**spec, "model": "changed"})
 
 
-async def test_first_setup_is_safe_when_independent_executors_start_concurrently():
+async def test_initialized_schema_is_safe_when_independent_executors_start_concurrently():
     dsn = os.environ.get("TENDER_TEST_DSN")
     if not dsn:
         pytest.skip("TENDER_TEST_DSN is required for real PostgreSQL tests")
@@ -101,11 +104,19 @@ async def test_first_setup_is_safe_when_independent_executors_start_concurrently
         await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     isolated = make_conninfo(dsn, options=f"-c search_path={schema}")
     try:
+        await initialize_schema(isolated, sections=("authoring",))
         results = await asyncio.gather(*(AuthoringStore(isolated).setup() for _ in range(4)), return_exceptions=True)
         assert all(result is None for result in results), [type(result).__name__ for result in results]
     finally:
         async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
             await conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+async def test_setup_does_not_recreate_missing_business_tables(authoring_store):
+    async with authoring_store.transaction() as conn:
+        await conn.execute("DROP TABLE tender_authoring_model_requests")
+    with pytest.raises(psycopg.errors.UndefinedTable):
+        await authoring_store.setup()
 
 
 async def test_recovery_preserves_immutable_cas_receipts_and_fences_old_owner(authoring_store):
@@ -165,15 +176,20 @@ async def test_sent_fence_covers_feedback_digests_and_concurrent_preparations(au
         await store.begin_request(lease, "three", "fixture", "outline", metadata("feedback-three"))
 
 
-@pytest.mark.parametrize("mutation", ["task", "logical"])
-async def test_execution_cannot_change_outline_task_or_logical_request_identity(authoring_store, mutation):
+async def test_independent_logical_tasks_can_send_concurrently_with_separate_retry_budgets(authoring_store):
     store = authoring_store
     identity, lease = await submitted(store)
-    await store.begin_request(lease, "first", "fixture", "outline", metadata())
-    with pytest.raises(ValueError if mutation == "task" else Conflict):
-        await store.begin_request(lease, "changed", "fixture", "extract" if mutation == "task" else "outline",
-                                  metadata("new", "changed") if mutation == "logical" else metadata())
-    assert len((await store.get_execution(identity))["requests"]) == 1
+    for task, logical in [("outline", "outline"), ("authoring_basis", "basis"),
+                          ("authoring_write", "chapter-one"), ("authoring_write", "chapter-two"),
+                          ("authoring_review", "review")]:
+        await store.begin_request(lease, logical, "fixture", task, metadata(logical, logical))
+        await store.finish_request(logical, "sent")
+    assert len((await store.get_execution(identity))["requests"]) == 5
+    with pytest.raises(RequestReplayBlocked):
+        await store.begin_request(lease, "same-chapter", "fixture", "authoring_write",
+                                  metadata("feedback", "chapter-one"))
+    with pytest.raises(ValueError):
+        await store.begin_request(lease, "wrong-task", "fixture", "extract", metadata())
 
 
 async def test_unknown_and_failed_calls_share_four_sends_across_lease_takeover(authoring_store):
@@ -286,21 +302,38 @@ async def test_successful_publication_is_terminal_and_bound_to_current_parent(au
     assert await store.acquire(identity) is None
     assert (await store.get_execution(identity))["result_ref"] == ref
     async with store.transaction() as conn:
-        unchanged = await (await conn.execute("SELECT * FROM tender_runs")).fetchone()
+        unchanged = await (await conn.execute("SELECT * FROM tender_analysis_runs")).fetchone()
     assert unchanged["status"] == "analysis-ready" and unchanged["domain_revision"] == 2
 
 
 @pytest.mark.parametrize("mutation", ["revision", "digest", "status", "cancelled"])
-async def test_parent_revision_change_cannot_publish_stale_outline(authoring_store, mutation):
+async def test_snapshot_publication_survives_analysis_changes_but_respects_cancellation(authoring_store, mutation):
     store = authoring_store
     identity, lease = await submitted(store)
     await parent(store)
     statements = {"revision": "domain_revision = 3", "digest": "checklist_digest = 'changed'",
                   "status": "status = 'waiting-confirmation'", "cancelled": "cancel_requested = true"}
     async with store.transaction() as conn:
-        await conn.execute("UPDATE tender_runs SET " + statements[mutation])
-    with pytest.raises(InvalidConfirmation):
-        await store.release(lease, "succeeded", result_ref=store.test_artifacts.put_json({"old": True}))
-    row = await store.get_execution(identity)
-    assert row["status"] == "running" and row["result_ref"] is None
-    await store.release(lease, "failed", error="InvalidConfirmation")
+        await conn.execute("UPDATE tender_analysis_runs SET " + statements[mutation])
+    reference = store.test_artifacts.put_json({"old": True})
+    if mutation == "cancelled":
+        with pytest.raises(Cancelled):
+            await store.release(lease, "succeeded", result_ref=reference)
+        assert (await store.get_execution(identity))["status"] == "running"
+    else:
+        row = await store.release(lease, "succeeded", result_ref=reference)
+        assert row["status"] == "succeeded" and row["authoring_input"]["domain_revision"] == 2
+
+
+async def test_exhausted_chapter_does_not_spend_another_chapters_retry_budget(authoring_store):
+    store = authoring_store
+    _, lease = await submitted(store)
+    for number in range(4):
+        await store.begin_request(lease, f"failed-{number}", "fixture", "authoring_write",
+                                  metadata(f"feedback-{number}", "first-chapter"))
+        await store.finish_request(f"failed-{number}", "sent")
+        await store.finish_request(f"failed-{number}", "failed")
+    with pytest.raises(ModelWorkUnitExhausted):
+        await store.begin_request(lease, "fifth", "fixture", "authoring_write", metadata("fifth", "first-chapter"))
+    await store.begin_request(lease, "second", "fixture", "authoring_write", metadata("second", "second-chapter"))
+    await store.finish_request("second", "sent")

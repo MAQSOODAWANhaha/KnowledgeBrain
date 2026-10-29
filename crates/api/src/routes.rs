@@ -48,7 +48,7 @@ where
     delete::<H, T, AppState>(h)
 }
 use knowledge::{
-    ApiKey, Document, ParseStatus, Product, ProductKind, ProductVersion, Role, Tag, VersionStatus,
+    ApiKey, Document, ParseStatus, Product, ProductKind, ProductVersion, Tag, VersionStatus,
     Workspace,
 };
 use platform::{is_audio_type, is_image_type, is_valid_file_type, is_video};
@@ -76,21 +76,10 @@ pub fn build(state: AppState) -> Router {
                 .merge(delete_s(delete_workspace)),
         )
         .route(
-            "/api/v1/workspaces/{id}/members",
-            get_s(list_members).merge(post_s(add_member)),
-        )
-        .route(
-            "/api/v1/workspaces/{id}/members/{user_id}",
-            patch_s(patch_member).merge(delete_s(remove_member)),
-        )
-        .route(
-            "/api/v1/workspaces/{id}/api-keys",
+            "/api/v1/api-keys",
             get_s(list_api_keys).merge(post_s(create_api_key)),
         )
-        .route(
-            "/api/v1/workspaces/{id}/api-keys/{key_id}",
-            delete_s(delete_api_key),
-        );
+        .route("/api/v1/api-keys/{key_id}", delete_s(delete_api_key));
     let knowledge_routes = Router::<AppState>::new()
         .route(
             "/api/v1/workspaces/{id}/retrieval-config",
@@ -176,6 +165,9 @@ pub fn build(state: AppState) -> Router {
         .route_layer(middleware::from_fn(knowledge_gate));
     let app = app
         .merge(knowledge_routes)
+        .merge(crate::tender_routes::router())
+        .merge(crate::tender_knowledge::router())
+        .merge(crate::tender_editor::router())
         .route("/api/v1/files", get_s(global_file))
         .route("/api/v1/system/parser-engines", get_s(list_parser_engines))
         .route(
@@ -207,16 +199,84 @@ pub fn build(state: AppState) -> Router {
     };
     let app = app.layer(tower_http::cors::CorsLayer::permissive());
     let app = if let Ok(dir) = std::env::var("KNOWLEDGEBRAIN_WEB_ROOT") {
-        let index = std::path::Path::new(&dir).join("index.html");
-        app.fallback_service(
-            tower_http::services::ServeDir::new(dir)
-                .append_index_html_on_directories(true)
-                .not_found_service(tower_http::services::ServeFile::new(index)),
-        )
+        web_files(app, &dir)
     } else {
         app
     };
     app.with_state(state)
+}
+
+fn web_files(app: Router<AppState>, dir: &str) -> Router<AppState> {
+    let index = std::path::Path::new(dir).join("index.html");
+    let navigation = tower::ServiceBuilder::new()
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::HEAD]),
+        )
+        .service(tower_http::services::ServeDir::new(
+            std::path::Path::new(dir).join("onlyoffice-navigation"),
+        ));
+    app.nest_service("/onlyoffice-navigation", navigation)
+        .fallback_service(
+            tower_http::services::ServeDir::new(dir)
+                .append_index_html_on_directories(true)
+                .not_found_service(tower_http::services::ServeFile::new(index)),
+        )
+}
+
+#[cfg(test)]
+mod navigation_static_tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn navigation_assets_allow_office_origin_without_changing_other_routes() {
+        let dir = std::env::temp_dir().join(format!("kb_navigation_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("onlyoffice-navigation")).unwrap();
+        std::fs::write(dir.join("onlyoffice-navigation/config.json"), "{}").unwrap();
+        std::fs::write(dir.join("index.html"), "app").unwrap();
+        let app = Router::<AppState>::new()
+            .route("/api/probe", get_s(|| async { "ok" }))
+            .layer(tower_http::cors::CorsLayer::permissive());
+        let app = web_files(app, dir.to_str().unwrap()).with_state(AppState {
+            jwt_secret: "test".into(),
+            bootstrap_key: String::new(),
+        });
+        let mut results = Vec::new();
+        for path in ["/onlyoffice-navigation/config.json", "/api/probe", "/"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("Origin", "http://office.example.test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            results.push((
+                response.status(),
+                response
+                    .headers()
+                    .get("access-control-allow-origin")
+                    .cloned(),
+            ));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(results.iter().all(|(status, _)| *status == StatusCode::OK));
+        assert_eq!(
+            results[0].1.as_ref().map(|value| value.as_bytes()),
+            Some(b"*".as_slice())
+        );
+        assert_eq!(
+            results[1].1.as_ref().map(|value| value.as_bytes()),
+            Some(b"*".as_slice())
+        );
+        assert!(results[2].1.is_none());
+    }
 }
 
 async fn knowledge_gate(request: Request, next: Next) -> Result<Response, ApiErr> {
@@ -302,14 +362,13 @@ async fn resolve_vid(
 pub(crate) enum Actor {
     User(Uuid),
     Key(ApiKey),
-    Bootstrap,
 }
 
 impl Actor {
-    fn user_id(&self) -> Option<Uuid> {
+    pub(crate) fn user_id(&self) -> Uuid {
         match self {
-            Self::User(id) => Some(*id),
-            _ => None,
+            Self::User(id) => *id,
+            Self::Key(key) => key.owner_user_id,
         }
     }
 }
@@ -317,7 +376,13 @@ impl Actor {
 pub(crate) async fn actor_from(headers: &HeaderMap, state: &AppState) -> Result<Actor, ApiErr> {
     if let Some(raw) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         if !state.bootstrap_key.is_empty() && raw == state.bootstrap_key {
-            return Ok(Actor::Bootstrap);
+            let username = std::env::var("KB_ADMIN_USERNAME").map_err(|_| unauthorized())?;
+            let pool = pg().await?;
+            let (id, _, _) = knowledge::find_user_by_email(&pool, username.trim())
+                .await
+                .map_err(pg_err)?
+                .ok_or_else(unauthorized)?;
+            return Ok(Actor::User(id));
         }
         let hash = platform::hash_password(raw);
         let Ok(pool) = platform::connect().await else {
@@ -339,16 +404,18 @@ pub(crate) async fn actor_from(headers: &HeaderMap, state: &AppState) -> Result<
 }
 
 async fn user_from(headers: &HeaderMap, state: &AppState) -> Result<Uuid, ApiErr> {
-    actor_from(headers, state)
-        .await?
-        .user_id()
-        .ok_or_else(unauthorized)
+    Ok(actor_from(headers, state).await?.user_id())
 }
 
-fn require_ws(_ws: Uuid, actor: &Actor, _write: bool, _admin: bool) -> Result<Role, ApiErr> {
-    match actor {
-        Actor::User(_) | Actor::Bootstrap | Actor::Key(_) => Ok(Role::Owner),
+async fn require_ws(ws: Uuid, actor: &Actor) -> Result<(), ApiErr> {
+    let pool = pg().await?;
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_workspaces WHERE id=$1 AND owner_user_id=$2 AND deleted_at IS NULL)",
+    ).bind(ws).bind(actor.user_id()).fetch_one(&pool).await.map_err(pg_err)?;
+    if !owned {
+        return Err(not_found("workspace"));
     }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -448,12 +515,12 @@ struct PatchMe {
 }
 
 impl PatchMe {
-    fn validate(&self, local_auth: bool) -> Result<(), ApiErr> {
-        if local_auth && self.email.is_some() {
+    fn validate(&self) -> Result<(), ApiErr> {
+        if self.email.is_some() {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "LOGIN_IDENTITY_IMMUTABLE",
-                "the configured local login identity cannot be changed through profile updates",
+                "the login identity cannot be changed through profile updates",
             ));
         }
         Ok(())
@@ -466,20 +533,13 @@ async fn patch_me(
     Json(body): Json<PatchMe>,
 ) -> Result<Json<MeBody>, ApiErr> {
     let uid = user_from(&headers, &state).await?;
-    // Local startup identifies the initialized account by its configured login.
-    // Reject changes before any database write so a profile edit cannot break restart.
-    body.validate(platform::ldap_url().is_empty())?;
+    // Both LDAP login and configured administrator ownership use this identity.
+    body.validate()?;
     let pool = pg().await?;
-    let (id, mut email) = knowledge::find_user_by_id(&pool, uid)
+    let (id, email) = knowledge::find_user_by_id(&pool, uid)
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("user"))?;
-    if let Some(e) = body.email {
-        email = e;
-        knowledge::update_user_email(&pool, id, &email)
-            .await
-            .map_err(pg_err)?;
-    }
     Ok(Json(MeBody { id, email }))
 }
 
@@ -502,14 +562,14 @@ async fn create_workspace(
         _ => knowledge::WorkspaceKind::ProductLine,
     };
     let pool = pg().await?;
-    if knowledge::workspace_slug_taken(&pool, &body.slug)
+    if knowledge::workspace_slug_taken(&pool, uid, &body.slug)
         .await
         .map_err(pg_err)?
     {
         return Err(fail(StatusCode::CONFLICT, "CONFLICT", "slug taken"));
     }
     if kind == knowledge::WorkspaceKind::Company
-        && knowledge::company_workspace_id(&pool)
+        && knowledge::company_workspace_id(&pool, uid)
             .await
             .map_err(pg_err)?
             .is_some()
@@ -522,15 +582,13 @@ async fn create_workspace(
     }
     let ws = Workspace {
         id: Uuid::new_v4(),
+        owner_user_id: uid,
         name: body.name,
         slug: body.slug,
         kind,
         retrieval: Default::default(),
     };
-    knowledge::insert_workspace_kind(&pool, ws.id, &ws.name, &ws.slug, ws.kind.as_str())
-        .await
-        .map_err(pg_err)?;
-    knowledge::insert_member(&pool, ws.id, uid, "owner")
+    knowledge::insert_workspace_kind(&pool, ws.id, uid, &ws.name, &ws.slug, ws.kind.as_str())
         .await
         .map_err(pg_err)?;
     Ok((StatusCode::CREATED, Json(WorkspaceView::from(&ws))))
@@ -561,15 +619,13 @@ async fn list_workspaces(
 ) -> Result<Json<Vec<WorkspaceView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = pg().await?;
-    let _ = knowledge::ensure_company_workspace(&pool).await;
-    let rows = knowledge::list_workspaces(&pool)
+    knowledge::ensure_company_workspace(&pool, actor.user_id())
+        .await
+        .map_err(pg_err)?;
+    let rows = knowledge::list_workspaces(&pool, actor.user_id())
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
-    let out = rows
-        .iter()
-        .filter(|w| require_ws(w.id, &actor, false, false).is_ok())
-        .map(WorkspaceView::from)
-        .collect();
+    let out = rows.iter().map(WorkspaceView::from).collect();
     Ok(Json(out))
 }
 
@@ -580,7 +636,7 @@ async fn get_workspace(
 ) -> Result<Json<WorkspaceView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = pg().await?;
-    require_ws(id, &actor, false, false)?;
+    require_ws(id, &actor).await?;
     let w = knowledge::load_workspace(&pool, id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
@@ -600,7 +656,7 @@ async fn patch_workspace(
     Json(body): Json<PatchWs>,
 ) -> Result<Json<WorkspaceView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     let mut w = knowledge::load_workspace(&pool, id)
         .await
@@ -637,7 +693,7 @@ async fn delete_workspace(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     let vids = knowledge::version_ids_for_workspace(&pool, id)
         .await
@@ -654,116 +710,13 @@ async fn delete_workspace(
     Ok(StatusCode::ACCEPTED)
 }
 
-#[derive(Serialize)]
-struct MemberView {
-    user_id: Uuid,
-    role: Role,
-}
-
-async fn list_members(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Vec<MemberView>>, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, false)?;
-    let pool = pg().await?;
-    let rows = knowledge::list_members_for_workspace(&pool, id)
-        .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
-    let out = rows
-        .into_iter()
-        .map(|(user_id, role)| MemberView {
-            user_id,
-            role: knowledge::Role::parse(&role),
-        })
-        .collect();
-    Ok(Json(out))
-}
-
-#[derive(Deserialize)]
-struct AddMember {
-    user_id: Uuid,
-    role: Role,
-}
-
-async fn add_member(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-    Json(body): Json<AddMember>,
-) -> Result<StatusCode, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
-    let pool = pg().await?;
-    knowledge::load_workspace(&pool, id)
-        .await
-        .map_err(pg_err)?
-        .ok_or_else(|| not_found("workspace"))?;
-    knowledge::insert_member(&pool, id, body.user_id, role_name(body.role))
-        .await
-        .map_err(pg_err)?;
-    Ok(StatusCode::CREATED)
-}
-
-#[derive(Deserialize)]
-struct PatchMember {
-    role: Role,
-}
-
-fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::Owner => "owner",
-        Role::Admin => "admin",
-        Role::Contributor => "contributor",
-        Role::Viewer => "viewer",
-    }
-}
-
-async fn patch_member(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, user_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<PatchMember>,
-) -> Result<StatusCode, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
-    let pool = pg().await?;
-    knowledge::load_workspace(&pool, id)
-        .await
-        .map_err(pg_err)?
-        .ok_or_else(|| not_found("workspace"))?;
-    knowledge::upsert_member(&pool, id, user_id, role_name(body.role))
-        .await
-        .map_err(pg_err)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn remove_member(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, user_id)): Path<(Uuid, Uuid)>,
-) -> Result<StatusCode, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
-    let pool = pg().await?;
-    knowledge::load_workspace(&pool, id)
-        .await
-        .map_err(pg_err)?
-        .ok_or_else(|| not_found("workspace"))?;
-    knowledge::delete_member(&pool, id, user_id)
-        .await
-        .map_err(pg_err)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn get_retrieval(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<knowledge::RetrievalConfig>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, false)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     let w = knowledge::load_workspace(&pool, id)
         .await
@@ -779,7 +732,7 @@ async fn patch_retrieval(
     Json(body): Json<knowledge::RetrievalConfig>,
 ) -> Result<Json<knowledge::RetrievalConfig>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     knowledge::load_workspace(&pool, id)
         .await
@@ -840,7 +793,7 @@ async fn list_products(
     Query(q): Query<KindQ>,
 ) -> Result<Json<Vec<ProductView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, false)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     let rows = knowledge::list_products_in_workspace(&pool, id)
         .await
@@ -864,7 +817,7 @@ async fn create_product(
     Json(body): Json<NewProduct>,
 ) -> Result<(StatusCode, Json<ProductView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, true, false)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     let (view, pid, pname, pslug, pkind) = {
         if knowledge::product_slug_taken(&pool, id, &body.slug)
@@ -923,7 +876,7 @@ async fn get_product(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     Ok(Json(ProductView::from(&p)))
 }
 
@@ -944,7 +897,7 @@ async fn patch_product(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, true)?;
+    require_ws(p.workspace_id, &actor).await?;
     if let Some(name) = body.name {
         p.name = name;
         knowledge::update_product_name(&pool, id, &p.name)
@@ -965,7 +918,7 @@ async fn delete_product(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, true)?;
+    require_ws(p.workspace_id, &actor).await?;
     if p.kind == ProductKind::Library && p.slug == "library" {
         return Err(fail(
             StatusCode::FORBIDDEN,
@@ -1078,7 +1031,7 @@ async fn list_versions(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     let versions = knowledge::list_versions_for_product(&pool, id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
@@ -1101,7 +1054,7 @@ async fn create_version(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, true, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     if knowledge::version_label_taken(&pool, id, &body.label)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
@@ -1109,6 +1062,9 @@ async fn create_version(
         return Err(fail(StatusCode::CONFLICT, "CONFLICT", "label taken"));
     }
     let clone_from = body.clone_from;
+    if let Some(source) = clone_from {
+        resolve_vid(&pool, id, &source.to_string()).await?;
+    }
     let make_current = body.make_current;
     let diffs: Vec<serde_json::Value> = body
         .diffs
@@ -1127,9 +1083,16 @@ async fn create_version(
             .await
             .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
     } else {
-        knowledge::insert_version(&pool, view_id, id, &label, "active", None)
-            .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
+        knowledge::insert_version(
+            &pool,
+            view_id,
+            id,
+            &label,
+            knowledge::VersionStatus::Active,
+            None,
+        )
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
     }
     let mut current = p.current_version_id;
     if current.is_none() {
@@ -1161,7 +1124,7 @@ async fn get_version(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     let vid = knowledge::resolve_product_version_id(&pool, id, &version_id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
@@ -1208,15 +1171,6 @@ struct PatchVersion {
     question_count: Option<usize>,
     question_custom_instructions: Option<String>,
     table_metadata_instructions: Option<String>,
-}
-
-fn version_status_str(st: VersionStatus) -> &'static str {
-    match st {
-        VersionStatus::Cloning => "cloning",
-        VersionStatus::Active => "active",
-        VersionStatus::Archived => "archived",
-        VersionStatus::Failed => "failed",
-    }
 }
 
 fn apply_patch_version(v: &mut ProductVersion, body: &PatchVersion) {
@@ -1305,7 +1259,7 @@ fn apply_patch_version(v: &mut ProductVersion, body: &PatchVersion) {
 
 fn version_config_of(v: &ProductVersion) -> knowledge::VersionConfig {
     knowledge::VersionConfig {
-        status: Some(version_status_str(v.status).into()),
+        status: Some(v.status),
         chunking: Some(json!({
             "chunk_size": v.chunk_size,
             "chunk_overlap": v.chunk_overlap,
@@ -1356,7 +1310,7 @@ async fn patch_version(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, true)?;
+    require_ws(p.workspace_id, &actor).await?;
     let vid = resolve_vid(&pool, id, &version_id).await?;
     let mut v = knowledge::load_version(&pool, vid)
         .await
@@ -1408,7 +1362,7 @@ async fn delete_version(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, true)?;
+    require_ws(p.workspace_id, &actor).await?;
     let vid = knowledge::resolve_product_version_id(&pool, id, &version_id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
@@ -1416,7 +1370,7 @@ async fn delete_version(
     knowledge::cancel_active_docs_for_versions(&pool, &[vid])
         .await
         .map_err(pg_err)?;
-    knowledge::set_version_status(&pool, vid, "archived")
+    knowledge::set_version_status(&pool, vid, knowledge::VersionStatus::Archived)
         .await
         .map_err(pg_err)?;
     knowledge::clear_product_current_if(&pool, id, vid)
@@ -1443,7 +1397,7 @@ async fn set_current(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, true)?;
+    require_ws(p.workspace_id, &actor).await?;
     let v = knowledge::load_version(&pool, body.version_id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
@@ -1481,7 +1435,7 @@ struct DocView {
     file_name: String,
     object_ref: String,
     parse_status: ParseStatus,
-    enable_status: String,
+    enable_status: knowledge::EnableStatus,
     index_ready: bool,
     pending_subtasks_count: i32,
     error_message: String,
@@ -1497,7 +1451,7 @@ impl DocView {
             file_name: d.file_name.clone(),
             object_ref: d.object_ref.clone(),
             parse_status: d.parse_status,
-            enable_status: d.enable_status.clone(),
+            enable_status: d.enable_status,
             index_ready: d.index_ready,
             pending_subtasks_count: d.pending_subtasks_count,
             error_message: d.error_message.clone(),
@@ -1519,7 +1473,7 @@ fn write_active_status(status: VersionStatus) -> Result<(), ApiErr> {
 
 #[derive(Deserialize)]
 struct DocListQ {
-    parse_status: Option<String>,
+    parse_status: Option<ParseStatus>,
     tag: Option<Uuid>,
     keyword: Option<String>,
 }
@@ -1536,21 +1490,16 @@ async fn list_documents(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
-    let vid = if version_id == "current" {
-        p.current_version_id.ok_or_else(|| not_found("version"))?
-    } else {
-        Uuid::parse_str(&version_id).map_err(|_| validation("version_id"))?
-    };
+    require_ws(p.workspace_id, &actor).await?;
+    let vid = resolve_vid(&pool, id, &version_id).await?;
     let keyword = q
         .keyword
         .as_deref()
         .map(|k| k.trim())
         .filter(|k| !k.is_empty());
-    let rows =
-        knowledge::list_documents_in_version(&pool, vid, q.parse_status.as_deref(), keyword, q.tag)
-            .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
+    let rows = knowledge::list_documents_in_version(&pool, vid, q.parse_status, keyword, q.tag)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
     let out = rows.iter().map(DocView::from).collect();
     Ok(Json(out))
 }
@@ -1699,7 +1648,7 @@ async fn ingest_prepared(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, actor, true, false)?;
+    require_ws(p.workspace_id, actor).await?;
     let vid = resolve_vid(&pool, product_id, version_id).await?;
     let version = knowledge::load_version(&pool, vid)
         .await
@@ -2051,7 +2000,7 @@ async fn get_document(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, false, false)?;
+    require_ws(ws, &actor).await?;
     Ok(Json(DocView::from(&d)))
 }
 
@@ -2070,7 +2019,7 @@ async fn document_content(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, false, false)?;
+    require_ws(ws, &actor).await?;
     let mut chunks = knowledge::load_document_chunks(&pool, id)
         .await
         .map_err(pg_err)?;
@@ -2122,9 +2071,9 @@ async fn delete_document(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, true, false)?;
+    require_ws(ws, &actor).await?;
     let _ = d;
-    knowledge::set_parse_status(&pool, id, "deleting", "")
+    knowledge::set_parse_status(&pool, id, knowledge::ParseStatus::Deleting, "")
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
     require_enqueued(platform::enqueue_list_delete(id).await, "document deletion")?;
@@ -2153,7 +2102,7 @@ async fn reparse_document(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, true, false)?;
+    require_ws(ws, &actor).await?;
     let v = knowledge::load_version(&pool, doc.product_version_id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
@@ -2178,7 +2127,7 @@ async fn reparse_document(
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
     doc.attempt = attempt;
     doc.parse_status = ParseStatus::Pending;
-    doc.enable_status = "disabled".into();
+    doc.enable_status = knowledge::EnableStatus::Disabled;
     require_enqueued(
         platform::enqueue_list_reparse(id, attempt).await,
         "document reparse",
@@ -2201,8 +2150,8 @@ async fn cancel_document(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, true, false)?;
-    knowledge::set_parse_status(&pool, id, "cancelled", "")
+    require_ws(ws, &actor).await?;
+    knowledge::set_parse_status(&pool, id, knowledge::ParseStatus::Cancelled, "")
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
     doc.parse_status = ParseStatus::Cancelled;
@@ -2230,8 +2179,8 @@ async fn timeline(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, false, false)?;
-    let parse_status = d.parse_status.as_str().to_string();
+    require_ws(ws, &actor).await?;
+    let parse_status = d.parse_status;
     let err_msg = d.error_message.clone();
     let mut latest = knowledge::latest_span_attempt(&pool, id)
         .await
@@ -2247,7 +2196,7 @@ async fn timeline(
         .map(|r| r.into_span())
         .collect();
     let (trace, current_stage, last_fail) =
-        knowledge::obs::build_trace(attempt, &parse_status, &rows);
+        knowledge::obs::build_trace(attempt, parse_status, &rows);
     let last_error = last_fail
         .map(|f| {
             json!({
@@ -2257,7 +2206,7 @@ async fn timeline(
             })
         })
         .or_else(|| {
-            if parse_status == "failed" && !err_msg.is_empty() {
+            if parse_status == ParseStatus::Failed && !err_msg.is_empty() {
                 Some(json!({
                     "stage": knowledge::obs::ROOT_NAME,
                     "code": "PARSE_FAILED",
@@ -2290,7 +2239,7 @@ async fn list_tags(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Tag>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, false)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     knowledge::load_workspace(&pool, id)
         .await
@@ -2309,7 +2258,7 @@ async fn create_tag(
     Json(body): Json<NewTag>,
 ) -> Result<(StatusCode, Json<Tag>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, true, false)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     knowledge::load_workspace(&pool, id)
         .await
@@ -2333,7 +2282,7 @@ async fn delete_tag(
     Path((id, tag_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
+    require_ws(id, &actor).await?;
     let pool = pg().await?;
     let tag = knowledge::load_tag(&pool, tag_id)
         .await
@@ -2367,7 +2316,7 @@ async fn put_tags(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("document"))?;
-    require_ws(ws, &actor, true, false)?;
+    require_ws(ws, &actor).await?;
     let kept = knowledge::tags_in_workspace(&pool, ws, &body.tag_ids)
         .await
         .map_err(pg_err)?;
@@ -2388,7 +2337,7 @@ async fn wiki_pages(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     let version = resolve_vid(&pool, id, &vid).await?;
     let pages = knowledge::list_wiki_pages(&pool, version)
         .await
@@ -2407,7 +2356,7 @@ async fn wiki_page(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     let version = resolve_vid(&pool, id, &vid).await?;
     knowledge::load_wiki_page(&pool, version, &slug)
         .await
@@ -2427,7 +2376,7 @@ async fn wiki_folders(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     let version = resolve_vid(&pool, id, &vid).await?;
     let folders = knowledge::list_wiki_folders(&pool, version)
         .await
@@ -2466,7 +2415,7 @@ async fn version_file(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     let version = resolve_vid(&pool, id, &vid).await?;
     let allowed = knowledge::version_references_object(&pool, version, &key, hash)
         .await
@@ -2553,27 +2502,16 @@ async fn patch_model(
 }
 
 pub(crate) async fn require_admin(_state: &AppState, actor: &Actor) -> Result<(), ApiErr> {
-    let admin = match actor {
-        Actor::Bootstrap => true,
-        Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
-        Actor::User(uid) => {
-            if let Ok(pool) = platform::connect().await {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM workspace_members
-                        WHERE user_id=$1 AND role IN ('owner','admin')
-                     )",
-                )
-                .bind(uid)
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(false)
-            } else {
-                false
-            }
-        }
-    };
-    if !admin {
+    let username = std::env::var("KB_ADMIN_USERNAME").unwrap_or_default();
+    let pool = pg().await?;
+    let admin: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM platform_users WHERE id=$1 AND email=$2)")
+            .bind(actor.user_id())
+            .bind(username.trim())
+            .fetch_one(&pool)
+            .await
+            .map_err(pg_err)?;
+    if username.trim().is_empty() || !admin {
         return Err(forbidden());
     }
     Ok(())
@@ -2610,7 +2548,7 @@ async fn do_search(
     headers: HeaderMap,
     Json(mut req): Json<knowledge::search::SearchRequest>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    let _actor = actor_from(&headers, &state).await?;
+    let actor = actor_from(&headers, &state).await?;
     if req.scope.is_some() {
         req.expand_wiki = false;
         req.expand_graph = false;
@@ -2621,14 +2559,14 @@ async fn do_search(
     }
     let pool = pg().await?;
     if req.mode == "matching" {
-        let out = knowledge::search::matching_pg(&pool, &req)
+        let out = knowledge::search::matching_pg(&pool, &req, actor.user_id())
             .await
             .map_err(map_search)?;
         let v = serde_json::to_value(&out).unwrap();
         assert!(v.get("best_product_id").is_none());
         return Ok(Json(v));
     }
-    let out = knowledge::search::assembly_pg(&pool, &req)
+    let out = knowledge::search::assembly_pg(&pool, &req, actor.user_id())
         .await
         .map_err(map_search)?;
     Ok(Json(serde_json::to_value(&out).unwrap()))
@@ -2639,7 +2577,7 @@ async fn do_match(
     headers: HeaderMap,
     Json(mut req): Json<knowledge::search::SearchRequest>,
 ) -> Result<Json<knowledge::search::MatchingResponse>, ApiErr> {
-    let _actor = actor_from(&headers, &state).await?;
+    let actor = actor_from(&headers, &state).await?;
     req.mode = "matching".into();
     if req.scope.is_some() {
         req.expand_wiki = false;
@@ -2647,7 +2585,7 @@ async fn do_match(
         req.include_library = false;
     }
     let pool = pg().await?;
-    let out = knowledge::search::matching_pg(&pool, &req)
+    let out = knowledge::search::matching_pg(&pool, &req, actor.user_id())
         .await
         .map_err(map_search)?;
     debug_assert!(
@@ -2702,7 +2640,7 @@ async fn do_answer(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("product"))?;
-    require_ws(p.workspace_id, &actor, false, false)?;
+    require_ws(p.workspace_id, &actor).await?;
     if p.current_version_id.is_none() {
         return Err(validation("product has no current version"));
     }
@@ -2727,7 +2665,7 @@ async fn do_answer(
         group_by: "none".into(),
         tender_text: None,
     };
-    let assembled = knowledge::search::assembly_pg(&pool, &sreq)
+    let assembled = knowledge::search::assembly_pg(&pool, &sreq, actor.user_id())
         .await
         .map_err(map_search)?;
     let model = knowledge::current_summary_model(&pool, body.product_id)
@@ -2773,16 +2711,9 @@ async fn list_queues(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewApiKey {
     name: String,
-    #[serde(default = "default_scope_workspace")]
-    scope_type: String,
-    scope_id: Option<Uuid>,
-    scopes: Vec<String>,
-}
-
-fn default_scope_workspace() -> String {
-    "workspace".into()
 }
 
 #[derive(Serialize)]
@@ -2790,63 +2721,28 @@ struct ApiKeyView {
     id: Uuid,
     name: String,
     prefix: String,
-    scope_type: String,
-    scope_id: Uuid,
-    scopes: Vec<String>,
+    owner_user_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
-}
-
-fn valid_scopes(scopes: &[String]) -> bool {
-    !scopes.is_empty()
-        && scopes
-            .iter()
-            .all(|s| matches!(s.as_str(), "ingest" | "search" | "admin"))
 }
 
 async fn create_api_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
     Json(body): Json<NewApiKey>,
 ) -> Result<(StatusCode, Json<ApiKeyView>), ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    if !valid_scopes(&body.scopes) {
-        return Err(validation("scopes must be ingest|search|admin"));
+    let uid = user_from(&headers, &state).await?;
+    if body.name.trim().is_empty() {
+        return Err(validation("name required"));
     }
-    if body.scope_type != "workspace" && body.scope_type != "product" {
-        return Err(validation("scope_type must be workspace or product"));
-    }
-    require_ws(id, &actor, false, true)?;
     let pool = pg().await?;
-    knowledge::load_workspace(&pool, id)
-        .await
-        .map_err(pg_err)?
-        .ok_or_else(|| not_found("workspace"))?;
-    let scope_id = if body.scope_type == "workspace" {
-        id
-    } else {
-        let pid = body
-            .scope_id
-            .ok_or_else(|| validation("scope_id required"))?;
-        let p = knowledge::load_product(&pool, pid)
-            .await
-            .map_err(pg_err)?
-            .ok_or_else(|| not_found("product"))?;
-        if p.workspace_id != id {
-            return Err(forbidden());
-        }
-        pid
-    };
     let raw = format!("kb_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let key = ApiKey {
         id: Uuid::new_v4(),
         name: body.name,
         key_hash: platform::hash_password(&raw),
         prefix: raw.chars().take(10).collect(),
-        scope_type: body.scope_type,
-        scope_id,
-        scopes: body.scopes,
+        owner_user_id: uid,
     };
     knowledge::insert_api_key(
         &pool,
@@ -2855,9 +2751,7 @@ async fn create_api_key(
             name: &key.name,
             key_hash: &key.key_hash,
             prefix: &key.prefix,
-            scope_type: &key.scope_type,
-            scope_id: key.scope_id,
-            scopes: &key.scopes,
+            owner_user_id: uid,
         },
     )
     .await
@@ -2868,9 +2762,7 @@ async fn create_api_key(
             id: key.id,
             name: key.name,
             prefix: key.prefix,
-            scope_type: key.scope_type,
-            scope_id: key.scope_id,
-            scopes: key.scopes,
+            owner_user_id: uid,
             token: Some(raw),
         }),
     ))
@@ -2879,53 +2771,41 @@ async fn create_api_key(
 async fn list_api_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ApiKeyView>>, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
+    let uid = user_from(&headers, &state).await?;
     let pool = pg().await?;
-    let out = knowledge::list_api_keys_for_workspace(&pool, id)
+    let keys = knowledge::list_api_keys_for_user(&pool, uid)
         .await
-        .map_err(pg_err)?
-        .into_iter()
-        .map(|k| ApiKeyView {
-            id: k.id,
-            name: k.name,
-            prefix: k.prefix,
-            scope_type: k.scope_type,
-            scope_id: k.scope_id,
-            scopes: k.scopes,
-            token: None,
-        })
-        .collect();
-    Ok(Json(out))
+        .map_err(pg_err)?;
+    Ok(Json(
+        keys.into_iter()
+            .map(|key| ApiKeyView {
+                id: key.id,
+                name: key.name,
+                prefix: key.prefix,
+                owner_user_id: uid,
+                token: None,
+            })
+            .collect(),
+    ))
 }
 
 async fn delete_api_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((id, key_id)): Path<(Uuid, Uuid)>,
+    Path(key_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_ws(id, &actor, false, true)?;
+    let uid = user_from(&headers, &state).await?;
     let pool = pg().await?;
-    let k = knowledge::load_api_key(&pool, key_id)
-        .await
-        .map_err(pg_err)?
-        .ok_or_else(|| not_found("api_key"))?;
-    let owned = k.scope_type == "workspace" && k.scope_id == id
-        || k.scope_type == "product"
-            && knowledge::load_product(&pool, k.scope_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|p| p.workspace_id == id);
-    if !owned {
-        return Err(not_found("api_key"));
-    }
-    knowledge::delete_api_key(&pool, key_id)
+    let result = sqlx::query("DELETE FROM platform_api_keys WHERE id=$1 AND owner_user_id=$2")
+        .bind(key_id)
+        .bind(uid)
+        .execute(&pool)
         .await
         .map_err(pg_err)?;
+    if result.rows_affected() == 0 {
+        return Err(not_found("api_key"));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2934,9 +2814,33 @@ async fn global_file(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Result<Vec<u8>, ApiErr> {
-    let _actor = actor_from(&headers, &state).await?;
-    let hash = q.key.trim_start_matches("objects/");
-    if hash.is_empty() {
+    let actor = actor_from(&headers, &state).await?;
+    let hash = q.key.strip_prefix("objects/").unwrap_or(&q.key);
+    if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(not_found("file"));
+    }
+    let object = format!("objects/{hash}");
+    let pool = pg().await?;
+    // Every download must resolve through a resource owned by the authenticated user.
+    let allowed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM knowledge_documents d JOIN knowledge_product_versions v ON v.id=d.product_version_id
+           JOIN knowledge_products p ON p.id=v.product_id JOIN knowledge_workspaces w ON w.id=p.workspace_id
+           WHERE d.object_ref=$1 AND w.owner_user_id=$2 AND w.deleted_at IS NULL AND d.deleted_at IS NULL
+           UNION ALL
+           SELECT 1 FROM knowledge_image_artifact_revisions i JOIN knowledge_documents d ON d.id=i.document_id
+           JOIN knowledge_product_versions v ON v.id=d.product_version_id JOIN knowledge_products p ON p.id=v.product_id
+           JOIN knowledge_workspaces w ON w.id=p.workspace_id
+           WHERE i.object_ref=$1 AND w.owner_user_id=$2 AND w.deleted_at IS NULL AND d.deleted_at IS NULL
+           UNION ALL
+           SELECT 1 FROM tender_documents d JOIN tender_projects p ON p.id=d.project_id
+           WHERE d.object_ref=$1 AND p.owner_user_id=$2
+           UNION ALL
+           SELECT 1 FROM tender_draft_versions v JOIN tender_projects p ON p.id=v.project_id
+           WHERE v.object_ref=$1 AND p.owner_user_id=$2
+         )",
+    ).bind(&object).bind(actor.user_id()).fetch_one(&pool).await.map_err(pg_err)?;
+    if !allowed {
         return Err(not_found("file"));
     }
     platform::read_blob(hash).map_err(|_| not_found("file"))
@@ -2991,7 +2895,7 @@ mod required_enqueue_tests {
         reset_isolated_schema(pool)
             .await
             .expect("reset isolated test schema");
-        platform::apply_fresh_baseline(pool).await.unwrap();
+        platform::migrate_database(pool).await.unwrap();
     }
 
     #[derive(Clone)]
@@ -3106,7 +3010,7 @@ mod required_enqueue_tests {
         let seeded = knowledge::create_workspace_with_library(&pool, owner, "API race", "api-race")
             .await
             .unwrap();
-        sqlx::query("UPDATE workspaces SET kind='company' WHERE id=$1")
+        sqlx::query("UPDATE knowledge_workspaces SET kind='company' WHERE id=$1")
             .bind(seeded.workspace_id)
             .execute(&pool)
             .await
@@ -3144,8 +3048,8 @@ mod required_enqueue_tests {
         assert_eq!(first_json["id"], second_json["id"]);
         let race_document_id = Uuid::parse_str(first_json["id"].as_str().unwrap()).unwrap();
         let race_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM documents WHERE product_version_id=$1
-               AND file_name='same.txt' AND file_size=$2 AND file_hash=$3
+            "SELECT count(*) FROM knowledge_documents WHERE product_version_id=$1
+               AND file_name='same.txt' AND byte_length=$2 AND content_sha256=$3
                AND deleted_at IS NULL",
         )
         .bind(seeded.library_version_id)
@@ -3156,7 +3060,7 @@ mod required_enqueue_tests {
         .unwrap();
         assert_eq!(race_rows, 1);
         let race_span_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM document_processing_spans
+            "SELECT count(*) FROM knowledge_document_processing_spans
              WHERE document_id=$1 AND attempt=1",
         )
         .bind(race_document_id)
@@ -3188,7 +3092,7 @@ mod required_enqueue_tests {
         let outage_json = response_json(outage_response).await;
         assert_eq!(outage_json["error"]["code"], "QUEUE_UNAVAILABLE");
         let outage_document_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM documents WHERE product_version_id=$1
+            "SELECT id FROM knowledge_documents WHERE product_version_id=$1
                AND file_name='outage.txt' AND deleted_at IS NULL",
         )
         .bind(seeded.library_version_id)
@@ -3201,8 +3105,8 @@ mod required_enqueue_tests {
         let replay_json = response_json(replay_response).await;
         assert_eq!(replay_json["id"], outage_document_id.to_string());
         let outage_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM documents WHERE product_version_id=$1
-               AND file_name='outage.txt' AND file_size=$2 AND file_hash=$3
+            "SELECT count(*) FROM knowledge_documents WHERE product_version_id=$1
+               AND file_name='outage.txt' AND byte_length=$2 AND content_sha256=$3
                AND deleted_at IS NULL",
         )
         .bind(seeded.library_version_id)
@@ -3269,17 +3173,16 @@ mod local_auth_contract_tests {
     }
 
     #[test]
-    fn local_profile_updates_cannot_rename_the_bootstrapped_login() {
+    fn profile_updates_cannot_rename_login_identity() {
         for email in ["another-admin", "", " fixture-admin "] {
             let update = PatchMe {
                 email: Some(email.into()),
             };
-            let error = update.validate(true).expect_err("local login is immutable");
+            let error = update.validate().expect_err("login is immutable");
             assert_eq!(error.0, StatusCode::CONFLICT);
             assert_eq!(error.1.0.error.code, "LOGIN_IDENTITY_IMMUTABLE");
-            assert!(update.validate(false).is_ok(), "LDAP behavior is unchanged");
         }
-        assert!(PatchMe { email: None }.validate(true).is_ok());
+        assert!(PatchMe { email: None }.validate().is_ok());
     }
 
     #[tokio::test]

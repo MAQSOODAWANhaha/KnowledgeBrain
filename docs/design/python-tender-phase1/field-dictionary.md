@@ -3,11 +3,12 @@
 ## 业务协议v2（工作区已实现）
 
 **本文件是第一阶段字段名称、类型、可选性和身份语义的唯一规范。**
+数据库内部表名、存储列及外键规则另由 [数据库命名与关联约定](../database-naming.md) 定义；存储改名通过读写适配保持本文 HTTP/gRPC、LLM 和 CAS 字段合同，不把数据库列名直接暴露为新的业务字段。
 [业务工作流](business-workflow.md)规定处理顺序，其他设计文档引用本字典，不另建同义结构。
 工作区`tender/schema.py`、抽取/核验提示和五节点主线已实现v2；下文单列的v1合同仍供
 历史独立工具使用，不自动转换旧回包。v2压缩、回包容错和默认重试已部署，两类审阅身份修复后真实独立核验已恢复，新协议语义验收未完成；
 测试及部署事实以[交接](handoff.md)为准。
-下文“问题续报与按需补读”已在源码实现；可信问题来源为normalization_version=4，处置恢复出口及覆盖分级修复为5，工作单元重试与JSON反馈升为6，joint职责与阶段内调度升为7，discovery已有关系及完整并集准入升为8。部署及实测状态见交接，不改变旧执行的冻结协议。
+下文“问题续报与按需补读”已在源码实现；可信问题来源为normalization_version=4，处置恢复出口及覆盖分级修复为5，工作单元重试与JSON反馈升为6，joint职责与阶段内调度升为7，discovery已有关系及完整并集准入升为8。跨包关系核验按完整证据合批使用9；associate/joint专用合批、逐组恢复和共同反证归属使用10，完整共享来源短号稳定性为11；当前接收合同12仅规范化成员内精确空shared_findings数组。旧执行继续其冻结版本，新旧核验计划不混用。部署及实测状态见交接。
 
 第一阶段完整分析招标文件，目标为 `register → freeze → extract → verify → confirm`，
 确认后到 `analysis-ready`。输入为招标文件、附件、澄清和补遗；不引入企业响应数据、响应计划、
@@ -264,6 +265,53 @@ findings=[]、只审阅了某个 ID、人工确认或 associate 请求成功均�
 宿主在 verification_ref 下持久保存候选、关系/决议提案、独立审阅及接受结果，绑定当前版本、
 work_unit_id、input_digest 和原始产物引用。只对被有效接受的具体 issue_id 记录解决结果，
 不删除历史 Issue；来源或领域内容变化沿用修订和重验，旧确认失效。
+
+### 关联与联合核验的专用合批合同
+
+本节对应[效率修复方案](analysis-efficiency-plan.md)，适用于normalization_version=12新冻结执行的
+associate/joint合批；不转换旧执行回包。既有共同问题/续报形成的work_unit
+仍是不可拆语义依赖组，物理批次不是新的业务实体。其他抽取、review和locate合同不变。
+
+| 字段/位置 | 唯一定义 |
+| --- | --- |
+| 合批输入公共池 | schema_version、operation及完整source_views/items/relations/candidates/issues，存在时带scope_decisions；associate保留原dispositions，joint沿用dispositions=[]并另带decisions。复用现有字段含义，仅同来源身份且内容一致的副本去重，保留完整必要条件/表头/例外；宿主保持成员的原输入映射，模型无需回传 |
+| 输入 `work_units` | 原冻结批全部成员的非空数组；每项`{work_unit_id, candidate_ids, issue_ids}`，joint另有`decision_ids`。身份指向宿主保留的逻辑组，指定各组处理目标，全部公共池是模型可见依据；局部纠正/拆目标时仍保留成员及引用，不另造group_id或业务分类字段 |
+| 输入 `target_work_unit_ids` | 本次须回答的成员子集，初次associate为全部成员，joint为需核验决议的成员，局部纠正只列仍需回答者。其余成员可被共同反证明确指向，但无需重新输出结果；不是模型要回抄的覆盖清单 |
+| `work_unit_id` | 合批内不再用一个顶层值代表全部目标，每个成员有稳定的原工作单元身份；发送时映射为短引用，输出只回其必要路由号。物理request_digest及批次回执留宿主，不能借换批次重置成员尝试 |
+| associate输出 `work_units` | 每项`{work_unit_id, relations, decisions, findings}`；数组沿用当前合同且允许为空，新relation/decision身份在该成员命名空间内唯一；决议不因associate完整返回而生效 |
+| joint输出 `work_units` | 每项`{work_unit_id, accepted_decision_ids, findings}`；accepted_decision_ids是语义接受选择，保留；不新增模型誊写的reviewed名单，宿主从有效成员结果及实际发送回执派生执行覆盖，不据此宣称语义完整 |
+| 输出 `shared_findings` | 必填数组，无值为`[]`；每项`{work_unit_ids: 非空string[], finding: Issue}`。用于跨组意见或对本次目标外兄弟组的意见，明确引用输入work_units中的成员，可包括此前已成功且此次不待回答的组；Issue自身结构不扩充，仅针对当前一个目标的意见放该组findings |
+
+两个输出外层均带schema_version，成员结果只须覆盖target_work_unit_ids指定的目标。
+接收端仅可在成员视图中省略精确的`shared_findings=[]`冗余，不修改原始物理回包。
+非空或错误类型仍以具体字段拒收，反馈要求保留内容并在外层明确`work_unit_ids`；
+不得自动搬移、猜测共同意见的归属或忽略其他额外字段。外层真实共同意见及兄弟组结果
+保持原合同。版本12不改变发送载荷、Prompt或重试额度，旧版本11冻结执行不热替换。
+先取得正常完成的完整JSON，再分别校验公共归属与
+成员结果；不把所有成员绑成一个不可分的schema接受结果，也不从半截JSON提取成功组。
+局部finding保留原组内整体接受逻辑；共同finding只作用于模型明确列出的组，宿主不得
+从共享item/range猜测传播范围。阶段最终汇总须应用全部明确归属的共同意见，后续反证
+指向此前成功组时按既有规则排除其受影响决议接受并保留未决，原成功回执不改写；不为
+该语义意见自动启动新的修复循环。无归属或未知组的共同意见不能静默丢弃或先放行潜在
+受影响组；保留原回包和具体错误，在同一剩余额度内纠正，耗尽后留未决及原恢复出口。
+
+joint及局部纠正保留associate实际可见的完整公共依据和必要提案/反证，不按最终引用
+缩回旧私有来源。joint目标可在预算不足时拆批，语义组不拆；完整单组仍超限走既有
+修订出口。首版不支持组内逐决议部分接受，也不引入新的模型调度或递归补读。
+
+宿主沿现有CAS/产物表保存公共依据、逐组结果和对应原始模型回执引用。结果摘要绑定
+实际任务与完整共享依据、Prompt/模型/协议，整份计划只作导航；尝试按稳定逻辑目标
+累计，批次、反馈、缺组重试和拆批均不能重置首次加三次额度。发送前原事务核对全部
+成员额度和在途身份；重启先重放成功物理回包，补齐未保存的成员，随后才能规划新调用。
+传输succeeded不等于业务接受，不清缓存或更改旧传输状态来获得新答案。
+
+核验结果的历史统计counts.model_calls仅表示完成的规划请求数，含复用且不展开纠正；
+operation_refs仍按逻辑组保存，并可附batch_ref追溯实际共同依据。真实付费调用、重试、
+未知usage和耗时必须从model_requests的发送记录及供应商usage统计，不用这两个计数替代。
+
+本节不新增主节点、RunStatus或数据库任务表。共享提示变动按完整摘要计算失效范围，
+升级使用新冻结运行，不在当前运行中混用新外层和旧回包。容量及重跑公式见方案；实际
+部署/真实验收只记交接，旧“共读暂列备选”描述属于此前已实现的小修订范围。
 
 ### 跨源候选发现与联合审阅
 
@@ -651,40 +699,33 @@ joint空列表是否足够仍待定向真实调用。即使无通用查漏目标
 继续在本字典定义，不提前为尚未验证的用例建立完整字段体系。原五节点、模型回包和确认
 协议保持原义，不复用历史v1响应计划。下列输入由宿主产生，不发送给LLM要求其回填。
 
+以下为本次实施合同。编制固定当前可读资料，不要求分析已确认；分析五节点的
+核验、确认与补遗接受语义不变。入口、上下文、恢复、心跳和发布一起遵守此边界。
+
 ### AuthoringInput
 
-| 字段 | 类型 | 必填 | 含义 |
-| --- | --- | --- | --- |
-| `schema_version` | 整数2 | 是 | 当前统一分析合同的引用输入，不另加编制输入版本配置 |
-| `run_id` | Identity | 是 | 所消费的分析运行 |
-| `source_version` | PositiveInt | 是 | 所消费的来源版本 |
-| `domain_revision` | PositiveInt | 是 | 所消费的领域修订 |
-| `checklist_digest` | Digest | 是 | 分析与确认的既有清单摘要，算法沿用verify，不重新定义摘要序列化 |
-| `frozen_ref` | ArtifactRef | 是 | 当前来源冻结产物；原文、原表格及必要背景按引用读取 |
-| `pack_plan_ref` | ArtifactRef | 是 | 当前分析分包索引及scope_decisions；片段定位须经过既有selector还原 |
-| `items_ref` | ArtifactRef | 是 | 全部抽取产物索引，不代表全部原事项仍然有效 |
-| `verification_ref` | ArtifactRef | 是 | 有效决议、关系核验状态、问题及覆盖的既有核验产物 |
-| `confirmation_ref` | ArtifactRef | 是 | 当前修订的既有confirm产物；人工意见从中读取，不新增确认状态 |
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `schema_version` | 整数2 | 统一合同版本 |
+| `run_id`、`source_version`、`domain_revision` | 沿用RunIdentity | 本次消费的分析版本 |
+| `checklist_digest` | Digest或null | 实际存在的分析摘要，未形成时为空 |
+| `frozen_ref`、`pack_plan_ref`、`items_ref`、`verification_ref`、`confirmation_ref` | ArtifactRef或null | 当前可读的来源、计划、抽取索引、核验和确认产物；缺失/不可读不伪造 |
+| `extract_refs` | ArtifactRef[]，默认空 | 抽取根未形成时已完成子包的固定引用 |
+| `issues` | AuthoringInputIssue[]，默认空 | `{code:Text,detail:Text}`，当前资料可用性说明，不增加blocking字段 |
 
-`read_authoring_input(store, artifacts, *, run_id, source_version, domain_revision, checklist_digest)`
-是Python内部只读函数。调用者显式固定预期版本和摘要；当前运行须已analysis-ready、未取消，
-且与预期一致。只从该运行的当前修订回执取根产物，冻结来源取领域修订0；历史产物和
-相同stage的子包不替代根产物。各引用经现有CAS校验，分包来源及run_identity、核验的
-items_ref、原算法复算的清单摘要、确认产物和持久确认记录须一致。
-核验hard_blocking须为false，但不因已由人工处理的语义问题仍有blocking=true而拒绝读取。
-frozen、pack-plan、extract索引及verify根产物须为schema_version=2；confirm沿既有payload，
-没有schema_version。不要求兼容v2产物的normalization_version等于当前执行版本。
-
-读取错误沿现有InvalidConfirmation或ArtifactIntegrityError返回，不修改分析状态或添加
-业务门禁。未确认时先完成既有确认；版本过期时重新获取当前分析，尚未确认时完成既有确认；产物缺失或损坏
-时从原产物恢复后重读，不能让LLM重写来源或用历史回执代替。只读结果是绑定版本的快照，
-不是执行租约；将来启动编制时仍须核对当前版本，不能凭一次读取长期授权旧稿。
+`read_authoring_input`开始时核对请求的来源/领域版本；checklist_digest可省略。
+对当前修订可读根及部分抽取回执建立不可变输入。原文有而分析缺少时仍可组织/写作，
+来源全部缺少时保留待补位置，不虚构招标要求。损坏引用不能充当有效来源。
+稳定execution_id恢复时沿用已固定输入，不重新抓取或静默替换；后续分析修订不使旧输入
+作废，旧产物继续标记真实版本。执行期间保留取消、独立租约及存储围栏检查；不重复
+以确认、当前清单或业务缺口作为发布门禁。新资料用新执行版本生成，保留旧产物。
 
 ### 按需装载与事实保留
 
-- 有效事项复用`current_items`。其既有条目为`{item_ref,item,decision_ids?}`或
+- 核验产物及其依赖可读时，有效事项复用`current_items`。其既有条目为`{item_ref,item,decision_ids?}`或
   `{item_ref,decision_id,effective_rule}`；二者均须保留。effective_rule只携带已接受决议明确
   保留的text/scope/evidence，不继承原项的numbers/scoring等可选值，不重造item_id。
+  核验投影不可读时使用已有抽取事项，并明确标记未核验及补遗待核；不能把原抽取当作有效投影。
 - 关系从verification的relations_ref读取，并保留unverified_relation_ids；决议从decisions_ref
   读取，并保留accepted_decision_ids。只有既有接受规则决定补遗投影，读取和人工确认不改变核验状态。
 - 问题保留issues/all_issues及确认中的issue_resolutions；acknowledged表示知悉并保留，
@@ -699,8 +740,8 @@ frozen、pack-plan、extract索引及verify根产物须为schema_version=2；con
 
 ## Python大纲与响应位置（T2）
 
-本批先实现可注入执行端的Python内部领域函数`organize_outline`：调用T1核对当前已确认版本，
-装载有效规则及必要原文，向执行端交付完整请求和回包校验函数，保存CAS大纲产物。
+可注入执行端的Python内部领域函数`organize_outline`读取T1可用快照或消费执行根已固定的输入，
+装载已有事项、可读有效投影及必要原文，向执行端交付完整请求和回包校验函数，保存CAS大纲产物。
 不接旧v1 Plan，不修改分析Task、提示快照或五节点；领域函数不持有付费执行及恢复上下文，
 由下节独立执行入口负责，不能借用已完成分析的租约。执行端负责完整请求发送及首次加三次的统一
 失败/纠正重试；本函数不再套一层重试。测试执行端不能替代真实持久执行验收。
@@ -711,13 +752,16 @@ frozen、pack-plan、extract索引及verify根产物须为schema_version=2；con
 | --- | --- | --- |
 | EffectiveItemRef | item_ref: ItemRef；decision_id?: Identity；rule_index?: NonnegativeInt | 原项直接引用；局部保留分支同时提供decision_id和retained_rules的零起始rule_index，不复制规则正文；同一决议可保留多条规则 |
 | SourceUnitRef | source_index_ref: ArtifactRef；unit_id: Identity | 指向冻结原生unit，含完整固定文字、原表格grid及定位；document_id、原件和raw_ref由索引读取，不重复保存 |
-| ResponseTarget | target_id: Identity；kind: narrative/form/attachment；purpose: Text；rule_refs: EffectiveItemRef[]；source_refs: SourceUnitRef[] | 正文、规定格式/表格或证明附件位置。kind不代表业务领域或完成状态；同一规则可对应多个位置，评分规则也用同一引用 |
+| ResponseTarget | target_id: Identity；kind: narrative/form/attachment；purpose: Text；rule_refs: EffectiveItemRef[]；source_refs: SourceUnitRef[]；manual_fill: bool=false | 正文、规定格式/表格或证明附件位置。manual_fill为true时保留原表/字段由人工填写最终值，宿主不对该位置请求正文；不是审批门禁。同一规则可对应多个位置，评分规则也用同一引用 |
 | OutlineChapter | chapter_id: Identity；title: Text；targets: ResponseTarget[]；children: OutlineChapter[] | 有序章节树。章节和位置身份由宿主按路径产生，不要求模型生成或回抄；分组标题可没有targets |
 | OutlineIssue | code: Text；detail: Text；rule_refs: EffectiveItemRef[]；target_id?: Identity | 具体待处理事项；不新增blocking状态或再次确认流程，语义疑点、未分配规则及模板定位缺口都不能因保存大纲而视为解决 |
-| AuthoringOutline | schema_version: 整数2；authoring_input: AuthoringInput；chapters: OutlineChapter[]；issues: OutlineIssue[] | 绑定本次已确认分析。原分析问题、人工意见、关系核验状态继续从输入引用读取，不复制或改写台账 |
+| AuthoringOutline | schema_version: 整数2；authoring_input: AuthoringInput；chapters: OutlineChapter[]；issues: OutlineIssue[] | 绑定本次固定可用快照，未确认状态不因生成大纲而改变。原分析问题、人工意见、关系核验状态继续从输入引用读取，不复制或改写台账 |
 
-上述字段除`?`外均必填；数组可以为空，空rule_refs的响应位置须有具体未绑定问题，不伪造要求。
-局部保留引用不继承旧项scoring等字段。章节/位置身份只在本产物内有效，不能跨大纲修订按
+上述字段除`?`或已注明默认值外均必填；数组可以为空。空rule_refs的位置可由真实
+source_refs/template_refs或已解析的纯参见支持；确实没有依据时保留具体未绑定问题，不伪造要求。
+局部保留引用不继承旧项scoring等字段。EffectiveItemRef未提供的decision_id/rule_index在
+持久化时必须省略，不能序列化成null；已提供的局部保留索引0必须保留。大纲、写作任务
+及CAS产物须可反复validate/dump/load往返，不以放宽下游null校验掩盖生产端序列化错误。章节/位置身份只在本产物内有效，不能跨大纲修订按
 同一路径假定同一内容；持久消费须绑定产物CAS。源表格按原unit装载，不由模型重写后保存。
 空白页等没有原生unit的虚拟范围不作为可选模板来源。XLSX的行范围按table_id/table_ids
 绑定真实表格unit；同一物理行横跨多表时保留全部原表引用，不用table_row载体冒充完整grid。
@@ -741,7 +785,8 @@ grid与row使用相同的单元格依赖装载；原grid、合并范围、原生
 上述坐标；无原生正文行的纯空白表外合并仍以原件为准，本批不承诺完整Excel布局重建。
 此处恢复宿主结构，不新增模型merged_ranges字段，也不宣称模型已读到表外合并关系。
 不存在的OCR/图片/锚点保持缺省，不伪造已完成；原分析问题继续沿原确认和后续核对出口处理。
-来源引用损坏沿既有ArtifactIntegrityError出口处理，不要求模型修复存储引用。
+底层装载器以ArtifactIntegrityError报告损坏；编制上下文记录不可读来源及待补位置，其他可用资料继续。
+不得把损坏引用当有效来源，也不要求模型修复存储引用。
 本次装载修复新增模型调用为0，T2仍为正常1次、同执行最多4次；请求语义视图、输入输出
 结构、预算及超限出口沿用原合同。目录可能补充含表外格的行锚点，最坏仍为O(S)目录，
 原文不重复发送；新增row引用由宿主保存，不增加模型回抄。索引读取沿用既有全文件
@@ -759,7 +804,9 @@ BUG-038的原生解析修复新增模型调用同样为0：全文件调用数C_n
 
 ### 模型发送与回包
 
-发送`schema_version=2、rules、relations、unverified_relation_ids、issues、issue_resolutions、scope_decisions、source_views、source_catalog`。
+发送`schema_version=2、rules、rule_origin、relations、unverified_relation_ids、issues、issue_resolutions、scope_decisions、source_views、source_catalog`。
+`rule_origin`由宿主填`verified_projection/extraction/source_only`，分别表示使用核验投影、未核验抽取或仅来源；
+只描述本次发送资料的来源，不新增运行状态、不要求模型回抄，也不表示响应已满足招标要求。
 关系的既有未核验身份随输入保留，不把候选关系当成已确认语义事实。
 每条rules使用宿主rule_id，加`item`或`effective_rule`以及原item_id关联关系；只发送语义值，
 不发送CAS、确认摘要、版本、原件路径及费用流水。规则来源及相关关系/问题所需原文按
@@ -772,8 +819,8 @@ from_rule_ids/to_rule_ids；分析原有映射及默认Task提示集合保持不
 语义引用才回传，不要求覆盖名单、宿主身份或评分数值回抄。
 
 回包`OutlineResponse{schema_version:2, chapters, findings}`：chapters递归使用
-`{title,targets,children}`；targets为`{kind,purpose,rule_ids,range_ids}`；findings为
-`{code,detail,rule_ids}`。所有字段必填，列表允许为空。range_ids可以选择已读原文或
+`{title,targets,children}`；targets为`{kind,purpose,rule_ids,range_ids,manual_fill?}`；manual_fill
+默认false；findings为`{code,detail,rule_ids}`。其余字段必填，列表允许为空。range_ids可以选择已读原文或
 目录中的锚点，宿主映射至完整SourceUnitRef并去重。目录来源尚未读入模型时保留具体
 `outline_source_not_read`问题，后续生成前须读取核对，不宣称模板含义已验证。
 `scope_bindings`及`pending_scope_context`内的可见锚点同样经原selector映射；正文去重
@@ -800,12 +847,13 @@ form没有源模板派生`outline_template_missing`；这些问题随产物保�
 
 同修订同完整请求的成功复用由下节独立执行上下文负责，领域函数的CAS产物不等于付费缓存。
 分析修订后重做T1、组织请求及其受影响下游，组织最多4次；纯样式修改不触发分析。
-返回前再次核对当前确认版本，运行中来源被替换时不发布旧版本新产物；这仍不是长期执行租约。
+运行中分析推进或修订不替换已固定输入；返回产物明确绑定旧快照，只检查取消及独立执行围栏。
+需要新资料时建立新执行，不把旧产物伪称最新；领域函数本身不持有长期租约。
 
 ### T2独立持久执行
 
 Python内部入口`execute_outline(analysis_store, artifacts, config, budget, *, execution_id,
-run_id, source_version, domain_revision, checklist_digest)`调用上述组织函数；execution_id由
+run_id, source_version, domain_revision, checklist_digest=None)`调用上述组织函数；execution_id由
 宿主显式固定，相同身份恢复同一执行，不自动生成新身份绕开失败额度。不新增CLI或队列节点。
 本批恢复由调用方以同execution_id再次调用；尚未接dispatcher，不代表进程退出后无人值守续跑。
 使用独立AuthoringStore和AuthoringLease，不领取或更改父分析运行的租约、状态及确认。
@@ -814,14 +862,15 @@ run_id, source_version, domain_revision, checklist_digest)`调用上述组织函
 | --- | --- |
 | AuthoringLease | execution_id、epoch；只授权当前编制执行，epoch单调递增，失效后不可发送或发布 |
 | 编制执行根 | execution_id；authoring_input: AuthoringInput；execution_spec: 非秘密配置；status: pending/running/succeeded/failed/cancelled；epoch、lease_until、cancel_requested；result_ref?: ArtifactRef；receipts: 小型宿主回执列表；error?: 错误类型；created_at、updated_at |
-| 编制请求回执 | request_id、execution_id、epoch、model、task=outline；status沿prepared/sent/succeeded/failed/uncertain；metadata含request_digest、logical_request_digest及预算测量；usage?、response_ref?、error?、created_at、sent_at?、finished_at? |
+| 编制请求回执 | request_id、execution_id、epoch、model、task=outline/authoring_basis/authoring_write/authoring_review；status沿prepared/sent/succeeded/failed/uncertain；metadata含request_digest、logical_request_digest及预算测量；usage?、response_ref?、error?、created_at、sent_at?、finished_at? |
 | 编制宿主回执 | stage、scope、input_digest、artifact_ref、epoch、metadata（宿主非秘密诊断）；只保存完整请求及最多四次拒收等少量CAS引用，不复制请求正文 |
 
 字段沿用已有含义。执行状态只描述内部执行生命周期，不增加业务审批状态。PG只新增
 `tender_authoring_executions`和`tender_authoring_model_requests`两表，完整请求、响应、
 反馈及结果仍存CAS。执行配置固定独立协议、规范Chat地址/模型/窗口、实际outline提示摘要、
 实际准入预算及超时策略，不包含密钥、密钥摘要或默认分析提示集合。相同execution_id的
-输入或非秘密配置变更须显式报冲突，不能静默复用；轮换密钥不改变请求身份。
+指定不同来源/领域身份或非秘密配置须显式报冲突；恢复优先取已有固定输入，
+不会因父分析新增产物替换输入或清空回执。轮换密钥不改变请求身份。
 首次建表使用当前schema内的PG事务级advisory lock串行初始化，避免并发启动时
 CREATE TABLE IF NOT EXISTS仍出现系统目录唯一冲突；不锁父分析或其他schema的执行。
 
@@ -830,8 +879,9 @@ Chat及显式预算，不扩分析Task，不继承VLM或verify tokenizer。拒�
 call_validated，编制拒收元数据写execution_id/epoch，不伪造分析command_id。
 contract_feedback放入用户消息JSON，并对纠正后的完整请求重新准入；逻辑摘要固定为原始
 完整请求，具体发送摘要包括反馈。短引用只在组织边界解码一次，模型不回抄执行身份。
-本批同execution_id只执行outline这一逻辑请求，恢复时基准逻辑摘要改变须报冲突；不得
-借同一执行内换摘要重置额度。已prepared的并行副本在另一份成功后也不能再次发送。
+同execution_id可容纳上述四种语义任务及多个完整逻辑单元；在途sent、成功缓存和四次额度
+按task+logical_request_digest隔离。反馈不改变逻辑摘要，不能借改反馈重置额度。
+同逻辑单元已prepared的并行副本在另一份成功后也不能再次发送，独立单元可同时推进。
 
 正常全文件仍1次组织调用，失败共用首次加3次，上限为同execution_id整个逻辑单元4次
 真实发送，跨进程恢复不重置；prepared、缓存读取及预算拒发不计付费发送。最坏输入为
@@ -844,12 +894,640 @@ contract_feedback放入用户消息JSON，并对纠正后的完整请求重新�
 uncertain按用户已接受的重复计费风险在剩余额度内重试，不承诺远端exactly-once。
 所有调用失败共用额度；取消、失租立即退出，数据库不可用由调用方恢复，不用新付费调用
 修数据库。预算/配置不满足明确返回，保留成功产物；耗尽后保留全部回执和具体错误，
-用户可修输入或配置后显式发起新执行，不自动重新跑分析。父分析修订仍重做T1及受影响
-组织请求，样式不变更父分析；最终发布须再次核对父确认并通过独立租约围栏。
+用户可修输入或配置后显式发起新执行，不自动重新跑分析。消费新分析修订时建立新快照及
+受影响组织请求；在途旧执行继续绑定原快照。样式不变更父分析；发布检查取消及独立租约。
 工作只负责组织和关闭模型客户端，关闭期间保持心跳；工作完成后须停止并等待心跳，
-再由原事务核对父确认及独立租约并发布成功，发布后直接返回，不留下心跳竞争窗口。
+再由原事务核对父分析/编制的取消标记及独立租约并发布成功，发布后直接返回，不留下心跳竞争窗口。
 心跳实际错误、客户端关闭失败及调用方取消不发布成功；等待子任务取消不能吞掉调用方取消。
 成功模型回执仍保留，同ID恢复复用；此顺序不改变调用次数、请求预算或修订重跑范围。
+
+## 编制依据与交付约束（T3至T5业务语义）
+
+本节说明业务语义，正式结构统一见下节Python编制执行合同；职责与预算见
+[编制架构草案](authoring-architecture.md)。字段先在本字典定义，再同步schema、提示和执行链；
+skill只引用合同，不另建同义结构。真实服务与文档验收状态只在交接记录。
+
+统一原则：所有业务缺口均是可交付内容的一部分，不是生成/导出的拒绝条件。原文必填
+而未知的值可为空，必要说明在不破坏原格式的位置或缺口清单中展示；缺价格不填0，
+缺材料不伪造引用，缺复核不声称已经通过。留空不需要额外审批。
+
+| 概念 | 最小含义与保存边界 |
+| --- | --- |
+| 编制输入快照 | AuthoringInput固定实际可读来源、已有事项/核验/人工意见及真实缺失状态；确认和全部根产物不再是生成前提。无效引用不作为有效资料，旧结果保留实际版本，不假装已确认或最新 |
+| 编制依据 | 与当前AuthoringInput关联的功能应答方案、可用资料与共同安排；产品信息/采用记录可选。宿主管理版本和引用，不另建招标事实台账或产品确认门禁 |
+| 项目背景 | 来源中的现状、规模、现有系统及目标等说明性事实，可以是non_item；按引用装载，不为进入生成流程强造事项，也不从历史方案补造本项目现状 |
+| 整体方案 | 编制依据内跨章共用且有适用资料支撑的功能实现、技术路线、部署/集成、实施阶段、角色、验收和服务安排；缺具体配置不阻止有依据部分生成，无依据部分留空，不新增独立状态机 |
+| 产品/方案事实 | 功能能力、实现方式、服务范围及其依据；品牌、型号、版本和配置均为可选补充，缺省不阻止写作。原文明示某处必填时保留局部待补项，拟议实现不冒充已有产品事实 |
+| 采用决定 | 可选的已有产品/方案选择、适用范围及授权依据；不作为编制依据或正文生成的必填条件，也不新增确认步骤，候选建议不自动构成业务授权 |
+| 履约承诺 | 有依据且获授权的交期、人员、定制、质保、费用等；拟议承诺保持未决，不能从产品介绍或招标要求直接推出 |
+| 资料引用 | 可重放的企业/产品/证明原件及定位、适用型号/主体/版本；沿用ArtifactRef管理不可变内容，实际知识服务定位适配在T3定义，不混同招标SourceUnitRef |
+| 资料用途 | 事实/证明依据与方法/写作参考分别判断；同一文档不同片段可能用途不同，历史方案不能直接证明本项目能力。usage只记录资料用途，是否适用仍由语义复核判断，命中不等于证明 |
+| 具体缺口 | 未满足、证据不足或待判定的内容及其影响位置、处理出口；默认留空/待补继续生成与导出，不以空资料生成满足结论，不要求问题关闭才能下载 |
+| 内容响应与编制/交付约束 | 是既有规则的使用方式，不新增ItemKind；前者进入响应位置，后者约束相应文件/表单/交付行为，如格式、签章、上传期限 |
+| 写作任务 | 可独立生成和保存的完整业务单元，绑定响应位置、相关要求、编制依据、资料及模板；可以是完整小节、相关条款组或表格，不以页数或事项数量固定划分。正式字段见下节WritingTask/WritingResponse/WritingUnit |
+| 交付核对视图 | 从既有规则、响应位置、采用证据及实际产物派生要求/评分、具体响应、证明、文件位置与剩余事项；不另建事实台账，也不以视图覆盖替代内容复核 |
+
+outline_rule_unassigned以响应位置及constraint_rule_refs共同计算未分配规则。不能为消除
+未分配提示强造正文章节，也不能把已引用但未落实的交付义务标成完成。具体字段覆盖
+分册与填表，不增加通用任务状态机。
+
+技术响应、方案、配置/偏离表和报价相关内容须引用同一编制依据；各章节不复制维护各自
+一套产品事实。编制依据修订仅影响其依赖的编制内容及必要复核，招标原文未变不重抽分析。
+正文、填充值、采用证据与实际导出合同见下节；purpose仅为写作要求，source_refs仅指
+招标来源，不能冒充已生成内容或已匹配企业材料。
+
+## Python编制执行合同（T3至T5）
+
+以下保留knowledge_required_v1历史基线；BUG-047之后的当前统一合同定义在
+[编制最小修订](#编制最小修订knowledge_required_v2)及后续提交结构字段中。
+源码和真实验收状态见交接，不能将下面v1的删稿策略或旧字段限制当作v2要求。
+
+本节先定义本次实施所用的最小字段；实际运行和验收状态仅在交接维护。
+不增加分析节点，不复制招标事实台账。所有模型回包中的ID仅为所需的短引用选择，
+宿主产生执行、章节、任务、资料及文件身份。
+
+| 结构 | 字段与含义 |
+| --- | --- |
+| OutlineAssemblyTarget | `kind:narrative/form/attachment`、`purpose:Text`、`target_ids:Identity[]`且至少一项；选择本请求宿主提供的短候选位置引用，将语义重复的跨批响应合并为一个实际位置。模型给出合并后的用途和模式，不回抄原规则/来源/CAS或持久身份 |
+| OutlineAssemblyChapter / OutlineAssemblyResponse | 节点含`title:Text`、`targets:OutlineAssemblyTarget[]=[]`、`is_volume:bool=false`、`children:OutlineAssemblyChapter[]=[]`；响应仅为`{chapters:OutlineAssemblyChapter[]}`。宿主对每个合并目标联合去重原rule_refs/source_refs，保留原模板依赖，并统一生成正式章节/位置ID；任一候选manual_fill=true则合并目标继承true，不能被模型改为自动填价 |
+| OutlineTargetResponse.manual_fill / ResponseTarget.manual_fill | `StrictBool=false`；大纲模型按实际语义将最终报价、投标单价、总价、折扣等人工填写位置设为true，宿主原样绑定。保留格式和待填位置，同章其他目标继续；不新增金额结构、审批状态或下载门禁，不扩展为所有技术参数都人工填写 |
+| KnowledgeMaterial | `material_id:Identity`、`title:Text`、`text:str`、`content_ref:ArtifactRef或null`、`original_ref:ArtifactRef或null`、`locator:dict`、`usage:fact/reference/proof`、`attachment:bool=false`；locator保留适用target及必要产品/版本/原文件定位。content_ref只指冻结文字片段，original_ref只指实际原件；片段不能冒充证明原件；搜索命中默认reference，不自动证明事实或资格 |
+| AuthoringArrangement | `topic:Text`、`text:str`、`nature:provided/proposed`、`material_ids:Identity[]=[]`；任何nature都须关联适用资料，provided只描述资料所载，不代表系统已核实或用户确认。proposed兼容旧产物，不再作为无依据生成的兜底 |
+| AuthoringBasisResponse | `project_background:str`、`approach:str`、`shared_arrangements:AuthoringArrangement[]`、`gaps:str[]`；前两字段兼容保留，本策略置空，不作为无引用依据进入写作。共同安排仅汇总适用资料及其关联要求支撑的内容，不因全源原文另起技术路线 |
+| AuthoringBasis | `schema_version:2`、`authoring_input:AuthoringInput`、`response:AuthoringBasisResponse`、`materials:KnowledgeMaterial[]`；同版编制共用一份依据 |
+| AuthoringBlock | `kind:paragraph/table`，`text:str=''`、`headers:str[]=[]`、`rows:str[][]=[]`、`target_ids:Identity[]=[]`、`material_ids:Identity[]=[]`；本块应答绑定适用目标及实际发送的非空知识文字；只有原件、没有文字的资料不能支撑新增正文。text可作表格前说明，paragraph同时带表格时按原顺序保留，记录block_kind_mismatch；无依据或非法引用的生成内容不采用，原位置留空 |
+| CellFillResponse | `source_id:Identity`、`row:NonnegativeInt`、`column:NonnegativeInt`、`text:str`、`target_ids:Identity[]=[]`、`material_ids:Identity[]=[]`；source_id为本任务原生模板短引用，坐标零起始；填值须关联form目标、该目标真实source_refs内原表及实际发送的非空支撑资料文字，不能借用同任务其他位置的模板 |
+| CellFill | `source_ref:SourceUnitRef`、`row`、`column`、`text`、`target_ids:Identity[]=[]`、`material_ids:Identity[]=[]`；宿主绑定原表及正式目标身份，固定非空格不被覆盖 |
+| AuthoringAttachment | `material_id`、`title`、`artifact_ref:ArtifactRef`；只能绑定实际可读原件，不能由模型制造CAS引用 |
+| WritingResponse | `blocks:AuthoringBlock[]`、`cell_fills:CellFillResponse[]`、`material_ids:Identity[]`、`gaps:str[]`；同次调用完成语义匹配及有依据改写，各block/fill分别关联目标和资料；顶层material_ids仅用于附件选择，不能替代内容依据。不回抄任务/章节身份 |
+| WritingTask | `task_id`、`chapter_id`、`title_path:str[]`、`targets:ResponseTarget[]`；同章连续narrative目标可合成一个任务；每个form、attachment或manual_fill目标各自单任务。manual_fill任务只保留格式占位；纯attachment缺可读原件、普通目标缺候选知识时均跳过写作，保留空位与gaps。部分匹配只写有依据部分，同章其他任务继续。单个表格实例填值只属于该target，不能因模板相同跨target合并。过大叙述任务按已有目标边界拆分，不按页数或每条要求拆分 |
+| WritingUnit | `schema_version:2`、`task_id`、`chapter_id`、`target_ids:Identity[]`、`status:generated/placeholder`、`blocks`、`cell_fills:CellFill[]`、`attachments:AuthoringAttachment[]`、`gaps:str[]`、`error_type:str或null`；失败占位不冒充成功正文 |
+| AuthoringReviewFinding / AuthoringReviewResponse | `findings:[{code:Text,detail:Text,task_ids:Identity[]=[],content_ids:Identity[]=[],suggestion:str='',can_revise:bool=false}]`；content_ids选宿主提供的具体block/fill短引用。宿主把跨任务unsupported_content按任务拆分，便于分批再核替换旧发现。明确无依据内容从采用稿移除；无精确内容但关联任务明确时，保守清空相应任务生成应答并保留原稿。仅现有资料足以修正时can_revise为true，缺证书、未知价格或授权保持false；缺项/冲突不设置下载门禁 |
+| AuthoringGap | `code:Text`、`detail:Text`、`task_id/chapter_id/target_id:Identity或null`；宿主统一缺口位置，模型局部字符串缺口在边界补位置 |
+| AuthoringUsage | `sent_requests`、`retry_requests`、`estimated_input_tokens`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`unknown_usage_requests`均非负整数；计量范围为本执行的实际发送；继承回执不伪造新发送或用量。Token总数只含已报告值，未知调用另计，不能视为免费；原执行费用按其回执单独追溯 |
+| AuthoringDocument | `schema_version:2`、`authoring_input`、`outline_ref`、`basis_ref`、`unit_refs:ArtifactRef[]`、`review_ref`、`initial_review_ref:ArtifactRef或null=null`、`superseded_unit_refs:ArtifactRef[]=[]`、`docx_ref`、`package_ref`、`gaps:AuthoringGap[]`、`usage:AuthoringUsage`；unit_refs指实际采用内容，初次复核和被替换的原稿分别保留，review_ref指最后复核结果。全部实际落盘后返回，费用未知保持未知 |
+
+归并输入采用单次`rules`共享表：按EffectiveItemRef完整身份分配短rule_id，保留该规则的
+完整text及已有scope/conditions/exceptions/subject/kind/scoring，不按相同文字合并不同范围。
+候选target仅携rule_ids及短source_ids；source_ids标识原生模板身份，用于区分同模板的
+复用与不同来源。模型选择target_ids，宿主仍以原引用联合规则/模板，绝不根据文本相似
+自行合并。source组织使用原outline.md；归并使用独立outline_assemble.md，改变归并协议
+不改变已完成来源请求摘要。当前样例归并可在显式校准预算内一次完成，不增加层层调用。
+
+T2追加`OutlineResponse.constraint_rule_ids:Identity[]=[]`及
+`AuthoringOutline.constraint_rule_refs:EffectiveItemRef[]=[]`，只用于文件/交付约束；它们
+不强造正文章节，也不表示已签章或已提交。章节可选`is_volume:bool=false`，仅在原文
+明确分册时设置；导出主DOCX保留全章节顺序，并对明确分册输出独立文件。普通顶级
+章节不自动当分册。未覆盖规则仍保留具体问题。
+
+归并输入按原章节列出候选target_id短引用、kind、purpose、manual_fill及必要rule_texts，
+供模型判断哪些是同一响应任务。它不是要求模型誊写宿主清单；未选候选仍由宿主保留为
+待核对位置，不能被静默删除。不同标段、适用条件、原格式实例或确有要求的正文/证明
+重复交付须分别保留；报价人工位置不应吞并仍需自动编写的技术/商务说明。
+
+投标人的最终报价、单价、总价、折扣等人工把控值保持空白，不用0、知识库/历史项目价格
+或自动计算值替代；已有价格资料也不自动变成本次最终报价。招标预算、最高限价、评分
+数值及其他原文要求仍原样保留，并供人工填写时参考。manual_fill只作用于对应响应位置，
+不暂停整份生成，也不把其他有依据的技术参数、实施方法及服务内容强制转为人工填写。
+
+`source_id`只在一次写作请求内有效，由宿主映射到SourceUnitRef；行列是该原生grid的零起始
+锚点坐标，不是Word导出后的编号。同一target内多任务填同一格且内容冲突时保留原空白和
+具体问题；不同target即使引用同一SourceUnitRef，也输出各自的表格实例。固定非空文字
+不因模型回包被覆盖；来源不属于本任务模板的填值不写入其他位置，保留定位缺口。
+
+资料准备时宿主将实际发送的`text`冻结到`content_ref`，不能将该片段引用放入`original_ref`。
+`attachment=true`同时要求实际可读原件；缺原件时只保留文字参考和缺口。当前知识适配的
+搜索片段默认`usage=reference`、`attachment=false`，不把检索命中升格为证明或授权。
+资料明确记载的功能及方法可在产品、版本和主体适用范围内据实应答或改写，不能只因
+reference标签忽略有效功能资料；事实/证明/授权声明仍须对应资料用途，命中不自动
+升格为proof。无有效资料关联的共同安排不保留，不再降为`proposed`继续生成。
+来源身份与范围由宿主维护，是否支持本项目响应由模型判断，不能用关键词或正则代替。
+
+### 知识匹配后编写（knowledge_required_v1）
+
+本策略统一进入basis/write/review实际payload及执行spec。招标来源提供背景、要求、
+条件和固定格式，不能单独证明投标人已有能力；所有新增应答，包括技术、实施、人员及
+服务方法，均须匹配可用知识资料。未匹配留空并记现有gaps，结构和导出照常保留。
+用户直接提供并冻结的有效企业资料同样属于可用资料，不要求特定知识服务才可采用。
+
+检索查询携本任务实际要求、适用条件及范围，不只使用章节标题、路径或purpose。
+候选视图保留必要文字、可适用target短引用及产品/版本/原文件定位；不发送无关元数据，
+也不能省去区分不同型号、版本或主体所需的信息。有功能依据即可写对应功能，型号和
+配置可选；不能借用另一目标、产品或版本的材料。无候选目标跳过basis/write，不能
+以招标要求或共同依据中的无来源approach补出方案。
+
+共同依据批次只发送候选资料、其关联实际targets及去重的rules，保留判断适用性所需的
+要求、条件和范围，不恢复全源反复编方案。只有原件但没有可发送文字的资料不进入
+共同依据，也不能被block/fill挂名作为支持；可读真实原件仍可按附件用途选择和导出。
+
+不另建匹配节点或ResponseMatch。write一次完成语义适用性判断及改写，block/fill只
+选择本请求的target短引用（如t1）及material引用，宿主绑定正式身份并检查可用范围。
+review的content_ids按任务选择宿主提供的b1/f1等正文块/填值别名；跨任务无依据发现
+由宿主拆成单任务发现，原始回包保留，不要求模型增加誊写。字段空数组
+仅兼容旧产物；新策略下不能凭默认值放行无依据新正文。部分命中只保留有依据内容。
+复核使用实际内容短引用；无依据内容移除后留空，不因改稿失败再采用已否定内容。
+复核不可用时，该批生成应答暂不采用，保留原稿及回执供恢复，原模板和空位继续导出。
+旧策略产物仅作历史证据，不能通过同摘要恢复静默成为本策略的采用稿。
+
+宿主导出包包含主DOCX、明确分册DOCX、真实附件、manifest及独立缺口清单。manifest中
+原件按摘要去重，`occurrences:[{material_id,title,chapter_id}]`保留同一原件的不同使用位置；
+模型不生成路径或附件摘要。图片/PDF按真实像素或原页插入；其他格式原件随包附送并记录
+未嵌入。按已知文字和网格重建不等于保留原字体、分页或完成最终版式验收。
+
+### 调用、预算、恢复与修订
+
+1. 全文件新增调用为`O + B + W + R + C + R改`：O是原文/规则按预算组织及必要归并次数，
+   B为有候选资料的共享依据批次，W为有候选资料的完整写作任务数，R为初次实际正文复核批次，C为本轮允许的一次
+   定向改稿任务数，R改为改稿后的复核批次。首次加三次重试上界`4*(O+B+W+R+C+R改)`；
+   不做任务两两组合、不固定逐要求调用。N个组织包只在N>1时另发一次候选响应位置归并；
+   归并超限或失败保留原批次章节与待核顺序，不假称已具备递归归并。共同依据按完整记录
+   顺序分批并携带受限previous摘要，不反复回传全量原文。知识检索另计实际次数。
+   W不计manual_fill、无候选资料及缺原件的纯附件任务；其格式占位新增调用为0，不参与
+   无资料改稿。语义匹配包含在W内，不增加独立匹配轮次。知识查询Q次最多按既有首次
+   加三次产生4Q次HTTP尝试；无命中/不适用是有效空白结果，不重试至命中。
+2. 请求按实际消息测量，输入不超过现有准入限额及总窗口扣输出/安全预留的较小值；
+   编制明确配置正输出预留，输出预留不是供应商硬上限。共同依据输出限12000 UTF-8字节；
+   写作提示通常控制6000汉字，不能将提示长度当成已验证输出容量。正文输出按逻辑单元控制，
+   原表不可拆时容量不足保留待补并记录，不能静默裁原文。记录累计估算输入、实际usage、
+   未知usage调用与重试次数，不将单次准入冒充累计预算。
+3. 缺知识/价格/型号/模板/确认有空白及位置缺口出口；模型恢复耗尽只使该任务占位。
+   复核失败记未核对，该批生成应答暂不采用，保留原稿与回执，模板/空位及其他任务
+   继续导出。基础设施/取消/写围栏保留真实失败，不能伪报导出成功。
+4. 同执行恢复复用已完成的内容摘要回执，不覆盖旧结果和手工文件。初次复核后，只对
+   status=generated且有can_revise=true发现的明确任务发起一次改稿；加入当前稿和真实
+   复核意见，仍由既有execute共用首次加三次额度，不另套重试、不补检索或无限续写。
+   空结果或改稿失败可保留未被否定的旧成功正文；明确无依据内容先移除，不能回退采用。
+   成功替换时旧稿进入superseded_unit_refs。
+   改过的任务再核一次，保留initial_review_ref；复核仍有问题继续导出，不开启下一轮自动改稿。
+   改稿输入沿用该任务原写作payload，追加previous_content中的blocks、cell_fills、attachments
+   和gaps，以及review_findings中的code/detail/suggestion/can_revise。旧填值用本次宿主
+   sources映射回source_id，附件只发material_id/title；不发送CAS、任务身份或按出现顺序猜绑定。
+   无法绑定原稿所用资料时保留原稿和具体问题，不让改稿静默移除原内容。
+   新执行按依赖选择受影响任务及跨执行复用属于后续修订能力，不能由previous_document_ref
+   参数存在推定已实现；原文未变不重抽，无法确定依赖时应明确重跑范围。
+5. 模型不生成CAS、execution/task/chapter ID，不回抄输入/覆盖清单或计算最终页码。
+   只选择来源/资料/所需响应位置的短引用；宿主负责映射、表格坐标、真实附件、文件装配。
+
+### 归并操作的显式Token计量
+
+BUG-081补充：来源组织装包在实际输入准入内预留2048 token纠正空间，实际发送上限
+不变；未知引用错误精确到叶字段，不复制整棵章节树。全量归并仅在原发送视图超限时
+使用`assembly_view="compact_v1"`，仍保持同一输出合同与宿主引用映射：
+
+- `template_parts`、`submission_sources`、`submission_rules`、`unassigned_rules`由数组
+  改为以原`part_id`/`source_id`/`rule_id`为键的对象，值保留该条除重复ID外的全部字段。
+- 纯原生网格可用`rows`完整二维明文矩阵表达，行列仍从0开始；`null`表示该坐标没有
+  独立原生单元格，`""`表示确实存在的空白格。`merged_cells`每项为
+  `[row,column,row_span,col_span]`，只列非1×1合并；`row_count`/`column_count`保留。
+  原件列宽属于宿主排版数据，仍在冻结原件内，不参与模型语义判断。带额外单元格属性
+  的网格保持完整原结构，不丢公式或其他未知字段。
+- 候选省略`is_volume=false`、`manual_fill=false`、`support_origins=["knowledge"]`、
+  `template_part_ids=[]`时只应用这些明确默认值，不表示缺失语义。其他字段不裁剪。
+- 以上仅是输入投影，不改变持久结构、最终DOCX或输出短引用，不要求模型重抄压缩表。
+  若投影后仍超限，保留既有容量缺口及人工编辑/重新编制出口，不能声称归并成功。
+
+`RequestBudget`增加宿主构造参数`tokenized_outline_assembly: bool=false`。开启必须同时显式
+配置`tokenizer="o200k_base"`；不能根据模型名称猜测，也不能在正在执行的请求中改配置。
+仅`measure_request/require_request(request, task="outline")`且发送payload顶层
+`operation="assemble"`时启用该计量。原文组织、依据、写作、改稿及复核仍按既有字节估算；
+既有verify tokenizer分支不变。prepared请求的task允许显式字符串，但不扩充分析Task枚举。
+
+开启时按实际消息的o200k token计量，保留512 framing余量、现有安全余量和
+`min(32768, context_tokens/4)`输出预留；131072窗口对应输入上限94208。输出预留不是
+供应商硬上限或已验证输出能力。关闭时默认spec及计量行为不变；开启时只在
+`spec.tokenized.operations`追加`{"outline":["assemble"]}`，`tokenized.tasks`仍为`["verify"]`，
+使执行快照能够区分本次操作准入配置。
+
+校准依据保留在私有证据目录`/opt/workspace/kb-tender-evidence/2026-10-26-authoring-implementation/`：
+`offline-budget-calibration-20261027T045351Z.json`对15个已完成、无图片的真实请求，逐个用
+保存的请求CAS对照供应商prompt usage；样本中的供应商prompt等于o200k正文计数加10，
+加512余量后的估算均高502。`real-assembly-o200k-preflight.json`显示完整归并在相同计量
+规则下可准入。该证据只支持本次端点/模型的窄操作显式启用，不证明所有模型tokenizer
+身份、图片费用或归并输出容量，也不将离线预审写成真实归并完成。
+
+本调整的五项边界：
+
+1. 新增模型调用为0；原文N包不变，N>1仍最多增加一次完整候选归并，不先新增树形多轮调用。
+2. 单请求按完整Prompt、候选、共享规则及全部必要语义实际计量；输出和安全预留照常扣除，
+   不以删除条件、模板或引用换取准入。
+3. 未校准/未显式开启继续字节估算；配置无效在发送前明确报错，实际超限仍保留已组织片段
+   和容量缺口，不改为无限重试或静默部分归并。
+4. 预算配置和Prompt共同固定在执行spec；需调整时使用明确的新执行，保留原调用及回执，
+   实际未变请求依既有摘要复用；不得对在途运行临时放宽准入。
+5. 不新增模型输出字段，不要求模型誊写计量、候选清单或宿主身份；模型仍只选择目标语义引用。
+
+实际知识服务接口是可注入的窄provider：按任务语义查询，返回冻结文字/原件及定位；
+没有配置、无命中或语义不适用返回可读诊断，相关应答留空、固定模板保留，继续导出。
+接口和合成回归不代表完成真实知识库
+验收，原件下载和适用性核实也不能由搜索片段代替。导出DOCX按冻结文字/网格重建；PDF原件作为真实附件按页嵌入或
+随包提供，不能把重建表格说成无损复刻PDF版式。
+
+本轮复核按实际任务内容和共同依据分批；跨批依赖组全局检查、单个巨型
+表格的分组填写、输入修订后的依赖选择、最终PDF视觉核对及目录实际页码/图表交叉编号
+仍须分别实现和验收。保留这些完整交付目标，不把当前分批复核和DOCX产物冒充全部完成。
+金额自动计算不在当前实现目标内；如未来明确需要，再单独讨论输入、人工采用和计算合同。
+
+## 编制最小修订（knowledge_required_v2）
+
+本节是BUG-047至BUG-052的统一后续合同，取代v1中所有内容必须有material_ids、
+复核不可用清空应答、只允许generated改稿以及所有空位均复核的设计。
+不增加分析节点、Agent、产品确认门禁、环境变量或通用状态机。schema_version仍为2，
+knowledge_required_v2仅标识编制交互策略，须进入执行spec和实际模型请求。
+
+### 依据与位置
+
+招标来源支持项目背景、建设现状、要求解释及规定格式；知识/明确企业资料支持产品
+功能、实现方法、企业事实和获授权承诺。来源事实不能被改写成投标人已经满足要求。
+功能资料可以支持相应功能，无须先确定品牌型号；历史价格仍不得填成本次报价。
+
+| 结构或字段 | 本轮最小修订 |
+| --- | --- |
+| OutlineTargetResponse / ResponseTarget.support_origins | `list[Literal["tender","knowledge"]]`，1至2项、去重，默认`["knowledge"]`；由已有大纲调用按位置内容选择。背景为`["tender"]`，企业应答为`["knowledge"]`，混合表单可含两者。只决定调度和允许的引用来源，不证明语义正确、不表示资料已匹配 |
+| 大纲归并 | 宿主联合已选目标的support_origins及已有检索意图；模型不重抄这些字段。同一混合表单保持一个实例，不为不同依据类型复制表格。kind仍为narrative/form/attachment |
+| 模型请求supports | 本请求局部共享表：`support_id`、`origin:tender/knowledge`、`target_ids`、实际必要`text`；原表按需携原生grid，知识按需携usage及必要主体/产品/版本/当前版本标记。由宿主生成引用和元数据，必要文字只发送一份，替代重复的originals/materials正文副本 |
+| AuthoringBlockResponse / CellFillResponse.support_ids | `Identity[]`，仅选择当前supports短引用。每个采用块/填值仍选择target_ids；源文说明可选择s1，企业应答须有适用的k1等知识支持。模型判断支持含义，宿主检查存在性、目标范围和允许origin，不用词表判断承诺 |
+| CellFillResponse.source_id | 继续标识原表，选择origin=tender且有实际grid的support_id；行列仍是宿主原生坐标。填值本身可由同一原文或知识支持，固定内容不覆盖，最终价格仍由人工填写 |
+| 持久AuthoringBlock / CellFill | 保留现有target_ids/material_ids，新增`source_refs:SourceUnitRef[]=[]`记录源文支持。宿主将support_ids拆解为正式资料和来源引用；CellFill.source_ref仍单独标识被填原表。短support_ids不写成跨执行身份，不为此迁移全部旧稿 |
+| WritingResponse.attachment_ids | 取代模型顶层material_ids，仅选择有真实原件及可判断证据的knowledge支持短引用。持久attachments继续使用现有AuthoringAttachment，不让模型生成CAS |
+| AuthoringArrangement模型视图 | 同样选择support_ids；共享企业安排仅由knowledge支持，宿主继续落盘material_ids。各批只处理本批支持，宿主合并已绑定安排，不要求模型重写旧批安排或重读旧材料；写作/复核装载本任务必要安排。无引用的approach不恢复为方案来源；项目背景在相应位置用招标来源支持 |
+| AuthoringReviewRequest / execute_document.review_request | 可选`{target_ids:Identity[至少1项],reason:Text}`。新执行继承前驱时冻结进spec，宿主将选定目标转换成本请求短引用，将真实理由送入相关review和必要修订；初次write不添加此反馈，无关请求按完整摘要复用 |
+| 复核content_ids | 沿用现有字段；b1/f1分别标识受审稿的正文/填值，补a1标识附件。别名只属于本次受审稿，宿主保存稿件引用与别名映射；旧稿序号不能用于删除新稿 |
+
+示例：`s1:tender`记载项目位于甲园区，`k1:knowledge`记载支持角色权限。项目位置说明
+选择s1，权限应答选择k1；没有容灾依据时该响应留空。仅有s1不能生成“我方已建成
+容灾中心”。一个表格中项目名称可由s1填写，企业人员由适用k1填写，价格格保持空白。
+
+### 有限检索计划与真实接口
+
+检索意图在已有原文大纲调用内产生，不增加独立查询规划或语义匹配轮。
+`OutlineResponse.search_intents:SearchIntentResponse[]=[]`，其中
+`SearchIntentResponse{query:Text[1..256字符],for_ids:Identity[至少1项]}`；for_ids仅选择
+该包已有规则/来源短引用。同一主题可关联多个引用，多个独立功能分别查询；不要求
+模型回抄全量规则。纯来源说明和人工报价不产生知识查询。256只约束查询文字，不
+裁剪原要求、条件和例外。
+
+`AuthoringOutline.search_intents:SearchIntent[]=[]`；宿主保存
+`SearchIntent{query,rule_refs:EffectiveItemRef[],source_refs:SourceUnitRef[],range_ids:Identity[]}`，
+将for_ids绑定为真实引用及原范围。目标通过其规则/来源引用
+关联查询，不另让模型誊写target-query关系。source-only位置直接依据实际原文或表格
+产生意图，不能只从标题/purpose猜测。缺少必要意图记retrieval_plan_missing，不伪装
+成已检索无命中；其他任务、明确提供的资料和源文说明继续。
+
+保留现有assembly接口，每次query只发送业务查询文字。完整要求、条件、例外和范围
+仍由write/review用于判断候选适用性，不拼入一个要求全部词同现的JSON查询。
+宿主按`query原值＋检索范围`精确去重，合并关联目标；不按语义猜测去重，不在无命中
+后递归扩写同义词，也不硬设每事项两查询从而丢掉复合要求或宽表的独立功能。
+
+Q为全文件计划去重后的实际查询数，须在发送前报告。Q随独立检索主题及输入内容
+增长，不等于章节数；O分包同时预留检索意图的输出容量，不能用输入准入掩盖查询
+输出超载。超过容量按原文/规则边界缩包；不可拆时保留局部待规划缺口，不静默裁掉
+查询或假称已经完整规划。查询条数的容量以实际输出预算验证，不凭空承诺固定值。
+
+每次HTTP仍最多8个命中，但服务没有限制单个命中文字大小，响应体不能宣称已有
+固定字节上界。原始命中先冻结，写作按任务装载必要文字；容量不足保留原片段和具体
+待处理位置，不截掉支持条件后采用。仅原件无可读证据不能作为已匹配证明选入。
+
+同一执行按单query与范围保存既有receipt，不仅按整个query数组缓存。回执保存实际
+命中/空结果/诊断及来源，目标关系由本次检索计划重新绑定，不复用旧target_ids。
+跨执行只有可证明知识快照同版时才复用查询；无法证明时重新检索，不能因query相同
+跳过对更新知识的读取。已知检索版本/范围固定，现有API无法提供统一时点快照的限制
+如实记录，不另建知识快照平台。保留必要产品版本及is_current等信息交模型判断，
+不用强制型号确认解决语义适用性问题。
+
+现有关键词索引simple不保证中文子词或同义召回；短查询只修复JSON污染及跨条款AND，
+不承诺解决该限制。没有可用语义召回时记录检索能力/召回不足，结果只能表述“本次
+未取得可用资料”，不能断言“知识库不存在资料”。不隐藏Embedding配置或Rust改造。
+
+### 写作、复核和采用
+
+| 情况 | 处理 |
+| --- | --- |
+| 全人工，或缺少本位置允许的任何支持 | 不写作、不正文复核；保留原格式/空位和真实原因 |
+| 允许tender且相关来源可读，无企业知识 | 可写来源说明/源文可确定填值；企业应答部分仍留空，不用来源推出企业能力 |
+| 有可用候选，模型完整返回但判断不匹配 | 保留空稿及理由，仍进入独立复核，检查是否漏匹配；不是传输失败，不无变化重试 |
+| 有正文、填值或待采用且有可读证据的附件 | 复核实际内容、支持范围及当前资料足以支持的遗漏；只有片段不能冒充证明原件 |
+| 写作传输/预算失败而形成纯空稿 | 沿既有恢复额度处理，耗尽后记运行原因；不为不存在的语义结果再发空稿复核 |
+| 现有支持足够、非人工且can_revise=true | 无论generated或语义placeholder，都允许一次有真实反馈的定向修订；无资料、未知报价及外部授权缺口继续留空 |
+
+以上从现有输入、manual_fill、内容、error_type及完整回包推导，不增加needs_review
+状态。混合单元同时核对有据内容及漏匹配；“没有正文就不复核”不作为实现规则。
+已有OCR正文投影到supports.text一次，OCR状态字典不作为可读正文。跨任务旧问题仅在
+一次成功复核完整看到其全部关联任务时替换，分包未覆盖完整上下文时继续保留待核；
+previous_findings.original_content_ids只表达历史位置，partial_context标明本包上下文不全。
+
+版本采用规则固定如下：初稿U0经初审，明确无依据内容剔除后得到S0。修订仍可读取
+U0及其真实意见，以便模型定位问题；S0是宿主保留的回退稿，不把已删块重新编号后
+冒充原稿。修订稿U1按自身实际内容重新分配b/f/a别名并复核，旧content_ids只用于
+原稿定位，作为历史意见送入新复核时不充当U1的删除指令。
+
+- 初审只是接口/预算不可用：保留尚未被否定的U0草稿，明确待复核，不写成缺少资料。
+- 初审已明确否定内容，改稿失败、空回包或U1再核不可用：采用S0，保存U1及回执，
+  不回退含已否定内容的U0，也不直接采用未经再核的替换稿。
+- U1复核完成：仅按U1意见移除其无依据内容，其他内容采用；仍有问题停止自动改稿。
+- 精确否定a1只移除该附件。不能精确定位时只将明确关联任务的生成应答留空，保留
+  固定模板、缺口及可追溯原稿；不扩展为全文删除，不固定增加定位调用或阻断导出。
+
+generated/placeholder继续只表示实际内容是否存在，核验完成与否由现有review/gaps
+表达；质量、未核对、待补和价格问题不阻断保存/导出。首批优先消费已有可读证明文字，
+缺少证据时保留附件位置；不隐含新增OCR/VLM付费调用。若后续需读取原页或新OCR，
+另计其实际调用和输出，不凭图片标题判定符合。
+
+### 调用、容量、恢复及实施验收
+
+1. 编制逻辑调用L=`O+B+W+R+C+R2`。O包含现有组织/归并及新增意图输出，B为有知识
+   候选的共同依据批次，W为有允许支持的写作单元数，R包含有候选的语义空稿复核，
+   C为最多一次定向修订，R2为受影响再核。`R,C,R2≤W`，故`L≤O+B+4W`，付费发送
+   沿既有首次加三次上界`4L`。全人工/全无允许支持时`W=R=C=R2=0`，有源文说明
+   时仍可能W>0。有候选但全部语义判空时R仍须覆盖，不能借空白省掉核验。检索HTTP
+   尝试另计，最多4Q；无命中不重试至命中。后端Embedding/重排可能另有费用，未知
+   用量不记免费。不做全章节或全事项两两匹配，必要的独立复核仍读取实际证据。
+2. 单请求计完整Prompt、相关要求/条件、去重supports、原表、真实反馈和输出引用。
+   短ID不代替必要原文。查询最长256字符，模型输出意图总量与目录/正文一起计量；
+   单个请求仍受实际输入准入和预留约束。输出预留不是API硬上限；当前HTTP没有输出
+   硬限，不能宣称最坏completion被32768封顶。单命中响应体及巨型单元同样无已验证
+   固定上界，按真实样例校准、测量与记录，不将此方案当作容量已验收。
+3. 缺资料/候选不适用留空，来源不明或缺检索意图有局部缺口，复核暂不可用保留草稿，
+   已否定内容不恢复；不可拆容量不足保留已有稿/空位。取消、失租、存储或实际导出
+   失败保留真实技术状态，不伪报文件成功。没有只有阻断没有出口的业务条件。
+4. 用户明确重审用新execution继承前驱，选定范围和真实重审理由进入实际review及
+   必要修订请求，并固定spec摘要；原写作可复用，空语义回包缓存也不跳过独立复核。
+   同ID已完成结果不覆盖，不清缓存、不加盐、不自动换ID重置额度。资料变更重跑
+   受影响查询/依据/写作/复核，无法确认知识同版时查询可能扩大；共享依据变化也可
+   扩大正文范围，不承诺每次只一章。一次策略升级会改变outline Prompt，旧106页
+   样例17份来源请求不能直接作为新意图回包复用；新O数量及费用须重新预审，不能
+   宣称新增轮数为0就没有重跑成本。后续未变请求仍按完整摘要复用。
+5. 模型只提供语义检索词、需要选择的for_ids/support_ids及正文/局部意见；origin、
+   正式身份、关联目标、CAS、版本、覆盖及调用成本由宿主管理。模板结构不由模型
+   重建，不重抄全量输入清单、元数据或覆盖名单。
+
+实施与验证状态见交接。真实验收需同时包含真实中文检索、分散片段支持、source-only、
+原文背景、混合表单、候选空稿可纠正、初审/再核失败的不同回退、附件a1局部删除、
+全无资料零正文复核、单query恢复，以及相同请求复用和知识更新失效；真实知识库
+单组纵切通过后再跑完整106页。结果与实际预算仅在交接维护，不提前勾选。
+
+## 提交结构与模板实例（BUG-054）
+
+本节是BUG-054的唯一字段合同。用户已批准实施，字段与装载路径已接通，实际回归、
+部署和真实文件验收状态见[交接](handoff.md)，不能仅凭schema通过声明业务结构已验收。
+实施后仅覆盖前述T2、T3至T5及knowledge_required_v2中关于局部章节、模板来源、
+实例归并和混合报价表的对应定义；knowledge_required_v2的知识支持、复核及恢复合同
+继续适用。不得同时沿用“form的全部source_refs都是模板”或“归并时自动联合全部模板”
+的旧语义。运行、部署及真实文件验证状态仍只在交接维护。
+
+### 上下文、模板部件与请求短引用
+
+BUG-055补充：编制来源请求的`sections:[{section_id,heading_path}]`按完整路径共享，
+每个`sources`条目以`section_id`关联，不再在每个段落重复heading_path；不要求回包
+重抄该共享表。宿主原始来源和持久引用不变，实际文字与上下文不按容量裁切。
+`RequestBudget.tokenized_authoring`为显式布尔选项，默认false；true必须同时显式
+提供已由该模型/目的地实际用量核对的o200k_base，适用任务仅outline、authoring_basis、
+authoring_write、authoring_review。计量方法、任务及提示摘要固定进spec。该选项不按
+名称自动开启，也不改变分析抽取/核验合同；首次启用及视图变化须重新做输入输出预审。
+
+| 结构或字段 | 类型、必填性及唯一含义 |
+| --- | --- |
+| SourceUnitRef | 沿用`{source_index_ref:ArtifactRef,unit_id:Identity}`，两字段必填，指向一个冻结原生unit；不因新增模板合同改变其他来源引用 |
+| TemplatePartRef | `{source_ref:SourceUnitRef,selectors:RangeSelector[]}`，两字段均必填。一个部件只能属于source_ref指定的冻结原生unit；selectors按选定片段顺序排列。`selectors=[]`仅表示已明确选择整个unit，不表示边界未知、未提供或装载失败 |
+| RangeSelector | 复用现有冻结来源选择器，必填`range_id/source_range_id/start/end`，其余已有谱系及作用域字段保持原定义；start/end为原规范范围中的半开区间，不由模型填写、计算或改写，不为本节另建字符偏移协议 |
+| 模型请求template_parts | 宿主提供的局部共享表`{part_id:Identity,range_ids:Identity[至少1项]}[]`；part_id使用p1等短引用，range_ids指向本请求实际提供的有序段落/网格锚点及其文字、结构。宿主私有映射保存每个part_id对应的TemplatePartRef，CAS、selector及原生身份不要求模型誊写；原文和grid在请求共享来源中只发送一份 |
+| OutlineTargetResponse.range_ids / ResponseTarget.source_refs | 前者仍选择本请求上下文来源，宿主绑定后者`SourceUnitRef[]`。它们用于说明、要求或相关背景，不再因kind=form而获得模板插入权限；选择上下文不能代替选择实际模板 |
+| OutlineTargetResponse.rule_ids / ResponseTarget.rule_refs | 选择本位置直接应答或填写的完整有效规则，不能仅因某段引文或主题相同绑定整条异用途规则。有真实来源或模板的引用/展示位置可为空，即使同批已有其他rules；这不表示其他规则已被覆盖或不存在。仅规则、来源及模板均空时报outline_target_unbound，来源未读继续独立报告 |
+| OutlineTargetResponse.template_part_ids | 新增`Identity[]=[]`，仅选择本次实际提供并已读的template_parts.part_id，顺序即本候选实际模板的部件顺序。正文、证明附件或无已定位模板时可为空，不要求回抄候选全集 |
+| ResponseTarget.template_refs | 新增`TemplatePartRef[]=[]`，由宿主绑定模型选定部件；顺序即该实例实际插入的顺序。不存在时保持空，不从source_refs、标题、kind或临近位置猜补 |
+| OutlineAssemblyTarget.template_part_ids | 新增`Identity[]=[]`，选择归并请求重新提供的共享template_parts短引用，明确最终采用部件及顺序；与原target_ids的语义归并选择分开，不按所选候选无条件联合全部template_refs |
+| OutlineAssemblyResponse.excluded_targets | 可选`[{target_ids:Identity[至少1项],reason:Text}]`，默认`[]`。模型对原文确定不属于本次交付的候选作明确处置，不要求抄写所有已安排身份；target_ids仅选本次短引用，不得与正式树已选候选重叠。宿主在现有OutlineIssue中保存outline_target_excluded、原用途、理由及关联rule_refs，不渲染被明确排除的目标；未选择且未明确排除的目标继续保留待整理 |
+| 归并请求findings | 来源批次的`{code,detail}[]`观察，过滤本来就由宿主全局重算的outline_rule_unassigned；不重新要求模型誊写回包或认为局部观察必然成立。条件、目录差异及本批未找到模板等须结合真实原文核对，不将观察作为执行指令 |
+| execute_document.submission_sources | 可选`SourceUnitRef[]`，默认空。调用方显式补充当前固定快照内的只读提交/适用性原文，按完整引用去重后冻结到execution_spec；未知来源记具体缺口并继续。宿主装载这些原文供A/F读取，并加入AuthoringOutline.submission_refs，不能因此猜补模板、声明要求适用或改变分析结果。generate_document及_organize传递同一输入，不作为正文review_request或自动结构修订指令 |
+| OutlineResponse.constraint_range_ids | 新增`Identity[]=[]`，选择本批实际提供的来源范围，记录无事项台账时也能识别的提交组成、分册及格式约束；有事项时可与constraint_rule_ids互补，不要求回抄全部来源 |
+| AuthoringOutline.submission_refs | 新增`SourceUnitRef[]=[]`，宿主将constraint_range_ids绑定并精确去重为提交约束的只读依据，供assembly及结构核对实际装载。不是模板插入授权，不因名称含submission就创建新实体或正式章节 |
+
+part_id、range_ids及target_ids的短引用只在各自请求内有效；source与assembly各自建立
+映射，不将同名p1视为同一个持久部件。持久目标仅保存template_refs及现有正式引用，
+不增加持久template_part_id、模板注册表或同义来源字段。归并可以将精确相同部件在
+同一实例中的机械重复记录一次，但不能据此合并不同填写实例或替模型选择补遗版本。
+
+宿主绑定TemplatePartRef时须核对source_ref的索引、unit确实存在，并通过同一冻结索引
+验证各selector的规范source_range_id、原始start/end边界、range_id及其可回放谱系。
+materialize后的unit_id必须与source_ref.unit_id相同，不能因其他unit具有相同文字、
+相邻位置或有效selector就跨unit接受。多个selector不得越出其原范围，部件之间的
+实际顺序与跨unit组合由模型选择、宿主按映射保存；不重新搜索引文猜出另一处位置。
+
+文字部件通过宿主已有的冻结段落锚点映射精确selectors，允许同一unit内的多份声明
+分别选取；一个unit不是一个模板实例。表格部件本轮保留完整原生grid及原坐标、
+合并关系，行锚点用于回绑已确认的真实grid，不能将任一被引用的行升级为整个模板。
+不能把字符片段当作可裁剪表格结构；同一grid含多份独立格式且尚不能精确保留边界时，
+保留对应待补位置及边界缺口，不把整grid复制到各target。无法精确定位的文字也不能
+退回复制整个unit；`selectors=[]`只能由明确的整unit选择产生。
+
+### 局部候选、正式章节与填写实例
+
+本轮剩余修复沿用既有实体，新增字段均有默认值，旧冻结产物继续可读：
+
+| 字段 | 最小合同与职责 |
+| --- | --- |
+| OutlineAssemblyTarget.rule_ids | `Identity[]=[]`，仅选择A的unassigned_rules短引用，补充已有候选或建立有实际规则依据的位置；与target_ids至少一者非空，不要求回抄全部规则 |
+| OutlineAssemblyTarget.source_ids | 可选`Identity[]=[]`，只选本次已发送submission_sources中可绑定的短引用，补充本目标实际使用的限定/上下文依据。宿主映射到完整SourceUnitRef并并入现有source_refs，不改变rule_refs归属、规则排除、template_refs或企业应答；不能仅凭source_ids创建无候选/规则/合法参见依据的新目标 |
+| submission_sources.bindable | 仅无确定冻结来源映射时显式`false`，原文仍供阅读，不得选入target.source_ids；正常可绑定来源省略true。实际可选集合由宿主映射决定，不根据文本相似度猜来源；未知或不可绑定选择报具体source_ids元素路径，沿既有最多4次请求额度纠正 |
+| OutlineAssemblyTarget.target_ids | 默认`[]`，只选已有候选；rule_ids非空，或narrative有非空related_target_ids用于纯参见时，允许不选择原内容候选；不能凭空生成无依据目标 |
+| OutlineAssemblyTarget.manual_fill / support_origins | 新规则位置可明确人工填写及允许来源，默认false/knowledge；已有候选的人工边界及来源许可由宿主保留，不能借归并扩大 |
+| OutlineAssemblyResponse.constraint_rule_ids | `Identity[]=[]`，只选未安排规则，补充实际提交约束，不因此创建正文章 |
+| OutlineAssemblyResponse.excluded_rules | `[{rule_ids:Identity[至少1],reason:Text}]=[]`，仅实际原文足以确认不适用时明确排除；不与已安排规则冲突，宿主保留原规则和理由 |
+| OutlineAssemblyResponse.search_intents | 沿用`SearchIntentResponse[]=[]`，仅为新增规则位置补充检索意图，for_ids选择unassigned_rules短引用；宿主绑定规则及实际证据，旧候选的意图不重抄 |
+| OutlineAssemblyTarget.related_target_ids | `Identity[]=[]`，选择实际有引用关系的候选；宿主映射到最终唯一实例，多实例歧义保留待核，不能按标题猜测。kind=narrative且本字段非空时可作为纯参见目标唯一的候选依据，target_ids/rule_ids可空；不继承被引用候选的规则、模板或企业内容，不免除原候选的安排/处置 |
+| ResponseTarget.related_target_ids | `Identity[]=[]`，保存本大纲内正式target引用，导出据实际章节显示参见位置；不证明应答内容一致 |
+
+纯参见指narrative目标有可解析related_target_ids且无自身rule_refs/source_refs/
+template_refs，也非manual_fill。它没有独立写作任务，显示实际参见即可，不误报缺少
+企业正文。带自身要求、模板或原文的相关位置仍需正常处理；未知、多实例或自引用
+未能解析时保留具体诊断和待补位置，不能因形状相似宣称内容已覆盖。
+| OutlineAssemblyChapter.presentation_role / OutlineChapter.presentation_role | `body/cover`，默认body；只有模型依据原格式明确封面才为cover。原来源候选不增加此字段，不按首章或名称推断 |
+| OutlineAssemblyResponse.table_headers | `[{part_id:Identity,header_row_count:NonnegativeInt}]=[]`，模型从完整原表判断连续起始表头，仅选择本A提供的完整网格；未知不猜，零表示明确不重复 |
+| TemplatePartRef.header_row_count | `NonnegativeInt或null=null`，仅展示信息；显式值需在实际行数内、不能切断跨行合并。无值可用原生header_cells，否则保留未知，不改冻结原表或selector |
+
+unassigned_rules只发送当前未被候选或提交约束安排的完整规则语义和实际证据一次；
+短引用与context.rules建立宿主映射。未选择不等于排除，仍保存未安排诊断与全量底稿。
+新位置沿实际规则证据绑定source_refs，禁止从标题/关键词决定技术、评分或后果归属。
+完整请求过大沿原预算出口保留待整理稿，不截断规则，不新增逐条模型核对。
+A的template_parts沿已有来源投影使用section_id，完整heading_path在template_sections
+共享一次；模型据共享表理解所属标题和范围，不要求回抄section_id，宿主原部件及定位
+保持不变。仅去重重复元数据，不删表格空位、跨行合并、原文字段或规则语义。
+heading_path是解析器提供的定位上下文，可能继承错误，不是规定的投标目录；真实目录、
+组成段落及适用条款优先。来源S沿constraint_range_ids同时选择结构条款及被引用的
+实际目录/组成原文，不能只送“按招标文件要求”一句，不能靠当前文件ID人工补齐生产逻辑。
+F的rule_dispositions仅投影outline_rule_unassigned和outline_rule_excluded所关联的
+实际规则语义及原引文、code和reason，不发送永久规则身份、CAS或原文位置身份；
+已安排规则不重复加进此表。F独立判断是否应安排响应/提交待办或有明确不适用依据，
+仍只返回既有findings，未决和无企业资料不阻止导出。
+F的supports同样复用来源标题投影：section_id引用本请求sections，完整heading_path
+仅发送一次；支持文字、表格及原表引用不变，不要求模型回抄sections。
+受约束的响应/填报/引用位置不能只以空title表示；沿已有target保留应答空位，或通过
+related_target_ids参见实际对应内容。合并主题不等于可以移动规定位置；没有独立原表
+不能造表，纯组织容器仍可只有children，不由宿主把所有空叶章判为失败。
+is_volume=true沿现有字段表示该内容组实际导出独立文件，不局限原文的“卷/册”词汇。
+真实要求不同文件分别交付/提交时保留对应分组，只有业务部分划分不足以推断独立文件。
+全树均为false时只有总稿；外部上传/签章/维护仍为人工待办，导出不代表平台已接收。
+要求细则的展示标签由宿主按既有字段产生；结构化首子字段与父字段的展示标签完全
+相同时只显示一次，原文字符串、业务值及次序不清洗，完整底稿保持不变。
+
+知识原件沿KnowledgeMaterial已有original_ref、attachment、locator表达，不增加实体：
+检索query可带宿主派生的include_original，仅实际证明目标启用；同query合并需要原件的
+范围。提供器范围spec包含原件合同版本和认证方式，不含密钥；知识快照身份包含原件
+模式，不复用旧片段回执冒充原件已取。真实文档/版本元数据及文件SHA核对成功后才
+有original_ref，attachment=true只代表可供选择，不代表证明适用或企业满足。元数据/
+下载各首次加三次，失败保留片段及定位缺口；下载大小有限、同源且不跟随重定向。
+检索自动取得的原件只在证明目标中采用，避免共享片段使普通正文顺带附送原件；调用方
+明确提供的真实证明仍可在相应表单等位置使用，适用性由模型判断，不增加表单禁附门禁。
+
+正式目录使用可更新TOC域、页脚保留PAGE，文档请求更新字段；实际页码由排版器更新，
+不按字数估算。封面只在所属输出范围的目录前显示，不加自动章号，不挪动其他卷封面。
+表头根据显式展示信息或原生标记重复，列宽按实际可用页宽设置；没有可确认表头时
+仍可导出。提交约束和结构待办另交付可读清单，不把平台上传动作变成正文一级章。
+
+语义评测结果单独保留语料/Prompt/模型/输入摘要、请求和原响应引用、用量及未知项、
+宿主合同结果；每例结果回执支持恢复。执行完成不等于人工标注或semantic_acceptance，
+人工GT、模型观察及人工裁定不混写，不把agent意见标为人工已完成。
+
+source回包继续沿用现有chapters/targets容器，但其章节标题、层级和目标只是本批
+局部候选；单批也不能绕过正式组织直接成为最终投标章节。source不生成正式章节/
+目标身份。assembly读取实际提交/分册约束、候选父路径、用途、适用范围及判断模板
+所必需的真实文字；constraint_rule_refs所指的提交条款须实际进入该输入，短ID不
+代替语义。source中的附件标签、表号或模板内标题不自动成为任意层级的编号章节；
+一张表也不必对应独立章节。chapter.title表达成稿业务内容，来源格式标识保留在
+实际采用的模板内部，不机械前置到正式标题。仅原文明确规定投标目录须使用某名称
+时按该要求组织；宿主不按附件字样或编号规则统一删除。最终标题和分册归属以
+assembly形成的正式章节树为准。
+
+业务命名不能改变原文明确约束的投标文件组成、层级及相对顺序。assembly先判断
+实际提交约束，保留受约束结构，再在允许范围内整理title；仅自由编排部分可按业务
+归并。不能以主题覆盖代替规定结构，也不能反向把整个招标书目录当作投标目录。
+
+旧独立`organize_outline/execute_outline`仅为来源候选预览，沿用AuthoringOutline
+载体及路径ID不表示正式目录。其结果没有生产写作/导出消费者；完整文档入口
+不复用该预览，必须由自身assembly形成正式目录。独立预览保持一次来源请求的
+既有执行合同，不将它的成功回执当作正式结构验收。
+
+| 结构或字段 | 本节确定的身份与归属 |
+| --- | --- |
+| OutlineAssemblyTarget.target_ids | 选择已有候选短引用；与rule_ids至少一者非空，或按上文narrative纯参见合同只选择related_target_ids。用于绑定候选规则、上下文和既有检索关联，所选候选的template_refs不随之自动全部插入 |
+| ResponseTarget.target_id | 由宿主产生的本大纲内正式位置身份。对kind=form，一个target就是一次实际填写并提交的完整实例；一个实例可有多个有序template_refs，多份独立填写表单不共用一个target |
+| OutlineChapter | 沿用chapter_id、title、targets、children和is_volume；正式树的位置表达提交归属，仅原文明示独立分册时is_volume=true。不另加instance_id、owner_id或volume_id，也不把source标签当提交归属 |
+| CellFillResponse.source_id / CellFill.source_ref | 仍使用现有请求短引用与SourceUnitRef回绑。原表必须属于对应target.template_refs中的实际grid；仅属于source_refs、其他target或同任务上下文的表不得填入。坐标沿用该原生grid，不因目录重排改变 |
+| OutlineTargetResponse.manual_fill / ResponseTarget.manual_fill | 沿用`StrictBool=false`，作用于整个target。含最终报价、单价、总价、折扣等且没有精确价格字段策略的form整体为true；不另建一个引用同表的价格target。该实例保留原格式、固定数量和技术条件，非价格企业字段也可最终由人工补齐，其他正文目标照常生成 |
+
+不同人员、标段、对象或原文明示分别填写的多份副本，应分别建立target，即使
+template_refs相同也保留独立实例。确属同一实例的跨批候选由模型归并，不按来源SHA、
+相同标题或相同表格全局去重。一个最终实例只在正式树中实际插入一次；需要提及它
+的其他位置不因此再次创建相同填写实例。模型判断是否同一实例、应采用哪个模板及
+提交归属，宿主负责身份、selector回绑、实例装载及按正式树导出。
+
+同一章节内多个form实例复用同一模板时，导出须显示各自既有purpose作为用途说明，
+以便区分填写对象和适用条件。说明不是新字段或填写事实，不写入原表固定单元格；
+宿主只按模板引用检测复用，不从表名猜角色、不生成主体名称。单一实例沿原格式显示。
+
+归并请求的共享template_parts必须包含模型判断实例及适用范围所需的完整内容：文字
+部件沿用text，网格部件使用完整原生grid（含所有单元格、合并和原坐标），不以首行
+或形状代替后续条件。heading_path取原生unit的实际路径，优先根字段，缺失时读取
+locator.heading_path；相同部件只发送一次。该模型输入投影不增加持久模板或主体字段，
+也不授权模型选择请求外的部件。完整请求须重新计量，真实预算和修订成本见修复方案。
+
+本轮不新增manual_cells、金额模型或价格词表。manual_fill禁止自动填入最终价格，
+不授权宿主按数字/关键词擦除原表。若原件价格格已有示例值，原格式保留不等于本次
+报价已经留空，须明确记录人工清理缺口；不得把示例、历史价格或预算当本次最终报价。
+模板缺失、边界未知、归属或适用性未决均记录具体位置和原因，相关位置留空待补，
+其余内容继续保存导出，不以猜测模板或额外业务门禁替代处理出口。
+
+明确排除仅是模型对本次交付候选的语义结论，不删除原始事项、来源或回执；排除理由
+通过既有issues保留。其关联规则计入本次已有安排/处置，不再机械报同一规则未安排；
+其他未安排规则照常保留。一个候选含多项仍适用内容时应拆分或保留条件，不可同时把
+同一短引用安排和排除；身份冲突按既有合同纠正/有限重试出口处理，不按理由关键词裁决。
+明确排除候选的专属局部旧问题按原批次/目标身份退役，其他来源观察保持原code和
+原文，并在最终detail前标注其来源读取阶段，避免把历史局部观察冒充最终缺失结论。
+最终模型排除理由和宿主重算的全局未安排问题不加该来源阶段标记，不据文字猜测已解决。
+
+### 已知要求与企业应答分离（BUG-063）
+
+已知招标要求属于独立的只读数据，不以企业资料、写作成功或复核接受为存在条件。
+新编制结果先保存要求底稿，再执行既有写作及复核；删除不受支持的应答，只影响
+WritingUnit中的企业内容，不删除底稿。以下字段由宿主从已冻结分析及实际绑定关系
+投影，不新增模型字段，也不要求模型重写要求或抄回覆盖名单。
+
+| 字段 | 唯一合同 |
+| --- | --- |
+| AuthoringDocument.requirements_ref | 可选`ArtifactRef`，旧结果默认null；新生成结果指向独立AuthoringRequirements只读快照，不嵌入WritingUnit.blocks |
+| AuthoringRequirements | `schema_version:2`、`authoring_input:AuthoringInput`、`rule_origin:extraction/verified_projection/source_only`、`rules:AuthoringRequirement[]`、`issues:AuthoringInputIssue[]=[]`。包括当前上下文全部已知有效规则，不只保存已安排位置的规则 |
+| AuthoringRequirement.rule_ref | 沿用完整EffectiveItemRef，包含适用时的decision_id和rule_index；宿主按此身份去重，不按文字、数值或标题判断同一要求 |
+| AuthoringRequirement.rule | `dict或null`，只读原样保存现有TenderItem或EffectiveRule的完整字段，不在复制时重复校验、补默认值或丢弃可读旧字段；仅无法读取该引用时为null并报告具体待核。有效投影只采用当前effective_rule，不读旧item补回被删除的条件/评分 |
+| AuthoringRequirement.target_ids | `Identity[]=[]`，宿主由最终target.rule_refs派生关联，保留多位置关系；空列表表示未关联实际响应位置，不能删除该规则或自行宣称不适用 |
+
+全量底稿以`招标要求底稿.json`随交付包提供。每章汇集narrative/form/attachment
+全部目标的已有rule_refs，按完整有效规则身份去重，展示一份“招标要求依据”及空白
+逐项响应位置，保留text、scope、conditions、exceptions和
+原文依据；这些是招标方要求，不是企业承诺。企业已有内容仍按原写作单元独立显示，
+不凭同章关系自动认定逐行满足。独立表单和证明实例仍按各自目标输出，不为每张
+原表再各抄一份要求；没有证明文件也保留证明要求。去重仅限同章的要求依据，不合并
+不同主体/标段的填写实例或跨章语义位置。未安排规则同样保留，并有待安排提示。不把评分、废标及
+提交要求统一改名为技术参数，不将source_refs中的评审表/背景自动升级为模板。
+presentation_role=cover的封面保持原格式，其已绑定填写要求及原文依据进入现有
+`提交要求与待办.md`中的封面填写要求，不在封面前插入依据表，也不只保存在JSON。
+
+展示确认状态沿用`AuthoringRequirements.authoring_input.confirmation_ref`，不新增字段。
+该引用缺失或为null时，依据表第一列表头为“分析整理（待确认）”，表前及
+`提交要求与待办.md`开头明确说明“摘要及适用范围仍需结合原文和有效补遗核对”。
+企业应答继续留空；原摘要、条件、引文和有效补遗逐字保留，提示不代表语义错误已修正。
+确认引用存在时沿用现有展示；`rule_origin=verified_projection`本身不等于人工确认。
+该变化只影响确定性导出，不改变底稿、模型请求、分包或恢复身份；已有稿件保留，
+重导出形成独立版本，不为补展示状态重跑模型。
+
+仅有原文而没有结构化规则时，保留既有来源和可用模板、注明尚未取得逐项规则；
+不从任意上下文复制整表猜参数。规则文字可读但原文不可读时保留已知内容及引用、
+报告定位缺口，继续导出。快照不重复加入写作或F请求，本轮新增模型调用为0。
+
+正文展示与存储编码分开：要求细则按既有字段含义显示可读标签及原值，列表分行，
+不得直接将dict/list的JSON序列化结果写入Word。量化事实、评分、后果及提交细则
+不能为消除JSON而删除；原始结构继续完整保存在要求底稿。未知旧形状保留可读内容
+和具体待核，不能用JSON倾倒作为展示回退。原文已有的代码/JSON字符串仍按原文保留，
+不作全篇标点或花括号清理；这些规则不改变模型协议或授权宿主推断招标语义。
+kind、domains等内部分类只保留在底稿，不作为正文要求事实打印。数值、单位及引文
+按原记录成组显示，0及明确布尔值不能按空值丢弃，不额外推导比较方向或计分含义。
+
+### 新旧回包与修订边界
+
+归并阶段的`OutlineAssemblyTarget.purpose`只是写作目的，不能替代来源证据。
+该目的采用另一已提供候选或未安排规则的条件、例外、适用性或约束时，模型须通过
+现有`target_ids`或`rule_ids`选择实际提供依据的条目；仅补充已发送提交原文或规则
+引文的限定上下文时，也可用`source_ids`独立选依据，避免把上下文规则同时归属为
+本位置的应答事项。宿主通过提交原文的直接引用或引文range_id的已有冻结映射，
+按完整SourceUnitRef去重并入现有`source_refs`，后续加载完整来源。只选择实际需要的短引用，不回抄
+全集、不按文本相似度推断关联，不因存在全局`submission_refs`就给每个任务装全目录。
+宿主持久引用仍沿用source_refs；新增返回字段source_ids可省略，预算和原4次请求额度
+不变。未知范围保留待核，不将purpose文字当成原文依据。
+
+历史大纲/写作产物仍可读取；缺少template_refs时默认`[]`仅表示没有按新合同绑定
+模板，不能恢复为“source_refs全部作为template_refs”。旧source回包的range_ids
+未区分模板角色和精确边界，也未证明是否同一填写实例；不能根据旧kind、标题或unit
+身份免费补出这些语义判断，不能仅因schema仍可解析就当作新合同成功回执。
+
+完整业务顺序、一次结构核对及调用/修订预算见
+[提交结构与表单归属修复方案](submission-structure-plan.md)；结构核对复用现有review
+问题合同，不新增工作流状态，实际语义操作、Prompt及输入须固定进执行与请求摘要。
+
+最终`operation=structure`请求先保留原视图；完整请求超准入时，才以既有网格投影
+重试准入。投影视图标记`structure_view=compact_v1`，只转换`supports.grid`及
+`submission_sources`内以JSON文本传送的原生网格。`rows`按原坐标保留全部明文和
+空字符串，`null`仅表示没有独立原生单元格；`merged_cells`保持非1×1合并坐标和
+跨度，物理列宽仍留在宿主。未知网格/单元格属性及稀疏展开更大的网格保留原对象。
+所有目标、章节树、原文、处置、引用、顺序及其他字段保持不变。
+仅该次structure系统提示追加格式说明并进入请求摘要，不修改共用`authoring_review`
+提示，既有正文复核回执继续按完整摘要复用。投影后仍超限时沿原
+`structure_review_unavailable`缺口继续生成；最多一次结构复核及原有限纠正，不新增
+模型阶段、输出预留或身份誊写要求，压缩准入通过不代表语义或输出容量已验证。
+
+新合同的schema/Prompt及实际视图须进入请求摘要。旧106页样例17份来源回包不能
+直接复用为新模板合同的判断，需按新合同重跑受影响source批次，再重新组织正式
+结构；实际包数与预算重新预审，不预先声称必定仍为17次。后续实际未变的完整请求
+仍按摘要复用；目录重组导致target身份、title_path或依赖变化时可能使相关写作和
+复核请求失效，不能承诺只增加一次assembly便复用全部正文。完整调用公式、容量
+及业务处理顺序由实施方案引用本节，不在字段字典另设一套流程。
 
 ## 历史v1字段、共享来源合同与实现依据
 
@@ -909,7 +1587,7 @@ uncertain按用户已接受的重复计费风险在剩余额度内重试，不�
 | `scope_decisions` | 人工bind/local_only决议记录列表 | 每项带range_id、证据、理由、明确目标；进入新领域修订后重分包/重验 |
 | `applicability_decisions` | requirement_id键控小型适用性决议 | 验证产物保存；计划读取原要求+当前决议有效视图，不复制完整要求 |
 | `checklist_digest` | sha256，source_version/domain_revision/来源/计划/要求/验证摘要 | 确认精确绑定，任何相关修订使旧确认失效 |
-| `status` | 各共享实体schema内明确枚举 | run、command、OCR、scope、disposition是不同实体状态，不相互冒用 |
+| `status` | 各共享实体schema内明确枚举 | run、command、模型回执、编制执行、调度任务、项目分别采用宿主业务枚举，读取/写入/分支共用定义，未知值明确报错；OCR、scope、disposition继续由模型schema中的Literal约束，不相互冒用 |
 
 ## PR评论6160192506的三个边界
 
@@ -942,3 +1620,63 @@ PackPlan为当前领域修订的总计划（引用多个PackDescriptor）；Pack
 
 已去掉WIP子包的requirements_ref/requirement_ids/disposition_range_ids组合，统一上表
 RequirementRef/DispositionRef；requirements_ref固定指阶段根的完整要求索引。内部合同未发布，不增加旧格式迁移。
+
+## 网页大纲修订与固定大纲正文（BUG-076）
+
+正式大纲继续使用 `AuthoringOutline`，不引入另一套模型响应格式。网页编辑投影由
+`tender/outline_edit.py::OutlineEditChapter` 定义：稳定章节标识、标题、子章节、可选卷册/
+封面标记及用户编写目标。原章节的响应位置、规则、来源和模板引用从服务端父大纲继承，
+网页请求不能覆盖这些引用；来源仅可按下述明确修订追加。新增章使用客户端创建的独立 `manual-UUID`；有编写目标时
+宿主建立对应narrative位置，无目标则仅标题，不推断招标要求或伪造企业依据。
+
+生成候选通过所属项目的成功执行标识读取；保存传明确父修订及来源修订/来源执行二选一，
+以项目行锁和父修订比较追加不可变记录。`revision_id`与`sha256`分别表示已保存修订身份
+及其完整大纲文件，候选不替代已保存head，保存未知仍重试同一键和同一请求内容。
+
+正文提交的`outline_revision_id`、`outline_sha256`只能引用本项目保存的大纲。宿主解析其
+`outline_ref`并固定原`authoring_input`，实际执行用 `outline_ref` 跳过组织；独立大纲执行
+用 `outline_only=True`，成功返回大纲文件而非`AuthoringDocument`。非默认选项固定到
+执行规格，同ID不能更换模式或大纲；默认整稿规格保持原义。旧人工Word、已保存大纲和
+新编制候选分别保留，不能把网页改纲称为已同步修改当前Word。
+
+大纲与正文请求可使用既有可选`previous_execution_id`指定一个同类前驱：大纲只继承
+大纲，正文只继承正文，且不得指向自身或另一项目。大纲前驱须属于当前选定的同一
+分析run、来源仍当前；正文固定大纲继续绑定其原run，未固定大纲时沿用现有前驱run。
+worker再次校验同run、同执行协议与同`outline_only`模式。大纲仍不接受知识选择、
+`review_request`或固定大纲选项，不增加模式、字段或节点。
+继承单位是完整请求摘要相同且重新校验通过的`document-model-response`；带反馈纠正
+后接受的回包同样可继承。新执行仅提交`reused_from_execution_id`引用，不复制付费请求
+行或usage。只改`outline_assemble`提示时，source请求满足以上条件才可复用，归并及
+任何实际改变的请求另计调用；旧运行与各版产物保持不可变。
+
+网页投影新增可选`target_ids`，仅选择同一来源执行及相同`authoring_input`的服务端响应。
+未提交时沿原章继承；显式空数组移出本章响应，不能重写其规则、来源、表单或用途。
+重复安排或未知身份拒绝。历史列表由`outline.history`读取，`outline.detail`返回本项目
+修订与`available_targets`；恢复使用历史修订为来源、最新head为父修订，保存追加新记录。
+历史目录不能跨生成执行混用相同的目标ID，人工响应定义从同执行的祖先修订恢复。
+
+章节编辑可选 `source_additions:[{target_id,source_refs:[SourceUnitRef]}]`，由审阅者明确
+选择遗漏的依据；目标须是本章保留或经 `target_ids` 选入的既有服务端响应。来源只允许
+父大纲 `submission_refs`、父大纲响应或上述合法历史目录已持有的完整引用；宿主按完整
+`SourceUnitRef` 核对及去重追加，不能仅凭 `unit_id` 接受另一份原文。不得删除原来源、
+修改规则/模板/用途/企业依据权限，也不能借此创建新响应。未传或空数组保留原行为。
+追加随现有保存请求摘要和不可变修订留痕；后续固定此修订编制，沿原摘要复用未变的
+写作回执，仅重算实际受影响的写作与复核。它是审阅后的明确引用修订，不代表原模型
+自动理解正确，不新增API、表、主节点或模型调用。
+
+网页未指定固定大纲的编制任务在提交时保存`authoring_input_ref`；worker只从持久job
+读取此引用，浏览器不能指定。执行规格固定该引用并检查完整快照与执行身份，恢复仍
+沿同一快照；分析后来修订不替换已排队输入，取消检查仍独立生效。
+
+正文请求可带`knowledge_selections:[{product_id,version_id}]`，最多20个固定UUID版本。
+选择同时固定在request和job中，空选择不产生知识依赖；不得传current、凭据或服务URL。
+知识worker在内存生成60秒、purpose/execution受限的内部令牌，API从job读取项目归属与
+已选版本，逐次核对所有权、版本状态和原件实际关系。检索失败保留待补，结果在写作前
+冻结；项目上传材料继续可用。选定资料不代表模型或宿主已确认其业务适用性。
+
+分析网页的`analysis.review`提供精确run/source/domain/checklist及事项基准摘要。
+`analysis.confirm`提交全部待人工问题的`acknowledged/dismissed`及理由，沿既有确认
+合同绑定原版本。`analysis.correct`仅收`pack_id/item_id/text`、基准摘要和人工理由；
+完整packs、证据、处置、关系和其他结构字段由服务端恢复，沿原领域修订重新核验。
+此入口只纠正文案，数字、条件、范围等结构修订仍使用既有完整纠正流程。未知提交保持
+原请求/key，过期基准409保留输入并提供最新分析对照，不自动套用到新版本。

@@ -640,7 +640,7 @@ fn reduce_grouped(
         let existing = store
             .wiki
             .get(&(version_id, slug.clone()))
-            .filter(|page| page.status == "published")
+            .filter(|page| page.status == crate::WikiStatus::Published)
             .cloned();
         let mut chunk_ids = Vec::new();
         for u in &updates {
@@ -674,7 +674,7 @@ fn reduce_grouped(
                 .filter_map(|did| {
                     store.wiki.values().find(|p| {
                         p.product_version_id == version_id
-                            && p.status == "published"
+                            && p.status == crate::WikiStatus::Published
                             && p.page_type == PAGE_SUMMARY
                             && p.source_refs.contains(did)
                     })
@@ -937,7 +937,7 @@ fn apply_patch(store: &mut WikiJob, version_id: Uuid, patch: ReducePatch) {
         title: patch.title.clone(),
         content: patch.content.clone(),
         page_type: patch.page_type,
-        status: "published".into(),
+        status: crate::WikiStatus::Published,
         summary: patch.summary,
         aliases: patch.aliases,
         source_refs: patch.source_refs,
@@ -1058,7 +1058,7 @@ fn linkify_version(store: &mut WikiJob, version_id: Uuid) {
     let refs: Vec<LinkRef> = store
         .wiki
         .values()
-        .filter(|p| p.product_version_id == version_id && p.status == "published")
+        .filter(|p| p.product_version_id == version_id && p.status == crate::WikiStatus::Published)
         .flat_map(|p| {
             let mut r = vec![LinkRef {
                 slug: p.slug.clone(),
@@ -1098,7 +1098,7 @@ fn write_index_page(store: &mut WikiJob, version_id: Uuid) {
         .values()
         .filter(|p| {
             p.product_version_id == version_id
-                && p.status == "published"
+                && p.status == crate::WikiStatus::Published
                 && p.page_type != PAGE_INDEX
         })
         .cloned()
@@ -1234,7 +1234,9 @@ fn write_log_page(store: &mut WikiJob, version_id: Uuid) {
         .wiki
         .values()
         .filter(|p| {
-            p.product_version_id == version_id && p.status == "published" && p.page_type != PAGE_LOG
+            p.product_version_id == version_id
+                && p.status == crate::WikiStatus::Published
+                && p.page_type != PAGE_LOG
         })
         .cloned()
         .collect();
@@ -1254,7 +1256,7 @@ fn write_synthesis_pages(store: &mut WikiJob, version_id: Uuid) {
         .values()
         .filter(|p| {
             p.product_version_id == version_id
-                && p.status == "published"
+                && p.status == crate::WikiStatus::Published
                 && p.page_type == PAGE_ENTITY
         })
         .cloned()
@@ -1315,7 +1317,9 @@ fn upsert_system_page(
     // System pages also derive from document content. Preserve their source
     // dependencies so tombstone/reparse invalidation covers syntheses and logs.
     for source in store.wiki.values().filter(|page| {
-        page.product_version_id == version_id && page.status == "published" && page.slug != slug
+        page.product_version_id == version_id
+            && page.status == crate::WikiStatus::Published
+            && page.slug != slug
     }) {
         page.source_refs.extend(source.source_refs.iter().copied());
         page.chunk_refs.extend(source.chunk_refs.iter().copied());
@@ -1404,7 +1408,7 @@ fn reduce_slug(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) -> Res
     let Some(page) = store.wiki.get(&(version_id, op.slug.clone())).cloned() else {
         return Ok(());
     };
-    if page.status != "published" {
+    if page.status != crate::WikiStatus::Published {
         return Ok(());
     }
     if let Some(p) = store.wiki.get_mut(&(version_id, op.slug.clone()))
@@ -2004,7 +2008,7 @@ mod tests {
         process_ingest_on_job(&mut store, version).unwrap();
         process_finalize_on_job(&mut store, version).unwrap();
         for page in store.wiki.values_mut() {
-            page.status = "draft".into();
+            page.status = crate::WikiStatus::Draft;
             page.content = "INVALIDATED_SECRET_TEXT".into();
             page.summary = "INVALIDATED_SECRET_TEXT".into();
         }
@@ -2014,7 +2018,7 @@ mod tests {
         let published = store
             .wiki
             .values()
-            .filter(|page| page.status == "published")
+            .filter(|page| page.status == crate::WikiStatus::Published)
             .collect::<Vec<_>>();
         assert!(!published.is_empty());
         assert!(

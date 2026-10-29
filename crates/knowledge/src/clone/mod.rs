@@ -34,33 +34,35 @@ pub async fn run_clone(
     // metadata, object ownership and complete index are initialized.
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let product_id: Uuid = sqlx::query_scalar(
-        "UPDATE product_versions SET status = 'cloning', updated_at = now()
+        "UPDATE knowledge_product_versions SET status = 'cloning', updated_at = now()
          WHERE id = $1 RETURNING product_id",
     )
     .bind(target_version_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    let src_emb: Option<String> =
-        sqlx::query_scalar("SELECT embedding_model_id FROM product_versions WHERE id = $1")
-            .bind(source_version_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-    let dst_emb: Option<String> =
-        sqlx::query_scalar("SELECT embedding_model_id FROM product_versions WHERE id = $1")
-            .bind(target_version_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let src_emb: Option<String> = sqlx::query_scalar(
+        "SELECT embedding_model_id FROM knowledge_product_versions WHERE id = $1",
+    )
+    .bind(source_version_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let dst_emb: Option<String> = sqlx::query_scalar(
+        "SELECT embedding_model_id FROM knowledge_product_versions WHERE id = $1",
+    )
+    .bind(target_version_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     let keep_copy = src_emb.unwrap_or_default() == dst_emb.unwrap_or_default() && schema_ready;
 
     let src_docs = sqlx::query(
-        "SELECT id, title, file_name, file_size, file_hash, object_ref,
-                COALESCE(type, 'file') AS doc_type, source_passages,
+        "SELECT id, title, file_name, byte_length AS file_size, content_sha256 AS file_hash, object_ref,
+                COALESCE(document_kind, 'file') AS doc_type, source_passages,
                 COALESCE(description, '') AS description,
                 COALESCE(summary_status, 'none') AS summary_status
-         FROM documents WHERE product_version_id = $1 AND deleted_at IS NULL
+         FROM knowledge_documents WHERE product_version_id = $1 AND deleted_at IS NULL
            AND parse_status NOT IN ('cancelled','deleting','deleted')
          ORDER BY id FOR SHARE",
     )
@@ -98,9 +100,9 @@ pub async fn run_clone(
         // obligation. Reparses start pending with their final source metadata
         // so the trigger captures the correct manual passages at insertion.
         sqlx::query(
-            "INSERT INTO documents (
+            "INSERT INTO knowledge_documents (
                 id, product_version_id, title, parse_status, enable_status,
-                file_name, file_size, file_hash, object_ref, type, source_passages,
+                file_name, byte_length, content_sha256, object_ref, document_kind, source_passages,
                 description, summary_status
              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         )
@@ -121,26 +123,28 @@ pub async fn run_clone(
             String::new()
         })
         .bind(if copy_keep {
-            src.get::<String, _>("summary_status")
+            src.try_get::<crate::SummaryStatus, _>("summary_status")
+                .map_err(|error| error.to_string())?
         } else {
-            "none".into()
+            crate::SummaryStatus::None
         })
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-        sqlx::query_scalar::<_, String>(
-            "SELECT kb_register_knowledge_document_object(
-                $1,'application/octet-stream',NULL::kb_actor_identity,$2,$3)",
+        crate::workflow::record_document_change(&mut tx, nid, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        platform::register_knowledge_document_object_in_tx(
+            &mut tx,
+            nid,
+            "application/octet-stream",
+            &format!("knowledge-document:{nid}"),
         )
-        .bind(nid)
-        .bind(format!("knowledge-document:{nid}"))
-        .bind(Uuid::new_v4())
-        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         sqlx::query(
-            "INSERT INTO document_tags (document_id, tag_id)
-             SELECT $1, tag_id FROM document_tags WHERE document_id = $2",
+            "INSERT INTO knowledge_document_tags (document_id, tag_id)
+             SELECT $1, tag_id FROM knowledge_document_tags WHERE document_id = $2",
         )
         .bind(nid)
         .bind(sid)
@@ -184,7 +188,7 @@ pub async fn run_clone(
     // this same initialization transaction.
     if !kept_docs.is_empty() {
         let source_had_wiki: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE product_version_id = $1)",
+            "SELECT EXISTS(SELECT 1 FROM knowledge_wiki_pages WHERE product_version_id = $1)",
         )
         .bind(source_version_id)
         .fetch_one(&mut *tx)
@@ -211,13 +215,15 @@ pub async fn run_clone(
             }
         }
     }
-    sqlx::query("UPDATE product_versions SET status = 'active', updated_at = now() WHERE id = $1")
-        .bind(target_version_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE knowledge_product_versions SET status = 'active', updated_at = now() WHERE id = $1",
+    )
+    .bind(target_version_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if make_current {
-        sqlx::query("UPDATE products SET current_version_id = $1 WHERE id = $2")
+        sqlx::query("UPDATE knowledge_products SET current_version_id = $1 WHERE id = $2")
             .bind(target_version_id)
             .bind(product_id)
             .execute(&mut *tx)
@@ -232,8 +238,7 @@ pub async fn run_clone(
 mod tests {
     use super::*;
     use crate::{TEST_PG_SERIAL, create_workspace_with_library, insert_document, insert_user};
-    use platform::apply_fresh_baseline;
-    use tokio::sync::{OnceCell, SemaphorePermit};
+    use tokio::sync::SemaphorePermit;
 
     async fn db_lock() -> SemaphorePermit<'static> {
         TEST_PG_SERIAL
@@ -245,36 +250,18 @@ mod tests {
     async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {
         let database_url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {
             sqlx::Error::Configuration(
-                "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for destructive PostgreSQL tests"
-                    .into(),
+                "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for isolated PostgreSQL tests".into(),
             )
         })?;
         if database_url.contains(":15432/") {
             return Err(sqlx::Error::Configuration(
-                "destructive PostgreSQL tests refuse the live :15432 database".into(),
+                "isolated PostgreSQL tests refuse the live :15432 database".into(),
             ));
         }
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(32)
             .connect(&database_url)
             .await
-    }
-
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../test-support/postgres.rs"
-    ));
-
-    async fn reset_fresh_schema(pool: &sqlx::PgPool) {
-        reset_isolated_schema(pool)
-            .await
-            .expect("reset isolated test schema");
-        apply_fresh_baseline(pool).await.expect("migrate");
-    }
-
-    async fn reset_fresh_schema_once(pool: &sqlx::PgPool) {
-        static RESET: OnceCell<()> = OnceCell::const_new();
-        RESET.get_or_init(|| reset_fresh_schema(pool)).await;
     }
 
     #[tokio::test]
@@ -284,7 +271,6 @@ mod tests {
             eprintln!("skip: postgres down");
             return;
         };
-        reset_fresh_schema_once(&pool).await;
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -294,6 +280,7 @@ mod tests {
             .unwrap();
         let src_ver = seeded.library_version_id;
         let src_doc = Uuid::new_v4();
+        let digest = platform::sha256_hex(src_doc.as_bytes());
         insert_document(
             &pool,
             crate::NewDocument {
@@ -302,8 +289,8 @@ mod tests {
                 title: "iso",
                 file_name: "iso.txt",
                 file_size: 3,
-                file_hash: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                object_ref: "objects/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                file_hash: &digest,
+                object_ref: &format!("objects/{digest}"),
             },
         )
         .await
@@ -317,50 +304,52 @@ mod tests {
         assert_eq!(follow[0].task_type, platform::TYPE_POST_PROCESS);
         assert!(follow[0].clone_keep);
         assert_eq!(follow[0].product_version_id, dst);
-        let src_count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM documents WHERE product_version_id = $1")
-                .bind(src_ver)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let src_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_documents WHERE product_version_id = $1",
+        )
+        .bind(src_ver)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(src_count, 1);
-        let dst_count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM documents WHERE product_version_id = $1")
-                .bind(dst)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let dst_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_documents WHERE product_version_id = $1",
+        )
+        .bind(dst)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(dst_count, 1);
         let dst_id: Uuid =
-            sqlx::query_scalar("SELECT id FROM documents WHERE product_version_id = $1")
+            sqlx::query_scalar("SELECT id FROM knowledge_documents WHERE product_version_id = $1")
                 .bind(dst)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_ne!(dst_id, src_doc);
         let owner_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM object_owner_references
-             WHERE object_ref = 'objects/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'",
+            "SELECT count(*) FROM platform_object_references
+             WHERE object_ref=$1",
         )
+        .bind(format!("objects/{digest}"))
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(owner_count, 2);
         let status: String =
-            sqlx::query_scalar("SELECT status FROM product_versions WHERE id = $1")
+            sqlx::query_scalar("SELECT status FROM knowledge_product_versions WHERE id = $1")
                 .bind(dst)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(status, "active");
         let current: Option<Uuid> =
-            sqlx::query_scalar("SELECT current_version_id FROM products WHERE id = $1")
+            sqlx::query_scalar("SELECT current_version_id FROM knowledge_products WHERE id = $1")
                 .bind(seeded.library_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(current, Some(src_ver));
-        reset_fresh_schema(&pool).await;
     }
 
     #[tokio::test]
@@ -370,7 +359,6 @@ mod tests {
             eprintln!("skip: postgres down");
             return;
         };
-        reset_fresh_schema_once(&pool).await;
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -378,12 +366,15 @@ mod tests {
         let seeded = create_workspace_with_library(&pool, owner, "Copy", "copy")
             .await
             .unwrap();
-        sqlx::query("UPDATE product_versions SET embedding_model_id = 'stub-emb' WHERE id = $1")
-            .bind(seeded.library_version_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE knowledge_product_versions SET embedding_model_id = 'stub-emb' WHERE id = $1",
+        )
+        .bind(seeded.library_version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let src_doc = Uuid::new_v4();
+        let digest = platform::sha256_hex(src_doc.as_bytes());
         insert_document(
             &pool,
             crate::NewDocument {
@@ -392,8 +383,8 @@ mod tests {
                 title: "spec",
                 file_name: "spec.txt",
                 file_size: 8,
-                file_hash: "5c58b7bd315c5c6c396aaedfe66d523f6f19ad5c4cd0d180cb4574e215cc0148",
-                object_ref: "objects/5c58b7bd315c5c6c396aaedfe66d523f6f19ad5c4cd0d180cb4574e215cc0148",
+                file_hash: &digest,
+                object_ref: &format!("objects/{digest}"),
             },
         )
         .await
@@ -440,46 +431,50 @@ mod tests {
         assert_eq!(follow[0].task_type, platform::TYPE_POST_PROCESS);
         assert!(follow[0].clone_keep);
         let dst_id = follow[0].document_id;
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
-            .bind(dst_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
+                .bind(dst_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(n, 1);
         let copied: String =
-            sqlx::query_scalar("SELECT content FROM chunks WHERE document_id = $1")
+            sqlx::query_scalar("SELECT content FROM knowledge_chunks WHERE document_id = $1")
                 .bind(dst_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(copied, "throughput 99");
-        let q: serde_json::Value =
-            sqlx::query_scalar("SELECT generated_questions FROM chunks WHERE document_id = $1")
-                .bind(dst_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let q: serde_json::Value = sqlx::query_scalar(
+            "SELECT generated_questions FROM knowledge_chunks WHERE document_id = $1",
+        )
+        .bind(dst_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(q, serde_json::json!(["q?"]));
-        let emb_n: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
+        let emb_n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM knowledge_chunk_embeddings WHERE document_id = $1",
+        )
+        .bind(dst_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(emb_n, 1);
+        let src_n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
+                .bind(src_doc)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(src_n, 1);
+        let st: String =
+            sqlx::query_scalar("SELECT parse_status FROM knowledge_documents WHERE id = $1")
                 .bind(dst_id)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(emb_n, 1);
-        let src_n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
-            .bind(src_doc)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(src_n, 1);
-        let st: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-            .bind(dst_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
         assert_eq!(st, "processing");
-        reset_fresh_schema(&pool).await;
     }
 
     #[tokio::test]
@@ -489,7 +484,6 @@ mod tests {
             eprintln!("skip: postgres down");
             return;
         };
-        reset_fresh_schema_once(&pool).await;
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -497,12 +491,15 @@ mod tests {
         let seeded = create_workspace_with_library(&pool, owner, "Mismatch", "mismatch")
             .await
             .unwrap();
-        sqlx::query("UPDATE product_versions SET embedding_model_id = 'emb-a' WHERE id = $1")
-            .bind(seeded.library_version_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE knowledge_product_versions SET embedding_model_id = 'emb-a' WHERE id = $1",
+        )
+        .bind(seeded.library_version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let src_doc = Uuid::new_v4();
+        let digest = platform::sha256_hex(src_doc.as_bytes());
         insert_document(
             &pool,
             crate::NewDocument {
@@ -511,8 +508,8 @@ mod tests {
                 title: "iso",
                 file_name: "iso.txt",
                 file_size: 3,
-                file_hash: "90ff7f6f30beadcbfb07c27b3f7059a97b568b23f82ca30bb2d8fc1fd0a53c0e",
-                object_ref: "objects/90ff7f6f30beadcbfb07c27b3f7059a97b568b23f82ca30bb2d8fc1fd0a53c0e",
+                file_hash: &digest,
+                object_ref: &format!("objects/{digest}"),
             },
         )
         .await
@@ -555,23 +552,25 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE product_versions SET embedding_model_id = 'emb-b' WHERE id = $1")
-            .bind(dst)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE knowledge_product_versions SET embedding_model_id = 'emb-b' WHERE id = $1",
+        )
+        .bind(dst)
+        .execute(&pool)
+        .await
+        .unwrap();
         let follow = run_clone(&pool, seeded.library_version_id, dst, &[], false)
             .await
             .unwrap();
         assert_eq!(follow.len(), 1);
         assert_eq!(follow[0].task_type, platform::TYPE_DOCUMENT_PROCESS);
         assert!(!follow[0].clone_keep);
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
-            .bind(follow[0].document_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM knowledge_chunks WHERE document_id = $1")
+                .bind(follow[0].document_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(n, 0);
-        reset_fresh_schema(&pool).await;
     }
 }

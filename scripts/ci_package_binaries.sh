@@ -5,18 +5,12 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 : "${CI_BIN_DIR:?}"
-: "${CI_CONTRACT_FEATURES:?}"
 : "${CI_API_BIN:?}"
 : "${CI_WORKER_BIN:?}"
-: "${CI_TENDER_PREPARE_BIN:?}"
 : "${CI_MIGRATOR_BIN:?}"
-: "${CI_CONTENT_POSTGRES_TESTS:?}"
-: "${CI_TENDER_TEST:?}"
 : "${CI_KNOWLEDGE_WORKFLOW_TESTS:?}"
 : "${CI_OXANA_TEST:?}"
 : "${CI_FRESH_TEST:?}"
-: "${CI_FROZEN_TEST_BIN:?}"
-: "${CI_DOCREADER_TEST_BIN:?}"
 out=$root/$CI_BIN_DIR
 rm -rf "$out"
 mkdir -p "$out/bins" "$out/tests"
@@ -33,20 +27,15 @@ copy_bin() {
 
 copy_bin "$CI_API_BIN"
 copy_bin "$CI_WORKER_BIN"
-copy_bin "$CI_TENDER_PREPARE_BIN"
 copy_bin "$CI_MIGRATOR_BIN"
 
 copy_tests() {
   local package=$1
-  local feature_mode=$2
-  shift 2
+  shift
   local -a tests=("$@")
   local -a cargo_args=(--locked --no-run --message-format=json -p "$package")
   local -a selectors=()
   local test_name json exe
-  if [[ "$feature_mode" == features ]]; then
-    cargo_args+=(--features "$CI_CONTRACT_FEATURES")
-  fi
   for test_name in "${tests[@]}"; do
     selectors+=(--test "$test_name")
   done
@@ -80,12 +69,10 @@ print(found)
   done
 }
 
-read -r -a content_tests <<< "$CI_CONTENT_POSTGRES_TESTS"
-copy_tests bidding default "${content_tests[@]}" "$CI_TENDER_TEST"
 read -r -a knowledge_tests <<< "$CI_KNOWLEDGE_WORKFLOW_TESTS"
-copy_tests knowledge default "${knowledge_tests[@]}"
-copy_tests platform default "$CI_OXANA_TEST" "$CI_FRESH_TEST"
-copy_tests bidding features "$CI_FROZEN_TEST_BIN" "$CI_DOCREADER_TEST_BIN"
+copy_tests knowledge "${knowledge_tests[@]}" vector_index_postgres
+copy_tests platform "$CI_OXANA_TEST" "$CI_FRESH_TEST"
+copy_tests api owner_access_postgres
 
 {
   printf '%s\n' "bins:"
