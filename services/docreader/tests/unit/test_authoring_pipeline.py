@@ -97,7 +97,7 @@ async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance
     source_rows = [{'source': {'range_id': key, 'text': '甲' * 1000}, 'rules': []} for key in ('a', 'b')]
     monkeypatch.setattr(pipeline, '_source_records', lambda artifacts, context: source_rows)
 
-    def bind(value):
+    def bind(value, **kwargs):
         target = value['chapters'][0]['targets'][0]
         return {'schema_version': 2, 'authoring_input': snapshot, 'issues': [], 'chapters': [
             {'chapter_id': 'chapter-1', 'title': '报价', 'children': [], 'targets': [
@@ -124,7 +124,7 @@ async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance
             {'kind': 'form', 'purpose': '同一报价表', 'rule_ids': [],
              'range_ids': [payload['sources'][0]['range_id']]}], 'children': []}], 'findings': []})
 
-    budget = RequestBudget(model='fixture', context_tokens=24000, prompts={}, output_reserve=4000)
+    budget = RequestBudget(model='fixture', context_tokens=28000, prompts={}, output_reserve=4000)
     result = await pipeline._organize(artifacts, context, budget, execute, [])
     targets = result['chapters'][0]['targets']
     assert len(calls) == 3 and len(targets) == 1

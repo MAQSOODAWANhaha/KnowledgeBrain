@@ -424,8 +424,6 @@ async fn upload(
     let (pool, owner) = require_project(&headers, &state, id).await?;
     let key = request_key(&headers)?;
     let mut file = None;
-    let mut role = None;
-    let mut kind = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -453,33 +451,10 @@ async fn upload(
                 }
                 file = Some((name, media, bytes));
             }
-            "role" if role.is_none() => {
-                role = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|_| validation("invalid document role"))?,
-                )
-            }
-            "kind" if kind.is_none() => {
-                kind = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|_| validation("invalid document kind"))?,
-                )
-            }
             _ => return Err(validation("unknown or duplicate upload field")),
         }
     }
     let (name, media, bytes) = file.ok_or_else(|| validation("one file is required"))?;
-    let role = role.unwrap_or_else(|| "main".into());
-    let kind = kind.unwrap_or_else(|| "tender".into());
-    if !["main", "attachment", "clarification", "amendment"].contains(&role.as_str())
-        || !["tender", "enterprise"].contains(&kind.as_str())
-    {
-        return Err(validation("invalid document role or kind"));
-    }
     let mut tx = pool.begin().await.map_err(pg_error)?;
     let project_status: ProjectStatus = sqlx::query_scalar(
         "SELECT status FROM tender_projects WHERE id=$1 AND owner_user_id=$2 FOR UPDATE",
@@ -557,7 +532,7 @@ async fn upload(
             .execute(&mut *tx).await.map_err(pg_error)?;
     }
     tx.commit().await.map_err(pg_error)?;
-    bridge(id,owner,"document.put",json!({"document_id":document,"file_name":name,"role":role,"kind":kind,"sha256":digest,"request_key":key}),bytes).await?;
+    bridge(id,owner,"document.put",json!({"document_id":document,"file_name":name,"sha256":digest,"request_key":key}),bytes).await?;
     let mut value = document_values(&pool, id)
         .await?
         .as_array()
@@ -566,8 +541,6 @@ async fn upload(
         .find(|doc| doc["id"] == json!(document))
         .cloned()
         .ok_or_else(|| not_found("document"))?;
-    value["role"] = json!(role);
-    value["kind"] = json!(kind);
     Ok((StatusCode::CREATED, Json(value)))
 }
 
@@ -646,7 +619,6 @@ async fn workbench(
         )
     })?;
     object.insert("project".into(), project_value(&pool, id).await?);
-    // Python contributes kind/role, while the shared object catalog owns originals.
     let catalog = document_values(&pool, id).await?;
     if let Some(existing) = object.get("documents").and_then(Value::as_array) {
         let documents: Vec<Value> = catalog
@@ -659,7 +631,7 @@ async fn workbench(
                     .iter()
                     .find(|meta| meta["document_id"] == doc["id"] || meta["id"] == doc["id"])
                 {
-                    for field in ["kind", "role", "status", "issues"] {
+                    for field in ["status", "issues"] {
                         if let Some(v) = meta.get(field) {
                             row[field] = v.clone();
                         }
@@ -1306,7 +1278,7 @@ mod tests {
             content: &str,
         ) -> (StatusCode, Value) {
             let body = format!(
-                "--tender-fixture\r\nContent-Disposition: form-data; name=\"kind\"\r\n\r\nenterprise\r\n--tender-fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--tender-fixture--\r\n"
+                "--tender-fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"source.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--tender-fixture--\r\n"
             );
             let response = app
                 .oneshot(
@@ -1332,7 +1304,8 @@ mod tests {
         }
         let (code, doc) = upload_request(app.clone(), &path, &token, &key, content).await;
         assert_eq!(code, StatusCode::CREATED, "{doc}");
-        assert_eq!(doc["kind"], "enterprise");
+        assert!(doc.get("kind").is_none());
+        assert!(doc.get("role").is_none());
         let (code, replay) = upload_request(app.clone(), &path, &token, &key, content).await;
         assert_eq!(code, StatusCode::CREATED, "{replay}");
         assert_eq!(replay["id"], doc["id"]);
@@ -1374,7 +1347,8 @@ mod tests {
         .unwrap();
         assert_eq!(status, StatusCode::OK, "{value}");
         assert_eq!(value["project"]["id"], json!(project));
-        assert_eq!(value["documents"][0]["kind"], "enterprise");
+        assert!(value["documents"][0].get("kind").is_none());
+        assert!(value["documents"][0].get("role").is_none());
         assert!(value["analysis"].is_null());
         assert!(value["current_docx"].is_null());
         assert!(value["versions"].as_array().unwrap().is_empty());

@@ -1,6 +1,6 @@
 # 投标台
 
-TokHub 高质感白工作台（见 [DESIGN.md](../DESIGN.md)），栈为 Vite + React 19 + Tailwind + shadcn/ui。用户入口为 **文件 → 编制 → 导出**（左栏当前标下的三步，不是顶栏 Stepper）。编制目标是 ONLYOFFICE Docs 直接编辑真实 DOCX；标题和结构以 DOCX 为准，不由外部树强制回写。
+冷灰仪器盘（见 [DESIGN.md](../DESIGN.md)），栈为 Vite + React 19 + Tailwind + shadcn/ui。用户入口为 **文件 → 编制 → 导出**（左栏当前标下的三步，不是顶栏 Stepper）。编制目标是 ONLYOFFICE Docs 直接编辑真实 DOCX；标题和结构以 DOCX 为准，不由外部树强制回写。
 
 [产品](../PRODUCT.md)、[外壳视觉](../DESIGN.md)、[业务 PRD](../docs/bidding/README.md)、[大纲运行时](../docs/design/evidence-runtime-contract.md)、[领域边界](../docs/bidding/authoring.md)、[编辑/保存契约](../docs/bidding/onlyoffice.md)。编辑器约束见 [ONLYOFFICE 计划](../plans/bidding/onlyoffice-integration.md)。用户在解析完成后点击生成大纲，不因解析就绪自动启动任务。文件 / 编制 / 导出三步入口不变。
 

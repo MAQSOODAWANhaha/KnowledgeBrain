@@ -10,6 +10,7 @@ import pytest
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.tender import authoring_pipeline as pipeline
+from docreader.tender.evidence.references import EvidenceRepository
 from docreader.tests.submission_responses import assemble_independent_candidates
 
 from test_authoring_pipeline_boundaries import ordinary_response, outline, snapshot
@@ -101,7 +102,7 @@ async def test_fit_and_placeholder_loading_allow_heartbeat_without_new_calls(mon
 async def test_all_pipeline_source_loads_share_context_repository(monkeypatch, tmp_path):
     artifacts = ArtifactStore(tmp_path)
     context, source = fixture_context(monkeypatch, artifacts)
-    context.repository, context.artifacts = object(), artifacts
+    context.repository, context.artifacts = EvidenceRepository(artifacts), artifacts
     seen = []
 
     def load_source(_artifacts, _reference, *, repository):

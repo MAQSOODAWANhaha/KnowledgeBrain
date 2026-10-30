@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { executionError, type TenderChapter, type TenderIssue, type TenderItem, type WorkbenchView } from "./api/workbench";
 import { authoringHref } from "./authoring/routes";
+import { inProgress } from "./executionStatus";
 import { TaskProgress } from "./TaskProgress";
 
 export function flattenChapters(chapters: TenderChapter[]): TenderChapter[] {
@@ -26,8 +27,18 @@ export function ChapterTree({ chapters, selectedId, gaps, onSelect, onLocate }: 
       {!!chapter.children?.length && (!collapsed.has(chapter.chapter_id) || !!query.trim()) && <ul>{render(chapter.children, depth + 1)}</ul>}
     </li>;
   });
+  const onTreeKey = (event: KeyboardEvent<HTMLUListElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".tender-tree-row > button:not(.tender-tree-toggle)")];
+    const index = buttons.findIndex(button => button === document.activeElement);
+    const next = buttons[index + (event.key === "ArrowDown" ? 1 : -1)];
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+    next.click();
+  };
   return <div className="tender-tree"><label><span className="sr-only">搜索章节</span><input type="search" placeholder="搜索章节…" value={query} onChange={event => setQuery(event.target.value)} /></label>
-    {!chapters.length ? <p className="tender-note">尚无可读取的文件结构。</p> : <ul>{render(chapters, 0)}</ul>}
+    {!chapters.length ? <p className="tender-note">尚无可读取的文件结构。</p> : <ul onKeyDown={onTreeKey}>{render(chapters, 0)}</ul>}
     {!!chapters.length && !chapters.some(matches) && <p className="tender-note">没有匹配章节。</p>}
     <p className="tender-note">目录与待补标记用于定位，章节存在不代表要求已经满足。</p>
   </div>;
@@ -78,21 +89,32 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
 }
 
 const kindLabels: Record<string, string> = { obligation: "要求", requirement: "要求", scoring_rule: "评分规则", consequence_rule: "后果规则", submission_requirement: "提交要求", fact: "背景事实" };
+const phasePrefix = /^(register|freeze|ocr|pack-plan|extract|analysis-review|analysis-locate|analysis-associate|analysis-joint|verify|confirm)\s+/;
+function groupedIssues(issues: { detail: string }[]) {
+  const counts = new Map<string, number>();
+  for (const issue of issues) {
+    const text = issue.detail.replace(phasePrefix, "");
+    counts.set(text, (counts.get(text) ?? 0) + 1);
+  }
+  return [...counts.entries()];
+}
 export function AnalysisPane({ analysis }: { analysis: WorkbenchView["analysis"] }) {
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState("");
   const items = analysis?.items ?? [];
   const shown = items.filter(item => (!kind || item.kind === kind) && (!query.trim() || item.text.includes(query.trim())));
-  return <section className="tender-section"><h2>招标解读</h2><p className="tender-note">要求、评分、后果和提交规则保留原文依据。分析确认与编制入口分别处理。</p>
+  const taskVisible = !!analysis && (inProgress(analysis.status) || analysis.status === "failed" || analysis.status === "blocked" || !!analysis.progress?.request_states.uncertain);
+  const issues = analysis ? groupedIssues(analysis.issues) : [];
+  return <section className="tender-section tender-analysis-main">
     {!analysis ? <p className="tender-empty">尚无分析结果。上传文件后可开始分析，也可先编制可用稿件。</p> : <>
-      <p>当前分析{analysis.confirmed ? "已确认" : "未确认"} · 来源版本 {analysis.source_version} · 修订 {analysis.domain_revision}</p>
+      {!taskVisible && <p className="tender-note">当前分析{analysis.confirmed ? "已确认" : "未确认"} · 来源版本 {analysis.source_version} · 修订 {analysis.domain_revision}</p>}
       <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />
       {analysis.sources_current === false && <p className="tender-context-warning" role="status">招标资料已有更新，以下是旧资料的分析结果。可重新分析，也可基于最新资料生成新稿。</p>}
       {executionError(analysis.error) && <p role="alert">{executionError(analysis.error)}</p>}
-      <div className="tender-filter"><input aria-label="搜索招标事项" type="search" placeholder="搜索事项原文…" value={query} onChange={event => setQuery(event.target.value)} />
-        <select aria-label="事项类型" value={kind} onChange={event => setKind(event.target.value)}><option value="">全部类型</option>{Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => <option key={value} value={value}>{kindLabels[value] ?? value}</option>)}</select></div>
-      {!items.length ? <p className="tender-empty">当前尚无可读取的事项，已有问题与执行状态仍保留。</p> : !shown.length ? <p>没有匹配事项。</p> : shown.map((item, index) => <article className="tender-analysis-item" key={item.item_id ?? index}><span className="tender-kind">{kindLabels[item.kind ?? ""] ?? item.kind}</span><ItemContent item={item} /></article>)}
-      {!!analysis.issues.length && <div className="tender-gap-list"><h3>分析问题</h3>{analysis.issues.map((issue, index) => <p key={`${issue.issue_id ?? issue.code}:${index}`}>{issue.detail}</p>)}</div>}
+      {!!items.length && <div className="tender-filter"><input aria-label="搜索招标事项" type="search" placeholder="搜索事项原文…" value={query} onChange={event => setQuery(event.target.value)} />
+        <select aria-label="事项类型" value={kind} onChange={event => setKind(event.target.value)}><option value="">全部类型</option>{Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => <option key={value} value={value}>{kindLabels[value] ?? value}</option>)}</select></div>}
+      {!items.length ? <p className="tender-empty">当前尚无可读取的事项。分析结束后在这里逐条查看。</p> : !shown.length ? <p>没有匹配事项。</p> : shown.map((item, index) => <article className="tender-analysis-item" key={item.item_id ?? index}><span className="tender-kind">{kindLabels[item.kind ?? ""] ?? item.kind}</span><ItemContent item={item} /></article>)}
+      {!!issues.length && <div className="tender-note">{issues.map(([text, count]) => <p key={text}>{count > 1 ? `${count} 个阶段同一情况：` : ""}{text}</p>)}</div>}
     </>}
   </section>;
 }

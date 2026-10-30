@@ -11,7 +11,7 @@ test("volume and cover settings survive save/reload and can be explicitly cleare
   expect(f.state.outlineSaves[0].body.chapters[0]).toMatchObject({ chapter_id: "chapter-1", is_volume: true, presentation_role: "cover" });
   expect(f.outline.draft!.outline.chapters[0].targets[0].target_id).toBe("target-1");
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
-  await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view", "edit"]);
   expect(f.state.calls.filter(call => call === "select")).toEqual([]);
   page.on("dialog", dialog => void dialog.accept());
@@ -64,7 +64,7 @@ test("a dirty Word draft prevents starting a review while retaining the editor a
   await f.edit(); await f.dirty();
   await expect(revision.getByRole("button", { name: "生成复核修订稿", exact: true })).toBeDisabled();
   await expect(revision.getByLabel("复核与修订理由", { exact: true })).toHaveValue("已选择的复核理由不能丢失。");
-  await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
   expect(f.state.starts).toEqual([]);
   expect(f.state.calls.filter(call => call === "select")).toEqual([]);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view", "edit"]);

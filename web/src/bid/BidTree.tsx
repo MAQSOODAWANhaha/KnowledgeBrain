@@ -16,16 +16,23 @@ const STEP_ICON = {
   export: IconDownload,
 } as const;
 
-export function ProjectNav({ projectId, currentStep }: { projectId: string; currentStep: AuthoringStep }) {
-  return <nav aria-label="项目分区" className="flex shrink-0 gap-5 overflow-x-auto border-b border-line">
-    {AUTHORING_STEPS.map((step) => <a key={step.key}
-      href={`#${authoringHref(projectId, step.key)}`}
-      aria-current={currentStep === step.key ? "page" : undefined}
-      data-testid={`wizard-${step.key}`}
-      className={cn("shrink-0 border-b-2 px-1 pb-3 pt-1 text-[13px] font-medium",
-        currentStep === step.key ? "border-sky text-sky-ink" : "border-transparent text-quiet hover:text-ink")}>
-      {step.label}
-    </a>)}
+export function ProjectNav({ projectId, currentStep, title }: { projectId: string; currentStep: AuthoringStep; title: string }) {
+  return <nav aria-label="项目分区" className="flex min-h-0 flex-col gap-0.5">
+    <a className="mb-1 px-2.5 py-2 text-[12px] text-quiet hover:text-ink" href="#/">返回项目列表</a>
+    <div className="mb-2 truncate px-2.5 text-[13px] font-semibold text-ink" title={title}>{title}</div>
+    {AUTHORING_STEPS.map((step) => {
+      const Icon = STEP_ICON[step.key];
+      const on = currentStep === step.key;
+      return <a key={step.key}
+        href={`#${authoringHref(projectId, step.key)}`}
+        aria-current={on ? "page" : undefined}
+        data-testid={`wizard-${step.key}`}
+        className={cn("flex min-h-9 items-center gap-2 border-l-2 px-2.5 text-[14px]",
+          on ? "border-sky font-semibold text-ink" : "border-transparent font-medium text-quiet hover:text-ink")}>
+        <Icon size={18} stroke={1.7} aria-hidden />
+        {step.label}
+      </a>;
+    })}
   </nav>;
 }
 
@@ -46,7 +53,7 @@ export function BidTree({
       {current && (
         <div className="mb-3 border-b border-line px-1 pb-3">
           <a
-            className="flex items-baseline gap-2 px-2.5 py-2 text-[15px] font-semibold text-ink"
+            className="flex items-baseline gap-2 px-2.5 py-2 text-[13px] font-semibold text-ink"
             href={`#${authoringHref(current.id, "files")}`}
           >
             {current.title}
@@ -64,10 +71,10 @@ export function BidTree({
                     key={step.key}
                     href={`#${authoringHref(current.id, step.key)}`}
                     className={cn(
-                      "flex min-h-11 items-center gap-2.5 rounded-[10px] px-3 text-[15px] font-medium",
+                      "flex min-h-8 items-center gap-2 rounded-[6px] px-2.5 text-[13px] font-medium",
                       on
                         ? "bg-sky-wash font-semibold text-sky-ink"
-                        : "text-quiet hover:bg-[#f6f6f8] hover:text-ink",
+                        : "text-quiet hover:bg-canvas hover:text-ink",
                     )}
                     data-testid={`wizard-${step.key}`}
                   >
@@ -86,7 +93,7 @@ export function BidTree({
       {(current ? rest : list).map((p) => (
         <a
           key={p.id}
-          className="mx-1 flex min-h-10 items-center gap-2 rounded-[10px] px-3 text-[14.5px] text-ink hover:bg-[#f6f6f8]"
+          className="mx-1 flex min-h-8 items-center gap-2 rounded-[6px] px-2.5 text-[13px] text-ink hover:bg-canvas"
           href={`#${authoringHref(p.id, "files")}`}
         >
           <IconFolder size={16} stroke={1.6} aria-hidden />

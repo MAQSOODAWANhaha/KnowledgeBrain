@@ -33,7 +33,7 @@ export function DocxRound({ workspaceId, onCancel, onPublished, onUnsafeChange }
     <h2>从 DOCX 创建新轮</h2>
     <p>选择已准备好的投标初稿或指定模板。发布后以所选文件开始编制，旧轮保存稿保留，旧轮编辑会话失效。</p>
     {state.input && <p>{state.input.expected ? "本次将替换当前编制轮次。" : "本次将创建首份 DOCX 投标稿。"}</p>}
-    <label>投标初稿或模板（DOCX） <input type="file" accept=".docx"
+    <label className="btn ghost">选择 DOCX<input type="file" hidden accept=".docx"
       disabled={round.unsafe() || state.phase === "published"}
       onChange={event => round.select(event.target.files?.[0] ?? null)} /></label>
     {state.file && <p>已选择：{state.file.name}</p>}
@@ -42,9 +42,9 @@ export function DocxRound({ workspaceId, onCancel, onPublished, onUnsafeChange }
     {state.error && <p role="alert">{state.error}</p>}
     {state.phase === "published" ? <>
       <p role="status">第 {state.receipt?.round_revision} 轮已发布。</p>
-      <button className="btn" onClick={onPublished}>进入当前稿件</button>
+      <button className="btn pri" onClick={onPublished}>进入当前稿件</button>
     </> : <>
-      <button className="btn" disabled={state.phase !== "uncertain" && (state.phase !== "ready" || !state.file)}
+      <button className="btn pri" disabled={state.phase !== "uncertain" && (state.phase !== "ready" || !state.file)}
         onClick={() => void round.publish()}>{state.phase === "uncertain" ? "确认发布结果" : "确认创建新轮"}</button>
       <button className="btn ghost" disabled={round.unsafe() || state.phase === "loading"}
         onClick={() => void round.load()}>刷新依据</button>

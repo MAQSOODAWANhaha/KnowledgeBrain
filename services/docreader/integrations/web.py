@@ -153,20 +153,17 @@ class WebBridge:
             raise WebError("PROJECT_NOT_FOUND", "项目不存在或无权访问。", 404)
         return row["status"] == ProjectStatus.OPEN
 
-    async def documents(self, project_id, kind="tender"):
+    async def documents(self, project_id):
         async with self.store.transaction() as conn:
             return await (await conn.execute(
                 "SELECT w.*, d.file_name, d.media_type FROM tender_document_sources w "
                 "JOIN tender_documents d ON d.id = w.document_id AND d.project_id = w.project_id "
-                "WHERE w.project_id = %s AND (%s::text IS NULL OR w.kind = %s) ORDER BY w.created_at, w.document_id",
-                (project_id, kind, kind),
+                "WHERE w.project_id = %s ORDER BY w.created_at, w.document_id",
+                (project_id,),
             )).fetchall()
 
     async def put_document(self, payload, blob):
         document_id, project_id = _uuid(payload.get("document_id")), payload["project_id"]
-        role, kind = payload.get("role", "main"), payload.get("kind", "tender")
-        if role not in {"main", "attachment", "clarification", "amendment"} or kind not in {"tender", "enterprise"}:
-            raise WebError("INVALID_DOCUMENT_ROLE", "资料类别或来源角色不正确。")
         digest = hashlib.sha256(blob).hexdigest()
         async with self.store.transaction() as conn:
             project_open = await self.lock_project(conn, payload)
@@ -187,24 +184,23 @@ class WebBridge:
                     raise WebError("PROJECT_ENDED", "项目已结束，仍可读取已有文件。", 409)
                 reference = await asyncio.to_thread(self.artifacts.put_bytes, blob, row["media_type"])
                 saved = await (await conn.execute(
-                    "INSERT INTO tender_document_sources(document_id, project_id, kind, role, original_ref) "
-                    "VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                    (document_id, project_id, kind, role, Jsonb(reference)),
+                    "INSERT INTO tender_document_sources(document_id, project_id, original_ref) "
+                    "VALUES (%s,%s,%s) RETURNING *",
+                    (document_id, project_id, Jsonb(reference)),
                 )).fetchone()
-            if (str(saved["project_id"]) != project_id or saved["kind"] != kind
-                    or saved["role"] != role or saved["original_ref"] != reference):
-                raise Conflict("document already identifies different project content or role")
-        return {"document": {"document_id": document_id, "file_name": row["file_name"], "kind": kind, "role": role}}
+            if str(saved["project_id"]) != project_id or saved["original_ref"] != reference:
+                raise Conflict("document already identifies different project content")
+        return {"document": {"document_id": document_id, "file_name": row["file_name"]}}
 
-    async def manifest(self, project_id, kind="tender"):
+    async def manifest(self, project_id):
         from docreader.tender.evidence import register_manifest
 
-        documents = await self.documents(project_id, kind)
-        if not documents and kind == "tender":
+        documents = await self.documents(project_id)
+        if not documents:
             raise WebError("TENDER_DOCUMENT_REQUIRED", "请先上传招标文件，再开始分析或编制。", 409)
         registered = await asyncio.to_thread(register_manifest, {"documents": [
             {"document_id": str(row["document_id"]), "document_version": row["original_ref"]["sha256"],
-             "role": row["role"], "file_name": row["file_name"], "original_ref": row["original_ref"]}
+             "file_name": row["file_name"], "original_ref": row["original_ref"]}
             for row in documents]}, self.artifacts)
         return registered
 
@@ -280,29 +276,8 @@ class WebBridge:
         return await self.store.get_run(run_id)
 
     async def materials(self, project_id):
-        from docreader.tender.evidence import EvidenceRepository, freeze_sources
-
-        registered = await self.manifest(project_id, "enterprise")
-        if not registered["documents"]:
-            return []
-        frozen = self.artifacts.read_json(await freeze_sources(registered, self.artifacts, ocr=None, plan=False))
-        repository, materials = EvidenceRepository(self.artifacts), []
-        for document in frozen["documents"]:
-            if not document.get("source_index_ref"):
-                continue
-            index = repository.source_index(document["source_index_ref"])
-            for unit in index.raw["units"]:
-                text = unit.get("text", "")
-                if unit.get("grid"):
-                    text += "\n" + "\n".join(cell.get("text", "") for cell in unit["grid"].get("cells", []))
-                if not text.strip():
-                    continue
-                materials.append({"material_id": "web-material-" + _digest({"document": document["document_id"], "unit": unit["unit_id"]}),
-                    "title": document["file_name"], "text": text, "original_ref": document["original_ref"],
-                    "locator": {"document_id": document["document_id"], "file_name": document["file_name"],
-                                "source_ref": {"source_index_ref": document["source_index_ref"], "unit_id": unit["unit_id"]}},
-                    "usage": "reference", "attachment": True})
-        return materials
+        del project_id
+        return []
 
     async def job(self, project_id, execution_id):
         async with self.store.transaction() as conn:
@@ -591,8 +566,8 @@ class WebBridge:
                  "authoring": views[0] if views else None, "executions": views,
                  "context_execution_id": context_id,
                  "documents": [{"id": str(row["document_id"]), "document_id": str(row["document_id"]),
-                                "kind": row["kind"], "role": row["role"], "status": "uploaded"}
-                               for row in await self.documents(project_id, kind=None)],
+                                "status": "uploaded"}
+                               for row in await self.documents(project_id)],
                  "outline": None, "requirements": None, "units": [], "gaps": [], "materials": [],
                  "artifacts": {"docx_available": False, "package_available": False}}
         if completed:

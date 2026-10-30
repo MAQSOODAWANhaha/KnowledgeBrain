@@ -209,9 +209,9 @@ export function DocxEditor({ workspaceId, api = docxApi, openRequest, controlRef
       {state.current && <span data-testid="docx-version">保存版本 {state.current.revision}</span>}
       <span role="status" data-testid="docx-status">{docxStatus(state)}</span>
       <div className="spacer" />
-      {state.mode === "edit" && <button className="btn" data-testid="docx-save" disabled={state.closing || state.closePending || state.recoveryRequired || state.phase !== "ready" || state.syncing ||
+      {state.mode === "edit" && <button className="btn pri" data-testid="docx-save" disabled={state.closing || state.closePending || state.recoveryRequired || state.phase !== "ready" || state.syncing ||
         (!state.uncertain && !state.saving && (!state.dirty || !!state.current?.editor.pending_save_id))}
-        onClick={() => { setNotice(null); void session.save(); }}>{state.uncertain || state.saving ? "确认保存结果" : "保存"}</button>}
+        onClick={() => { setNotice(null); void session.save(); }}>{state.uncertain || state.saving ? "确认保存结果" : "保存修改"}</button>}
       <button className="btn ghost" disabled={!state.current || downloading} aria-describedby={downloadUnconfirmed ? `${elementId}-download-boundary` : undefined} onClick={() => void download()}>下载已保存稿</button>
       {state.phase === "ready" && <button className="btn ghost" disabled={session.unsafe() || readOnly && state.mode === "view"}
         data-testid="docx-mode" onClick={() => reopen(state.mode === "view" ? "edit" : "view")}>
@@ -224,15 +224,15 @@ export function DocxEditor({ workspaceId, api = docxApi, openRequest, controlRef
     {state.current && downloadUnconfirmed && <p className="docx-version-notice" role="status" id={`${elementId}-download-boundary`} data-testid="docx-download-boundary">下载仅包含已保存的 Word v{state.current.revision}，不包含当前尚未确认保存的修改。</p>}
     {state.openPending && state.phase === "failed" && <div className="docx-version-notice" role="status">
       上次打开文档的结果待确认。将恢复本标签页的原请求，不会关闭其他标签页的编辑会话。
-      <button data-testid="docx-confirm-open" onClick={() => void session.confirmOpen()}>确认同一次打开请求</button>
+      <button className="btn ghost" data-testid="docx-confirm-open" onClick={() => void session.confirmOpen()}>确认同一次打开请求</button>
     </div>}
     {state.closePending && !state.recoveryRequired && <div className="docx-version-notice" role="status">
       当前文档暂时锁定，确认原会话已关闭后才能重新打开。
-      <button data-testid="docx-confirm-close" disabled={state.closing} onClick={() => void session.confirmClose()}>确认同一次关闭请求</button>
+      <button className="btn ghost" data-testid="docx-confirm-close" disabled={state.closing} onClick={() => void session.confirmClose()}>确认同一次关闭请求</button>
     </div>}
     {state.recoveryRequired && <div className="docx-version-notice" role="alert" data-testid="docx-recovery">
       平台尚未保存这些修改。请在当前 Word 中使用“文件 → 下载为 → DOCX”导出恢复稿，确认文件已下载后再关闭。
-      <button disabled={state.closing || state.saving || state.uncertain || state.syncing || !!state.current?.editor.pending_save_id}
+      <button className="btn ghost" disabled={state.closing || state.saving || state.uncertain || state.syncing || !!state.current?.editor.pending_save_id}
         onClick={() => void session.confirmRecoveredClose()}>已导出恢复稿，关闭编辑器</button>
     </div>}
     {(state.error || notice) && <div className="banner warn" role="alert">{state.error || notice}

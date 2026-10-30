@@ -18,7 +18,8 @@ _FIELDS = {
     'work_unit_id': 'w', 'work_unit_ids': 'w', 'target_work_unit_ids': 'w',
     'pack_id': 'p', 'table_id': 't', 'table_ids': 't',
     'unit_id': 'u', 'image_unit_ids': 'u',
-    'part_id': 'p', 'template_part_ids': 'p', 'constraint_range_ids': 'r',
+    'part_id': 'p', 'template_part_ids': 'p', 'start_part_id': 'p', 'end_part_id': 'p',
+    'constraint_range_ids': 'r', 'context_range_ids': 'r',
 }
 
 

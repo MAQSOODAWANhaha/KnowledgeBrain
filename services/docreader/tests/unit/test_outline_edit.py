@@ -63,6 +63,17 @@ def test_empty_tree_is_preserved_instead_of_recreating_deleted_chapters():
     assert any(issue['code'] == 'outline_edit_target_removed' for issue in changed['issues'])
 
 
+def test_submission_note_role_round_trips_through_human_edit_without_losing_evidence():
+    base = outline()
+    changed = apply_outline_edit(base, [{'chapter_id': 'a', 'title': '平台操作',
+        'presentation_role': 'submission_note', 'children': []}])
+    assert changed['chapters'][0]['presentation_role'] == 'submission_note'
+    assert changed['chapters'][0]['targets'] == base['chapters'][0]['targets']
+    restored = apply_outline_edit(changed, [{'chapter_id': 'a', 'title': '正式正文',
+        'presentation_role': 'body', 'children': []}])
+    assert restored['chapters'][0]['targets'] == base['chapters'][0]['targets']
+
+
 @pytest.mark.parametrize('chapters', [
     [{'chapter_id': 'unknown', 'title': '未知标识', 'children': []}],
     [{'chapter_id': 'a', 'title': '重复', 'children': [{'chapter_id': 'a', 'title': '循环', 'children': []}]}],

@@ -61,13 +61,52 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   useEffect(() => { if (step === "authoring" && authoringMode === "body" && openRequest) setBodyOpened(true); }, [step, authoringMode, openRequest]);
   const revisionDetails = useRef<HTMLDetailsElement | null>(null);
   const savedReviewDetails = useRef<HTMLDetailsElement | null>(null);
+  const footRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const foot = footRef.current;
+    if (!foot) return;
+    const closeOthers = (current: HTMLDetailsElement) => {
+      foot.querySelectorAll("details").forEach(item => { if (item !== current) item.open = false; });
+    };
+    const onToggle = (event: Event) => {
+      const details = event.target;
+      if (details instanceof HTMLDetailsElement && details.open) closeOthers(details);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const open = foot.querySelector("details[open]");
+      if (!(open instanceof HTMLDetailsElement)) return;
+      open.open = false;
+      open.querySelector("summary")?.focus({ preventScroll: true });
+    };
+    foot.addEventListener("toggle", onToggle);
+    foot.addEventListener("keydown", onKey);
+    return () => { foot.removeEventListener("toggle", onToggle); foot.removeEventListener("keydown", onKey); };
+  }, [view]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (step !== "authoring" || authoringMode !== "body") return;
+      if (event.key !== "[" && event.key !== "]") return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable=true]")) return;
+      event.preventDefault();
+      if (event.key === "[") setLeftClosed(value => !value);
+      else setRightClosed(value => !value);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [step, authoringMode]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [leftClosed, setLeftClosed] = useState(() => window.matchMedia("(max-width: 700px)").matches);
   const [rightClosed, setRightClosed] = useState(() => window.matchMedia("(max-width: 1200px)").matches);
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 700px)");
+    const closeDirectory = () => { if (narrow.matches) setLeftClosed(true); };
+    narrow.addEventListener("change", closeDirectory);
+    return () => narrow.removeEventListener("change", closeDirectory);
+  }, []);
   const [dismissedDraft, setDismissedDraft] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
-  const [fileKind, setFileKind] = useState<"tender" | "enterprise">("tender");
-  const [fileRole, setFileRole] = useState("main");
   const executionAttempts = useRef(new Map<string, MutationAttempt>());
   const actionKey = `kb.tender-action:${projectId}`;
   const [pending, setPending] = useState<PendingAction | null>(() => {
@@ -151,7 +190,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     readRequest.current++; setBusy(true); setNotice(null); setUploading(files.map(file => file.name));
     try {
       for (const file of files) {
-        await tenderApi.upload(projectId, file, createMutationAttempt(), { kind: fileKind, role: fileRole });
+        await tenderApi.upload(projectId, file, createMutationAttempt());
         setUploading(current => current.filter(name => name !== file.name));
       }
     } catch (ex) { setNotice(`上传未全部确认，请核对文件列表。${ex instanceof Error ? ex.message : ""}`); }
@@ -213,42 +252,61 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const pickChapter = (chapter: TenderChapter) => { setSelectedId(chapter.chapter_id); locate(chapter.bookmark); };
   const showReview = (details: HTMLDetailsElement | null) => {
     if (!details) return;
+    footRef.current?.querySelectorAll("details").forEach(item => { if (item !== details) item.open = false; });
     details.open = true;
-    details.scrollIntoView({ block: "start" });
     details.querySelector("summary")?.focus({ preventScroll: true });
   };
+  const moveAuthoringMode = (key: string) => {
+    if (key !== "ArrowLeft" && key !== "ArrowRight") return false;
+    const order = ["outline", "body"] as const;
+    const index = Math.max(0, order.indexOf(authoringMode === "body" ? "body" : "outline"));
+    const mode = order[(index + (key === "ArrowRight" ? 1 : -1) + order.length) % order.length];
+    setAuthoringMode(mode);
+    document.getElementById(mode === "outline" ? "outline-planner-tab" : "word-editor-tab")?.focus();
+    return true;
+  };
+  const reviewShortcuts = savedReviewVersion && <div className="tender-review-shortcuts" role="group" aria-label="稿件复核入口"><div><button onClick={() => showReview(savedReviewDetails.current)}>打开保存稿复核</button><p>当前保存稿：Word v{savedReviewVersion.revision}，读取已保存正文，包含人工修改；进入后确认复核版本。</p></div><div><button disabled={!contextMatches || !view?.context_execution_id || !view?.outline} onClick={() => showReview(revisionDetails.current)}>基于生成稿修订</button><p>生成稿修订基准：{contextMatches && view?.context_execution_id && view?.outline ? reviewSourceLabel : "暂无可用生成基准"}，新稿生成后由你选择载入。</p></div></div>;
+  const pageActions = view && <div className="tender-page-actions">
+    {step === "analysis" && <button disabled={busy || ended && pending?.kind !== "analysis" || inProgress(view.analysis?.status) && pending?.kind !== "analysis" || !!pending && pending.kind !== "analysis"} onClick={() => void start("analysis")}>{pending?.kind === "analysis" ? "确认同一次分析请求" : "分析招标文件"}</button>}
+    {step === "authoring" && <button className="tender-primary" onClick={() => { setAuthoringMode("outline"); window.location.hash = `/bids/${projectId}/authoring`; }}>编排大纲</button>}
+  </div>;
+  const authoringTabs = <div className="tender-authoring-tabs" role="tablist" aria-label="标书编制视图" onKeyDown={event => { if (moveAuthoringMode(event.key)) event.preventDefault(); }}><button role="tab" tabIndex={authoringMode === "body" ? -1 : 0} aria-selected={authoringMode === "outline"} aria-controls="outline-planner-panel" id="outline-planner-tab" onClick={() => setAuthoringMode("outline")}>大纲编排</button><button role="tab" tabIndex={authoringMode === "body" ? 0 : -1} aria-selected={authoringMode === "body"} aria-controls="word-editor-panel" id="word-editor-tab" onClick={() => setAuthoringMode("body")}>正文编辑</button></div>;
   return <Shell root="bids" layout="workspace" email={email} onBeforeLeave={() => !unsafe}
     crumbs={<Crumbs items={[{ label: "投标项目", href: "/" }, { label: view?.project.title ?? "投标项目" }, { label: sectionLabel }]} />}
-    title={view?.project.title ?? "投标项目"} projectNav={<ProjectNav projectId={projectId} currentStep={step} />}>
+    title={sectionLabel} extra={pageActions} tree={<ProjectNav projectId={projectId} currentStep={step} title={view?.project.title ?? "投标项目"} />}>
     <div className={`tender-workspace${step === "authoring" ? " is-authoring" : ""}`}>
       {error && <div className="tender-alert" role="alert">{view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}{error}<button onClick={() => setRetry(value => value + 1)}>重试</button></div>}
       {notice && <div className="tender-alert" role="alert">{notice}<button aria-label="关闭提示" onClick={() => setNotice(null)}>×</button></div>}
       {!view ? !error && <p className="tender-loading" role="status">正在读取项目、稿件和任务…</p> : <>
-        <div className="tender-project-status"><span>{view.documents.length} 份项目文件</span><span>{view.analysis ? `分析：${executionStatus(view.analysis.status)}` : "分析尚未开始"}</span><span>{view.authoring ? `编制：${executionStatus(view.authoring.status)}` : "编制尚未开始"}</span><span>{view.gaps.length} 条待补记录</span>
-          <div className="tender-primary-actions"><button disabled={busy || ended && pending?.kind !== "analysis" || inProgress(view.analysis?.status) && pending?.kind !== "analysis" || !!pending && pending.kind !== "analysis"} onClick={() => void start("analysis")}>{pending?.kind === "analysis" ? "确认同一次分析请求" : "分析招标文件"}</button><button className="tender-primary" onClick={() => { setAuthoringMode("outline"); window.location.hash = `/bids/${projectId}/authoring`; }}>编排大纲</button></div></div>
         {pending && <p className="tender-note" role="status">存在尚未确认的提交，请确认同一次请求。刷新页面不会自动创建新任务。</p>}
         {candidate && <div className="tender-new-draft" role="status"><div><strong>{candidate.source === "recovered" ? "发现会话恢复稿" : "新稿"} v{candidate.revision} {candidate.source === "recovered" ? "待核对" : "已生成"}</strong><p>当前稿件及人工修改保留，查看新稿前请确认当前修改已经保存。</p></div><button disabled={busy || unsafe || ended} onClick={() => void selectDraft(candidate)}>查看新稿</button><button onClick={() => setDismissedDraft(candidate.id)}>继续当前稿</button></div>}
-        {step === "files" && <section className="tender-section" aria-label="项目资料"><h2>项目资料</h2><p className="tender-note">上传招标文件、补遗及项目附件。新资料用于后续编制快照，已有稿件保留。</p>
-          {!ended && <div className="tender-upload"><label>资料用途 <select aria-label="资料用途" value={fileKind} disabled={busy} onChange={event => setFileKind(event.target.value as "tender" | "enterprise")}><option value="tender">招标来源</option><option value="enterprise">企业证明与编制资料</option></select></label><label>文件角色 <select aria-label="文件角色" value={fileRole} disabled={busy} onChange={event => setFileRole(event.target.value)}><option value="main">主文件</option><option value="attachment">附件</option><option value="clarification">澄清</option><option value="amendment">补遗</option></select></label><label>选择项目文件<input type="file" multiple accept={TENDER_INPUT_ACCEPT} disabled={busy} onChange={event => { void upload(Array.from(event.target.files ?? [])); event.target.value = ""; }} /></label></div>}
+        {step === "files" && <section className="tender-section" aria-label="项目资料"><p className="tender-note">上传项目文件。分析会自行读取结构和内容，新资料用于后续编制快照，已有稿件保留。</p>
+          {!ended && <div className="tender-upload"><label className="btn ghost">选择项目文件<input type="file" hidden multiple accept={TENDER_INPUT_ACCEPT} disabled={busy} onChange={event => { void upload(Array.from(event.target.files ?? [])); event.target.value = ""; }} /></label></div>}
           {uploading.map(name => <p key={name} role="status">正在上传：{name}</p>)}
           <KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} />
-          {!view.documents.length ? <p className="tender-empty">尚未上传项目文件。</p> : <div className="tender-table-scroll"><table className="tender-table"><thead><tr><th>文件</th><th>用途</th><th>大小</th><th>处理状态</th><th>原件</th></tr></thead><tbody>{view.documents.map(document => <tr key={document.id}><td>{document.file_name}</td><td>{document.kind === "enterprise" ? "企业资料" : "招标来源"}</td><td>{Math.ceil(document.byte_length / 1024)} KB</td><td>{document.parse_status ?? "已上传，执行时读取"}</td><td>{document.download_url && <button onClick={() => void download(document.download_url!, document.file_name)}>下载原件</button>}</td></tr>)}</tbody></table></div>}
+          {!view.documents.length ? <p className="tender-empty">尚未上传项目文件。</p> : <div className="tender-table-scroll"><table className="tender-table"><thead><tr><th>文件</th><th>大小</th><th>处理状态</th><th>原件</th></tr></thead><tbody>{view.documents.map(document => <tr key={document.id}><td>{document.file_name}</td><td>{Math.ceil(document.byte_length / 1024)} KB</td><td>{document.parse_status ?? "已上传，执行时读取"}</td><td>{document.download_url && <button onClick={() => void download(document.download_url!, document.file_name)}>下载原件</button>}</td></tr>)}</tbody></table></div>}
         </section>}
-        <div style={{ display: step === "analysis" ? undefined : "none" }}>
+        {step === "authoring" && authoringTabs}
+        <div className={`tender-step${view.analysis?.items?.length ? "" : " is-empty"}`} style={{ display: step === "analysis" ? undefined : "none" }}>
           <AnalysisPane analysis={view.analysis} />
-          <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
-          <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
+          <aside className="tender-analysis-side" aria-label="分析处理">
+            <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
+            <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
+          </aside>
         </div>
-        {step === "authoring" && <div className="tender-authoring-tabs" role="tablist" aria-label="标书编制视图"><button role="tab" aria-selected={authoringMode === "outline"} aria-controls="outline-planner-panel" id="outline-planner-tab" onClick={() => setAuthoringMode("outline")}>大纲编排</button><button role="tab" aria-selected={authoringMode === "body"} aria-controls="word-editor-panel" id="word-editor-tab" onClick={() => setAuthoringMode("body")}>正文编辑</button></div>}
         {step === "authoring" && authoringMode === "outline" && !bodyOpened && view.current_docx && <div className="tender-first-word" role="status"><div><strong>正文已生成</strong><p>可查看已保存的 Word v{view.current_docx.revision}，当前大纲调整继续保留。</p></div><button onClick={() => setAuthoringMode("body")}>正文已生成，查看Word</button></div>}
         {step === "authoring" && view.authoring && <TaskProgress label={view.authoring.operation === "outline" ? "大纲任务" : "正文任务"} status={view.authoring.status} progress={view.authoring.progress} />}
         <div id="outline-planner-panel" role="tabpanel" aria-labelledby="outline-planner-tab" style={{ display: step === "authoring" && authoringMode === "outline" ? undefined : "none" }} className="outline-planner-panel"><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></div>
         <div id="word-editor-panel" role="tabpanel" aria-labelledby="word-editor-tab" style={{ display: step === "authoring" && authoringMode === "body" ? undefined : "none" }} className={`tender-authoring${leftClosed ? " left-closed" : ""}${rightClosed ? " right-closed" : ""}`}>
-          <aside className="tender-outline" aria-label="文件与章节目录"><div className="tender-pane-heading"><strong>文件结构</strong><button aria-label={leftClosed ? "展开目录" : "收起目录"} onClick={() => setLeftClosed(value => !value)}>{leftClosed ? "›" : "‹"}</button></div>{!leftClosed && <><p className="tender-outline-version">{displayedDraft ? `已保存 Word v${displayedDraft.revision} 的目录` : "编制大纲"}</p><ChapterTree chapters={chapters} selectedId={selected?.chapter_id ?? null} gaps={contextMatches ? view.gaps : []} onSelect={pickChapter} onLocate={locate} />{!!displayedDraft?.outline?.missing_chapter_ids?.length && <p className="tender-context-warning">{displayedDraft.outline.missing_chapter_ids.length} 个原章节未能绑定已保存文件，相关要求与待补记录仍保留。</p>}</>}</aside>
-          <main className="tender-word" aria-label="Word 稿件工作区">{savedReviewVersion && <div className="tender-review-shortcuts" role="group" aria-label="稿件复核入口"><div><button onClick={() => showReview(savedReviewDetails.current)}>打开保存稿复核</button><p>当前保存稿：Word v{savedReviewVersion.revision}，读取已保存正文，包含人工修改；进入后确认复核版本。</p></div><div><button disabled={!contextMatches || !view.context_execution_id || !view.outline} onClick={() => showReview(revisionDetails.current)}>基于生成稿修订</button><p>生成稿修订基准：{contextMatches && view.context_execution_id && view.outline ? reviewSourceLabel : "暂无可用生成基准"}，新稿生成后由你选择载入。</p></div></div>}{navigationNotice && <p className="tender-navigation-status" role="status">{navigationNotice}</p>}{openRequest && bodyOpened ? <DocxEditor workspaceId={projectId} readOnly={!!ended} ownerIdentity={email} api={tenderDocxApi} controlRef={editorRef} openRequest={openRequest} navigationRequest={navigationRequest} onNavigationResult={onNavigationResult} onUnsafeChange={setWordUnsafe} onCurrentChange={onCurrentChange} onSaved={onSaved} /> : <section className="tender-before-word"><h2>投标稿尚未形成</h2><p>请在大纲编排中生成并保存结构，再按已保存修订生成正文。</p>{inProgress(view.authoring?.status) && <p role="status">编制任务正在执行，当前尚无可打开的 Word 文件。</p>}{executionError(view.authoring?.error) && <p role="alert">{executionError(view.authoring?.error)}</p>}</section>}</main>
-          <aside className="tender-inspector" aria-label="要求、依据与待补"><div className="tender-pane-heading"><strong>章节核对</strong><button aria-label={rightClosed ? "展开核对栏" : "收起核对栏"} onClick={() => setRightClosed(value => !value)}>{rightClosed ? "‹" : "›"}</button></div>{!rightClosed && <ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} />}</aside>
+          <aside className="tender-outline" aria-label="文件与章节目录"><div className="tender-pane-heading"><strong>文件结构</strong><button aria-expanded={!leftClosed} aria-label={leftClosed ? "展开目录" : "收起目录"} onClick={() => setLeftClosed(value => !value)}>{leftClosed ? "›" : "‹"}</button></div>{!leftClosed && <><p className="tender-outline-version">{displayedDraft ? `已保存 Word v${displayedDraft.revision} 的目录` : "编制大纲"}</p><ChapterTree chapters={chapters} selectedId={selected?.chapter_id ?? null} gaps={contextMatches ? view.gaps : []} onSelect={pickChapter} onLocate={locate} />{!!displayedDraft?.outline?.missing_chapter_ids?.length && <p className="tender-context-warning">{displayedDraft.outline.missing_chapter_ids.length} 个原章节未能绑定已保存文件，相关要求与待补记录仍保留。</p>}</>}</aside>
+          <main className="tender-word" aria-label="Word 稿件工作区">{rightClosed && reviewShortcuts}{navigationNotice && <p className="tender-navigation-status" role="status">{navigationNotice}</p>}{openRequest && bodyOpened ? <DocxEditor workspaceId={projectId} readOnly={!!ended} ownerIdentity={email} api={tenderDocxApi} controlRef={editorRef} openRequest={openRequest} navigationRequest={navigationRequest} onNavigationResult={onNavigationResult} onUnsafeChange={setWordUnsafe} onCurrentChange={onCurrentChange} onSaved={onSaved} /> : <section className="tender-before-word"><h2>投标稿尚未形成</h2><p>请在大纲编排中生成并保存结构，再按已保存修订生成正文。</p>{inProgress(view.authoring?.status) && <p role="status">编制任务正在执行，当前尚无可打开的 Word 文件。</p>}{executionError(view.authoring?.error) && <p role="alert">{executionError(view.authoring?.error)}</p>}</section>}</main>
+          <aside className="tender-inspector" aria-label="要求、依据与待补"><div className="tender-pane-heading"><strong>章节核对</strong><button aria-expanded={!rightClosed} aria-label={rightClosed ? "展开核对栏" : "收起核对栏"} onClick={() => setRightClosed(value => !value)}>{rightClosed ? "‹" : "›"}</button></div>{!rightClosed && <>{reviewShortcuts}<ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></>}</aside>
         </div>
-        <div style={{ display: step === "authoring" && authoringMode === "body" ? undefined : "none" }}><details className="tender-task-details" ref={revisionDetails}><summary>按章节定向复核与修订</summary><ChapterRevision
+        {step === "export" && <section className="tender-section"><p className="tender-note">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</p>
+          {!view.versions.length ? <p className="tender-empty">尚无已保存稿件。</p> : <div className="tender-table-scroll"><table className="tender-table"><thead><tr><th>版本</th><th>来源</th><th>状态</th><th>文件</th></tr></thead><tbody>{view.versions.map(version => <tr key={version.id}><td>v{version.revision}</td><td>{version.source === "manual" ? "人工保存稿" : version.source === "recovered" ? "会话恢复稿（待核对）" : "编制生成稿"}</td><td>{version.id === view.current_docx?.id ? "当前稿件" : "已保留"}</td><td><button onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)}>下载 DOCX v{version.revision}</button>{version.id !== view.current_docx?.id && <button disabled={busy || unsafe || ended} onClick={() => void selectDraft(version)}>选为当前稿 v{version.revision}</button>}</td></tr>)}</tbody></table></div>}
+          {view.artifacts?.package_url && <><button onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")}>下载编制交付包（包含待补清单）</button><p className="tender-note">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</p><p className="tender-note">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</p></>}{view.gaps.length > 0 && <div className="tender-gap-list"><h3>编制时的待补记录</h3>{view.gaps.map((gap, index) => <p key={`${gap.code}:${index}`}>{gap.detail}</p>)}</div>}
+        </section>}
+        <div className="tender-foot" ref={footRef}><div style={{ display: step === "authoring" && authoringMode === "body" ? "contents" : "none" }}><details className="tender-task-details" ref={revisionDetails}><summary>按章节定向复核与修订</summary><ChapterRevision
           source={contextMatches && view.context_execution_id && view.outline ? { execution_id: view.context_execution_id, label: reviewSourceLabel, chapters: view.outline.chapters } : null}
           disabled={!!ended && !(pending?.kind === "authoring" && !!pending.body?.review_request) || wordUnsafe || !!pending && !(pending.kind === "authoring" && !!pending.body?.review_request) || inProgress(view.authoring?.status) && !pending}
           busy={busy} pending={pending?.kind === "authoring" && !!pending.body?.review_request}
@@ -257,12 +315,9 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
           onSubmit={body => start("authoring", body)} onUnsafeChange={setRevisionUnsafe} /></details>
           <details className="tender-task-details" ref={savedReviewDetails}><summary>核对已保存的 Word 内容</summary><SavedWordReview projectId={projectId}
             version={savedReviewVersion} readOnly={!!ended} disabled={wordUnsafe || busy} onUnsafeChange={setSavedReviewUnsafe} /></details></div>
-        {step === "export" && <section className="tender-section"><h2>交付文件</h2><p className="tender-note">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</p>
-          {!view.versions.length ? <p className="tender-empty">尚无已保存稿件。</p> : <div className="tender-table-scroll"><table className="tender-table"><thead><tr><th>版本</th><th>来源</th><th>状态</th><th>文件</th></tr></thead><tbody>{view.versions.map(version => <tr key={version.id}><td>v{version.revision}</td><td>{version.source === "manual" ? "人工保存稿" : version.source === "recovered" ? "会话恢复稿（待核对）" : "编制生成稿"}</td><td>{version.id === view.current_docx?.id ? "当前稿件" : "已保留"}</td><td><button onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)}>下载 DOCX v{version.revision}</button>{version.id !== view.current_docx?.id && <button disabled={busy || unsafe || ended} onClick={() => void selectDraft(version)}>选为当前稿 v{version.revision}</button>}</td></tr>)}</tbody></table></div>}
-          {view.artifacts?.package_url && <><button onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")}>下载编制交付包（包含待补清单）</button><p className="tender-note">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</p><p className="tender-note">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</p></>}{view.gaps.length > 0 && <div className="tender-gap-list"><h3>编制时的待补记录</h3>{view.gaps.map((gap, index) => <p key={`${gap.code}:${index}`}>{gap.detail}</p>)}</div>}
-        </section>}
         <details className="tender-task-details"><summary>执行详情</summary><p>分析：{executionStatus(view.analysis?.status)}；编制：{executionStatus(view.authoring?.status)}</p>{view.authoring?.usage && <p>已发送 {view.authoring.usage.sent_requests} 次，重试 {view.authoring.usage.retry_requests} 次，Token {view.authoring.usage.total_tokens}；未知用量 {view.authoring.usage.unknown_usage_requests} 次。</p>}{executionError(view.authoring?.error) && <p>{executionError(view.authoring?.error)}</p>}{view.authoring && (inProgress(view.authoring.status) ? <button disabled={busy} onClick={() => void executionAction(view.authoring!.execution_id, "cancel")}>取消本次编制</button> : ["failed", "blocked"].includes(view.authoring.status) && <button disabled={busy || ended} onClick={() => void executionAction(view.authoring!.execution_id, "resume")}>继续本次编制</button>)}</details>
         <details className="tender-task-details tender-legacy-generation"><summary>直接生成整稿</summary><p>此入口重新生成大纲和正文。需要沿用人工编排时，请在大纲编排中按已保存修订生成正文。</p><button disabled={busy || ended && pending?.kind !== "authoring" || inProgress(view.authoring?.status) && pending?.kind !== "authoring" || !!pending && (pending.kind !== "authoring" || !!pending.body && ("outline_revision_id" in pending.body || "review_request" in pending.body))} onClick={() => void start("authoring")}>{pending?.kind === "authoring" && !(pending.body && ("outline_revision_id" in pending.body || "review_request" in pending.body)) ? "确认同一次编制请求" : view.current_docx ? "生成新稿" : "生成投标稿"}</button></details>
+        </div>
       </>}
     </div>
   </Shell>;

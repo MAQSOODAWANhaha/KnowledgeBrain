@@ -148,7 +148,7 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
       {err ? (
         <div className="preview-empty">
           {err}
-          <div style={{ marginTop: 12 }}>
+          <div className="mt-3">
             <DownloadLink objectKey={objectKey} fileName={fileName} />
           </div>
         </div>
@@ -158,7 +158,7 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
           {fileName.toLowerCase().endsWith(".ppt") || fileName.toLowerCase().endsWith(".doc")
             ? "旧版 .ppt / .doc 请下载后用 Office 打开。pptx / docx 可在浏览器里预览。"
             : "浏览器里嵌不了这种格式。请下载原件，解析结果看「解析」和「分片」。"}
-          <div style={{ marginTop: 12 }}>
+          <div className="mt-3">
             <DownloadLink objectKey={objectKey} fileName={fileName} />
           </div>
         </div>

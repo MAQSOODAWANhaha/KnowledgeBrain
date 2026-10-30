@@ -35,7 +35,7 @@ export type OutlineSave = { expected_revision_id: string | null; source_revision
 export type DocumentStart = { outline_revision_id?: string; outline_sha256?: string; knowledge_selections?: Array<{ product_id: string; version_id: string }>; previous_execution_id?: string; review_request?: { target_ids: string[]; reason: string } };
 export type TenderDocument = {
   id: string; file_name: string; media_type: string; byte_length: number;
-  parse_status?: string; content_sha256?: string; download_url?: string; kind?: "tender" | "enterprise"; role?: string;
+  parse_status?: string; content_sha256?: string; download_url?: string;
 };
 export type SavedWordOutline = { chapters: TenderChapter[]; bookmarks?: string[]; missing_chapter_ids?: string[] };
 export type TenderDraft = {
@@ -103,11 +103,9 @@ export const tenderApi = {
   async workbench(id: string, signal?: AbortSignal): Promise<WorkbenchView> {
     return (await v2Request<WorkbenchView>(`${projectPath(id)}/workbench`, { signal })).data;
   },
-  async upload(id: string, file: File, attempt: MutationAttempt, options: { kind: "tender" | "enterprise"; role: string }): Promise<TenderDocument> {
+  async upload(id: string, file: File, attempt: MutationAttempt): Promise<TenderDocument> {
     const body = new FormData();
     body.append("file", file);
-    body.append("kind", options.kind);
-    body.append("role", options.role);
     return (await v2Request<TenderDocument>(`${projectPath(id)}/documents`, { method: "POST", body }, { attempt })).data;
   },
   async start(id: string, kind: "analysis" | "authoring", attempt: MutationAttempt, body: DocumentStart | Record<string, never> = {}): Promise<void> {

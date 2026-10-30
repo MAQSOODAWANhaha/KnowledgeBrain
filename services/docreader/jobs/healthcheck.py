@@ -29,7 +29,7 @@ _CORE_QUERIES = (
     "SELECT request_id,run_id,status,metadata,response_ref FROM tender_analysis_model_requests LIMIT 0",
     "SELECT execution_id,status,lease_until,cancel_requested,result_ref,receipts FROM tender_authoring_executions LIMIT 0",
     "SELECT request_id,execution_id,status,metadata,usage FROM tender_authoring_model_requests LIMIT 0",
-    "SELECT document_id,project_id,kind,role,original_ref FROM tender_document_sources LIMIT 0",
+    "SELECT document_id,project_id,original_ref FROM tender_document_sources LIMIT 0",
     "SELECT run_id,project_id,request_key,source_only FROM tender_project_analyses LIMIT 0",
     "SELECT execution_id,project_id,run_id,payload,status,claim_until,resume_keys,created_at FROM tender_authoring_jobs LIMIT 0",
     "SELECT revision_id,project_id,revision,parent_id,execution_id,outline_ref,request_key,request_digest FROM tender_outline_revisions LIMIT 0",

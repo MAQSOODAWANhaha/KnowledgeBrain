@@ -73,7 +73,7 @@ async def test_structure_projects_exact_response_rows_once_without_persistent_so
 
 async def test_structure_accepted_original_cache_precedes_compact_replanning(monkeypatch):
     original = large_payload(large=True)
-    monkeypatch.setattr(authoring_structure, "_structure_payload", lambda *_args: (original, []))
+    monkeypatch.setattr(authoring_structure, "_structure_payload", lambda *_args, **_kwargs: (original, []))
     admitted = budget()
     admitted.prompts = {"authoring_structure": PROMPT}
     admitted.context_tokens = 100
@@ -96,7 +96,7 @@ async def test_structure_accepted_original_cache_precedes_compact_replanning(mon
 
 async def test_structure_accepted_compact_cache_precedes_compact_admission(monkeypatch):
     original = large_payload(large=True)
-    monkeypatch.setattr(authoring_structure, "_structure_payload", lambda *_args: (original, []))
+    monkeypatch.setattr(authoring_structure, "_structure_payload", lambda *_args, **_kwargs: (original, []))
     admitted = budget()
     admitted.prompts = {"authoring_structure": PROMPT}
     admitted.context_tokens = 100

@@ -335,9 +335,19 @@ class TemplatePartRef(Contract):
 
 
 ResponseTargetKind = Literal["narrative", "form", "attachment"]
+ChapterPresentationRole = Literal["body", "cover", "submission_note"]
 SupportOrigins = Annotated[list[Literal["tender", "knowledge"]], Field(min_length=1, max_length=2),
                            AfterValidator(lambda values: list(dict.fromkeys(values)))]
 SearchQuery = Annotated[Text, Field(max_length=256)]
+
+
+class TemplateSpanResponse(Contract):
+    start_part_id: Identity = Field(description=(
+        "First supplied template part of one complete native format; the host includes this part and every "
+        "supplied part through end_part_id in the same frozen document's native order."))
+    end_part_id: Identity = Field(description=(
+        "Last supplied template part of the same complete native format, inclusive; never select another "
+        "document or an endpoint before start_part_id."))
 
 
 class ResponseTableRowResponse(Contract):
@@ -346,15 +356,26 @@ class ResponseTableRowResponse(Contract):
 
 
 class ResponseTableResponse(Contract):
+    context_range_ids: list[Identity] = Field(default_factory=list, description=(
+        "Select supplied exact source ranges for original headers, units, conditions and guidance applying to the whole table. "
+        "Use actual sources in the source request and shared source_excerpts in assembly; keep row-specific conditions with their rows."))
     rows: list[ResponseTableRowResponse] = Field(min_length=1)
 
 
 class OutlineTargetResponse(Contract):
     kind: ResponseTargetKind
     purpose: Text
-    rule_ids: list[Identity]
-    range_ids: list[Identity]
+    rule_ids: list[Identity] = Field(description=(
+        "Select only this request's top-level rules[].rule_id. item_id values in related_rules, "
+        "relations or issues are read-only context; never create a rule ID by changing an item ID prefix."))
+    range_ids: list[Identity] = Field(description=(
+        "Select supplied bindable source or evidence/context range references; "
+        "these may include context not read in this batch."))
     template_part_ids: list[Identity] = Field(default_factory=list)
+    template_spans: list[TemplateSpanResponse] = Field(default_factory=list)
+    subject: Text | None = Field(default=None, description=(
+        "The source-required subject role for this one form instance, not an invented company name; "
+        "different required subjects remain separate targets."))
     response_table: ResponseTableResponse | None = None
     manual_fill: StrictBool = False
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
@@ -365,12 +386,15 @@ class OutlineChapterResponse(Contract):
     targets: list[OutlineTargetResponse] = Field(default_factory=list)
     children: list["OutlineChapterResponse"] = Field(default_factory=list)
     is_volume: StrictBool = False
+    presentation_role: ChapterPresentationRole = "body"
 
 
 class OutlineFinding(Contract):
     code: Text
     detail: Text
-    rule_ids: list[Identity]
+    rule_ids: list[Identity] = Field(description=(
+        "Select only this request's top-level rules[].rule_id. item_id values in related_rules, "
+        "relations or issues are read-only context; never create a rule ID by changing an item ID prefix."))
 
 
 class SearchIntentResponse(Contract):
@@ -382,8 +406,12 @@ class OutlineResponse(Contract):
     schema_version: AnalysisVersion
     chapters: list[OutlineChapterResponse]
     findings: list[OutlineFinding]
-    constraint_rule_ids: list[Identity] = Field(default_factory=list)
-    constraint_range_ids: list[Identity] = Field(default_factory=list)
+    constraint_rule_ids: list[Identity] = Field(default_factory=list, description=(
+        "Select only this request's top-level rules[].rule_id. item_id values in related_rules, "
+        "relations or issues are read-only context; never create a rule ID by changing an item ID prefix."))
+    constraint_range_ids: list[Identity] = Field(default_factory=list, description=(
+        "Select only sources[].range_id actually read in this batch. A range mentioned only in "
+        "evidence, relations or issues does not qualify."))
     search_intents: list[SearchIntentResponse] = Field(default_factory=list)
 
 
@@ -391,12 +419,35 @@ class OutlineAssemblyTarget(Contract):
     kind: ResponseTargetKind
     purpose: Text
     target_ids: list[Identity] = Field(default_factory=list)
-    rule_ids: list[Identity] = Field(default_factory=list)
-    source_ids: list[Identity] = Field(default_factory=list)
-    template_part_ids: list[Identity] = Field(default_factory=list)
+    rule_ids: list[Identity] = Field(default_factory=list, description=(
+        "Select additional supplied rules. On revision, omit to retain the unique previous position's explicit "
+        "selection for the same non-empty candidate ID set and subject; an explicit array replaces that additional selection, "
+        "and [] clears it. Original candidate rules always remain."))
+    source_ids: list[Identity] = Field(default_factory=list, description=(
+        "Select additional bindable submission_sources for understanding. On revision, omit to retain the unique "
+        "previous position's explicit selection for the same non-empty candidate ID set and subject; an explicit array replaces "
+        "that additional selection, and [] clears it. This selection is independent of rule_ids; original candidate "
+        "sources and the currently selected rules' exact evidence remain."))
+    template_part_ids: list[Identity] = Field(default_factory=list, description=(
+        "Omit both template_part_ids and template_spans to retain the selected instances' complete formats. "
+        "Providing either field replaces the format selection; explicit empty arrays clear a mistaken format "
+        "while retaining its rules and source context."))
+    template_spans: list[TemplateSpanResponse] = Field(default_factory=list, description=(
+        "Optional inclusive ranges of a complete format in the supplied native order. "
+        "When combined with explicit part IDs, the host keeps native order. Omit both template selection "
+        "fields to retain the existing complete selection."))
+    subject: Text | None = Field(default=None, description=(
+        "The source-required subject role for this one form instance; preserve distinct candidate subjects "
+        "as separate instances even when they use the same native format."))
     response_table: ResponseTableResponse | None = None
-    related_target_ids: list[Identity] = Field(default_factory=list)
-    manual_fill: StrictBool = False
+    related_target_ids: list[Identity] = Field(default_factory=list, description=(
+        "Select supplied candidate references. On revision, omit to retain the unique previous position's "
+        "selection for the same non-empty candidate ID set and subject; an explicit array replaces it, and [] clears it. "
+        "References are resolved against the revised positions; ambiguous instances remain unresolved."))
+    manual_fill: StrictBool = Field(default=False, description=(
+        "On revision, omit to retain the unique previous position's manual-fill boundary for the same non-empty "
+        "candidate ID set and subject. An explicit boolean replaces an assembly-added flag; original candidate manual-fill "
+        "requirements always remain."))
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
 
     @model_validator(mode="after")
@@ -411,7 +462,7 @@ class OutlineAssemblyChapter(Contract):
     title: Text
     targets: list[OutlineAssemblyTarget] = Field(default_factory=list)
     is_volume: StrictBool = False
-    presentation_role: Literal["body", "cover"] = "body"
+    presentation_role: ChapterPresentationRole = "body"
     children: list["OutlineAssemblyChapter"] = Field(default_factory=list)
 
 
@@ -446,6 +497,7 @@ class ResponseTableRow(Contract):
 
 
 class ResponseTable(Contract):
+    context_source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
     rows: list[ResponseTableRow] = Field(min_length=1)
 
 
@@ -457,6 +509,7 @@ class ResponseTarget(Contract):
     source_refs: list[SourceUnitRef]
     source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
     template_refs: list[TemplatePartRef] = Field(default_factory=list)
+    subject: Text | None = None
     response_table: ResponseTable | None = None
     manual_fill: StrictBool = False
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
@@ -469,7 +522,7 @@ class OutlineChapter(Contract):
     targets: list[ResponseTarget]
     children: list["OutlineChapter"]
     is_volume: StrictBool = False
-    presentation_role: Literal["body", "cover"] = "body"
+    presentation_role: ChapterPresentationRole = "body"
 
 
 class OutlineIssue(_AnalysisContract):
@@ -650,6 +703,27 @@ class AuthoringReviewFinding(Contract):
 
 class AuthoringReviewResponse(Contract):
     findings: list[AuthoringReviewFinding]
+
+
+class SourceDecorationExclusion(Contract):
+    target_id: Identity = Field(description="Select the current structure view's exact target_id.")
+    support_ids: list[Identity] = Field(min_length=1, description=(
+        "Select only this target's template_support_ids that contain solely standalone source page "
+        "headers, footers or page numbers. Never select a part containing substantive text, conditions, "
+        "notes, table titles, filling instructions or signatures, even if deemed inapplicable. "
+        "Preserve mixed or uncertain parts; source/context supports do not qualify."))
+    reason: Text = Field(description=(
+        "Explain why each selected part is solely source page decoration, with no substantive content. "
+        "Inapplicability of a substantive clause never authorizes exclusion."))
+
+
+class AuthoringStructureResponse(AuthoringReviewResponse):
+    source_decoration_exclusions: list[SourceDecorationExclusion] = Field(default_factory=list, description=(
+        "Optional exclusions of standalone source page headers, footers or page numbers only. "
+        "Never remove substantive fixed-format content or applicability notes. "
+        "Executable only when source_decoration_edits_allowed is true; otherwise retained as suggestions. "
+        "Do not infer actions from finding codes or prose. Rules, source references, exact excerpts "
+        "and response rows remain unchanged."))
 
 
 class AuthoringGap(Contract):

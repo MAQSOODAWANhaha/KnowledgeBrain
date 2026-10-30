@@ -84,3 +84,27 @@ def test_cover_is_bound_without_adding_visible_heading(tmp_path):
     assert actual["chapters"][0]["title"] == "封面"
     assert actual["chapters"][0]["targets"][0]["bookmark"] == bookmark_name("cover-target", "target")
     assert not any(paragraph.style.name.startswith("Heading") for paragraph in Document(BytesIO(data)).paragraphs)
+
+
+def test_submission_note_subtree_is_not_a_missing_word_chapter_or_an_orphan_body(tmp_path):
+    store = ArtifactStore(tmp_path)
+    child = {"chapter_id": "note-child", "title": "外部子操作", "is_volume": True,
+             "targets": [], "children": []}
+    note = {"chapter_id": "note", "title": "上传与签章", "presentation_role": "submission_note",
+            "is_volume": True, "children": [child], "targets": []}
+    body = {"chapter_id": "body", "title": "正式正文", "children": [], "targets": []}
+    deleted = {"chapter_id": "deleted", "title": "已删除正文", "children": [], "targets": []}
+    historical = {"task_id": "historical", "chapter_id": child["chapter_id"], "target_ids": [],
+                  "blocks": [{"kind": "paragraph", "text": "历史操作不能回流正文"}],
+                  "cell_fills": [], "attachments": []}
+    result = export_authoring_document(store, {"chapters": [note, body]}, [historical])
+    data = store.read_bytes(result["docx_ref"])
+    actual = read_docx_outline(data, [note, body, deleted])
+    assert [chapter["chapter_id"] for chapter in actual["chapters"]] == ["body"]
+    assert actual["missing_chapter_ids"] == ["deleted"]
+    document = Document(BytesIO(data))
+    text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
+    assert '1 正式正文' in text
+    assert '历史操作不能回流正文' not in text and '外部子操作' not in text
+    with ZipFile(store.path(result["package_ref"])) as archive:
+        assert not any(name.startswith('volumes/') for name in archive.namelist())

@@ -8,7 +8,7 @@ from uuid import uuid4
 from docreader.integrations.store import Cancelled, RequestReplayBlocked, StaleExecution
 from docreader.llm.request import (
     ModelContractError, ModelCorrectionStalled, ModelInfrastructureError, ModelJSONError,
-    ModelSemanticError, ModelWorkUnitExhausted, image_data_url,
+    ModelRateLimitError, ModelSemanticError, ModelWorkUnitExhausted, image_data_url,
 )
 
 
@@ -86,7 +86,10 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
             # storage OSError through must still retain the paid-call retries.
             if attempt == 3:
                 raise ModelWorkUnitExhausted(task) from error
-            await asyncio.sleep(2 ** attempt)
+            delay = 2 ** attempt
+            if isinstance(error, ModelRateLimitError):
+                delay = min(120, max(30 * delay, error.retry_after_seconds or 0))
+            await asyncio.sleep(delay)
             continue
         except passthrough_exceptions:
             raise

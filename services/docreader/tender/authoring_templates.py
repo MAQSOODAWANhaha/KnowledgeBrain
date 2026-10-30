@@ -6,6 +6,7 @@ import hashlib
 import json
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
+from docreader.llm.request import ModelContractError
 from docreader.tender.evidence.references import EvidenceRepository, fragment, selector
 from docreader.tender.schema import TemplatePartRef
 
@@ -14,6 +15,85 @@ def template_part_key(reference):
     part = TemplatePartRef.model_validate(reference).model_dump(exclude_unset=True)
     return (part['source_ref']['source_index_ref']['sha256'], part['source_ref']['unit_id'],
             tuple((s['source_range_id'], s['start'], s['end']) for s in part['selectors']))
+
+
+def ordered_template_part_ids(parts, repository):
+    """Order a visible pool by frozen documents, native units and text offsets."""
+    documents, units, positions = {}, {}, {}
+    for identity, part in parts.items():
+        reference = part['source_ref']
+        digest = reference['source_index_ref']['sha256']
+        if digest not in documents:
+            documents[digest] = len(documents)
+            index = repository.source_index(reference['source_index_ref'])
+            units[digest] = {unit['unit_id']: ordinal for ordinal, unit in enumerate(index.raw['units'])}
+        if reference['unit_id'] not in units[digest]:
+            raise ArtifactIntegrityError('template part refers to an unknown frozen unit')
+        positions[identity] = (documents[digest], units[digest][reference['unit_id']],
+                               min((selected['start'] for selected in part['selectors']), default=-1))
+    return sorted(parts, key=positions.__getitem__)
+
+
+def template_part_runs(parts, repository, *, all_parts=None):
+    """Advertise visible runs without spanning hidden parts or frozen documents."""
+    if not parts:
+        return []
+    registered = parts if all_parts is None else all_parts
+    visible = {template_part_key(part): identity for identity, part in parts.items()}
+    runs, current, document = [], [], None
+    for identity in ordered_template_part_ids(registered, repository):
+        part = registered[identity]
+        digest = part['source_ref']['source_index_ref']['sha256']
+        alias = visible.get(template_part_key(part))
+        if alias is None or digest != document:
+            if len(current) >= 2:
+                runs.append([current[0], current[-1]])
+            current = []
+        if alias is not None:
+            current.append(alias)
+        document = digest
+    if len(current) >= 2:
+        runs.append([current[0], current[-1]])
+    return runs
+
+
+def expand_template_spans(parts, spans, repository, *, path=(), all_parts=None):
+    """Resolve visible inclusive spans, rejecting holes in the full prepared pool."""
+    if not spans:
+        return []
+    for ordinal, span in enumerate(spans):
+        for field in ('start_part_id', 'end_part_id'):
+            if span[field] not in parts:
+                raise ModelContractError([{'path': [*path, ordinal, field], 'code': 'outline_unknown_template',
+                    'detail': 'Select a template part supplied in this request.'}])
+        first, last = (parts[span[field]]['source_ref']['source_index_ref']['sha256']
+                       for field in ('start_part_id', 'end_part_id'))
+        if first != last:
+            raise ModelContractError([{'path': [*path, ordinal, 'end_part_id'],
+                'code': 'outline_invalid_template_span', 'detail': 'Keep both endpoints in the same frozen document.'}])
+    registered = parts if all_parts is None else all_parts
+    ordered = [template_part_key(registered[identity])
+               for identity in ordered_template_part_ids(registered, repository)]
+    visible = {template_part_key(part): identity for identity, part in parts.items()}
+    positions = {key: ordinal for ordinal, key in enumerate(ordered)}
+    result, seen = [], set()
+    for ordinal, span in enumerate(spans):
+        start, end = (positions[template_part_key(parts[span[field]])]
+                      for field in ('start_part_id', 'end_part_id'))
+        if start > end:
+            raise ModelContractError([{'path': [*path, ordinal, 'end_part_id'],
+                'code': 'outline_invalid_template_span', 'detail': 'Select the last part after the first in native order.'}])
+        selected = ordered[start:end + 1]
+        if any(key not in visible for key in selected):
+            raise ModelContractError([{'path': [*path, ordinal, 'end_part_id'],
+                'code': 'outline_invalid_template_span',
+                'detail': 'Select a continuous span read in this request, or use discrete template_part_ids; '
+                          'this span includes unread parts.'}])
+        for key in selected:
+            if key not in seen:
+                seen.add(key)
+                result.append(visible[key])
+    return result
 
 
 def load_template_part(artifacts, reference, *, repository=None):
@@ -62,6 +142,8 @@ def prepare_template_parts(artifacts, context, source_records=None):
     repository = context.repository
     try:
         frozen = artifacts.read_json(context.input['frozen_ref']) if context.input.get('frozen_ref') else {}
+        if not isinstance(frozen, dict):
+            raise ValueError('unexpected authoring artifact shape')
     except (OSError, ValueError, KeyError):
         context.template_parts = {}
         return list(source_records or []), []
@@ -177,4 +259,11 @@ def prepare_template_parts(artifacts, context, source_records=None):
     for grid in grids.values():
         if set(grid['range_ids']) <= visible:
             expose(grid['source_ref'], [], list(grid['range_ids']))
+    document_order = {document['source_index_ref']['sha256']: ordinal
+                      for ordinal, document in enumerate(frozen.get('documents', []))}
+    ordered = ordered_template_part_ids(dict(sorted(context.template_parts.items(), key=lambda entry:
+        document_order[entry[1]['source_ref']['source_index_ref']['sha256']])), repository)
+    context.template_parts = {identity: context.template_parts[identity] for identity in ordered}
+    views = {part['part_id']: part for part in parts}
+    parts = [views[identity] for identity in ordered]
     return combined, parts

@@ -73,6 +73,14 @@ class ModelInfrastructureError(ConnectionError):
     """The bounded work-unit recovery policy may retry this failure."""
 
 
+class ModelRateLimitError(ModelInfrastructureError):
+    """An HTTP 429 rejection with an optional parsed provider retry delay."""
+
+    def __init__(self, retry_after_seconds=None):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("model endpoint returned HTTP 429")
+
+
 class UncertainModelResponse(RuntimeError):
     """Execution/billing may have occurred; never automatically replay payment."""
 

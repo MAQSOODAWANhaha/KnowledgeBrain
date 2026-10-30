@@ -61,13 +61,13 @@ def payload(runtime, action="workbench", **extra):
     return {"action": action, "project_id": runtime.project, "owner_user_id": runtime.owner, **extra}
 
 
-async def upload(runtime, *, kind="tender"):
+async def upload(runtime):
     data, document_id = document_bytes(), str(uuid4())
     async with runtime.bridge.store.transaction() as conn:
         await conn.execute("INSERT INTO tender_documents VALUES(%s,%s,%s,%s,%s,%s)",
             (document_id, runtime.project, "示例来源.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
              hashlib.sha256(data).hexdigest(), len(data)))
-    request = payload(runtime, "document.put", document_id=document_id, kind=kind, role="main")
+    request = payload(runtime, "document.put", document_id=document_id)
     await runtime.bridge.put_document(request, data)
     return request, data
 
@@ -509,17 +509,16 @@ async def test_pending_analysis_sources_are_compared_before_freeze_is_ready(runt
     assert (await runtime.bridge.analysis_view(run, runtime.project))["sources_current"] is False
 
 
-async def test_enterprise_materials_are_fixed_at_submission_and_new_uploads_reach_new_jobs(runtime, monkeypatch):
+async def test_uploaded_files_join_one_analysis_set_without_classified_materials(runtime, monkeypatch):
     configured(monkeypatch)
     await upload(runtime)
-    await upload(runtime, kind="enterprise")
-    first = await runtime.bridge.start_authoring(payload(runtime, request_key="old-materials"))
-    first_job = await runtime.bridge.job(runtime.project, first["authoring"]["execution_id"])
-    await upload(runtime, kind="enterprise")
-    second = await runtime.bridge.start_authoring(payload(runtime, request_key="new-materials"))
-    second_job = await runtime.bridge.job(runtime.project, second["authoring"]["execution_id"])
-    assert len(second_job["payload"]["materials"]) == 2 * len(first_job["payload"]["materials"]) > 0
-    assert (await runtime.bridge.job(runtime.project, first_job["execution_id"]))["payload"] == first_job["payload"]
+    await upload(runtime)
+    started = await runtime.bridge.start_authoring(payload(runtime, request_key="plain-upload"))
+    job = await runtime.bridge.job(runtime.project, started["authoring"]["execution_id"])
+    assert job["payload"]["materials"] == []
+    registered = await runtime.bridge.manifest(runtime.project)
+    assert len(registered["documents"]) == 2
+    assert {document["role"] for document in registered["documents"]} == {"main"}
 
 
 async def test_dispatch_failure_is_recoverable_and_preserves_execution_id(runtime, monkeypatch):
@@ -643,7 +642,7 @@ async def test_workbench_context_follows_selected_word_instead_of_new_candidate(
     view = await runtime.bridge.workbench(runtime.project, current_id)
     assert view["context_execution_id"] == current_id
     assert view["artifacts"]["execution_id"] == candidate_id
-    assert view["documents"][0]["kind"] == "tender"
+    assert "kind" not in view["documents"][0] and "role" not in view["documents"][0]
     with pytest.raises(WebError, match="不属于此项目"):
         await runtime.bridge.workbench(runtime.other, current_id)
 

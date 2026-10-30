@@ -39,7 +39,7 @@ async def test_large_assembly_reports_one_leaf_within_existing_correction_room(
     context = SimpleNamespace(input={"schema_version": 2, "run_id": "assembly-feedback",
         "source_version": 1, "domain_revision": 1, "issues": []}, sources={}, rules={"rule-1": reference},
         payload={"rules": [{"rule_id": "rule-1", "item": {"text": "保留原要求。", "evidence": []}}]},
-        validate=lambda _: deepcopy(fragment))
+        validate=lambda _, **kwargs: deepcopy(fragment))
     monkeypatch.setattr(pipeline, "_source_records", lambda *_: [])
     monkeypatch.setattr(pipeline, "prepare_template_parts", lambda *_: ([], []))
     budget = RequestBudget(model="fixture", context_tokens=131072, tokenizer="o200k_base",

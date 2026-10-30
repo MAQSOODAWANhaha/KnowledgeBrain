@@ -2,15 +2,15 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "../../lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold",
+  "inline-flex items-center gap-1.5 rounded-[4px] px-1.5 py-0.5 text-xs font-semibold",
   {
     variants: {
       tone: {
         sky: "bg-sky-wash text-sky-ink",
-        gray: "bg-[#f1f5f9] text-quiet",
-        go: "bg-[#ecfdf5] text-go",
-        wait: "bg-[#fff7ed] text-wait",
-        stop: "bg-[#fef2f2] text-stop",
+        gray: "bg-canvas text-quiet",
+        go: "bg-[var(--pine-soft)] text-go",
+        wait: "bg-[var(--amber-soft)] text-wait",
+        stop: "bg-[var(--rose-soft)] text-stop",
       },
     },
     defaultVariants: { tone: "gray" },

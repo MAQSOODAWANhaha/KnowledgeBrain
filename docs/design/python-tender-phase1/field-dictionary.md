@@ -964,6 +964,8 @@ outline_rule_unassigned以响应位置及constraint_rule_refs共同计算未分�
 | WritingTask | `task_id`、`chapter_id`、`title_path:str[]`、`targets:ResponseTarget[]`；同章连续narrative目标可合成一个任务；每个form、attachment或manual_fill目标各自单任务。manual_fill任务只保留格式占位；纯attachment缺可读原件、普通目标缺候选知识时均跳过写作，保留空位与gaps。部分匹配只写有依据部分，同章其他任务继续。单个表格实例填值只属于该target，不能因模板相同跨target合并。过大叙述任务按已有目标边界拆分，不按页数或每条要求拆分 |
 | WritingUnit | `schema_version:2`、`task_id`、`chapter_id`、`target_ids:Identity[]`、`status:generated/placeholder`、`blocks`、`cell_fills:CellFill[]`、`attachments:AuthoringAttachment[]`、`gaps:str[]`、`error_type:str或null`；失败占位不冒充成功正文 |
 | AuthoringReviewFinding / AuthoringReviewResponse | `findings:[{code:Text,detail:Text,task_ids:Identity[]=[],content_ids:Identity[]=[],suggestion:str='',can_revise:bool=false,reject_content:bool=false}]`；content_ids选宿主提供的具体block/fill短引用。reject_content由模型判断当前已生成内容确实失真、与依据矛盾或增删条件改变原义时置true；纯遗漏、待补及复核不可用保持false。宿主对true或旧unsupported_content按任务拆分并执行原定位剔除，不按其他自由code猜语义。无精确内容但关联任务明确时，保守清空该任务生成应答并保留原稿；固定原表和要求行不删。can_revise独立表示现有资料是否足以作一次修订，缺证书、未知价格或授权保持false。自动大纲的结构F0只要有findings就交A1复核一次，不以can_revise拦截结构意见；A1依据原文可修改或保持，树改变才F1，人工固定大纲不自动修订。结构/保存Word只读复核不执行正文剔除，reject_content保持false。缺项/冲突不设置下载门禁 |
+| AuthoringStructureResponse | 结构F专用，继承`findings`，增加`source_decoration_exclusions:[{target_id:Identity,support_ids:Identity[],reason:Text}]=[]`。仅排除确定为独立源页首、页尾或页码装饰的部件，只选当次目标实际`template_support_ids`。含实质正文、条件、备注、表内标题、填写说明或签署内容的部件及混合部件不得排除；本项目不适用不能作为删除固定原格式条款的依据。不确定时保留内容并记finding，表单归属仍交既有A1。仅上下文/要求行引用不可排除。宿主按精确部件身份在指定实例内执行，不按code或文字推断，不删除原要求、原CAS、相邻部件或其他实例。仅自动组装F0/F1设置`source_decoration_edits_allowed=true`后执行；固定人工大纲及只读复核只保留建议，不改纲。全部选择合法后才统一应用；命中成功回执也执行相同规则，旧`template_exclusions`不属于新合同；非法选择沿原有限反馈出口，不加轮次或门禁 |
+| 结构F compact文本共享 | 可选`text_pool:str[]`及support/submission_source的`text_lines:(str或非负整数)[]`。整数仅为本次共享池从0起的下标，按顺序换行连接逐字恢复原text；不合并support/source身份、条件、所属目标或原格。只在有净收益的发送副本采用，不影响原CAS或输出合同，不回抄共享池 |
 | 结构修订反馈 previous_structure.targets | `review_target_id`为F中的v短引用，`candidate_target_ids`为同请求原候选t引用。宿主为模型已选及兜底保留的全部位置登记映射；保留遗漏候选不能把其已知候选引用置空。同一候选多实例继续分别登记、参见不明确时保留歧义，不让模型推测持久身份 |
 | AuthoringGap | `code:Text`、`detail:Text`、`task_id/chapter_id/target_id:Identity或null`；宿主统一缺口位置，模型局部字符串缺口在边界补位置 |
 | AuthoringUsage | `sent_requests`、`retry_requests`、`estimated_input_tokens`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`unknown_usage_requests`均非负整数；计量范围为本执行的实际发送；继承回执不伪造新发送或用量。Token总数只含已报告值，未知调用另计，不能视为免费；原执行费用按其回执单独追溯 |
@@ -1076,8 +1078,8 @@ BUG-081补充：来源组织装包在实际输入准入内预留2048 token纠正
 不变；未知引用错误精确到叶字段，不复制整棵章节树。全量归并仅在原发送视图超限时
 使用`assembly_view="compact_v1"`，仍保持同一输出合同与宿主引用映射：
 
-- `template_parts`、`submission_sources`、`submission_rules`、`unassigned_rules`由数组
-  改为以原`part_id`/`source_id`/`rule_id`为键的对象，值保留该条除重复ID外的全部字段。
+- `template_parts`、`source_excerpts`、`submission_sources`、`submission_rules`、`unassigned_rules`由数组
+  改为以原`part_id`/`range_id`/`source_id`/`rule_id`为键的对象，值保留该条除重复ID外的全部字段。
 - 纯原生网格可用`rows`完整二维明文矩阵表达，行列仍从0开始；`null`表示该坐标没有
   独立原生单元格，`""`表示确实存在的空白格。`merged_cells`每项为
   `[row,column,row_span,col_span]`，只列非1×1合并；`row_count`/`column_count`保留。
@@ -1087,6 +1089,18 @@ BUG-081补充：来源组织装包在实际输入准入内预留2048 token纠正
   `template_part_ids=[]`时只应用这些明确默认值，不表示缺失语义。其他字段不裁剪。
 - 以上仅是输入投影，不改变持久结构、最终DOCX或输出短引用，不要求模型重抄压缩表。
   若投影后仍超限，保留既有容量缺口及人工编辑/重新编制出口，不能声称归并成功。
+
+BUG-103补充：compact视图可在顶层携带`text_pool: string[]`，仅共享完全相同的
+原文行。`template_parts`、`source_excerpts`及`submission_sources`中可用
+`text_lines: (string | integer)[]`代替`text`：字符串就是该行原文，整数是从0开始的
+`text_pool`索引；按顺序以原始`\n`连接即为该条完整原文。空行、首尾换行、Unicode、
+空白和标点均不规整，不让模型计算字符偏移或回抄共享池。仅在完整JSON实际变小
+时采用；没有净收益、不可读正文及网格沿现有表达。相同文字共享不合并来源身份、
+部件、适用条件或实例；原`p/x/s`短引用、部件顺序和宿主绑定均不变。
+这是输入端无损表达，不增加持久字段或输出字段，不改变模板/响应表的实际选择。
+仅当`source_sections`只有一个章节，且所有`source_excerpts`确实引用该章节时，
+compact摘录可省略共同`section_id`，统一引用这唯一章节；多章节或任何不一致时
+逐条保留。`source_sections`本身保持完整，不引入通用默认值/列式协议。
 
 `RequestBudget`增加宿主构造参数`tokenized_outline_assembly: bool=false`。开启必须同时显式
 配置`tokenizer="o200k_base"`；不能根据模型名称猜测，也不能在正在执行的请求中改配置。
@@ -1707,6 +1721,66 @@ worker再次校验同run、同执行协议与同`outline_only`模式。大纲仍
 
 ## 精确来源与业务响应表
 
+### 完整模板、主体实例与外部操作（BUG-101）
+
+以下增量取代此前“组装省略模板即为空”的约定，其余来源与模板边界保持不变。
+
+| 字段 | 唯一含义 |
+| --- | --- |
+| TemplateSpanResponse | `{start_part_id:Identity,end_part_id:Identity}`，两个端点均来自本请求实际提供、按冻结原生顺序排列的template_parts，且属于同一冻结文档。首尾均包含；宿主展开中间全部部件。模型判断一个完整格式的语义边界，不计算字符位置、不誊写长部件名单 |
+| OutlineTargetResponse.template_spans / OutlineAssemblyTarget.template_spans | 可选`TemplateSpanResponse[]=[]`，每段表达一个明确连续的完整格式范围；离散声明/不连续部件仍用template_part_ids选择。宿主按所选范围完整展开并精确去重，最终仍保存既有template_refs，不新增格式注册表或持久组身份 |
+| OutlineTargetResponse.subject / OutlineAssemblyTarget.subject / ResponseTarget.subject | 可选非空文本或null，默认null，表示本份填写实例适用的主体角色/对象，不是已核实企业名称。不同主体仍各一份target；未知身份不补造实际企业资料。组装保留候选已明确的不同主体实例，不因合并章节而合成一份表 |
+| OutlineChapterResponse.presentation_role / OutlineAssemblyChapter.presentation_role / OutlineChapter.presentation_role | `body/cover/submission_note`，默认body。submission_note仅表示平台上传、签章或维护等外部操作，不进入正文、主目录或正文分卷，其来源和目的保留在提交待办。确实需要准备的独立内容文件仍为body并按实际要求设is_volume，不能因最终要上传就排除 |
+
+主体分组只在尚未明确归属时保全未知实例：所选候选只有一个已知subject，且模型
+显式subject与之相同时，接受模型确定为该同一主体的合并，完整保留候选依据及模板。
+省略/不一致的选择仍保留未知实例；多个已知主体不因一个输出subject而强行合并。
+
+S仅能选择本批实际可见的部件，范围不得跨未阅读的批次；多批发现的格式由A按明确
+候选及来源组织。首尾之间若有完整注册表中存在、当前请求未提供的部件，沿既有
+引用纠正提示选择已读连续范围或离散部件，不自动插入未读文字，也不把带洞范围
+称为完整。混用连续范围与离散部件时按冻结原生顺序合并，避免页尾移到正文之前。
+A为候选明确引用的原生unit提供可选完整部件，使解释依据中的续表
+可成为实际模板；这只是同一实际来源的可达性，不按相邻页、相同标题补猜格式归属，
+也不将全文重复送入A。A同时省略template_part_ids与template_spans时继承所选候选
+的完整原格式；显式提供选择则替代，显式空数组可清除误选模板而保留规则和来源。
+只有模型选择的模板才会输出，普通理解来源仍不授权。
+同一非空候选lineage且主体唯一的A1位置，省略rule_ids/source_ids分别保留A0新增的规则绑定与
+理解来源/精确摘录；显式提供字段替换对应新增选择，空数组可撤回对应新增绑定，
+不清除S候选原有依据。前版以原短引用显示这些选择，未改变的引用由宿主继承，
+不要求模型重新誊写。候选组合、主体或唯一性变化时不跨实例猜继承。
+target_ids=[]的新增规则或纯参见位置不自动匹配前版；修订须显式选择其依据及仍需
+保留的来源、人工标记。不能把空候选集合当作这些不同位置的共同身份。
+相同规则适用于A0已接受的related_target_ids参见选择；manual_fill省略时继承实际
+人工填写边界，显式值可修改A0新增标记，但不清除S原有的人工填写限制。
+组装输入template_runs为`[[start_part_id,end_part_id],...]`，由宿主按完整冻结原生
+顺序计算当前可见池的连续段，仅列至少含两个部件的同文档范围；不连续的可见ID
+不因过滤后相邻而变连续。template_spans只选择同一run内的有序首尾；孤立部件或
+跨run的选择用离散template_part_ids。该字段不授权输出隐藏部件，不要求模型回抄。
+run仅表示原生连续性，不表示其中每个部件都属于同一应交格式；可明确识别的源文件
+页眉页脚、页码通过既有离散选择排除，不以重复次数自动删文。跨页实质续文、条件、
+备注和签署栏保留，无法区分时保留来源及待核，不能按标题或关键词代替语义判断。
+结构修订提供前版模板、主体及交付角色选择，保留未受影响的实例；删除候选仍须沿
+既有明确排除理由出口，不能靠再生成遗漏实现删除。主体/范围是否识别正确仍需结构
+核对及原文验收，字段存在或宿主展开成功都不能证明语义完整。
+组装合并多个已知主体时，各自只继承该主体原候选；主体未知的候选仍独立保留，
+不能由宿主复制给每个已知主体。submission_note整子树在写作、正文、分卷及Word
+导航中保持同一角色；遗漏或组装失败仍保留待办，不回流“待整理正文”。人工编排
+沿同一ChapterPresentationRole合同修改，恢复成body时保留既有证据和目标身份。
+
+来源大纲引用域（BUG-100）：`OutlineTargetResponse.rule_ids`、
+`OutlineFinding.rule_ids`、`OutlineResponse.constraint_rule_ids`只选择本请求顶层
+`rules[].rule_id`。`related_rules.item.item_id`及关系/问题中的事项身份只读，不得换
+前缀推导规则身份。`OutlineTargetResponse.range_ids`仍可选择宿主已提供、可绑定的
+证据上下文；`OutlineResponse.constraint_range_ids`则只选择本批实际阅读的
+`sources[].range_id`。证据或问题中出现过身份，不代表本批已阅读其完整原文。
+这些区别同时进入同源Schema的字段description与Prompt；不动态枚举全部身份，
+也不修改既有validator来容纳越域引用。
+
+WritingUnit的placeholder只表示没有生成正文/填值，不表示原格式未输出。任务全部目标
+为form、无实际生成内容且无本目标可用知识候选时，不建立正文R记录；原格式仍由F
+及导出保全。任何实际内容、可用知识候选或其他kind仍进入既有正文复核，不新增状态。
+
 本节是BUG-040/093修复的统一字段合同，覆盖前述字段的相应部分。schema、绑定、
 写作/复核/改稿与导出依此接线；实际回归、部署及真实验收状态见交接。实施依据见
 [后续统一修复](submission-structure-plan.md#后续统一修复bug-040086093095)。
@@ -1716,8 +1790,10 @@ worker再次校验同run、同执行协议与同`outline_only`模式。大纲仍
 | --- | --- |
 | SourceExcerptRef | `{source_ref:SourceUnitRef,selectors:RangeSelector[]}`；selectors非空且每项属于该冻结unit，按原文顺序保存。复用现有selector/materialize，不让模型计算offset。与TemplatePartRef共享选择器结构，但本引用不授予原表插入权限，也不调用原网格裁剪路径 |
 | ResponseTarget.source_excerpts | 可选有序精确来源，默认空，提供本目标共同理解依据，不机械复制全部表行。新来源短range选择由宿主绑定；相应source_refs是unit索引投影，不再重复加载整unit。明确需要整个unit时绑定其全部原生范围；旧目标无精确引用仍按原whole-unit读取，不由代码猜删上下文 |
-| ResponseTarget.response_table | 可选`{rows:ResponseTableRow[]}`，缺省无业务响应表；不是按kind/domain/标题推导。表达由模型基于本项目要求确定的逐行应答位置，与规定原表template_refs分开 |
+| ResponseTarget.response_table | 可选`{rows:ResponseTableRow[]}`，缺省无业务响应表；不是按kind/domain/标题推导。表达由模型基于本项目要求确定的逐行应答位置，与规定原表template_refs分开。非空行由宿主实际生成“招标要求/投标响应”表，共同条件显示于表前，无资料时仅应答格留空；不能仅因template_refs为空判定没有输出表或追加原格式待补。原文明示必须使用的原生可填写格式仍须另外核对 |
 | ResponseTableRow | `{row_id:Identity,source_excerpts:SourceExcerptRef[],rule_refs:EffectiveItemRef[]}`；来源非空，rule_refs可空以容纳尚未成为事项的原要求。宿主在冻结大纲中生成行身份，逻辑行可含有序跨页片段，分片及恢复不重编号；不复制摘要、数字、评分或原文正文 |
+| ResponseTableResponse.context_range_ids | 可选`Identity[]=[]`，来源S选择本批实际阅读的r引用，组装A选择共享精确来源x引用。仅表示适用于整张业务表的原表头、单位、条件或必要引导；只适用部分行的条件仍随相应行选择，不扩大适用范围 |
+| ResponseTable.context_source_excerpts | 可选`SourceExcerptRef[]=[]`，宿主绑定上述选择、保持顺序并按精确片段去重。与仅供理解的target.source_excerpts分开，必须在最终业务表前实际展示一次；不生成新业务行或企业应答格 |
 | 来源/组装响应行 | 模型只选择当前可见的短range/候选引用及rule_ids；宿主回绑完整片段与正式行身份。组装候选需保留其精确来源和逻辑行，必要共享原文只发送一次，不让模型重抄有序原文或返回持久row_id |
 | 写作请求response_rows | 宿主为本批实际行提供短row_id、对应target/rule短引用和source support短引用；原文在共享supports中只发一次。不再让模型回抄完整要求列、目标身份或全量覆盖名单 |
 | RowFillResponse | `{row_id:Identity,text:StrictStr,support_ids:Identity[]}`；只返回当前行的企业应答及真实支持。WritingResponse新增可选`row_fills=[]`，不复用原生CellFill的行列坐标 |
@@ -1727,10 +1803,23 @@ worker再次校验同run、同执行协议与同`outline_only`模式。大纲仍
 模型来源/组装共用`response_table:{rows:[{range_ids:Identity[],rule_ids:Identity[]=[]}]}`，
 不返回持久行身份。来源range_ids选本批WirePayload的短r引用；组装range_ids选共享
 source_excerpts中的x引用，行rule_ids选择已给候选的a引用或未安排规则的u引用。
-组装候选带原有行选择；省略新response_table时继承被选候选的行，重新分组也不能
+组装候选带原有行选择；省略新response_table时优先继承同lineage前版已采纳表，
+没有唯一前版位置时继承被选候选的表，重新分组也不能
 静默丢已知原文行。宿主保留未安排的完整行及诊断，是否本次不适用仍由模型沿原
 候选排除出口明确说明。写作response_rows给q引用，回包row_fills只选本请求q引用；
 复核使用rN内容引用定位已生成答案，与来源阶段r引用处于不同请求命名空间。
+
+BUG-102补充：来源/组装的response_table还可携带context_range_ids。组装继承所选
+候选已有的共享上下文，并合并明确新增的精确来源；省略或重排行不能静默丢掉这些
+限定。不同原表的共享条件不相同时，不可把它们自动合并为整表共同条件。模型须
+显式重交response_table.context_range_ids，并在整表或相应行完整交接原条件及原行引用，才能
+采用该重组；未完整交接时保留各原表边界及归属待核，不阻断其他生成。新增来源
+可保留为只读理解依据，新增未安排规则沿既有rule_refs待核出口，不升级为全局提交
+约束。条件是否语义适用仍由模型核对，宿主只比较精确来源覆盖，不按文字猜范围。
+写作、复核及结构核对通过response_context_support_ids读取同一共享supports，
+上下文属于tender，不因参与企业应答判断而变成knowledge。写作分片将它作为共同
+来源保留，持久行身份不变；最终按原目标渲染一次。来源不可读走既有待核占位和
+诊断，资料不足仍保留要求与空应答，不增加生成门禁。
 
 同一逻辑要求跨页时按有序片段完整展示，保留原文边界；不能把同片段相邻的独立
 要求解释为同一条件。如果当前原生范围无法区分，先保留完整复合行；确需细分时
@@ -1781,7 +1870,7 @@ Word显示与原生格式段落一致，仅隐藏解析器Markdown标题前缀�
 
 | 边界 | 规则 |
 | --- | --- |
-| 来源/组装大纲、共同依据、写作、内容/结构复核 | 复用对应OutlineResponse、OutlineAssemblyResponse、AuthoringBasisResponse、WritingResponse、AuthoringReviewResponse输出类型；不得发送AuthoringOutline、WritingUnit等持久结构 |
+| 来源/组装大纲、共同依据、写作、内容/结构复核 | 复用对应OutlineResponse、OutlineAssemblyResponse、AuthoringBasisResponse、WritingResponse、AuthoringReviewResponse、AuthoringStructureResponse输出类型；不得发送AuthoringOutline、WritingUnit等持久结构 |
 | V2抽取生成 | 事项、关系、问题复用现有强类型，处置使用仅含range_id/status/reason的ItemDispositionOutput；宽容接收仍使用兼容旧items/item_ids的ItemDispositionResponse。生成包不使用list[Any]的容错接收壳，也不要求模型回抄宿主推导的覆盖名单 |
 | V2核验生成 | locate/associate/review分别选择对应输出；批次成员只增加work_unit_id并嵌入该操作的实际结果，shared_findings使用既有共享问题类型。contract_feedback沿原operation，不新造correct节点 |
 | 宽容接收 | AnalysisExtractionResponse和AnalysisBatchResponse保留逐项容错；同一包中一个坏事项或成员不能令有效兄弟丢失。生成Schema不能代替这条接收路径 |

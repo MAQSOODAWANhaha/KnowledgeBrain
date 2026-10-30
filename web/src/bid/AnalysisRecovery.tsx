@@ -75,7 +75,7 @@ export function AnalysisRecovery({ projectId, disabled, readOnly = false, onChan
   if (!notice && !dirty && !pending && base?.status !== "failed") return null;
   return <section className="tender-info-card" aria-label="分析任务恢复">
     <h3>继续失败的分析</h3>
-    <p className="tender-note">继续原任务、原资料和原分析版本，成功回执保留；未完成的模型调用仍可能产生费用。来源有变化时，此操作仍处理原任务固定的资料。</p>
+    <p className="tender-note">继续原任务和原资料。未完成的模型调用仍可能产生费用。</p>
     {notice && <p role="alert" className="tender-alert">{notice}</p>}
     <button disabled={saving} onClick={() => void read()}>刷新分析恢复状态</button>
     {base && working && <>

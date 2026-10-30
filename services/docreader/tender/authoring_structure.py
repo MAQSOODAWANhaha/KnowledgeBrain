@@ -13,13 +13,15 @@ from docreader.llm.request import (
     build_request,
 )
 from docreader.tender.authoring import _OutlineContext, project_source_sections
-from docreader.tender.schema import AUTHORING_GROUNDING_POLICY, AuthoringReviewResponse
+from docreader.tender.schema import AUTHORING_GROUNDING_POLICY, AuthoringStructureResponse
 
 
 _COMPACT_VIEW_PROMPT = (
     "\n结构视图grid.rows保留全部单元格明文，行列从0开始；空字符串为原生空白格，"
     "null表示该位置没有独立单元格。merged_cells各项为[row,column,row_span,col_span]，"
     "保留所有非1×1合并；原始列宽由宿主保存。submission_sources中的grid与supports中的grid含义相同。\n"
+    "条目用text_lines代替text时，字符串是原文行，整数是顶层text_pool从0开始的索引；"
+    "按序以换行连接恢复完整原文，空行保留。共享原文不合并来源身份、主体、条件、选择或引用。\n"
 )
 
 
@@ -87,7 +89,7 @@ def _rule_dispositions(context, issues):
     return dispositions, gaps
 
 
-def _structure_payload(artifacts, outline, units, *, outline_phase=False):
+def _structure_payload(artifacts, outline, units, *, outline_phase=False, template_bindings=None):
     from docreader.tender.authoring_pipeline import _constraint_context
     from docreader.tender.authoring_templates import (
         load_template_part,
@@ -153,6 +155,7 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False):
                     target["target_id"], f"{target_prefix}{len(targets) + 1}"
                 )
                 template_ids = []
+                selected_bindings = {}
                 for part in target.get("template_refs", []):
                     try:
                         key = template_part_key(part)
@@ -193,6 +196,7 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False):
                             part_ids[key] = support_id
                         if part_ids[key] not in template_ids:
                             template_ids.append(part_ids[key])
+                        selected_bindings[part_ids[key]] = key
                     except (OSError, ValueError, KeyError):
                         gaps.append(
                             {
@@ -202,11 +206,14 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False):
                                 "target_id": target["target_id"],
                             }
                         )
+                if template_bindings is not None:
+                    template_bindings[identity] = {"target": target, "parts": selected_bindings}
                 selected.append(
                     {
                         "target_id": identity,
                         "kind": target["kind"],
                         "purpose": target["purpose"],
+                        **({"subject": target["subject"]} if target.get("subject") else {}),
                         "manual_fill": target.get("manual_fill", False),
                         "related_target_ids": [
                             targets[ref]
@@ -221,6 +228,9 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False):
                     selected[-1]["source_support_ids"] = source_supports(target["source_excerpts"],
                         chapter["chapter_id"], target["target_id"])
                 if target.get("response_table"):
+                    if target["response_table"].get("context_source_excerpts"):
+                        selected[-1]["response_context_support_ids"] = source_supports(
+                            target["response_table"]["context_source_excerpts"], chapter["chapter_id"], target["target_id"])
                     selected[-1]["response_rows"] = [{"row_id": f"q{ordinal}",
                         "source_support_ids": source_supports(row["source_excerpts"],
                             chapter["chapter_id"], target["target_id"])}
@@ -272,24 +282,30 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False):
     }, gaps
 
 
-async def review_structure(artifacts, outline, units, budget, execute, *, outline_phase=False):
+async def review_structure(artifacts, outline, units, budget, execute, *, outline_phase=False,
+                           apply_source_decoration_exclusions=False):
     """Return findings/gaps; the durable executor owns the existing retry allowance.
 
     Inspect final adopted instances once, including manual or unfilled forms.
     Do not send enterprise prose or turn structure feedback into another rewrite.
+    Source decoration exclusions execute only when automatic organization opts in.
     """
     if not outline.get("chapters"):
         return [], []
+    template_bindings = {}
     if outline_phase:
         units = []
-        payload, gaps = _structure_payload(artifacts, outline, units, outline_phase=True)
+        payload, gaps = _structure_payload(artifacts, outline, units, outline_phase=True,
+                                            template_bindings=template_bindings)
     else:
-        payload, gaps = _structure_payload(artifacts, outline, units)
+        payload, gaps = _structure_payload(artifacts, outline, units, template_bindings=template_bindings)
+    if apply_source_decoration_exclusions:
+        payload["source_decoration_edits_allowed"] = True
     task_ids = {unit["task_id"] for unit in units}
 
     def validate(raw):
         try:
-            value = AuthoringReviewResponse.model_validate(raw).model_dump()
+            value = AuthoringStructureResponse.model_validate(raw).model_dump()
         except ValidationError as error:
             raise ModelContractError(
                 [
@@ -312,7 +328,47 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
             finding["reject_content"] = False
             if not outline_phase:
                 finding["can_revise"] = False
+        seen, exclusions = set(), []
+        for ordinal, action in enumerate(value["source_decoration_exclusions"]):
+            target_id = action["target_id"]
+            path = ["source_decoration_exclusions", ordinal]
+            if target_id not in template_bindings:
+                raise ModelContractError([{"path": [*path, "target_id"],
+                    "code": "structure_unknown_reference", "detail": "Select a supplied structure target."}])
+            for number, support_id in enumerate(action["support_ids"]):
+                if support_id not in template_bindings[target_id]["parts"]:
+                    raise ModelContractError([{"path": [*path, "support_ids", number],
+                        "code": "structure_unknown_reference",
+                        "detail": "Select only this target's template_support_ids, not source/context supports."}])
+            support_ids = []
+            for support_id in action["support_ids"]:
+                if (target_id, support_id) not in seen:
+                    seen.add((target_id, support_id))
+                    support_ids.append(support_id)
+            if support_ids:
+                exclusions.append({**action, "support_ids": support_ids})
+        value["source_decoration_exclusions"] = exclusions
         return value
+
+    def accepted(value):
+        from docreader.tender.authoring_templates import template_part_key
+
+        excluded = {}
+        for action in value["source_decoration_exclusions"]:
+            binding = template_bindings[action["target_id"]]
+            if not apply_source_decoration_exclusions:
+                gaps.append({"code": "structure_source_decoration_exclusion_not_applied",
+                    "detail": ("本次固定大纲核对仅保留独立源装饰排除建议（" + action["target_id"]
+                               + "：" + "、".join(action["support_ids"]) + "）：" + action["reason"]),
+                    "target_id": binding["target"]["target_id"]})
+                continue
+            excluded.setdefault(action["target_id"], set()).update(
+                binding["parts"][identity] for identity in action["support_ids"])
+        for identity, keys in excluded.items():
+            target = template_bindings[identity]["target"]
+            target["template_refs"] = [part for part in target.get("template_refs", [])
+                                       if template_part_key(part) not in keys]
+        return value["findings"], gaps
 
     prompt = budget.prompts.get("authoring_structure")
     if not isinstance(prompt, str):
@@ -325,7 +381,7 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
 
         hit, value = await _replay(execute, "authoring_structure", request, validate)
         if hit:
-            return value["findings"], gaps
+            return accepted(value)
         try:
             budget.require_request(request, "authoring_structure")
         except ModelBudgetError:
@@ -339,7 +395,7 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
             )
             hit, value = await _replay(execute, "authoring_structure", request, validate)
             if hit:
-                return value["findings"], gaps
+                return accepted(value)
             budget.admit_request(request, "authoring_structure")
         value = await execute("authoring_structure", request, validate)
     except (ModelBudgetError, ModelWorkUnitExhausted) as error:
@@ -350,4 +406,4 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
             }
         )
         return [], gaps
-    return value["findings"], gaps
+    return accepted(value)

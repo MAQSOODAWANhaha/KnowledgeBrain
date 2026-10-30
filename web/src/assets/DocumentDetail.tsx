@@ -68,7 +68,7 @@ export function DocumentDetail({
   if (err) {
     return (
       <div className="card">
-        <p className="note" style={{ color: "var(--rose)" }}>
+        <p className="note stop">
           {err}
         </p>
         <a className="btn" href={`#${backHref}`}>
@@ -100,11 +100,11 @@ export function DocumentDetail({
     <div className="stack doc-detail">
       <div className="card pad-0">
         {data.error_message ? (
-          <p className="note" style={{ margin: "12px 18px 8px", color: "var(--rose)" }}>
+          <p className="note stop inset">
             {data.error_message}
           </p>
         ) : null}
-        <div className="flex h-[52px] flex-wrap items-stretch gap-1 bg-[#f6f6f8] px-5" role="tablist">
+        <div className="flex h-10 flex-wrap items-stretch gap-1 border-b border-line bg-canvas px-4" role="tablist">
           {tabs
             .filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0)
             .map((item) => (
@@ -114,20 +114,20 @@ export function DocumentDetail({
                 role="tab"
                 aria-selected={tab === item.key}
                 className={cn(
-                  "relative flex items-center gap-2 bg-transparent px-3 text-[16px] font-medium transition-colors",
-                  tab === item.key ? "font-semibold text-ink" : "text-[#9a9aa6] hover:text-ink",
+                  "relative flex items-center gap-2 bg-transparent px-3 text-[13px] font-medium transition-colors duration-[140ms]",
+                  tab === item.key ? "font-semibold text-ink" : "text-quiet hover:text-ink",
                 )}
                 onClick={() => setTab(item.key)}
               >
                 {item.label}
                 {item.n != null ? (
-                  <span className="rounded-full bg-white px-1.5 py-0.5 text-[12px] font-medium text-quiet">
+                  <span className="rounded-[4px] bg-white px-1.5 py-0.5 text-[12px] font-medium text-quiet">
                     {item.n}
                   </span>
                 ) : null}
                 <span
                   className={cn(
-                    "absolute bottom-2 left-1/2 h-[3px] w-7 -translate-x-1/2 rounded-full bg-sky transition-opacity duration-150",
+                    "absolute inset-x-3 bottom-0 h-0.5 bg-sky transition-opacity duration-[140ms]",
                     tab === item.key ? "opacity-100" : "opacity-0",
                   )}
                 />
@@ -147,7 +147,7 @@ export function DocumentDetail({
               <GfmPreview markdown={data.markdown} />
             </div>
           ) : (
-            <p className="note" style={{ padding: 24 }}>
+            <p className="note pad">
               还没有解析正文
             </p>
           )}

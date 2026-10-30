@@ -1,12 +1,11 @@
 """Apply human tree edits while retaining server-owned evidence and target identity."""
 
 from copy import deepcopy
-from typing import Literal
 from uuid import UUID
 
 from pydantic import Field, StrictBool, StrictStr
 
-from docreader.tender.schema import AuthoringOutline, Contract, Identity, SourceUnitRef, Text
+from docreader.tender.schema import AuthoringOutline, ChapterPresentationRole, Contract, Identity, SourceUnitRef, Text
 
 
 class OutlineSourceAddition(Contract):
@@ -19,7 +18,7 @@ class OutlineEditChapter(Contract):
     title: Text = Field(max_length=1000)
     children: list['OutlineEditChapter'] = Field(default_factory=list)
     is_volume: StrictBool | None = None
-    presentation_role: Literal['body', 'cover'] | None = None
+    presentation_role: ChapterPresentationRole | None = None
     writing_goal: StrictStr = Field(default='', max_length=20000)
     target_ids: list[Identity] | None = Field(default=None, max_length=1000)
     source_additions: list[OutlineSourceAddition] = Field(default_factory=list, max_length=1000)

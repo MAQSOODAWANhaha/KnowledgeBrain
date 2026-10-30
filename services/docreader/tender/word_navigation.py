@@ -75,6 +75,8 @@ def read_docx_outline(data: bytes, known_chapters: list | None = None) -> dict:
     known, depths = {}, {}
     def register(chapters, depth=1):
         for chapter in chapters:
+            if chapter.get("presentation_role") == "submission_note":
+                continue
             name = bookmark_name(chapter["chapter_id"])
             known[name], depths[name] = chapter, depth
             register(chapter.get("children", []), depth + 1)

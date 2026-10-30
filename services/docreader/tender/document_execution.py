@@ -46,13 +46,12 @@ from docreader.tender.status import AUTHORING_MODEL_TASKS, AuthoringExecutionSta
 
 
 _TASKS = AUTHORING_MODEL_TASKS
-# Structure review is a separate task but the same prompt bytes as content review.
 _PROMPT_FILES = {
     "outline": "outline.md",
     "authoring_basis": "authoring_basis.md",
     "authoring_write": "authoring_write.md",
     "authoring_review": "authoring_review.md",
-    "authoring_structure": "authoring_review.md",
+    "authoring_structure": "authoring_structure.md",
     "outline_assemble": "outline_assemble.md",
 }
 _PROMPTS = tuple(_PROMPT_FILES)

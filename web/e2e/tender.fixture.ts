@@ -140,7 +140,7 @@ async function fixture(page: Page) {
     }
     if (url.pathname === `${path}/documents` && method === "POST") {
       state.uploads.push(request.postData() ?? "");
-      const document = { id: "company-proof", file_name: "合成企业证明.txt", media_type: "text/plain", byte_length: 30, kind: "enterprise" as const, role: "attachment" };
+      const document = { id: "company-proof", file_name: "合成企业证明.txt", media_type: "text/plain", byte_length: 30 };
       view.documents.push(document);
       return json(document, 201);
     }

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import math
@@ -24,6 +26,7 @@ from docreader.llm.request import (
     ModelCorrectionStalled,
     ModelInfrastructureError,
     ModelJSONError,
+    ModelRateLimitError,
     ModelSemanticError,
     UncertainModelResponse,
     request_digest,
@@ -335,7 +338,13 @@ class OpenAIModel:
         except APIStatusError as error:
             # A received HTTP rejection is distinct from a lost response.
             status = error.status_code
-            response_ref, usage = await self._received_rejection(error.response, digest)
+            retry_after_seconds = (
+                _retry_after_seconds(error.response.headers.get("retry-after"))
+                if status == 429 else None
+            )
+            response_ref, usage = await self._received_rejection(
+                error.response, digest, retry_after_seconds=retry_after_seconds
+            )
             await self._finish(
                 request_id,
                 ModelRequestStatus.FAILED,
@@ -344,6 +353,8 @@ class OpenAIModel:
                 started,
                 response_ref,
             )
+            if status == 429:
+                raise ModelRateLimitError(retry_after_seconds) from None
             _, failure = http_failure(status)
             if failure is ModelInfrastructureError:
                 raise ModelInfrastructureError(
@@ -556,7 +567,7 @@ class OpenAIModel:
         )
 
     async def _received_rejection(
-        self, response: httpx.Response, digest: str
+        self, response: httpx.Response, digest: str, *, retry_after_seconds=None
     ) -> tuple[dict | None, dict | None]:
         try:
             body = response.json(parse_constant=invalid_json_constant)
@@ -571,6 +582,8 @@ class OpenAIModel:
             "usage": usage,
             "usage_status": "reported" if usage is not None else "unknown",
         }
+        if retry_after_seconds is not None:
+            envelope["retry_after_seconds"] = retry_after_seconds
         return await self._save_response(envelope), usage
 
     async def _finish(
@@ -609,6 +622,22 @@ class OpenAIModel:
             activity=activity,
         )
         self.usage.record(status, usage)
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            seconds = max(0.0, date.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _first_data_activity(counts) -> dict | None:

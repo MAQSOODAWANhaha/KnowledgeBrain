@@ -89,6 +89,15 @@ def validate_outline_references(value, *, rule_ids, source_ids, template_part_id
                 for field, allowed in (("rule_ids", rule_ids), ("range_ids", source_ids),
                                        ("template_part_ids", template_part_ids)):
                     _check_reference_ids(target[field], allowed, [*current, "targets", ordinal, field])
+                for span_number, span in enumerate(target.get("template_spans", [])):
+                    for field in ("start_part_id", "end_part_id"):
+                        if span[field] not in template_part_ids:
+                            raise ModelContractError([{"path": [*current, "targets", ordinal,
+                                "template_spans", span_number, field], "code": "outline_unknown_template",
+                                "detail": "Select a template part supplied in this request."}])
+                _check_reference_ids((target.get("response_table") or {}).get("context_range_ids", []),
+                    constraint_sources, [*current, "targets", ordinal, "response_table", "context_range_ids"],
+                    "Select actual sources supplied in this request.")
                 for row_number, row in enumerate((target.get("response_table") or {}).get("rows", [])):
                     for field, allowed in (("rule_ids", rule_ids), ("range_ids", source_ids)):
                         _check_reference_ids(row.get(field, []), allowed,
@@ -291,7 +300,8 @@ class _OutlineContext:
         self.payload["issues"] = [*self.payload["issues"],
                                  *(i for i in self.availability_issues if i not in self.payload["issues"])]
 
-    def validate(self, response: dict) -> dict:
+    def validate(self, response: dict, *, template_part_ids=None) -> dict:
+        from docreader.tender.authoring_templates import expand_template_spans, ordered_template_part_ids
         try:
             parsed = OutlineResponse.model_validate(response).model_dump()
         except ValidationError as error:
@@ -320,6 +330,9 @@ class _OutlineContext:
                     target_path = [*current_path, "targets", number - 1]
                     refs = references(target["rule_ids"], self.rules, [*target_path, "rule_ids"])
                     excerpts = bind_source_excerpts(self, target["range_ids"], path=[*target_path, "range_ids"])
+                    table_context = bind_source_excerpts(self,
+                        (target.get("response_table") or {}).get("context_range_ids", []),
+                        path=[*target_path, "response_table", "context_range_ids"])
                     rows = []
                     for row_number, row in enumerate((target.get("response_table") or {}).get("rows", [])):
                         row_path = [*target_path, "response_table", "rows", row_number]
@@ -331,10 +344,20 @@ class _OutlineContext:
                         refs.extend(ref for ref in row_rules if ref not in refs)
                         assigned.update(row["rule_ids"])
                     sources = [part["source_ref"] for part in excerpts]
+                    sources.extend(part["source_ref"] for part in table_context)
                     sources.extend(part["source_ref"] for row in rows for part in row["source_excerpts"])
                     sources = list({(s["source_index_ref"]["sha256"], s["unit_id"]): s for s in sources}.values())
-                    templates = references(target["template_part_ids"], self.template_parts,
-                                           [*target_path, "template_part_ids"])
+                    pool = (self.template_parts if template_part_ids is None else
+                            {identity: self.template_parts[identity] for identity in self.template_parts
+                             if identity in template_part_ids})
+                    _check_reference_ids(target["template_part_ids"], pool, [*target_path, "template_part_ids"])
+                    selected_parts = list(dict.fromkeys([*target["template_part_ids"],
+                        *expand_template_spans(pool, target["template_spans"], self.repository,
+                            path=[*target_path, "template_spans"], all_parts=self.template_parts)]))
+                    if target["template_spans"]:
+                        selected_parts = ordered_template_part_ids({identity: pool[identity]
+                            for identity in selected_parts}, self.repository)
+                    templates = references(selected_parts, pool, [*target_path, "template_part_ids"])
                     assigned.update(target["rule_ids"])
                     if not (refs or sources or templates or rows):
                         problem("outline_target_unbound", "该响应位置尚无规则、来源或原格式依据，需核对其用途。", [], target_id)
@@ -344,13 +367,17 @@ class _OutlineContext:
                     if any((s["source_index_ref"]["sha256"], s["unit_id"]) not in self.read_units for s in mapped):
                         problem("outline_source_not_read", "已定位目录来源，但模型尚未阅读正文，生成前须装载核对。", refs, target_id)
                     targets.append({"target_id": target_id, "kind": target["kind"], "purpose": target["purpose"],
+                                    **({"subject": target["subject"]} if target["subject"] else {}),
                                     "rule_refs": refs, "source_refs": sources, "template_refs": templates,
                                     **({"source_excerpts": excerpts} if excerpts else {}),
-                                    **({"response_table": {"rows": rows}} if rows else {}),
+                                    **({"response_table": {"rows": rows,
+                                        **({"context_source_excerpts": table_context} if table_context else {})}} if rows else {}),
                                     "manual_fill": target["manual_fill"],
                                     "support_origins": target["support_origins"]})
                 result.append({"chapter_id": chapter_id, "title": chapter["title"], "targets": targets,
                                "is_volume": chapter["is_volume"],
+                               **({"presentation_role": chapter["presentation_role"]}
+                                  if chapter["presentation_role"] != "body" else {}),
                                "children": chapters(chapter["children"], position, (*current_path, "children"))})
             return result
 

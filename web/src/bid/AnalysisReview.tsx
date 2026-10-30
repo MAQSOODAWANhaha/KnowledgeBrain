@@ -135,7 +135,6 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
         }}>载入最新分析重新核对</button>
       </div>}
       {currentState?.hard_blocking && <p className="tender-alert">存在来源、覆盖或执行问题，人工判定不能解除。请按问题提示补充来源、使用完整纠正流程或联系管理员处理后重新分析。</p>}
-      <h4>待确认问题（{base.human_issue_ids.length}）</h4>
       {base.human_issue_ids.map((id, index) => {
         const issue = base.issues.find(value => value.issue_id === id);
         const value = working.decisions[id] ?? { verdict: "", reason: "" };
@@ -149,14 +148,15 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
           <label>判定理由 <textarea aria-label={`问题 ${index + 1} 判定理由`} value={value.reason} maxLength={4000} onChange={event => change({ reason: event.target.value })} /></label>
         </fieldset>;
       })}
-      {!base.human_issue_ids.length && <p className="tender-note">没有需要逐条判定的语义问题。仍需核对事项与来源后提交确认。</p>}
+      {!base.human_issue_ids.length && !base.correction?.items.length && <p className="tender-note">当前没有待核对的问题。</p>}
+      {!!base.human_issue_ids.length && <h4>待确认问题（{base.human_issue_ids.length}）</h4>}
       {base.issues.filter(issue => !base.human_issue_ids.includes(issue.issue_id ?? "")).map((issue, index) => <p key={index} className="tender-note">{issue.detail}</p>)}
       <button className="tender-primary" disabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")}>{pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"}</button>
       {!!corrections.length && <p className="tender-note">已修改事项字段，请先提交事项纠正，等待重新审核后的确认清单。</p>}
       {corrections.some(value => !validFields(value)) && <p className="tender-alert">请补齐已添加的业务字段和数值原文片段；不需要的字段可清空或删除，最高分须大于等于零。</p>}
-      <h4>事项业务字段</h4>
-      <p className="tender-note">对照冻结原文纠正事项类型、数值、条件、范围等业务字段。来源位置和证据保持冻结；数值原文片段必须能在该事项的冻结来源中找到。源文件有误时，请上传修订文件后重新分析。</p>
-      {base.correction?.items.map((entry, index) => {
+      {!!base.correction?.items.length && <><h4>事项业务字段</h4>
+      <p className="tender-note">对照冻结原文纠正事项。来源位置和证据保持冻结；数值原文片段必须能在该事项的冻结来源中找到。</p>
+      {base.correction.items.map((entry, index) => {
         const key = itemKey(entry.pack_id, entry.item.item_id), item = entry.item;
         return <details key={key}><summary>事项 {index + 1}：{item.text}</summary>
           <p><strong>原事项：</strong>{item.text}</p>
@@ -174,9 +174,8 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
           }} />
         </details>;
       })}
-      {!base.correction && <p className="tender-note">当前尚无可纠正的完整事项基准，请等待分析完成或处理来源问题。</p>}
-      {base.correction && <><label>纠正理由 <textarea aria-label="事项纠正理由" disabled={locked} maxLength={4000} value={working.reason} onChange={event => setWorking(current => current && { ...current, reason: event.target.value })} /></label>
-        <button disabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")}>{pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"}</button></>}
+      <label>纠正理由 <textarea aria-label="事项纠正理由" disabled={locked} maxLength={4000} value={working.reason} onChange={event => setWorking(current => current && { ...current, reason: event.target.value })} /></label>
+      <button disabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")}>{pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"}</button></>}
     </>}
   </section>;
 }

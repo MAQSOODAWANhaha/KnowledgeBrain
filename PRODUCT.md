@@ -48,7 +48,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 ## Brand Commitments
 
 - 名称：KnowledgeBrain / 投标。
-- 视觉钉死：TokHub 高质感白（毛玻璃顶栏、浅侧栏 `#FAFAFB`、品牌蓝 `#2563EB`、卡片 14px + 轻阴影）。中文 UI 字体 PingFang SC / Noto Sans SC，禁止运行时 Google Fonts。规范见 `DESIGN.md`。
+- 视觉钉死：冷灰仪器盘（画布 `#F4F5F7`、发丝线、钢蓝 `#1E3A5F` 只用于选中、主按钮和焦点）。中文 UI 字体 PingFang SC / Noto Sans SC，禁止运行时 Google Fonts。规范见 `DESIGN.md`。
 - 组件钉死：Tailwind CSS + shadcn/ui 做壳，图标 Tabler。正文编辑由 ONLYOFFICE 承担；外壳字体/颜色规范不强加到 DOCX 招标版式或编辑器内部界面。
 - 禁止把招标文件或人补图写回产品库。
 
@@ -58,7 +58,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 - [业务 PRD](docs/bidding/README.md)、[大纲运行时](docs/design/evidence-runtime-contract.md)、[ONLYOFFICE 技术契约](docs/bidding/onlyoffice.md)、[领域边界](docs/bidding/authoring.md)、[编辑与出件顺序](plans/bidding/onlyoffice-integration.md)、[未完成缺口](docs/design/check-execution-plan.md)
 - `docs/knowledge-base/domain.md`（知识库领域与证据检索端口）
-- `1.png`：Plannotator 三栏编辑器仅作结构参照（左树 / 中文稿 / 右检查器）；外壳外观以 `DESIGN.md` 为准，不再仿 iCloud，也不走 Cloudflare 锌灰密表
+- `1.png`：Plannotator 三栏编辑器仅作结构参照（左树 / 中文稿 / 右检查器）。外壳以 `DESIGN.md` 的冷灰仪器盘为准：不仿 iCloud，不用暖纸，也不把侧栏做成暗色
 - 无客户照片、无真实标书样张可当品牌图
 
 ## Product Principles

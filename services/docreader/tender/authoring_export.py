@@ -80,9 +80,15 @@ def _walk(chapters, prefix=()):
         yield from _walk(chapter.get("children", []), path)
 
 
+def _body_entries(entries):
+    notes = [path for chapter, path in entries if chapter.get("presentation_role") == "submission_note"]
+    return [(chapter, path) for chapter, path in entries
+            if not any(path[:len(parent)] == parent for parent in notes)]
+
+
 def _display_paths(entries):
     paths, identities, counts = {}, {}, defaultdict(int)
-    for chapter, path in entries:
+    for chapter, path in _body_entries(entries):
         parent = paths.get(path[:-1], ())
         if chapter.get("presentation_role", "body") == "cover":
             paths[path] = parent
@@ -140,7 +146,7 @@ def _toc(document):
     update.set(qn("w:val"), "true")
 
 
-def _submission_notes(outline, requirements, gaps):
+def _submission_notes(outline, requirements, gaps, artifacts=None):
     entries = list(_walk(outline.get("chapters", [])))
     rules = {_requirement_key(row["rule_ref"]): row for row in (requirements or {}).get("rules", [])}
     assigned = {_requirement_key(ref) for chapter, _ in entries for target in chapter.get("targets", [])
@@ -171,6 +177,25 @@ def _submission_notes(outline, requirements, gaps):
                 lines.extend(["> " + quote.replace("\n", "\n> "), ""])
 
     append_rules("已知提交与编制约束", constraints)
+    body_paths = {path for _, path in _body_entries(entries)}
+    for chapter, path in entries:
+        if path not in body_paths:
+            lines.extend(["## 提交待办：" + chapter["title"], ""])
+            for target in chapter.get("targets", []):
+                lines.extend(["- " + target["purpose"], ""])
+                if artifacts is not None:
+                    from docreader.tender.authoring_excerpts import load_source_excerpt, whole_source_excerpts
+                    excerpts = list(target.get("source_excerpts", []))
+                    precise = {_source_key(ref["source_ref"]) for ref in excerpts}
+                    try:
+                        for reference in target.get("source_refs", []):
+                            if _source_key(reference) not in precise:
+                                excerpts.extend(whole_source_excerpts(artifacts, reference))
+                        for excerpt in excerpts:
+                            text = load_source_excerpt(artifacts, excerpt)["text"]
+                            lines.extend(["> " + text.replace("\n", "\n> "), ""])
+                    except (OSError, ValueError, KeyError):
+                        lines.extend(["原文暂不可读，来源引用保留在本次大纲中，待人工核对。", ""])
     paths = _display_paths(entries)
     for chapter, _ in entries:
         references = [ref for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])]
@@ -253,8 +278,14 @@ def _block(document, block, *, width_ratios=None):
 class _Assembler:
     def __init__(self, artifacts, writing_units, review_issues, entries=()):
         self.artifacts = artifacts
+        body_targets = {target['target_id'] for chapter, _ in _body_entries(entries)
+                        for target in chapter.get('targets', [])}
+        self.note_targets = {target['target_id'] for chapter, _ in entries
+                             for target in chapter.get('targets', [])} - body_targets
         self.units = defaultdict(list)
         for unit in writing_units:
+            if unit.get('target_ids') and set(unit['target_ids']).issubset(self.note_targets):
+                continue
             self.units[unit["chapter_id"]].append(unit)
         self.gaps = list(review_issues or [])
         self.attachments = {}
@@ -263,7 +294,7 @@ class _Assembler:
         self.display_paths = _display_paths(entries)
         self.locations = {target["target_id"]: " ".join(part for part in (
             ".".join(map(str, self.display_paths.get(chapter["chapter_id"], ()))), chapter["title"]) if part)
-            for chapter, _ in entries for target in chapter.get("targets", [])}
+            for chapter, _ in _body_entries(entries) for target in chapter.get("targets", [])}
 
     def gap(self, code, detail, chapter_id, target_id=None):
         value = {"code": code, "detail": detail, "chapter_id": chapter_id}
@@ -356,6 +387,16 @@ class _Assembler:
         rows = target.get("response_table", {}).get("rows", [])
         if not rows:
             return False
+        context_texts = []
+        for excerpt in target["response_table"].get("context_source_excerpts", []):
+            try:
+                context_texts.append(load_source_excerpt(self.artifacts, excerpt, repository=self.repository)["text"])
+            except (OSError, ValueError, KeyError):
+                context_texts.append("（原表共同条件待核对，来源引用已保留）")
+                self.gap("export_response_source_unavailable", "该表部分共同条件不可读，保留来源和待核位置。",
+                         chapter_id, target["target_id"])
+        if context_texts:
+            document.add_paragraph(re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", "\n".join(context_texts)))
         choices = defaultdict(set)
         row_ids = {row["row_id"] for row in rows}
         for unit in units:
@@ -433,6 +474,8 @@ class _Assembler:
         blocks = []
         for block in unit.get("blocks", []):
             target_ids = set(block.get("target_ids") or unit.get("target_ids", []))
+            if target_ids and target_ids.issubset(self.note_targets):
+                continue
             if target_ids and target_ids.issubset(blocked_forms):
                 manual = target_ids.issubset(manual_forms)
                 self.gap("export_manual_content_omitted" if manual else "export_form_content_unplaced",
@@ -523,8 +566,9 @@ class _Assembler:
             if target_id in response_tables:
                 self.response_table(document, target, [unit for _, unit in linked], chapter_id)
             if target["kind"] == "form":
-                if any(part_uses[key] > 1 for key in forms[target_id]):
-                    document.add_paragraph(target["purpose"], style="Caption")
+                if target.get("subject") or any(part_uses[key] > 1 for key in forms[target_id]):
+                    label = (target["subject"] + "：" if target.get("subject") else "") + target["purpose"]
+                    document.add_paragraph(label, style="Caption")
                 for part in forms[target_id].values():
                     key = _source_key(part["source_ref"])
                     fills = [fill for _, unit in linked for fill in unit.get("cell_fills", [])
@@ -533,7 +577,7 @@ class _Assembler:
                         fills = []
                         self.gap("export_manual_content_omitted", "人工填写表格未采用自动填值。", chapter_id, target_id)
                     self.template(document, part, fills, chapter_id, target_id)
-                if not forms[target_id]:
+                if not forms[target_id] and target_id not in response_tables:
                     document.add_paragraph("（原格式待补）")
                     self.gap("export_template_missing", "该填写位置尚无可用原格式。", chapter_id, target_id)
             for ordinal, unit in linked:
@@ -569,6 +613,7 @@ class _Assembler:
             add_bookmark(document.element.body[chapter_start], chapter_id)
 
     def render(self, entries, title):
+        entries = _body_entries(entries)
         document = Document()
         section = document.sections[0]
         section.page_width, section.page_height = Mm(210), Mm(297)
@@ -658,7 +703,7 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
         entries.append(({"chapter_id": chapter_id, "title": "补充内容", "targets": []}, (len(entries) + 1,)))
     docx_ref = assembler.render(entries, "投标文件")
     volumes = []
-    for chapter, path in entries:
+    for chapter, path in _body_entries(entries):
         if chapter.get("is_volume"):
             subtree = [(value, value_path) for value, value_path in entries if value_path[:len(path)] == path]
             reference = assembler.render(subtree, chapter["title"])
@@ -673,7 +718,7 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
     if requirements is not None:
         manifest["requirements"] = {"artifact_ref": artifacts.put_json(requirements), "package_path": "招标要求底稿.json"}
         requirement_files.append(manifest["requirements"])
-    notes = artifacts.put_bytes(_submission_notes(outline, requirements, gaps).encode(), "text/markdown")
+    notes = artifacts.put_bytes(_submission_notes(outline, requirements, gaps, artifacts).encode(), "text/markdown")
     manifest["submission_notes"] = {"artifact_ref": notes, "package_path": "提交要求与待办.md"}
     output = BytesIO()
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:

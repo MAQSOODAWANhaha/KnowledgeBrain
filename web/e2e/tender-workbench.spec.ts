@@ -44,7 +44,7 @@ test("dirty edits block candidate switching and retain the editor", async ({ pag
   await f.edit();
   await f.dirty(); f.candidate(); await page.clock.runFor(5100);
   await expect(page.getByRole("button", { name: "查看新稿", exact: true })).toBeDisabled();
-  await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
   expect(f.state.calls.filter(call => call === "select")).toHaveLength(0);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view", "edit"]);
 });
@@ -53,7 +53,7 @@ test("a correlated save updates metadata and rebinds navigation without remounti
   await page.clock.install(); const f = await fixture(page); await f.ready();
   await f.edit();
   await f.dirty(); await page.getByTestId("docx-save").click();
-  await expect(page.getByTestId("docx-status")).toContainText("正在保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("保存中");
   await page.getByTestId("docx-save").click();
   await expect.poll(() => f.state.saves.length).toBe(2);
   expect(f.state.saves[0]).toEqual(f.state.saves[1]);

@@ -7,16 +7,19 @@ from docreader.llm.budget import RequestBudget
 from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender import authoring_pipeline as pipeline
 
+from test_authoring_templates import create_source
+
 
 def fixture_context(monkeypatch, artifacts):
-    source = {'source_index_ref': artifacts.put_json({'fixture': True}), 'unit_id': 'template'}
+    _, index_ref, _ = create_source(artifacts.root, [{'text': '投标函规定格式'}])
+    source = {'source_index_ref': index_ref, 'unit_id': 'unit:0'}
     snapshot = {'schema_version': 2, 'run_id': 'submission', 'source_version': 1,
                 'domain_revision': 1, 'issues': []}
     context = SimpleNamespace(input=snapshot, payload={'rules': [], 'issues': [], 'relations': []},
                               sources={'source-a': [source]}, rules={},
                               template_parts={'part-a': {'source_ref': source, 'selectors': []}})
 
-    def bind(value):
+    def bind(value, **_kwargs):
         def chapters(entries):
             return [{'chapter_id': 'local', 'title': c['title'], 'is_volume': c.get('is_volume', False),
                      'children': chapters(c['children']), 'targets': [

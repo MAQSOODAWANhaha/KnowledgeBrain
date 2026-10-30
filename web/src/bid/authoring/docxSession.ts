@@ -328,9 +328,9 @@ export function docxStatus(state: DocxState): string {
   if (state.phase === "failed") return "稿件打开失败";
   if (state.phase === "closed") return "编辑器已关闭";
   if (state.uncertain) return "保存结果待确认";
-  if (state.saving || state.current?.editor.pending_save_id) return "正在保存，等待入稿确认…";
+  if (state.saving || state.current?.editor.pending_save_id) return "保存中";
   if (state.syncing) return "正在同步修改…";
-  if (state.dirty) return "有修改尚未保存";
+  if (state.dirty) return "有未保存修改";
   if (state.error) return "保存状态待确认";
   if (state.confirmed && !state.error) return "已保存";
   return "当前保存版本已载入";

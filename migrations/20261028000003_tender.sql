@@ -188,8 +188,6 @@ CREATE INDEX tender_authoring_requests_execution_idx
 CREATE TABLE tender_document_sources (
     document_id uuid PRIMARY KEY,
     project_id uuid NOT NULL REFERENCES tender_projects(id),
-    kind text NOT NULL CHECK (kind IN ('tender', 'enterprise')),
-    role text NOT NULL CHECK (role IN ('main', 'attachment', 'clarification', 'amendment')),
     original_ref jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY(document_id, project_id) REFERENCES tender_documents(id, project_id)

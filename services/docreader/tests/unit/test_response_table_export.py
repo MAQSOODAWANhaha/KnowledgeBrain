@@ -4,6 +4,7 @@ from copy import deepcopy
 from io import BytesIO
 
 from docx import Document
+import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
@@ -60,6 +61,20 @@ def test_complete_cross_page_rows_are_exported_without_knowledge_or_generic_plac
     assert [cell.text for cell in doc.tables[0].rows[2].cells] == ["另须提供独立功能证明。", ""]
     assert not any("本部分内容待补" in p.text for p in doc.paragraphs)
     assert not any(gap["code"] == "export_content_pending" for gap in result["gaps"])
+
+
+@pytest.mark.parametrize('manual_fill', [False, True])
+def test_form_response_rows_are_a_real_table_without_native_template_missing_warning(tmp_path, manual_fill):
+    artifacts = ArtifactStore(tmp_path)
+    selected = excerpts(artifacts, ['完整技术要求及其适用条件。'])
+    rows = [{'row_id': 'requirement', 'source_excerpts': selected, 'rule_refs': []}]
+    result = export_authoring_document(artifacts,
+        outline(rows, kind='form', manual_fill=manual_fill), [unit()])
+    doc = opened(artifacts, result)
+    assert len(doc.tables) == 1
+    assert [cell.text for cell in doc.tables[0].rows[1].cells] == ['完整技术要求及其适用条件。', '']
+    assert '（原格式待补）' not in [p.text for p in doc.paragraphs]
+    assert not any(gap['code'] == 'export_template_missing' for gap in result['gaps'])
 
 
 def test_response_requirements_hide_parser_headings_without_changing_cross_page_sources(tmp_path):

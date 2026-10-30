@@ -96,9 +96,9 @@ test("an old workbench poll cannot replace the new authoring queue state", async
   f.view.authoring = { execution_id: "new-authoring", status: "published" };
   await page.getByText("直接生成整稿", { exact: true }).click();
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
-  await expect(page.getByText("编制：排队中", { exact: true })).toBeVisible();
+  await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await held.release();
-  await expect(page.getByText("编制：排队中", { exact: true })).toBeVisible();
+  await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "生成新稿", exact: true })).toBeDisabled();
   expect(f.state.starts).toHaveLength(1);
 });
@@ -124,7 +124,7 @@ test("an old workbench read error cannot replace the successful post-mutation st
   f.view.authoring = { execution_id: "new-authoring", status: "published" };
   await page.getByText("直接生成整稿", { exact: true }).click();
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
-  await expect(page.getByText("编制：排队中", { exact: true })).toBeVisible();
+  await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await held.release();
   await expect(page.getByRole("alert").filter({ hasText: "过期的工作台错误" })).toHaveCount(0);
 });
@@ -185,7 +185,6 @@ test("ending a project still permits the exact unknown authoring receipt to be c
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   const confirm = page.getByRole("button", { name: "确认同一次编制请求", exact: true });
   await expect(confirm).toBeEnabled(); f.view.project.status = "ended"; await page.clock.runFor(5100);
-  await expect(page.getByRole("button", { name: "分析招标文件", exact: true })).toBeDisabled();
   await expect(confirm).toBeEnabled(); await confirm.click(); await expect.poll(() => f.state.starts.length).toBe(2);
   expect(f.state.starts[1]).toEqual(f.state.starts[0]);
 });
@@ -289,7 +288,7 @@ for (const saved of [true, false]) {
     await expect(page.getByLabel("章节名称", { exact: true })).toBeDisabled();
     const discard = page.getByRole("button", { name: "放弃当前调整", exact: true });
     await expect(discard).toBeEnabled(); page.once("dialog", dialog => void dialog.accept()); await discard.click();
-    await expect(page.getByTestId("outline-save-status")).not.toHaveText("未保存");
+    await expect(page.getByTestId("outline-save-status")).not.toHaveText("有未保存修改");
     await page.getByRole("navigation", { name: "产品", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
     await expect(page).toHaveURL(/#\/library$/);
     expect(f.state.outlineSaves).toEqual([]);

@@ -6,7 +6,7 @@ test("published authoring remains cancellable and cannot start another document"
   const f = await fixture(page);
   f.view.authoring = { execution_id: "queued-document", status: "published" };
   await f.ready();
-  await expect(page.getByText("编制：排队中", { exact: true })).toBeVisible();
+  await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await page.getByText("执行详情", { exact: true }).click();
   await page.getByRole("button", { name: "取消本次编制" }).click();
   expect(f.state.executions.map(x => x.action)).toEqual(["cancel"]);
@@ -23,7 +23,7 @@ test("published outline stays queued with cancel available and duplicate generat
   await f.ready();
   await page.getByRole("tab", { name: "大纲编排" }).click();
   await expect(page.getByRole("button", { name: "生成大纲", exact: true })).toBeDisabled();
-  await expect(page.locator(".outline-execution")).toContainText("大纲任务：排队中");
+  await expect(page.getByRole("region", { name: "大纲任务进度", exact: true })).toContainText("大纲任务：排队中");
   await page.getByRole("button", { name: "取消大纲生成" }).click();
   expect(f.state.executions.map(x => x.action)).toEqual(["cancel"]);
   expect(f.state.starts).toEqual([]);
@@ -74,6 +74,7 @@ test("published analysis blocks new requests but permits confirmation of its fro
   const f = await fixture(page);
   f.view.analysis!.status = "published";
   await f.ready();
+  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "招标解读" }).click();
   await expect(page.getByRole("button", { name: "分析招标文件", exact: true })).toBeDisabled();
   const attempt = { idempotencyKey: "queue-confirm-analysis" };
   await page.evaluate(({ project, attempt }) => sessionStorage.setItem(`kb.tender-action:${project}`, JSON.stringify({ kind: "analysis", body: {}, attempt })), { project, attempt });

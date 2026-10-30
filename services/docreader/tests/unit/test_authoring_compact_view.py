@@ -4,10 +4,11 @@ from copy import deepcopy
 import json
 from types import SimpleNamespace
 
-from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.tender.authoring_view import compact_assembly_payload
 from docreader.tender import authoring_pipeline as pipeline
+
+from test_authoring_templates import create_source
 
 
 def native_grid():
@@ -80,19 +81,19 @@ def test_duplicate_native_coordinates_are_preserved_without_overwriting_cell_tex
 
 
 async def test_over_budget_assembly_reaches_model_and_binds_original_template(monkeypatch, tmp_path):
-    artifacts = ArtifactStore(tmp_path)
-    ref = {'source_index_ref': artifacts.put_json({'fixture': True}), 'unit_id': 'original-table'}
-    part = {'source_ref': ref, 'selectors': []}
     snapshot = {'schema_version': 2, 'run_id': 'compact-assembly', 'source_version': 1, 'domain_revision': 1}
     grid = {'row_count': 160, 'column_count': 8, 'cells': [
         {'row': row, 'column': column, 'row_span': 1, 'col_span': 1, 'text': ''}
         for row in range(160) for column in range(8)]}
     grid['cells'][0]['text'] = '本标段完整表格，不得删除空白行'
+    artifacts, index_ref, _ = create_source(tmp_path, [{'grid': grid}])
+    ref = {'source_index_ref': index_ref, 'unit_id': 'unit:0'}
+    part = {'source_ref': ref, 'selectors': []}
     fragment = {'chapters': [{'chapter_id': 'local', 'title': '人员', 'children': [], 'targets': [
         {'target_id': 'local-target', 'kind': 'form', 'purpose': '按原格式填写人员',
          'rule_refs': [], 'source_refs': [ref], 'template_refs': [part]}]}], 'issues': []}
     context = SimpleNamespace(input={**snapshot, 'issues': []}, sources={}, rules={},
-                              payload={'rules': []}, validate=lambda value: deepcopy(fragment))
+                              payload={'rules': []}, validate=lambda value, **_kw: deepcopy(fragment))
     monkeypatch.setattr(pipeline, '_source_records', lambda *_: [])
     monkeypatch.setattr(pipeline, 'prepare_template_parts', lambda *_: ([], []))
     monkeypatch.setattr(pipeline, 'load_template_part', lambda *_a, **_kw: {

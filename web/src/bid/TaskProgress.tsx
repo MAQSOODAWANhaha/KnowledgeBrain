@@ -15,16 +15,22 @@ const phaseName = (phase: string) => phases[phase] ?? "处理任务";
 export function TaskProgress({ label, status, progress }: { label: string; status?: string; progress?: TaskProgressView }) {
   if (!status) return null;
   const active = inProgress(status);
+  const attention = active || status === "failed" || status === "blocked" || !!progress?.request_states.uncertain;
+  if (!attention) return null;
+  const identity = progress?.identity;
+  const version = identity?.source_version !== undefined && identity.domain_revision !== undefined
+    ? `来源版本 ${identity.source_version} · 修订 ${identity.domain_revision}` : null;
   return <section className="tender-progress" aria-label={`${label}进度`}>
     <p role="status"><strong>{label}：{executionStatus(status)}</strong>
       {active && progress?.current_phase && <span> · 当前阶段：{phaseName(progress.current_phase)}</span>}
       {progress?.last_completed_phase && <span> · 最近进展：{phaseName(progress.last_completed_phase)}</span>}
+      {version && <span> · {version}</span>}
     </p>
     {progress && <>
       <p>已接受 {progress.accepted_units} 个工作单元{active ? "，剩余总量尚未确定。" : "。"}</p>
       {!!progress.request_states.uncertain && <p className="tender-context-warning">{progress.request_states.uncertain} 次请求回执待确认，请沿当前任务恢复入口处理。</p>}
       <details><summary>阶段与请求回执</summary>
-        <p>{progress.identity.source_version !== undefined && progress.identity.domain_revision !== undefined ? `来源版本 ${progress.identity.source_version} · 领域修订 ${progress.identity.domain_revision}` : "依据身份尚未就绪，请等待任务状态更新。"}</p>
+        {!version && <p>依据身份尚未就绪，请等待任务状态更新。</p>}
         {progress.accepted_by_phase.map(item => <p key={item.phase}>{phaseName(item.phase)}：已接受 {item.count} 个工作单元</p>)}
         {progress.active_tasks.map(item => <p key={item.phase}>{phaseName(item.phase)}：准备发送 {item.prepared} 次，等待返回 {item.sent} 次</p>)}
         <p>已收到返回 {progress.request_states.received} 次；失败 {progress.request_states.failed} 次；未通过业务验收 {progress.rejected_responses} 次。</p>

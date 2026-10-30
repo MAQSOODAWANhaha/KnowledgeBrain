@@ -50,7 +50,7 @@ test("history preview preserves local and Word edits, then restores through a ne
   expect(f.outlineHistory.get("outline-r1")!.outline.chapters[0].title).toBe("历史实施方案");
   expect(f.outlineHistory.get("outline-r3")!.outline.chapters[0].title).toBe("当前实施方案");
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
-  await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
   await expect(page.getByTestId("docx-version")).toHaveText("保存版本 1");
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view", "edit"]);
 });
@@ -62,7 +62,7 @@ test("an empty historical outline can be restored and saved as an empty new revi
   await page.getByRole("button", { name: "读取历史修订", exact: true }).click();
   await page.getByRole("button", { name: "预览修订 2", exact: true }).click();
   await page.getByRole("button", { name: "载入此历史大纲另存", exact: true }).click();
-  await expect(page.getByTestId("outline-save-status")).toHaveText("未保存");
+  await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
   await expect(page.getByRole("button", { name: "保存大纲草稿", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
   await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 4");

@@ -18,7 +18,7 @@ for (const width of [1440, 390]) {
     await page.goto(`/#/bids/${project}/authoring`);
     const title = page.getByLabel("章节名称", { exact: true });
     await title.fill("尚未保存的实施编排");
-    await expect(page.getByTestId("outline-save-status")).toHaveText("未保存");
+    await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
     await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
     await expect(page.getByRole("heading", { name: "投标稿尚未形成", exact: true })).toBeVisible();
     await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
@@ -37,7 +37,7 @@ for (const width of [1440, 390]) {
     expect(f.state.calls).toEqual(["open"]);
     await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
     await expect(title).toHaveValue("尚未保存的实施编排");
-    await expect(page.getByTestId("outline-save-status")).toHaveText("未保存");
+    await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
     expect(f.state.outlineSaves).toEqual([]); expect(f.state.starts).toEqual([]);
     if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
@@ -51,7 +51,7 @@ test("a background generated draft leaves the current dirty Word open until an e
   f.candidate(); await page.clock.runFor(5100);
   await expect(page.getByRole("button", { name: "查看新稿", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "正文已生成，查看Word", exact: true })).toHaveCount(0);
-  await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
   await expect(page.getByTestId("docx-version")).toHaveText("保存版本 1");
   await expect(page.getByRole("tab", { name: "正文编辑", exact: true })).toHaveAttribute("aria-selected", "true");
   expect(f.state.opens).toEqual(opens);

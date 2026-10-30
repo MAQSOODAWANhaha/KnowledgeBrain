@@ -45,7 +45,7 @@ test("outline editing and saving preserve the open dirty Word instance", async (
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
   await expect(page.getByTestId("outline-save-status")).toContainText("已保存修订 2");
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
-  await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+  await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view", "edit"]);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.destroyed)).toBe(1);
 });
@@ -54,7 +54,7 @@ test("the default read-only reload releases completed save status while keeping 
   await page.clock.install(); const f = await fixture(page);
   f.state.current!.editor.pending_save_id = "pending-before-reload";
   await page.goto(`/#/bids/${project}/authoring`);
-  await expect(page.getByTestId("docx-status")).toHaveText("正在保存，等待入稿确认…");
+  await expect(page.getByTestId("docx-status")).toHaveText("保存中");
   const initialOpens = f.state.opens.length;
   f.publish(); await page.clock.runFor(1100);
   await expect(page.getByTestId("docx-status")).toHaveText("当前保存版本已载入");
@@ -122,7 +122,7 @@ test("confirming an earlier unknown save preserves edits made afterwards", async
   await expect(page.getByRole("button", { name: "确认同一次大纲保存", exact: true })).toBeEnabled();
   await page.getByLabel("章节名称", { exact: true }).fill("发送后继续调整的版本");
   await page.getByRole("button", { name: "确认同一次大纲保存", exact: true }).click();
-  await expect(page.getByTestId("outline-save-status")).toHaveText("未保存");
+  await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
   await expect(page.getByLabel("章节名称", { exact: true })).toHaveValue("发送后继续调整的版本");
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
   expect(f.state.outlineSaves[0]).toEqual(f.state.outlineSaves[1]);
@@ -155,7 +155,7 @@ test("repeated unknown retries preserve later edits across reload without changi
   expect(retried[0]).toEqual(f.state.outlineSaves[0]);
   failRetry = false;
   await page.getByRole("button", { name: "确认同一次大纲保存", exact: true }).click();
-  await expect(page.getByTestId("outline-save-status")).toHaveText("未保存");
+  await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
   await expect(page.getByLabel("章节名称", { exact: true })).toHaveValue("后续编辑 B");
   expect(f.state.outlineSaves[1]).toEqual(f.state.outlineSaves[0]);
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();

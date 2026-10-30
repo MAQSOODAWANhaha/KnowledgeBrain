@@ -50,7 +50,7 @@ async def test_over_budget_structure_preserves_every_cell_and_only_projects_grid
     original = payload(large=True)
     before = deepcopy(original)
     source_gap = {'code': 'fixture_source_gap', 'detail': '原有来源缺口保留。'}
-    monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_: (original, [source_gap]))
+    monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_, **_kwargs: (original, [source_gap]))
     admitted = budget()
     assert admitted.measure_request(build_request(admitted.model, PROMPT, original), 'authoring_review')['fits'] is False
     calls = []
@@ -89,7 +89,7 @@ async def test_over_budget_structure_preserves_every_cell_and_only_projects_grid
 async def test_admitted_structure_keeps_exact_original_request_and_shared_prompt(monkeypatch):
     original = payload()
     before = deepcopy(original)
-    monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_: (original, []))
+    monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_, **_kwargs: (original, []))
     admitted = budget()
     expected = build_request(admitted.model, PROMPT, original, task="authoring_structure")
     admitted.require_request(expected, 'authoring_review')
@@ -109,7 +109,7 @@ async def test_still_oversized_structure_tries_complete_source_before_provider_f
     original = payload(large=True)
     original['submission_sources'].append({'source_id': 's5', 'text': '完整原文' * 10000})
     before = deepcopy(original)
-    monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_: (original, []))
+    monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_, **_kwargs: (original, []))
     calls = []
 
     async def execute(task, request, _validate):

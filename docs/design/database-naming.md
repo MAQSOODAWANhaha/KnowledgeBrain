@@ -104,7 +104,7 @@
 | `tender_model_requests` | `tender_analysis_model_requests` | 分析模型调用回执 |
 | `tender_authoring_executions` | `tender_authoring_executions` | 编制执行与租约 |
 | `tender_authoring_model_requests` | `tender_authoring_model_requests` | 编制模型调用回执 |
-| `tender_web_documents` | `tender_document_sources` | 文件的来源类别、角色与分析原件引用 |
+| `tender_web_documents` | `tender_document_sources` | 项目文件的分析原件引用 |
 | `tender_web_runs` | `tender_project_analyses` | 项目关联分析及原件快照运行 |
 | `tender_web_authoring_jobs` | `tender_authoring_jobs` | 编制入队与投递状态 |
 | `tender_web_docx_versions` | `tender_draft_versions` | 生成、编辑及恢复的 Word 稿件版本 |

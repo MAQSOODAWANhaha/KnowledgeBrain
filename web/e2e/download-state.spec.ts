@@ -30,11 +30,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       const expected = [await downloadSaved(page, "word-v1", 1)];
 
       await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.events!.onDocumentStateChange({ data: false }));
-      await expect(page.getByTestId("docx-status")).toHaveText("有修改尚未保存");
+      await expect(page.getByTestId("docx-status")).toHaveText("有未保存修改");
       await expect(warning).toBeVisible();
       expected.push(await downloadSaved(page, "word-v1", 1));
       await page.getByTestId("docx-save").click();
-      await expect(page.getByTestId("docx-status")).toContainText("正在保存");
+      await expect(page.getByTestId("docx-status")).toHaveText("保存中");
       await expect(warning).toBeVisible();
       expected.push(await downloadSaved(page, "word-v1", 1));
 
@@ -76,7 +76,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await page.clock.install(); const f = await fixture(page);
       f.state.current!.editor.pending_save_id = "previous-session-save";
       await page.goto(`/#/bids/${f.view.project.id}/authoring`);
-      await expect(page.getByTestId("docx-status")).toContainText("正在保存");
+      await expect(page.getByTestId("docx-status")).toHaveText("保存中");
       await expect(page.getByTestId("docx-download-boundary")).toHaveText("下载仅包含已保存的 Word v1，不包含当前尚未确认保存的修改。");
       const expected = await downloadSaved(page, "word-v1", 1);
       f.state.current!.editor.pending_save_id = null;

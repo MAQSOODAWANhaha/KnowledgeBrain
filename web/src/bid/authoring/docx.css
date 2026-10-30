@@ -1,7 +1,7 @@
 .docx-pane { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; height: 100%; }
-.docx-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.docx-toolbar { position: relative; z-index: 26; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); background: var(--bg); }
 .docx-toolbar [role="status"] { color: var(--muted); }
 .docx-editor-frame { flex: 1; height: max(480px, calc(100dvh - 160px)); width: 100%; min-height: 320px; }
 .docx-editor-frame > div { height: 100%; }
 .docx-editor-frame iframe { border: 0; }
-.docx-version-notice { padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 6px; background: #eff6ff; color: #1e40af; font-size: 13px; }
+.docx-version-notice { padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--fill); color: var(--ink); font-size: 13px; }

@@ -8,7 +8,7 @@ from pydantic import create_model
 from docreader.llm.request import ModelConfigurationError
 from docreader.tender.schema import (
     AnalysisIssue, AnalysisReviewResponse, AnalysisSharedFinding, AnalysisVersion,
-    AssociationResult, AuthoringBasisResponse, AuthoringReviewResponse, Contract,
+    AssociationResult, AuthoringBasisResponse, AuthoringReviewResponse, AuthoringStructureResponse, Contract,
     Extraction, ItemDispositionOutput, LocateResult, OCRResponse, OutlineAssemblyResponse,
     OutlineResponse, Plan, Relation, TenderItem, Text, Verification, WritingResponse,
 )
@@ -40,7 +40,7 @@ _BATCHES = {operation: _batch_response(response.__name__, response)
 _DIRECT = {
     'ocr': OCRResponse, 'plan': Plan, 'authoring_basis': AuthoringBasisResponse,
     'authoring_write': WritingResponse, 'authoring_review': AuthoringReviewResponse,
-    'authoring_structure': AuthoringReviewResponse,
+    'authoring_structure': AuthoringStructureResponse,
 }
 
 

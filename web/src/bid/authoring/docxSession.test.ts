@@ -382,7 +382,7 @@ describe("DOCX save confirmation", () => {
   it("editor synchronization never acknowledges persistence or permits leaving", async () => {
     const f = fixture(); await f.start(); f.edit();
     expect(f.session.getState().dirty).toBe(true);
-    expect(docxStatus(f.session.getState())).toBe("有修改尚未保存");
+    expect(docxStatus(f.session.getState())).toBe("有未保存修改");
     expect(await f.session.close()).toBe(false);
   });
   it("leaving a clean editor releases the server session, while dirty or uncertain edits retain it", async () => {

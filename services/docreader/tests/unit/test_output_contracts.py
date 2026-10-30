@@ -1,5 +1,6 @@
 """Generation describes semantic responses, leaving host identity and recovery alone."""
 from copy import deepcopy
+from importlib.resources import files
 import json
 
 import pytest
@@ -29,6 +30,50 @@ def test_schema_is_sent_once_without_rewriting_payload_or_exposing_source_ids():
     assert request['messages'][0]['content'].count('"$defs"') == 1
 
 
+def test_source_outline_request_explains_rule_and_source_reference_domains():
+    from docreader.tender.schema import OutlineResponse
+
+    payload = {'schema_version': 2, 'rules': [{'rule_id': 'opaque-rule-identity'}],
+               'related_rules': [{'item': {'item_id': 'opaque-item-identity'}}],
+               'sources': [{'range_id': 'opaque-range-identity', 'text': '本批实际原文'}]}
+    prompt = files('docreader.tender.prompts').joinpath('outline.md').read_text('utf-8')
+    request = build_request('configured-model', prompt, payload, task='outline')
+    schema = sent_schema(request)
+    target = schema['$defs']['OutlineTargetResponse']
+    finding = schema['$defs']['OutlineFinding']
+    rule_fields = [target['properties']['rule_ids'], finding['properties']['rule_ids'],
+                   schema['properties']['constraint_rule_ids']]
+    for field in rule_fields:
+        description = field['description']
+        assert 'top-level rules[].rule_id' in description
+        assert 'related_rules' in description and 'item_id' in description
+        assert 'read-only' in description and 'prefix' in description
+    target_sources = target['properties']['range_ids']
+    assert 'bindable' in target_sources['description']
+    assert 'evidence/context' in target_sources['description']
+    constraint_sources = schema['properties']['constraint_range_ids']
+    assert 'sources[].range_id' in constraint_sources['description']
+    assert 'read in this batch' in constraint_sources['description']
+    assert 'evidence' in constraint_sources['description']
+    assert {'rule_ids', 'range_ids'} <= set(target['required'])
+    assert 'rule_ids' in finding['required']
+    assert not {'constraint_rule_ids', 'constraint_range_ids'} & set(schema['required'])
+    defaults = OutlineResponse.model_validate({'schema_version': 2, 'chapters': [], 'findings': []})
+    assert defaults.constraint_rule_ids == defaults.constraint_range_ids == []
+    for field in [*rule_fields, target_sources, constraint_sources]:
+        assert field['type'] == 'array' and field['items']['type'] == 'string'
+        assert 'enum' not in field['items']
+    assert all(value not in json.dumps(schema, ensure_ascii=False)
+               for value in ['opaque-rule-identity', 'opaque-item-identity',
+                             'opaque-range-identity', '本批实际原文'])
+    prompt = request['messages'][0]['content'].split('\n\n返回JSON须符合以下JSON Schema；')[0]
+    reference_domain = next(paragraph for paragraph in prompt.split('\n\n')
+                            if paragraph.startswith('引用域：'))
+    for term in ['rules[].rule_id', 'related_rules.item.item_id', '只读', '前缀',
+                 'range_ids', '证据上下文', 'constraint_range_ids', 'sources[].range_id', '实际阅读']:
+        assert term in reference_domain
+
+
 @pytest.mark.parametrize('task,payload,expected', [
     ('outline', {'schema_version': 2}, 'OutlineResponse'),
     ('outline', {'operation': 'assemble'}, 'OutlineAssemblyResponse'),
@@ -36,7 +81,7 @@ def test_schema_is_sent_once_without_rewriting_payload_or_exposing_source_ids():
     ('authoring_write', {'previous_content': {}}, 'WritingResponse'),
     ('authoring_review', {}, 'AuthoringReviewResponse'),
     ('authoring_review', {'operation': 'review_saved_word'}, 'AuthoringReviewResponse'),
-    ('authoring_structure', {'operation': 'structure', 'phase': 'outline'}, 'AuthoringReviewResponse'),
+    ('authoring_structure', {'operation': 'structure', 'phase': 'outline'}, 'AuthoringStructureResponse'),
     ('verify', {'schema_version': 2, 'operation': 'locate'}, 'LocateResult'),
     ('verify', {'schema_version': 2, 'operation': 'associate'}, 'AssociationResult'),
     ('verify', {'schema_version': 2, 'operation': 'review'}, 'AnalysisReviewResponse'),

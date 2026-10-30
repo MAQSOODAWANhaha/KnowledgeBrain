@@ -64,7 +64,8 @@ def split_writing_task(task):
             all_excerpts = [ref for row in rows for ref in row['source_excerpts']]
             selected_excerpts = [ref for row in selected for ref in row['source_excerpts']]
             narrowed['source_refs'] = deepcopy(_source_inventory(
-                target['source_refs'], selected_excerpts, all_excerpts, excerpts))
+                target['source_refs'], selected_excerpts, all_excerpts,
+                [*excerpts, *target['response_table'].get('context_source_excerpts', [])]))
         elif rules:
             # Explicit source selections are common context. A complete rule is
             # loaded with all its own evidence/conditions by the normal writer.

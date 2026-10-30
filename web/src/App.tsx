@@ -34,9 +34,9 @@ function Login() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   return (
-    <div className="grid min-h-dvh place-items-center bg-[radial-gradient(circle_at_50%_36%,rgba(37,99,235,.08),transparent_240px),#fafafb] px-6 py-12">
+    <div className="grid min-h-dvh place-items-center bg-canvas px-6 py-12">
       <form
-        className="w-full max-w-[400px] rounded-[14px] border border-line bg-white px-9 py-10 shadow-[0_1px_2px_rgba(17,17,26,.04),0_6px_18px_rgba(17,17,26,.05)]"
+        className="w-full max-w-[400px] rounded-[8px] border border-line bg-white px-8 py-8"
         data-testid="login-form"
         onSubmit={async (e) => {
           e.preventDefault();
@@ -60,12 +60,12 @@ function Login() {
         }}
       >
         <div className="mb-7 flex items-center gap-2.5">
-          <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-[linear-gradient(140deg,#60a5fa,#2563eb_55%,#1d4ed8)] text-[13px] font-extrabold text-white shadow-[0_2px_8px_rgba(37,99,235,.35)]">
+          <span className="grid h-7 w-7 place-items-center rounded-[6px] bg-sky text-[11px] font-semibold tracking-wide text-white">
             KB
           </span>
-          <strong className="text-base font-semibold">KnowledgeBrain</strong>
+          <strong className="text-[13px] font-semibold">KnowledgeBrain</strong>
         </div>
-        <h1 className="mb-6 text-[22px] font-semibold tracking-tight">登录</h1>
+        <h1 className="mb-6 text-[20px] font-semibold tracking-tight">登录</h1>
         <Label htmlFor="login-email">账号</Label>
         <Input
           id="login-email"
@@ -203,7 +203,7 @@ function Bids({ email }: { email: string }) {
                     className="cursor-pointer"
                     onClick={() => go(authoringHref(p.id, "files"))}
                   >
-                    <TableCell className="font-semibold">{p.title}</TableCell>
+                    <TableCell className="font-semibold"><a className="block rounded-[4px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky" href={`#${authoringHref(p.id, "files")}`}>{p.title}</a></TableCell>
                     <TableCell className="text-quiet">
                       {p.ended_at ? p.ended_at.slice(0, 10) : "—"}
                     </TableCell>
@@ -314,7 +314,7 @@ export function App() {
   if (!ready) {
     return (
       <div className="grid min-h-dvh place-items-center bg-canvas">
-        <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-[linear-gradient(140deg,#60a5fa,#2563eb_55%,#1d4ed8)] text-[13px] font-extrabold text-white shadow-[0_2px_8px_rgba(37,99,235,.35)]">
+        <span className="grid h-7 w-7 place-items-center rounded-[6px] bg-sky text-[11px] font-semibold tracking-wide text-white">
           KB
         </span>
       </div>

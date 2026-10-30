@@ -160,7 +160,7 @@ export function QuotePane({
               增行
             </Button>
           </div>
-          <table className="grid" style={{ minWidth: 1120 }}>
+          <div className="w-full overflow-auto"><table className="grid min-w-[1120px]">
             <thead>
               <tr>
                 <th>说明</th>
@@ -315,6 +315,7 @@ export function QuotePane({
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
