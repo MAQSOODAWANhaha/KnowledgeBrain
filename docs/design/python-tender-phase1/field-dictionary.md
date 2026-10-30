@@ -820,7 +820,8 @@ from_rule_ids/to_rule_ids；分析原有映射及默认Task提示集合保持不
 
 回包`OutlineResponse{schema_version:2, chapters, findings}`：chapters递归使用
 `{title,targets,children}`；targets为`{kind,purpose,rule_ids,range_ids,manual_fill?}`；manual_fill
-默认false；findings为`{code,detail,rule_ids}`。其余字段必填，列表允许为空。range_ids可以选择已读原文或
+默认false；findings为`{code,detail,rule_ids}`。targets/children可省略，默认空列表；其余必填字段以
+输出Schema为准，列表允许为空。range_ids可以选择已读原文或
 目录中的锚点，宿主映射至完整SourceUnitRef并去重。目录来源尚未读入模型时保留具体
 `outline_source_not_read`问题，后续生成前须读取核对，不宣称模板含义已验证。
 `scope_bindings`及`pending_scope_context`内的可见锚点同样经原selector映射；正文去重
@@ -962,7 +963,8 @@ outline_rule_unassigned以响应位置及constraint_rule_refs共同计算未分�
 | WritingResponse | `blocks:AuthoringBlock[]`、`cell_fills:CellFillResponse[]`、`material_ids:Identity[]`、`gaps:str[]`；同次调用完成语义匹配及有依据改写，各block/fill分别关联目标和资料；顶层material_ids仅用于附件选择，不能替代内容依据。不回抄任务/章节身份 |
 | WritingTask | `task_id`、`chapter_id`、`title_path:str[]`、`targets:ResponseTarget[]`；同章连续narrative目标可合成一个任务；每个form、attachment或manual_fill目标各自单任务。manual_fill任务只保留格式占位；纯attachment缺可读原件、普通目标缺候选知识时均跳过写作，保留空位与gaps。部分匹配只写有依据部分，同章其他任务继续。单个表格实例填值只属于该target，不能因模板相同跨target合并。过大叙述任务按已有目标边界拆分，不按页数或每条要求拆分 |
 | WritingUnit | `schema_version:2`、`task_id`、`chapter_id`、`target_ids:Identity[]`、`status:generated/placeholder`、`blocks`、`cell_fills:CellFill[]`、`attachments:AuthoringAttachment[]`、`gaps:str[]`、`error_type:str或null`；失败占位不冒充成功正文 |
-| AuthoringReviewFinding / AuthoringReviewResponse | `findings:[{code:Text,detail:Text,task_ids:Identity[]=[],content_ids:Identity[]=[],suggestion:str='',can_revise:bool=false}]`；content_ids选宿主提供的具体block/fill短引用。宿主把跨任务unsupported_content按任务拆分，便于分批再核替换旧发现。明确无依据内容从采用稿移除；无精确内容但关联任务明确时，保守清空相应任务生成应答并保留原稿。仅现有资料足以修正时can_revise为true，缺证书、未知价格或授权保持false；缺项/冲突不设置下载门禁 |
+| AuthoringReviewFinding / AuthoringReviewResponse | `findings:[{code:Text,detail:Text,task_ids:Identity[]=[],content_ids:Identity[]=[],suggestion:str='',can_revise:bool=false,reject_content:bool=false}]`；content_ids选宿主提供的具体block/fill短引用。reject_content由模型判断当前已生成内容确实失真、与依据矛盾或增删条件改变原义时置true；纯遗漏、待补及复核不可用保持false。宿主对true或旧unsupported_content按任务拆分并执行原定位剔除，不按其他自由code猜语义。无精确内容但关联任务明确时，保守清空该任务生成应答并保留原稿；固定原表和要求行不删。can_revise独立表示现有资料是否足以作一次修订，缺证书、未知价格或授权保持false。自动大纲的结构F0只要有findings就交A1复核一次，不以can_revise拦截结构意见；A1依据原文可修改或保持，树改变才F1，人工固定大纲不自动修订。结构/保存Word只读复核不执行正文剔除，reject_content保持false。缺项/冲突不设置下载门禁 |
+| 结构修订反馈 previous_structure.targets | `review_target_id`为F中的v短引用，`candidate_target_ids`为同请求原候选t引用。宿主为模型已选及兜底保留的全部位置登记映射；保留遗漏候选不能把其已知候选引用置空。同一候选多实例继续分别登记、参见不明确时保留歧义，不让模型推测持久身份 |
 | AuthoringGap | `code:Text`、`detail:Text`、`task_id/chapter_id/target_id:Identity或null`；宿主统一缺口位置，模型局部字符串缺口在边界补位置 |
 | AuthoringUsage | `sent_requests`、`retry_requests`、`estimated_input_tokens`、`prompt_tokens`、`completion_tokens`、`total_tokens`、`unknown_usage_requests`均非负整数；计量范围为本执行的实际发送；继承回执不伪造新发送或用量。Token总数只含已报告值，未知调用另计，不能视为免费；原执行费用按其回执单独追溯 |
 | AuthoringDocument | `schema_version:2`、`authoring_input`、`outline_ref`、`basis_ref`、`unit_refs:ArtifactRef[]`、`review_ref`、`initial_review_ref:ArtifactRef或null=null`、`superseded_unit_refs:ArtifactRef[]=[]`、`docx_ref`、`package_ref`、`gaps:AuthoringGap[]`、`usage:AuthoringUsage`；unit_refs指实际采用内容，初次复核和被替换的原稿分别保留，review_ref指最后复核结果。全部实际落盘后返回，费用未知保持未知 |
@@ -1022,7 +1024,7 @@ reference标签忽略有效功能资料；事实/证明/授权声明仍须对应
 
 不另建匹配节点或ResponseMatch。write一次完成语义适用性判断及改写，block/fill只
 选择本请求的target短引用（如t1）及material引用，宿主绑定正式身份并检查可用范围。
-review的content_ids按任务选择宿主提供的b1/f1等正文块/填值别名；跨任务无依据发现
+review的content_ids按任务选择宿主提供的b1/f1等正文块/填值别名；明确否定的跨任务发现
 由宿主拆成单任务发现，原始回包保留，不要求模型增加誊写。字段空数组
 仅兼容旧产物；新策略下不能凭默认值放行无依据新正文。部分命中只保留有依据内容。
 复核使用实际内容短引用；无依据内容移除后留空，不因改稿失败再采用已否定内容。
@@ -1060,7 +1062,7 @@ review的content_ids按任务选择宿主提供的b1/f1等正文块/填值别名
    成功替换时旧稿进入superseded_unit_refs。
    改过的任务再核一次，保留initial_review_ref；复核仍有问题继续导出，不开启下一轮自动改稿。
    改稿输入沿用该任务原写作payload，追加previous_content中的blocks、cell_fills、attachments
-   和gaps，以及review_findings中的code/detail/suggestion/can_revise。旧填值用本次宿主
+   和gaps，以及review_findings中的code/detail/suggestion/can_revise/reject_content。旧填值用本次宿主
    sources映射回source_id，附件只发material_id/title；不发送CAS、任务身份或按出现顺序猜绑定。
    无法绑定原稿所用资料时保留原稿和具体问题，不让改稿静默移除原内容。
    新执行按依赖选择受影响任务及跨执行复用属于后续修订能力，不能由previous_document_ref
@@ -1208,6 +1210,7 @@ Q为全文件计划去重后的实际查询数，须在发送前报告。Q随独
 | 有正文、填值或待采用且有可读证据的附件 | 复核实际内容、支持范围及当前资料足以支持的遗漏；只有片段不能冒充证明原件 |
 | 写作传输/预算失败而形成纯空稿 | 沿既有恢复额度处理，耗尽后记运行原因；不为不存在的语义结果再发空稿复核 |
 | 现有支持足够、非人工且can_revise=true | 无论generated或语义placeholder，都允许一次有真实反馈的定向修订；无资料、未知报价及外部授权缺口继续留空 |
+| 已生成内容被模型明确否定 | reject_content=true或旧unsupported_content按当前稿的task/content引用剔除，原表、要求行及正确兄弟保留；纯遗漏、待补、技术失败不据此剔除 |
 
 以上从现有输入、manual_fill、内容、error_type及完整回包推导，不增加needs_review
 状态。混合单元同时核对有据内容及漏匹配；“没有正文就不复核”不作为实现规则。
@@ -1223,7 +1226,8 @@ U0及其真实意见，以便模型定位问题；S0是宿主保留的回退稿�
 - 初审只是接口/预算不可用：保留尚未被否定的U0草稿，明确待复核，不写成缺少资料。
 - 初审已明确否定内容，改稿失败、空回包或U1再核不可用：采用S0，保存U1及回执，
   不回退含已否定内容的U0，也不直接采用未经再核的替换稿。
-- U1复核完成：仅按U1意见移除其无依据内容，其他内容采用；仍有问题停止自动改稿。
+- U1复核完成：仅按U1的reject_content=true或旧unsupported_content意见移除被否定的
+  当前内容，其他内容采用；纯缺项不扩大为正文否定，仍有问题停止自动改稿。
 - 精确否定a1只移除该附件。不能精确定位时只将明确关联任务的生成应答留空，保留
   固定模板、缺口及可追溯原稿；不扩展为全文删除，不固定增加定位调用或阻断导出。
 
@@ -1701,10 +1705,10 @@ worker再次校验同run、同执行协议与同`outline_only`模式。大纲仍
 此入口只纠正文案，数字、条件、范围等结构修订仍使用既有完整纠正流程。未知提交保持
 原请求/key，过期基准409保留输入并提供最新分析对照，不自动套用到新版本。
 
-## 精确来源与业务响应表（待实施修订）
+## 精确来源与业务响应表
 
-本节是BUG-040/093后续修复的字段草案，尚未进入schema或部署；仅在实施后覆盖
-前述字段的相应部分。实施与验收依据见
+本节是BUG-040/093修复的统一字段合同，覆盖前述字段的相应部分。schema、绑定、
+写作/复核/改稿与导出依此接线；实际回归、部署及真实验收状态见交接。实施依据见
 [后续统一修复](submission-structure-plan.md#后续统一修复bug-040086093095)。
 不新增分析事项实体、主节点、虚拟原表或通用表格描述语言。
 
@@ -1720,6 +1724,14 @@ worker再次校验同run、同执行协议与同`outline_only`模式。大纲仍
 | RowFill | 宿主绑定`row_id/text/material_ids/source_refs/source_excerpts`；来源均为实际支持，target从本大纲行绑定推出。WritingUnit新增可选`row_fills=[]`，行身份不依赖wN或当前分包号 |
 | 精确支持的持久化 | AuthoringBlock、CellFill、RowFill的招标支持新增可选`source_excerpts=[]`，source_refs仍作unit索引投影/旧引用。支持key包含完整source_index/unit/selectors，复核、previous_content和改稿不得再仅按unit将不同片段合并；CellFill.source_ref仍单独定位真实被填原表 |
 
+模型来源/组装共用`response_table:{rows:[{range_ids:Identity[],rule_ids:Identity[]=[]}]}`，
+不返回持久行身份。来源range_ids选本批WirePayload的短r引用；组装range_ids选共享
+source_excerpts中的x引用，行rule_ids选择已给候选的a引用或未安排规则的u引用。
+组装候选带原有行选择；省略新response_table时继承被选候选的行，重新分组也不能
+静默丢已知原文行。宿主保留未安排的完整行及诊断，是否本次不适用仍由模型沿原
+候选排除出口明确说明。写作response_rows给q引用，回包row_fills只选本请求q引用；
+复核使用rN内容引用定位已生成答案，与来源阶段r引用处于不同请求命名空间。
+
 同一逻辑要求跨页时按有序片段完整展示，保留原文边界；不能把同片段相邻的独立
 要求解释为同一条件。如果当前原生范围无法区分，先保留完整复合行；确需细分时
 由宿主提供结构化句段短引用供模型选择，不让模型做字符算术。共用表头、单位、
@@ -1732,6 +1744,8 @@ range的unit_id；现有context.sources可能为原表选择映射到多个旁�
 
 派生业务响应表的要求列由宿主从片段读取、保持原文；应答列只按row_id填入已绑定
 的有据内容。原规格表可仅作要求来源，不能伪装成已有企业应答列的原生grid。
+Word显示与原生格式段落一致，仅隐藏解析器Markdown标题前缀；原CAS和selectors
+不变，标题正文、数字、条件及续文完整保留，不由显示层重新解释要求。
 招标规定填写的真实原表仍由template_refs和CellFill处理；不得为新增企业列裁坏
 原表或再输出一份相同实例。一个目标只采用一种实际表载体；确需不同交付表时由
 模型建立分别有依据的目标，不把同一实例既复制原表又生成另一张应答表。
@@ -1740,3 +1754,44 @@ range的unit_id；现有context.sources可能为原表选择映射到多个旁�
 未知行、冲突填值或无支持的应答保留回包/诊断，仅相关格留空并沿既有有限纠正出口
 处理；不丢要求、不以空白冒充无偏差、不阻止整稿导出。缺少精确来源时保留原引用
 和明确待核位置，不能从purpose补原文；事项摘要的错义继续走已有correct修订。
+
+### 预算配置边界
+
+沿用现有默认o200k_base和既有上下文、输出预留配置，不新增预算环境变量或配置文件。
+校准依据按实际端点、模型和operation在仓库外审计；不能将一个模型的样本推广到其他
+模型，也不启用未经核实的系数。输入误差与输出/reasoning容量分别检查，成功缓存复验
+先于发送准入。预算不足沿有限分片和明确容量缺口恢复，不截断要求或阻止其余内容导出。
+
+全局归并A（outline/assemble）和结构核对F（authoring_structure/structure）是完整请求，
+本地窗口估算不是供应商已验证的硬上限。缓存未命中时先采用现有无损compact视图；
+仍超估算则保留原计量及fits=false并实际发送，不能直接跳为待整理/未核对。
+该次发送回执metadata增加`admission_warning="local_context_estimate_exceeded"`，
+不进入HTTP请求体，不修改请求摘要，也不把fits改成true。
+供应商拒绝、断流或合同错误继续使用同一首次加三次额度，耗尽后保留回执、原文、
+草稿及明确原因。输出预留、窗口、算法和HTTP请求体不因此改变，不加配置开关。
+来源和正文等可拆任务继续沿原规划分包；不把全部模型任务的预算校验一概取消。
+
+### 模型返回Schema统一（BUG-099）
+
+模型输出类型是字段、枚举、必填与默认值的唯一来源；Prompt解释语义、依据及引用
+选择，不再独立手写整份返回结构。按task和operation（核验另区分work_units批次）
+选择输出类型，构建完整请求时从该类型生成JSON Schema，使用共享defs，不复制
+宿主持久对象、CAS、版本或全量引用枚举。真正的身份可见性和跨字段业务关系仍在
+现有宿主绑定/语义核对边界验证，Schema不替代模型语义判断。
+
+| 边界 | 规则 |
+| --- | --- |
+| 来源/组装大纲、共同依据、写作、内容/结构复核 | 复用对应OutlineResponse、OutlineAssemblyResponse、AuthoringBasisResponse、WritingResponse、AuthoringReviewResponse输出类型；不得发送AuthoringOutline、WritingUnit等持久结构 |
+| V2抽取生成 | 事项、关系、问题复用现有强类型，处置使用仅含range_id/status/reason的ItemDispositionOutput；宽容接收仍使用兼容旧items/item_ids的ItemDispositionResponse。生成包不使用list[Any]的容错接收壳，也不要求模型回抄宿主推导的覆盖名单 |
+| V2核验生成 | locate/associate/review分别选择对应输出；批次成员只增加work_unit_id并嵌入该操作的实际结果，shared_findings使用既有共享问题类型。contract_feedback沿原operation，不新造correct节点 |
+| 宽容接收 | AnalysisExtractionResponse和AnalysisBatchResponse保留逐项容错；同一包中一个坏事项或成员不能令有效兄弟丢失。生成Schema不能代替这条接收路径 |
+| 空集合 | WritingResponse.blocks、OutlineChapterResponse.targets/children默认[]；省略可知空容器不整包拒收。显式null不等于合法空集合，其他业务必填字段不放宽 |
+| 可选空值 | 仅非必填且默认None的分析字段可将显式null确定性规范化为省略；不修改调用者原dict，不吞非null非法值，不把false/0改为空。必填可空section_id保留null；可选非空列表的[]仍非法 |
+| 分析问题 | 使用具名AnalysisIssue声明blocking必填，与实际V2校验一致；沿用旧Issue的默认值供旧合同使用。合法false与needs_source=false保留，未知路由值可省略，非法非null仍诊断 |
+| 已存产物 | 不重写旧CAS或原始回执；在接收/绑定时规范化，exclude_unset保持缺省语义。空对象仍须满足原至少一事实/依据要求 |
+
+本轮兼容路径在system消息中只发送一次由代码生成的Schema，继续json_object。
+当前代理strict支持未知，不新增环境变量、能力缓存或付费探针，不因猜测支持而改为
+json_schema后失败重发。支持严格模式的后续接线须以同一份生成Schema为基础，经
+明确能力实证后替换发送位置，不同时重复塞两份Schema，不把不支持视为业务失败。
+生成Schema及完整Prompt都计入原输入估算与request_digest，沿既有恢复/回执合同。

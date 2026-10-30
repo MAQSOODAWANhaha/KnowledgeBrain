@@ -9,6 +9,7 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.request import ModelContractError
 from docreader.llm.wire import WirePayload
 from docreader.tender.authoring import _OutlineContext, load_outline_source
+from docreader.tender.authoring_excerpts import load_source_excerpt
 from docreader.tender.authoring_templates import load_template_part, prepare_template_parts
 from docreader.tender.evidence import freeze_sources
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment, selector
@@ -110,7 +111,7 @@ def test_virtual_blank_pages_are_neither_catalog_templates_nor_selectable_source
 
 
 @pytest.mark.parametrize("table_count", [1, 2])
-def test_spreadsheet_row_choices_bind_all_complete_grid_units_and_read_full_tables(tmp_path, table_count):
+def test_spreadsheet_row_choices_bind_native_excerpt_and_separate_complete_template_grids(tmp_path, table_count):
     artifacts = ArtifactStore(tmp_path)
     index, tables = spreadsheet(artifacts, table_count)
     assert len(index.ranges) == 2 and all(row["unit_id"].startswith("row:") for row in index.ranges)
@@ -125,9 +126,10 @@ def test_spreadsheet_row_choices_bind_all_complete_grid_units_and_read_full_tabl
     outlined = ctx.validate(form_response(ctx, [index.ranges[0]["range_id"]],
                                           [part["part_id"] for part in parts]))
     target = outlined["chapters"][0]["targets"][0]
-    assert target["source_refs"] == [
-        {"source_index_ref": source_ref, "unit_id": table["unit_id"]} for table in tables]
-    assert [load_outline_source(artifacts, ref)["unit"] for ref in target["source_refs"]] == tables
+    assert target["source_refs"] == [{"source_index_ref": source_ref, "unit_id": "row:1"}]
+    assert target["source_excerpts"][0]["source_ref"] == target["source_refs"][0]
+    excerpt = load_source_excerpt(artifacts, target["source_excerpts"][0])
+    assert excerpt["text"] == index.ranges[0]["text"] and excerpt["grid"] is None
     assert [load_template_part(artifacts, ref)["unit"] for ref in target["template_refs"]] == tables
     assert all(part["selectors"] == [] for part in target["template_refs"])
     read_ids = {row["range_id"] for view in ctx.payload["source_views"]
@@ -147,7 +149,9 @@ def test_multiple_spreadsheet_rows_do_not_duplicate_shared_template_grids(tmp_pa
     outlined = ctx.validate(form_response(ctx, [*selected, selected[0]], [*selected_parts, selected_parts[0]]))
     target = outlined["chapters"][0]["targets"][0]
     assert target["source_refs"] == [
-        {"source_index_ref": source_ref, "unit_id": table["unit_id"]} for table in tables]
+        {"source_index_ref": source_ref, "unit_id": row["unit_id"]} for row in index.ranges]
+    assert [load_source_excerpt(artifacts, ref)["text"] for ref in target["source_excerpts"]] == [
+        row["text"] for row in index.ranges]
     assert target["template_refs"] == [ctx.template_parts[identity] for identity in selected_parts]
 
 
@@ -184,6 +188,7 @@ def test_fragment_evidence_uses_text_free_alias_and_short_selection_preserves_fu
     loaded = load_outline_source(artifacts, references[0])
     assert loaded["unit"] == index.raw["units"][0]
     assert loaded["unit"]["text"] == text
+    assert load_source_excerpt(artifacts, saved["chapters"][0]["targets"][0]["source_excerpts"][0])["text"] == selected["text"]
     assert not any(issue["code"] == "outline_source_not_read" for issue in saved["issues"])
 
 
@@ -253,11 +258,18 @@ def test_spreadsheet_row_preserves_cells_outside_defined_tables(tmp_path, table_
     ctx, source_ref = outline_context(artifacts, index, body=[chosen], evidence_source=chosen)
     outlined = artifacts.read_json(artifacts.put_json(ctx.validate(form_response(ctx, [chosen["range_id"]]))))
     references = outlined["chapters"][0]["targets"][0]["source_refs"]
-    assert references == [{"source_index_ref": source_ref, "unit_id": table["unit_id"]} for table in tables] + [
-        {"source_index_ref": source_ref, "unit_id": row["unit_id"]}]
+    assert references == [{"source_index_ref": source_ref, "unit_id": row["unit_id"]}]
     loaded = [load_outline_source(artifacts, ref) for ref in references]
-    assert [entry["unit"] for entry in loaded] == [*tables, row]
+    assert [entry["unit"] for entry in loaded] == [row]
     assert loaded[-1]["spreadsheet_cells"][key] == outside
+    exact = outlined["chapters"][0]["targets"][0]["source_excerpts"][0]
+    assert load_source_excerpt(artifacts, exact)["text"] == chosen["text"]
+    if not use_fragment:
+        assert outside["text"] in load_source_excerpt(artifacts, exact)["text"]
+    # Whole-unit legacy reads remain available; exact new selections do not
+    # silently expand a requested fragment back to the adjacent table/statement.
+    assert [load_outline_source(artifacts, {"source_index_ref": source_ref,
+        "unit_id": table["unit_id"]})["unit"] for table in tables] == tables
     assert len({ref["unit_id"] for ref in references}) == len(references)
     assert not any(issue["code"] == "outline_source_not_read" for issue in outlined["issues"])
 
@@ -321,7 +333,8 @@ async def test_native_workbook_freeze_to_outline_preserves_outside_cells_formula
     ctx, _ = outline_context(artifacts, index, evidence_source=chosen)
     outlined = ctx.validate(form_response(ctx, [chosen["range_id"], image["range_id"]]))
     loaded = [load_outline_source(artifacts, ref) for ref in outlined["chapters"][0]["targets"][0]["source_refs"]]
-    grid = next(entry for entry in loaded if entry["unit"].get("grid"))
+    grid = load_outline_source(artifacts, next(ref for ref in ctx.sources[chosen["range_id"]]
+        if ref["unit_id"] != chosen["unit_id"]))
     row = next(entry for entry in loaded if entry["unit"]["kind"] == "table_row")
     scan = next(entry for entry in loaded if entry["unit"]["kind"] == "image_region")
     assert any(cell["text"] == "必须另附盖章证明。" for cell in row["spreadsheet_cells"].values())

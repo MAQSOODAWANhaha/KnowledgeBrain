@@ -47,7 +47,9 @@ conditions (nonempty string array of applicability conditions), exceptions (none
 string array of exceptions to the rule), and numbers (nonempty array of
 {value,unit,quote}; value is a finite number or nonempty source string, including Chinese
 number words; unit may be empty only if
-unitless). Omit absent optional fields; do not emit null, empty arrays/objects or filler.
+unitless). Prefer omitting absent optional fields rather than emitting null; the host
+normalizes null to omission only for optional fields whose default is None. Empty
+arrays/objects and filler do not supply a source-backed fact.
 Omission is not a declaration that information does not exist. Preserve legitimate zeros.
 numbers is optional enrichment: preserve numerical rules fully in text and evidence even
 when omitting numbers. Each number's quote must occur in that item's cited source ranges.
@@ -80,12 +82,13 @@ Preserve unresolved cross-references as issues with the original range_id. The h
 provide chapter navigation to a separate locate operation and load its selected original
 passages for association and independent review. Do not infer missing target text.
 
-Return exactly these five required fields; all arrays may be empty:
-{"schema_version":2,"items":[],"dispositions":[],"relations":[],"issues":[]}
+Return one JSON object conforming to the host-supplied response JSON Schema for this
+request. Required collections may be empty. Record examples below describe local fields,
+not a complete response.
 
-Declare a disposition only for a body range or template row that is non_item or unresolved:
-{range_id,status,reason}. Do not emit status=items and do not emit item_ids. A range cited
-by an item's evidence needs no disposition; the host derives that coverage from the evidence.
+Declare a disposition only for a body range or template row that is non_item or unresolved.
+The local disposition record is {range_id,status,reason}. Do not emit status=items or item_ids.
+A range cited by an item's evidence needs no disposition; the host derives that coverage from the evidence.
 A range that is neither cited nor declared stays unresolved for review.
 If a range contains both a clear item and unresolved content, keep the item and add a
 blocking issue; do not also emit a disposition for that range. unresolved means no definite
@@ -100,8 +103,9 @@ Preserve score hierarchy, proof/qualification links and scoped rejection trigger
 Issues use {code,detail,blocking}, optionally range_id, nonempty item_ids,
 related_issue_ids (a nonempty array of existing input issue IDs being continued), and
 needs_source (a boolean: true needs original text outside this request, false means the
-supplied original text is sufficient; omit when not judged). Do not emit null or empty
-optional fields. A continuation preserves the original problem; it does not resolve it.
+supplied original text is sufficient; omit when not judged). Prefer omitting unknown
+optional fields; do not emit empty optional collections. A continuation preserves the
+original problem; it does not resolve it.
 Report a different doubt separately, even if it shares a source. Explain missing source
 or sufficient local evidence in detail; do not infer global absence from this local pack.
 An unresolved

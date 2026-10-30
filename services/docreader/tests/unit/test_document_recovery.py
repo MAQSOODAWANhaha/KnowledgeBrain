@@ -10,7 +10,7 @@ from docreader.integrations.artifacts import ArtifactIntegrityError, ArtifactSto
 from docreader.integrations.store import Lease
 from docreader.llm.budget import RequestBudget
 from docreader.llm.recovery import call_validated
-from docreader.llm.request import build_request, request_digest
+from docreader.llm.request import ModelBudgetError, ModelSemanticError, build_request, request_digest
 from docreader.tender import document_execution
 from docreader.tender.document_execution import (
     _DocumentExecutor,
@@ -317,3 +317,59 @@ async def test_document_execution_pins_v2_grounding_policy_without_changing_exec
         == "knowledge_required_v2"
     )
     assert spec["protocol"] == "tender_document_execution_v1"
+
+
+async def test_oversized_accepted_request_replays_before_new_send_admission(tmp_path, monkeypatch):
+    artifacts = ArtifactStore(tmp_path)
+    client = SimpleNamespace(config=SimpleNamespace(chat=SimpleNamespace(base_url="http://fixture")))
+    request = model_request("authoring_write", "write")
+    digest = request_digest(client.config.chat.base_url, request)
+    reference = artifacts.put_json({"task": "authoring_write", "input_digest": digest,
+                                    "response": {"content": "paid and accepted"}})
+    store = SimpleNamespace(receipt=AsyncMock(return_value=None), commit_artifact=AsyncMock())
+    previous = {"execution_id": "previous", "receipts": [{"stage": "document-model-response",
+        "scope": f"authoring_write:{digest}", "input_digest": digest, "artifact_ref": reference}]}
+    budget = RequestBudget(context_tokens=100, model="fixture", prompts={})
+    assert budget.measure_request(request, "authoring_write")["fits"] is False
+    executor = _DocumentExecutor(client, store, artifacts, SimpleNamespace(execution_id="current"),
+                                 budget, {}, previous)
+    calls = []
+    monkeypatch.setattr(document_execution, "_DocumentModel", lambda *_args: calls.append("sent"))
+    assert await executor.replay("authoring_write", request, lambda value: value["content"]) == (True, "paid and accepted")
+    assert await executor("authoring_write", request, lambda value: value["content"]) == "paid and accepted"
+    assert calls == []
+
+
+async def test_replay_miss_does_not_send_or_consume_attempts(tmp_path, monkeypatch):
+    artifacts = ArtifactStore(tmp_path)
+    client = SimpleNamespace(config=SimpleNamespace(chat=SimpleNamespace(base_url="http://fixture")))
+    store = SimpleNamespace(receipt=AsyncMock(return_value=None), commit_artifact=AsyncMock())
+    executor = _DocumentExecutor(client, store, artifacts, SimpleNamespace(execution_id="current"),
+                                 RequestBudget(model="fixture", prompts={}), {}, None)
+    calls = []
+    monkeypatch.setattr(document_execution, "_DocumentModel", lambda *_args: calls.append("sent"))
+    assert await executor.replay("authoring_write", model_request("authoring_write", "write"), lambda value: value) == (False, None)
+    assert calls == []
+    store.commit_artifact.assert_not_awaited()
+
+
+async def test_inherited_cache_must_pass_current_binder_before_budget_bypass(tmp_path, monkeypatch):
+    artifacts = ArtifactStore(tmp_path)
+    client = SimpleNamespace(config=SimpleNamespace(chat=SimpleNamespace(base_url="http://fixture")))
+    request = model_request("authoring_write", "write")
+    digest = request_digest(client.config.chat.base_url, request)
+    reference = artifacts.put_json({"task": "authoring_write", "input_digest": digest,
+                                    "response": {"content": "old contract"}})
+    store = SimpleNamespace(receipt=AsyncMock(return_value=None), commit_artifact=AsyncMock())
+    previous = {"execution_id": "previous", "receipts": [{"stage": "document-model-response",
+        "scope": f"authoring_write:{digest}", "input_digest": digest, "artifact_ref": reference}]}
+    executor = _DocumentExecutor(client, store, artifacts, SimpleNamespace(execution_id="current"),
+                                 RequestBudget(context_tokens=100, model="fixture", prompts={}), {}, previous)
+
+    def reject(_value):
+        raise ModelSemanticError("no current support")
+
+    assert await executor.replay("authoring_write", request, reject) == (False, None)
+    with pytest.raises(ModelBudgetError):
+        await executor("authoring_write", request, reject)
+    store.commit_artifact.assert_not_awaited()

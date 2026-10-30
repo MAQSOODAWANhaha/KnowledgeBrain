@@ -23,7 +23,9 @@ def test_v2_extraction_excludes_global_navigation_without_losing_source_coverage
     identity = {"source_version": 1, "domain_revision": 2}
     problems = [{"issue_id": "source-1", "code": "scope_pending", "detail": "Scope still needs review.", "blocking": True}]
     builder = partial(item_payload, identity=identity, issues=problems)
-    admission = RequestBudget(context_tokens=6500, output_reserve=0, prompts={"extract": "Read every source."})
+    # Include the static generation contract; the repeated catalog must still
+    # exceed this small synthetic window while complete source packs fit.
+    admission = RequestBudget(context_tokens=11000, output_reserve=0, prompts={"extract": "Read every source."})
     packs, _ = make_packs(index, admission, payload_builder=builder)
     assert_coverage(index, packs)
     for pack in packs:

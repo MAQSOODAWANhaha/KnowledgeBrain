@@ -10,14 +10,11 @@ by these requirements, with their conditions and structural support. Resolve tho
 range IDs and respect their scope; text-free `source_aliases` map old cited IDs to exact
 canonical Unicode intervals of already supplied ranges. Never invent unresolved references.
 
-Return exactly one primary response item per supplied requirement:
-```
-{"items": [{"requirement_id": "exact input requirement id", "target_kind": "body",
- "target": "第3章/3.2 服务期限承诺",
- "action": "承诺投标人在30天内交付，并说明交付里程碑。",
- "material_needs": ["Project delivery schedule approved by the delivery owner"],
- "constraint_digest": "copy the supplied 64-character digest exactly"}]}
-```
+Return exactly one primary response item per supplied requirement, using its exact input
+requirement_id. The complete response must conform to the host-supplied response JSON Schema.
+A local field example is target="第3章/3.2 服务期限承诺" with
+action="承诺投标人在30天内交付，并说明交付里程碑。"; this illustrates a position and
+specific action, not a complete response or an obligation absent from the supplied source.
 
 `target_kind` is `body`, `table_field`, `attachment`, or `manual_action`.
 - A body target identifies a chapter/section plus position, and action states the actual

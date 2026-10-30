@@ -30,7 +30,7 @@ class RequestBudget:
     """
 
     METHOD = "utf8_bytes_decoded_messages_v2"
-    BUILDER = "chat_json_object_stream_short_refs_v2"
+    BUILDER = "chat_json_object_stream_short_refs_schema_v3"
     IMAGE_TOKENS = 16384
     FRAMING_TOKENS = 32  # 16 + 8 per message for our two-message body.
     TOKENIZERS = ("o200k_base",)
@@ -140,6 +140,8 @@ class RequestBudget:
         )
 
     def spec(self) -> dict:
+        from docreader.llm.contracts import output_contract_spec
+
         spec = {
             "method": self.METHOD,
             "builder": self.BUILDER,
@@ -149,6 +151,7 @@ class RequestBudget:
             "safety": self.safety,
             "image_tokens_each": self.IMAGE_TOKENS,
             "framing_tokens": self.FRAMING_TOKENS,
+            "output_contracts": output_contract_spec(),
             "prompts": {
                 task: hashlib.sha256(prompt.encode()).hexdigest()
                 for task, prompt in sorted(self.prompts.items())
@@ -189,7 +192,7 @@ class RequestBudget:
         from docreader.llm.wire import WirePayload
 
         return build_request(
-            self.model, prompt, WirePayload(task, payload).payload, images
+            self.model, prompt, WirePayload(task, payload).payload, images, task=task
         )
 
     def measure(
@@ -308,6 +311,22 @@ class RequestBudget:
         # An independent VLM may have no configured capacity. Preserve that
         # existing deployment meaning, without reporting a proven fit.
         return measured
+
+    def admit_request(self, request: dict, task: str | None = None) -> dict:
+        """Send complete assembly/review while retaining an exceeded estimate."""
+        try:
+            return self.require_request(request, task)
+        except ModelBudgetError:
+            payload = json.loads(request["messages"][1]["content"][0]["text"])
+            if not isinstance(payload, dict) or (task, payload.get("operation")) not in (
+                ("outline", "assemble"),
+                ("authoring_structure", "structure"),
+            ):
+                raise
+            return {
+                **self.measure_request(request, task),
+                "admission_warning": "local_context_estimate_exceeded",
+            }
 
 
 def _json(value) -> str:

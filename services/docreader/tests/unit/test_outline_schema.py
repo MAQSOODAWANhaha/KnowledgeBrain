@@ -19,8 +19,18 @@ def test_whole_and_retained_references_have_distinct_identity():
     assert SourceUnitRef(source_index_ref=REF, unit_id="native-unit").source_index_ref.sha256 == REF["sha256"]
 
 
+def test_unknown_decision_pair_nulls_normalize_to_the_whole_item_reference():
+    payload = {"item_ref": ITEM, "decision_id": None, "rule_index": None}
+    whole = EffectiveItemRef(item_ref=ITEM)
+    normalized = EffectiveItemRef.model_validate(payload)
+    assert normalized == whole
+    assert normalized.model_dump(exclude_unset=True) == whole.model_dump(exclude_unset=True)
+    assert payload == {"item_ref": ITEM, "decision_id": None, "rule_index": None}
+
+
 @pytest.mark.parametrize("extra", [
-    {"decision_id": "decision"}, {"rule_index": 0}, {"decision_id": None, "rule_index": None},
+    {"decision_id": "decision"}, {"rule_index": 0},
+    {"decision_id": "decision", "rule_index": None}, {"decision_id": None, "rule_index": 0},
     {"decision_id": "decision", "rule_index": -1}, {"decision_id": "decision", "rule_index": True},
     {"scoring": {"points": 2}},
 ])

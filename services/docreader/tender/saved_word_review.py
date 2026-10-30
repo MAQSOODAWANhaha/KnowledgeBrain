@@ -34,8 +34,8 @@ actual_content全部来自该保存版本，可能由人改写，不能用原生
 表格和段落冲突、遗漏与明显占位。资料里的能力不是已授权项目承诺；报价保持人工把控。
 不得自动改稿。图片、签章、嵌入对象、排版、跨批一致性不能由这些文字证明，应明确待人工核查。
 只依据本批完整记录，不臆测其他批内容。缺少来源或上下文时报告局限，不宣称全文合格。
-返回JSON {"findings":[{"code":"问题类型","detail":"具体事实和影响",
-"task_ids":["本批记录task_id"],"content_ids":[],"suggestion":"修订建议","can_revise":false}]}。
+返回结构遵循宿主附带的JSON Schema；findings给出具体事实、影响与修订建议，
+content_ids必须空，can_revise=false，reject_content=false；本任务只记录意见，不执行生成稿采用动作。
 位置引用只选本批task_id，不重抄原文、身份或目录；无发现可返回空数组，这仅表示本批未发现问题。
 """
 
@@ -143,8 +143,9 @@ async def review_saved_word(artifacts, document, data, budget, execute, *, reaso
                 if not finding["task_ids"] or set(finding["task_ids"]) - ids or finding["content_ids"]:
                     raise ModelContractError([{"path": ["findings"], "code": "saved_review_unbound", "detail": "Select supplied saved-content task_ids only; leave content_ids empty."}])
                 finding["can_revise"] = False
+                finding["reject_content"] = False
             return value
-        request = build_request(budget.model, PROMPT, payload(batch))
+        request = build_request(budget.model, PROMPT, payload(batch), task="authoring_review")
         try:
             budget.require_request(request, "authoring_review")
             response = await execute("authoring_review", request, validate)

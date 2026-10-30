@@ -115,7 +115,7 @@ async def test_tender_background_is_written_without_enterprise_knowledge(tmp_pat
     result = artifacts.read_json(await generate_document(artifacts, snapshot,
         RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), execute))
     adopted = artifacts.read_json(result['unit_refs'][0])
-    assert calls == ['outline', 'outline', 'authoring_write', 'authoring_review', 'structure']
+    assert calls == ['outline', 'outline', 'structure', 'authoring_write', 'authoring_review']
     assert adopted['blocks'][0]['text'] == background
     assert adopted['blocks'][0]['material_ids'] == [] and adopted['blocks'][0]['source_refs']
 
@@ -232,6 +232,7 @@ async def test_mixed_nonprice_form_uses_source_and_company_support_without_copyi
         {'row': row, 'column': col, 'text': label if col == 0 else '', 'row_span': 1, 'col_span': 1}
         for row, label in enumerate(('项目名称', '人员姓名', '证书编号')) for col in range(2)]}
     snapshot = source_snapshot(artifacts, [{'text': '本项目名称为甲项目。', 'grid': grid}])
+    template_aliases = []
 
     async def execute(stage, request, validate):
         value = json.loads(request['messages'][1]['content'][0]['text'])
@@ -249,11 +250,14 @@ async def test_mixed_nonprice_form_uses_source_and_company_support_without_copyi
             return validate({})
         if stage == 'authoring_write':
             assert sum(bool(s.get('grid')) for s in value['supports']) == 1
+            template_alias = next(s['support_id'] for s in value['supports'] if s.get('grid'))
+            assert template_alias in value['targets'][0]['template_support_ids']
+            template_aliases.append(template_alias)
             return validate({'blocks': [], 'cell_fills': [
-                {'source_id': 's1', 'row': row, 'column': 1, 'text': text,
+                {'source_id': template_alias, 'row': row, 'column': 1, 'text': text,
                  'target_ids': ['t1'], 'support_ids': [support]}
-                for row, text, support in ((0, '甲项目', 's1'), (1, '张三', 'k1'))]})
-        assert [f['support_ids'] for f in value['units'][0]['content']['cell_fills']] == [['s1'], ['k1']]
+                for row, text, support in ((0, '甲项目', template_alias), (1, '张三', 'k1'))]})
+        assert [f['support_ids'] for f in value['units'][0]['content']['cell_fills']] == [[template_aliases[0]], ['k1']]
         return validate({'findings': []})
 
     result = artifacts.read_json(await generate_document(artifacts, snapshot,

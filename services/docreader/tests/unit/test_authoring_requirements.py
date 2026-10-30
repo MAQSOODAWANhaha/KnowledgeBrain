@@ -125,7 +125,7 @@ def test_preserved_requirement_and_input_are_deep_copies():
 def test_malformed_legacy_semantic_rule_does_not_discard_its_valid_sibling_or_block_generation():
     malformed, valid = reference("legacy"), reference()
     value = context([("old", malformed), ("r1", valid)], [
-        {"rule_id": "old", "item": {**item(), "item_id": "legacy", "conditions": None}},
+        {"rule_id": "old", "item": {**item(), "item_id": "legacy", "conditions": []}},
         {"rule_id": "r1", "item": item()}])
 
     result = preserve_requirements(value, outline())

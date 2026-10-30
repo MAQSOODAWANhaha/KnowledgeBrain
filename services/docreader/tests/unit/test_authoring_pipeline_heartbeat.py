@@ -128,7 +128,7 @@ async def test_all_pipeline_source_loads_share_context_repository(monkeypatch, t
     task = {"task_id": "w1", "chapter_id": "chapter-1", "title_path": ["响应"], "targets": [
         {"target_id": "target", "kind": "form", "purpose": "填写原格式", "rule_refs": [],
          "source_refs": [source], "template_refs": [{"source_ref": source,
-            "selectors": [{"range_id": "source-a", "start": 0, "end": 3}]}]}]}
+                "selectors": [{"range_id": "source-a", "source_range_id": "source-a", "start": 0, "end": 3}]}]}]}
     payload, _, issues = pipeline._load_task(artifacts, context, task, {"response": {"shared_arrangements": []}}, [])
     assert not issues and [s["text"] for s in payload["supports"]] == ["原文", "原格式"]
     assert [name for name, _ in seen] == ["part", "source", "source", "part"]

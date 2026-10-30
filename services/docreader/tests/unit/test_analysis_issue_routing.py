@@ -144,7 +144,7 @@ async def test_informational_notes_skip_work_but_missing_local_location_stays_vi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("links", [["absent"], ["question-0", "absent"], [], None, "question-0"])
+@pytest.mark.parametrize("links", [["absent"], ["question-0", "absent"], [], "question-0"])
 async def test_invalid_optional_links_preserve_finding_and_force_unknown_route(tmp_path, links):
     data = await scenario(tmp_path)
     context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
@@ -160,6 +160,21 @@ async def test_invalid_optional_links_preserve_finding_and_force_unknown_route(t
     assert "related_issue_ids" not in value["findings"][0]
     assert "needs_source" not in value["findings"][0]
     assert value["diagnostics"] and response == original
+
+
+@pytest.mark.asyncio
+async def test_null_optional_issue_links_do_not_erase_explicit_local_routing(tmp_path):
+    data = await scenario(tmp_path)
+    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
+    payload = context.review_requests()[0]
+    response = {'schema_version': 2, 'accepted_decision_ids': [], 'findings': [{
+        'code': 'condition_unclear', 'detail': '本地核对即可。', 'blocking': True,
+        'related_issue_ids': None, 'range_id': None, 'item_ids': None, 'needs_source': False}]}
+    original = deepcopy(response)
+    value = context.validate(response, payload)
+    assert value['findings'] == [{'code': 'condition_unclear', 'detail': '本地核对即可。',
+                                 'blocking': True, 'needs_source': False}]
+    assert 'diagnostics' not in value and response == original
 
 
 def test_issue_link_short_references_and_feedback_roundtrip():

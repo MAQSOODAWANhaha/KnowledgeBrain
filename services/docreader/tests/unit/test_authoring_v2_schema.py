@@ -51,6 +51,33 @@ def test_writer_only_selects_support_refs_while_persisted_blocks_keep_formal_ref
         WritingResponse.model_validate({"blocks": [{"kind": "paragraph", "material_ids": ["permanent-id"]}]})
 
 
+def test_writer_accepts_row_fills_without_a_redundant_empty_blocks_array():
+    response = WritingResponse.model_validate({"row_fills": [{"row_id": "q1", "text": "支持双机热备。",
+        "support_ids": ["k1"]}]}).model_dump()
+    assert response['blocks'] == []
+    assert response['row_fills'][0]['text'] == '支持双机热备。'
+
+
+def test_outline_empty_containers_have_the_same_defaults_as_assembly():
+    result = OutlineResponse.model_validate({'schema_version': 2, 'chapters': [
+        {'title': '技术文件', 'children': [{'title': '留空位置'}]}], 'findings': []})
+    assert result.chapters[0].targets == []
+    assert result.chapters[0].children[0].targets == result.chapters[0].children[0].children == []
+
+
+@pytest.mark.parametrize('field', ['blocks', 'cell_fills', 'row_fills', 'attachment_ids', 'gaps'])
+def test_writer_empty_defaults_do_not_turn_explicit_null_into_a_list(field):
+    with pytest.raises(ValidationError):
+        WritingResponse.model_validate({'blocks': [], field: None})
+
+
+@pytest.mark.parametrize('field', ['targets', 'children'])
+def test_outline_empty_defaults_do_not_turn_explicit_null_into_a_list(field):
+    with pytest.raises(ValidationError):
+        OutlineResponse.model_validate({'schema_version': 2, 'chapters': [
+            {'title': '技术文件', 'targets': [], 'children': [], field: None}], 'findings': []})
+
+
 def test_shared_arrangement_wire_refs_and_persisted_material_refs_are_distinct():
     arrangement = {"topic": "访问控制", "text": "按角色分配权限。", "nature": "provided"}
     wire = AuthoringBasisResponse.model_validate({"shared_arrangements": [

@@ -64,7 +64,7 @@ async def test_source_validator_reports_constraint_reference_instead_of_copying_
 
 async def test_source_packing_leaves_feedback_room_without_losing_original_text(tmp_path):
     artifacts = ArtifactStore(tmp_path)
-    originals = ["a" * 3900, "b" * 3900]
+    originals = ["a" * 2800, "b" * 2800]
     context = _OutlineContext(artifacts, snapshot(artifacts, [{"text": text} for text in originals]))
     budget = RequestBudget(model="fixture", context_tokens=12000, output_reserve=2000,
                            prompts={"outline": "Return the requested outline JSON"})

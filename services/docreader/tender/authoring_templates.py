@@ -125,6 +125,9 @@ def prepare_template_parts(artifacts, context, source_records=None):
                 identity = piece['range_id']
                 context.sources[identity] = deepcopy(references)
                 context.range_roots[identity] = row['source_range_id']
+                context.excerpts[identity] = [{'source_ref': {
+                    'source_index_ref': source_index_ref, 'unit_id': row['unit_id']},
+                    'selectors': [selector(piece)]}]
                 records.append({**{key: deepcopy(value) for key, value in original.items()
                                    if key not in {'source', 'sources', 'rules'}},
                     'source': {**deepcopy(view), 'range_id': identity, 'text': paragraph},

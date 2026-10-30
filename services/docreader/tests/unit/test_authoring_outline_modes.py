@@ -23,14 +23,14 @@ async def test_outline_only_uses_current_source_and_assembly_without_writing_or_
     async def execute(task, request, validate):
         value = payload(request)
         calls.append((task, value.get("operation")))
-        assert task == "outline", "Outline planning must stop before basis, writing and review."
+        assert task in {"outline", "authoring_structure"}, "Outline planning must stop before basis and writing."
         return validate(ordinary_response(task, value))
 
     reference = await pipeline.generate_document(artifacts, fixed, budget(), execute,
                                                   outline_only=True, knowledge=Knowledge())
     outline = AuthoringOutline.model_validate(artifacts.read_json(reference))
     assert outline.authoring_input.model_dump() == fixed
-    assert len(calls) == 2 and calls[-1] == ("outline", "assemble")
+    assert calls == [("outline", None), ("outline", "assemble"), ("authoring_structure", "structure")]
     assert "docx_ref" not in artifacts.read_json(reference)
 
 
@@ -61,6 +61,9 @@ async def test_fixed_outline_skips_organization_and_preserves_identity_order_and
     async def execute(task, request, validate):
         assert task != "outline", "A fixed outline must never be reorganized by the model."
         requests.append(payload(request))
+        if task == "authoring_structure":
+            return validate({"findings": [{"code": "check_structure", "detail": "人工目录位置仍需核对。",
+                "suggestion": "由人工决定是否调整已有章节。", "can_revise": False}]})
         return validate(ordinary_response(task, payload(request)))
 
     result = artifacts.read_json(await pipeline.generate_document(

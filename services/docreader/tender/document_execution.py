@@ -135,13 +135,21 @@ class _DocumentExecutor:
     async def __call__(self, task, request, validate):
         if task not in _TASKS:
             raise ModelConfigurationError("unsupported document model task")
-        self.budget.require_request(request, task)
         digest = request_digest(self.client.config.chat.base_url, request)
         lock = self._request_locks.setdefault((task, digest), asyncio.Lock())
         async with lock:
             return await self._execute(task, request, validate, digest)
 
-    async def _execute(self, task, request, validate, digest):
+    async def replay(self, task, request, validate):
+        """Revalidate an exact accepted response without admitting or sending HTTP."""
+        if task not in _TASKS:
+            raise ModelConfigurationError("unsupported document model task")
+        digest = request_digest(self.client.config.chat.base_url, request)
+        lock = self._request_locks.setdefault((task, digest), asyncio.Lock())
+        async with lock:
+            return await self._replay(task, validate, digest)
+
+    async def _replay(self, task, validate, digest):
         scope = f"{task}:{digest}"
         receipt = await self.store.receipt(
             self.lease, "document-model-response", scope, input_digest=digest
@@ -190,7 +198,15 @@ class _DocumentExecutor:
                             "reused_from_execution_id": self.previous["execution_id"]
                         },
                     )
-                return value
+                return True, value
+        return False, None
+
+    async def _execute(self, task, request, validate, digest):
+        hit, value = await self._replay(task, validate, digest)
+        if hit:
+            return value
+        self.budget.admit_request(request, task)
+        scope = f"{task}:{digest}"
 
         accepted = None
 

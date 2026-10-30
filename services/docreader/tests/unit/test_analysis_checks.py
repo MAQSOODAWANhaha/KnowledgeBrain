@@ -351,7 +351,7 @@ async def test_physical_page_candidate_loads_complete_page_for_association(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("null_field", ["section_refs","page_refs"])
-async def test_unused_optional_candidate_selectors_reject_explicit_null(tmp_path,null_field):
+async def test_unused_optional_candidate_selectors_normalize_explicit_null(tmp_path,null_field):
     data = await scenario(tmp_path,documents=[("main","main",[("第一页。","obligation"),("第二页。",None)])],
                           native_setup=physical_pdf)
 
@@ -359,8 +359,8 @@ async def test_unused_optional_candidate_selectors_reject_explicit_null(tmp_path
         select = page_candidate if null_field == "section_refs" else all_source_candidate
         return [{**entry,null_field:None} for entry in select(payload)]
 
-    with pytest.raises(ModelSemanticError,match="host contract"):
-        await run(data,Model(locate=candidate))
+    result = await run(data,Model(locate=candidate))
+    assert result['blocking'] is False
 
 
 @pytest.mark.asyncio

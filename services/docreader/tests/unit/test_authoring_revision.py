@@ -133,9 +133,9 @@ async def test_previous_template_and_attachment_use_current_short_references(tmp
     proof_material = {"material_id": "proof", "title": "原件", "text": "原件证明本次功能适用。",
                       "original_ref": proof_ref, "attachment": True, "usage": "proof", "locator": {}}
     current = unit(cell_fills=[{"source_ref": ref_a, "row": 1, "column": 1, "text": "甲表值",
-                               "target_ids": ["w1:target"], "material_ids": ["method"], "source_refs": []},
+                               "target_ids": ["w1:target"], "material_ids": ["method"], "source_refs": [], "source_excerpts": []},
                               {"source_ref": ref_b, "row": 1, "column": 1, "text": "乙表值",
-                               "target_ids": ["w1:target"], "material_ids": ["method"], "source_refs": []}],
+                               "target_ids": ["w1:target"], "material_ids": ["method"], "source_refs": [], "source_excerpts": []}],
                    attachments=[{"material_id": "proof", "title": "原件", "artifact_ref": proof_ref}])
 
     def make_payload(_task):

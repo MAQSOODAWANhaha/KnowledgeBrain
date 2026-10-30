@@ -87,14 +87,19 @@ def _rule_dispositions(context, issues):
     return dispositions, gaps
 
 
-def _structure_payload(artifacts, outline, units):
+def _structure_payload(artifacts, outline, units, *, outline_phase=False):
     from docreader.tender.authoring_pipeline import _constraint_context
     from docreader.tender.authoring_templates import (
         load_template_part,
         template_part_key,
     )
 
+    from docreader.tender.authoring_excerpts import load_source_excerpt, source_excerpt_key
+
+    if outline_phase:
+        units = []
     supports, part_ids, targets, gaps, task_ids = [], {}, {}, [], {}
+    target_prefix = "v" if outline_phase else "t"
     for unit in units:
         for identity in unit.get("target_ids", []):
             task_ids.setdefault(identity, []).append(unit["task_id"])
@@ -112,10 +117,32 @@ def _structure_payload(artifacts, outline, units):
     def register(entries):
         for chapter in entries:
             for target in chapter.get("targets", []):
-                targets.setdefault(target["target_id"], f"t{len(targets) + 1}")
+                targets.setdefault(target["target_id"], f"{target_prefix}{len(targets) + 1}")
             register(chapter.get("children", []))
 
     register(outline["chapters"])
+
+    def source_supports(excerpts, chapter_id, target_id):
+        identities = []
+        fragments = [{"source_ref": excerpt["source_ref"], "selectors": [selected]}
+                     for excerpt in excerpts for selected in excerpt["selectors"]]
+        for excerpt in fragments:
+            try:
+                key = ("excerpt", source_excerpt_key(excerpt))
+                if key not in part_ids:
+                    loaded = load_source_excerpt(artifacts, excerpt, repository=context.repository)
+                    source = loaded["unit"]
+                    support_id = f"s{len(supports) + 1}"
+                    supports.append({"support_id": support_id, "origin": "tender", "text": loaded["text"],
+                        "heading_path": source.get("heading_path", source.get("locator", {}).get("heading_path", ""))})
+                    part_ids[key] = support_id
+                if part_ids[key] not in identities:
+                    identities.append(part_ids[key])
+            except (OSError, ValueError, KeyError):
+                gaps.append({"code": "structure_source_unavailable",
+                    "detail": "本位置的精确招标原文暂不可读，保留来源及结构待核。",
+                    "chapter_id": chapter_id, "target_id": target_id})
+        return identities
 
     def chapters(entries):
         result = []
@@ -123,7 +150,7 @@ def _structure_payload(artifacts, outline, units):
             selected = []
             for target in chapter.get("targets", []):
                 identity = targets.setdefault(
-                    target["target_id"], f"t{len(targets) + 1}"
+                    target["target_id"], f"{target_prefix}{len(targets) + 1}"
                 )
                 template_ids = []
                 for part in target.get("template_refs", []):
@@ -190,6 +217,14 @@ def _structure_payload(artifacts, outline, units):
                         "task_ids": task_ids.get(target["target_id"], []),
                     }
                 )
+                if target.get("source_excerpts"):
+                    selected[-1]["source_support_ids"] = source_supports(target["source_excerpts"],
+                        chapter["chapter_id"], target["target_id"])
+                if target.get("response_table"):
+                    selected[-1]["response_rows"] = [{"row_id": f"q{ordinal}",
+                        "source_support_ids": source_supports(row["source_excerpts"],
+                            chapter["chapter_id"], target["target_id"])}
+                        for ordinal, row in enumerate(target["response_table"]["rows"], 1)]
             result.append(
                 {
                     "chapter_id": chapter["chapter_id"],
@@ -226,6 +261,7 @@ def _structure_payload(artifacts, outline, units):
     return {
         "grounding_policy": AUTHORING_GROUNDING_POLICY,
         "operation": "structure",
+        **({"phase": "outline"} if outline_phase else {}),
         "chapters": tree,
         "sections": sections,
         "supports": supports,
@@ -236,7 +272,7 @@ def _structure_payload(artifacts, outline, units):
     }, gaps
 
 
-async def review_structure(artifacts, outline, units, budget, execute):
+async def review_structure(artifacts, outline, units, budget, execute, *, outline_phase=False):
     """Return findings/gaps; the durable executor owns the existing retry allowance.
 
     Inspect final adopted instances once, including manual or unfilled forms.
@@ -244,7 +280,11 @@ async def review_structure(artifacts, outline, units, budget, execute):
     """
     if not outline.get("chapters"):
         return [], []
-    payload, gaps = _structure_payload(artifacts, outline, units)
+    if outline_phase:
+        units = []
+        payload, gaps = _structure_payload(artifacts, outline, units, outline_phase=True)
+    else:
+        payload, gaps = _structure_payload(artifacts, outline, units)
     task_ids = {unit["task_id"] for unit in units}
 
     def validate(raw):
@@ -269,7 +309,9 @@ async def review_structure(artifacts, outline, units, budget, execute):
                     ]
                 )
             finding["task_ids"] = list(dict.fromkeys(finding["task_ids"]))
-            finding["can_revise"] = False
+            finding["reject_content"] = False
+            if not outline_phase:
+                finding["can_revise"] = False
         return value
 
     prompt = budget.prompts.get("authoring_structure")
@@ -277,8 +319,13 @@ async def review_structure(artifacts, outline, units, budget, execute):
         from docreader.tender.document_execution import load_prompts
 
         prompt = load_prompts()["authoring_structure"]
-    request = build_request(budget.model, prompt, payload)
+    request = build_request(budget.model, prompt, payload, task="authoring_structure")
     try:
+        from docreader.tender.authoring_pipeline import _replay
+
+        hit, value = await _replay(execute, "authoring_structure", request, validate)
+        if hit:
+            return value["findings"], gaps
         try:
             budget.require_request(request, "authoring_structure")
         except ModelBudgetError:
@@ -288,8 +335,12 @@ async def review_structure(artifacts, outline, units, budget, execute):
                 budget.model,
                 prompt + _COMPACT_VIEW_PROMPT,
                 compact_structure_payload(payload),
+                task="authoring_structure",
             )
-            budget.require_request(request, "authoring_structure")
+            hit, value = await _replay(execute, "authoring_structure", request, validate)
+            if hit:
+                return value["findings"], gaps
+            budget.admit_request(request, "authoring_structure")
         value = await execute("authoring_structure", request, validate)
     except (ModelBudgetError, ModelWorkUnitExhausted) as error:
         gaps.append(

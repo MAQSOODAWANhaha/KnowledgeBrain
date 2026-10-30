@@ -163,11 +163,10 @@ async def test_cross_task_issue_requires_a_complete_successful_rereview(
         assert final == []
         assert not any(gap["code"] == "cross_dependency" for gap in result["gaps"])
         assert len(reviews) == 2
-    assert review_rounds == [2, 2] and writes == [
-        ("A部分", False),
-        ("C部分", False),
-        ("A部分", True),
-    ]
+    assert review_rounds == [2, 2]
+    # Initial writes run concurrently; the revision must follow both initial writes.
+    assert sorted(writes[:2]) == [("A部分", False), ("C部分", False)]
+    assert writes[2:] == [("A部分", True)]
     assert len(structure_reviews) == 1
     units = {
         unit["task_id"]: unit for unit in map(artifacts.read_json, result["unit_refs"])

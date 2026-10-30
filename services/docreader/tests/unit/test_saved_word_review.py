@@ -43,3 +43,33 @@ def test_unanchored_document_is_reviewed_without_guessing_chapter_from_title():
     records, gaps = read_saved_word(stream.getvalue(), [{"chapter_id": "original", "title": "旧标题", "children": [], "targets": []}])
     assert all(record["chapter_id"] is None for record in records)
     assert any(gap["code"] == "saved_word_missing_chapter" for gap in gaps)
+
+
+async def test_saved_word_review_only_reports_without_adopting_generated_content(tmp_path, monkeypatch):
+    import json
+
+    from docreader.integrations.artifacts import ArtifactStore
+    from docreader.llm.budget import RequestBudget
+    from docreader.tender import saved_word_review
+
+    record = {"task_id": "saved-1", "chapter_id": "chapter-original", "title": "人工保存章节",
+              "actual_content": {"kind": "paragraph", "text": "人工保存的当前正文。"}}
+    monkeypatch.setattr(saved_word_review, "_prepare_review", lambda *_args: (
+        [record], [], {"chapter-original": [{"rules": [], "supports": []}]}, {}))
+    calls = []
+
+    async def execute(stage, request, validate):
+        payload = json.loads(request["messages"][1]["content"][0]["text"])
+        calls.append(payload)
+        assert stage == "authoring_review" and payload["operation"] == "review_saved_word"
+        assert payload["records"][0]["actual_content"] == record["actual_content"]
+        return validate({"findings": [{"code": "source_meaning_changed", "detail": "人工稿条件需要核对。",
+            "task_ids": ["saved-1"], "can_revise": True, "reject_content": True}]})
+
+    report = await saved_word_review.review_saved_word(ArtifactStore(tmp_path), {}, saved_bytes(),
+        RequestBudget(model="fixture", context_tokens=131072, prompts={}), execute)
+    assert len(calls) == report["reviewed_record_count"] == 1
+    finding, = report["findings"]
+    assert finding["code"] == "source_meaning_changed" and finding["content_ids"] == []
+    assert finding["can_revise"] is False
+    assert finding["reject_content"] is False, "Saved Word review reports opinions without content adoption."

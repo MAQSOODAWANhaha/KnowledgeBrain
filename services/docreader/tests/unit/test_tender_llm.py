@@ -677,7 +677,11 @@ async def test_execution_drift_fails_before_request_audit_or_http(change):
 
 
 async def test_snapshot_prompt_is_the_prompt_actually_sent():
-    prompts = {"extract": "original JSON prompt"}
+    from docreader.llm.request import build_request
+
+    source_prompt = "original JSON prompt"
+    prompts = {"extract": source_prompt}
+    expected_prompt = build_request("gpt-4o", source_prompt, {}, task="extract")["messages"][0]["content"]
     seen = []
     audit = Audit()
 
@@ -685,8 +689,9 @@ async def test_snapshot_prompt_is_the_prompt_actually_sent():
         seen.append(json.loads(request.content)["messages"][0]["content"])
         assert (
             audit.spec["prompts"]["extract"]
-            == hashlib.sha256(seen[-1].encode()).hexdigest()
+            == hashlib.sha256(source_prompt.encode()).hexdigest()
         )
+        assert seen[-1] == expected_prompt
         return response()
 
     client = OpenAIModel(
@@ -699,7 +704,7 @@ async def test_snapshot_prompt_is_the_prompt_actually_sent():
     prompts["extract"] = "caller changed this after construction"
     async with client:
         await client.call("extract", {})
-    assert seen == ["original JSON prompt"]
+    assert seen == [expected_prompt]
 
 
 async def test_exact_sent_body_has_same_measurement_as_planner_and_budget_is_pinned():

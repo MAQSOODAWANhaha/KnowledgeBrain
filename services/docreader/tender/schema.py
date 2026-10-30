@@ -68,9 +68,9 @@ class _AnalysisContract(Contract):
     @classmethod
     def omit_unknown_optional_fields(cls, value):
         if isinstance(value, dict):
-            for name, field in cls.model_fields.items():
-                if not field.is_required() and name in value and value[name] is None:
-                    raise ValueError(f"omit optional {name} instead of providing null")
+            omitted = {name for name, field in cls.model_fields.items()
+                       if not field.is_required() and field.default is None}
+            return {name: entry for name, entry in value.items() if entry is not None or name not in omitted}
         return value
 
 
@@ -270,23 +270,24 @@ class Issue(Contract):
         return value
 
 
-def _explicit_analysis_issue(value):
-    if isinstance(value, Issue):
-        fields = value.model_fields_set
-        supplied = {name: getattr(value, name) for name in fields}
-    elif isinstance(value, dict):
-        fields, supplied = value.keys(), value
-    else:
+class AnalysisIssue(_AnalysisContract, Issue):
+    blocking: StrictBool = Field()
+
+    @model_validator(mode="before")
+    @classmethod
+    def explicit_issue_fields(cls, value):
+        if isinstance(value, Issue):
+            return value.model_dump(exclude_unset=True)
         return value
-    if not {"code", "detail", "blocking"}.issubset(fields):
-        raise ValueError("analysis issues require explicit code, detail and blocking")
-    for name in ("range_id", "item_ids", "related_issue_ids", "needs_source"):
-        if name in supplied and supplied[name] is None:
-            raise ValueError(f"omit optional issue {name} instead of providing null")
-    return value
 
 
-_AnalysisIssue = Annotated[Issue, BeforeValidator(_explicit_analysis_issue)]
+_AnalysisIssue = AnalysisIssue
+
+
+class OCRResponse(Contract):
+    text: StrictStr
+    status: OCRStatus
+    issues: list[Issue] = Field(default_factory=list)
 
 
 class Extraction(Contract):
@@ -322,6 +323,11 @@ class SourceUnitRef(Contract):
     unit_id: Identity
 
 
+class SourceExcerptRef(Contract):
+    source_ref: SourceUnitRef
+    selectors: list["RangeSelector"] = Field(min_length=1)
+
+
 class TemplatePartRef(Contract):
     source_ref: SourceUnitRef
     selectors: list["RangeSelector"]
@@ -334,20 +340,30 @@ SupportOrigins = Annotated[list[Literal["tender", "knowledge"]], Field(min_lengt
 SearchQuery = Annotated[Text, Field(max_length=256)]
 
 
+class ResponseTableRowResponse(Contract):
+    range_ids: list[Identity] = Field(min_length=1)
+    rule_ids: list[Identity] = Field(default_factory=list)
+
+
+class ResponseTableResponse(Contract):
+    rows: list[ResponseTableRowResponse] = Field(min_length=1)
+
+
 class OutlineTargetResponse(Contract):
     kind: ResponseTargetKind
     purpose: Text
     rule_ids: list[Identity]
     range_ids: list[Identity]
     template_part_ids: list[Identity] = Field(default_factory=list)
+    response_table: ResponseTableResponse | None = None
     manual_fill: StrictBool = False
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
 
 
 class OutlineChapterResponse(Contract):
     title: Text
-    targets: list[OutlineTargetResponse]
-    children: list["OutlineChapterResponse"]
+    targets: list[OutlineTargetResponse] = Field(default_factory=list)
+    children: list["OutlineChapterResponse"] = Field(default_factory=list)
     is_volume: StrictBool = False
 
 
@@ -378,6 +394,7 @@ class OutlineAssemblyTarget(Contract):
     rule_ids: list[Identity] = Field(default_factory=list)
     source_ids: list[Identity] = Field(default_factory=list)
     template_part_ids: list[Identity] = Field(default_factory=list)
+    response_table: ResponseTableResponse | None = None
     related_target_ids: list[Identity] = Field(default_factory=list)
     manual_fill: StrictBool = False
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
@@ -422,13 +439,25 @@ class OutlineAssemblyResponse(Contract):
     search_intents: list[SearchIntentResponse] = Field(default_factory=list)
 
 
+class ResponseTableRow(Contract):
+    row_id: Identity
+    source_excerpts: list[SourceExcerptRef] = Field(min_length=1)
+    rule_refs: list[EffectiveItemRef] = Field(default_factory=list)
+
+
+class ResponseTable(Contract):
+    rows: list[ResponseTableRow] = Field(min_length=1)
+
+
 class ResponseTarget(Contract):
     target_id: Identity
     kind: ResponseTargetKind
     purpose: Text
     rule_refs: list[EffectiveItemRef]
     source_refs: list[SourceUnitRef]
+    source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
     template_refs: list[TemplatePartRef] = Field(default_factory=list)
+    response_table: ResponseTable | None = None
     manual_fill: StrictBool = False
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
     related_target_ids: list[Identity] = Field(default_factory=list)
@@ -530,6 +559,7 @@ class AuthoringBlock(Contract):
     target_ids: list[Identity] = Field(default_factory=list)
     material_ids: list[Identity] = Field(default_factory=list)
     source_refs: list[SourceUnitRef] = Field(default_factory=list)
+    source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
 
 
 class CellFillResponse(Contract):
@@ -549,6 +579,21 @@ class CellFill(Contract):
     target_ids: list[Identity] = Field(default_factory=list)
     material_ids: list[Identity] = Field(default_factory=list)
     source_refs: list[SourceUnitRef] = Field(default_factory=list)
+    source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
+
+
+class RowFillResponse(Contract):
+    row_id: Identity
+    text: StrictStr
+    support_ids: list[Identity] = Field(default_factory=list)
+
+
+class RowFill(Contract):
+    row_id: Identity
+    text: StrictStr
+    material_ids: list[Identity] = Field(default_factory=list)
+    source_refs: list[SourceUnitRef] = Field(default_factory=list)
+    source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
 
 
 class AuthoringAttachment(Contract):
@@ -558,8 +603,9 @@ class AuthoringAttachment(Contract):
 
 
 class WritingResponse(Contract):
-    blocks: list[AuthoringBlockResponse]
+    blocks: list[AuthoringBlockResponse] = Field(default_factory=list)
     cell_fills: list[CellFillResponse] = Field(default_factory=list)
+    row_fills: list[RowFillResponse] = Field(default_factory=list)
     attachment_ids: list[Identity] = Field(default_factory=list)
     gaps: list[StrictStr] = Field(default_factory=list)
 
@@ -579,6 +625,7 @@ class WritingUnit(Contract):
     status: Literal["generated", "placeholder"]
     blocks: list[AuthoringBlock] = Field(default_factory=list)
     cell_fills: list[CellFill] = Field(default_factory=list)
+    row_fills: list[RowFill] = Field(default_factory=list)
     attachments: list[AuthoringAttachment] = Field(default_factory=list)
     gaps: list[StrictStr] = Field(default_factory=list)
     error_type: StrictStr | None = None
@@ -596,6 +643,9 @@ class AuthoringReviewFinding(Contract):
     content_ids: list[Identity] = Field(default_factory=list)
     suggestion: StrictStr = ""
     can_revise: StrictBool = False
+    reject_content: StrictBool = Field(default=False, description=(
+        "True only when identified generated content is incorrect or unsupported. "
+        "Missing content, missing materials and unavailable review do not reject existing content."))
 
 
 class AuthoringReviewResponse(Contract):
@@ -725,16 +775,20 @@ class ItemDisposition(_AnalysisContract):
         return self
 
 
-class ItemDispositionResponse(_AnalysisContract):
+class ItemDispositionOutput(_AnalysisContract):
+    range_id: Text
+    status: Literal["non_item", "unresolved"]
+    reason: Text
+
+
+class ItemDispositionResponse(ItemDispositionOutput):
     """LLM-response boundary. New extracts declare only non_item or unresolved.
 
     status=items remains accepted so an older complete packet can be replayed.
     The host derives item coverage and item_ids from evidence.
     """
 
-    range_id: Text
     status: Literal["items", "non_item", "unresolved"]
-    reason: Text
     item_ids: list[Text] = Field(default_factory=list)
 
 
@@ -1317,7 +1371,7 @@ def recover_issue_routing(value, allowed_ids: set[str], path: str, diagnostics: 
     """Keep a finding when its optional routing cannot bind to this input."""
     if not isinstance(value, dict):
         return value
-    result = dict(value)
+    result = AnalysisIssue.omit_unknown_optional_fields(value)
     links = result.get("related_issue_ids")
     bad_links = "related_issue_ids" in result and (
         not isinstance(links, list) or not links or any(not isinstance(i, str) or i not in allowed_ids for i in links))

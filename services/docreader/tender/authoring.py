@@ -11,6 +11,8 @@ from docreader.integrations.artifacts import ArtifactIntegrityError
 from docreader.llm.request import ModelContractError
 from docreader.tender.checks.analysis import current_items
 from docreader.tender.evidence.references import EvidenceRepository
+from docreader.tender.evidence.references import selector
+from docreader.tender.authoring_excerpts import bind_source_excerpts, response_row_id
 from docreader.tender.evidence.view import source_view
 from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY, AuthoringInput, AuthoringOutline, OutlineResponse, SourceUnitRef,
@@ -87,6 +89,10 @@ def validate_outline_references(value, *, rule_ids, source_ids, template_part_id
                 for field, allowed in (("rule_ids", rule_ids), ("range_ids", source_ids),
                                        ("template_part_ids", template_part_ids)):
                     _check_reference_ids(target[field], allowed, [*current, "targets", ordinal, field])
+                for row_number, row in enumerate((target.get("response_table") or {}).get("rows", [])):
+                    for field, allowed in (("rule_ids", rule_ids), ("range_ids", source_ids)):
+                        _check_reference_ids(row.get(field, []), allowed,
+                            [*current, "targets", ordinal, "response_table", "rows", row_number, field])
             chapters(chapter["children"], [*current, "children"])
 
     chapters(value["chapters"], ["chapters"])
@@ -127,6 +133,7 @@ class _OutlineContext:
                         "issue_resolutions": confirmation.get("issue_resolutions"),
                         "scope_decisions": plan.get("scope_decisions", [])}
         self.sources, self.read_units, self.range_roots, self.template_parts = {}, set(), {}, {}
+        self.excerpts = {}
         self._sources(plan)
 
     def _read(self, reference, label, default):
@@ -189,6 +196,10 @@ class _OutlineContext:
             tables = source.get("table_ids") or [source.get("table_id")]
             unit_ids = [u for u in tables if u in units and units[u].get("grid")]
             native = units.get(source["unit_id"])
+            if native is not None:
+                self.excerpts[source["range_id"]] = [{"source_ref": {
+                    "source_index_ref": deepcopy(source_ref), "unit_id": source["unit_id"]},
+                    "selectors": [selector(source)]}]
             if unit_ids and native and native["kind"] == "table_row":
                 locator = native["locator"]
                 cells = ([indexes[source_ref["sha256"]].raw["spreadsheet_cells"][key]
@@ -308,20 +319,34 @@ class _OutlineContext:
                     target_id = f"{chapter_id}:target-{number}"
                     target_path = [*current_path, "targets", number - 1]
                     refs = references(target["rule_ids"], self.rules, [*target_path, "rule_ids"])
-                    sources = [source for group in references(target["range_ids"], self.sources, [*target_path, "range_ids"])
-                               for source in group]
+                    excerpts = bind_source_excerpts(self, target["range_ids"], path=[*target_path, "range_ids"])
+                    rows = []
+                    for row_number, row in enumerate((target.get("response_table") or {}).get("rows", [])):
+                        row_path = [*target_path, "response_table", "rows", row_number]
+                        row_excerpts = bind_source_excerpts(self, row["range_ids"], path=[*row_path, "range_ids"])
+                        row_rules = references(row["rule_ids"], self.rules, [*row_path, "rule_ids"])
+                        row_id = response_row_id(target_id, row_excerpts, row_rules)
+                        if not any(entry["row_id"] == row_id for entry in rows):
+                            rows.append({"row_id": row_id, "source_excerpts": row_excerpts, "rule_refs": row_rules})
+                        refs.extend(ref for ref in row_rules if ref not in refs)
+                        assigned.update(row["rule_ids"])
+                    sources = [part["source_ref"] for part in excerpts]
+                    sources.extend(part["source_ref"] for row in rows for part in row["source_excerpts"])
                     sources = list({(s["source_index_ref"]["sha256"], s["unit_id"]): s for s in sources}.values())
                     templates = references(target["template_part_ids"], self.template_parts,
                                            [*target_path, "template_part_ids"])
                     assigned.update(target["rule_ids"])
-                    if not (refs or sources or templates):
+                    if not (refs or sources or templates or rows):
                         problem("outline_target_unbound", "该响应位置尚无规则、来源或原格式依据，需核对其用途。", [], target_id)
-                    if target["kind"] == "form" and not templates:
+                    if target["kind"] == "form" and not templates and not rows:
                         problem("outline_template_missing", "规定格式/表格尚未定位源模板，需补充来源。", refs, target_id)
-                    if any((s["source_index_ref"]["sha256"], s["unit_id"]) not in self.read_units for s in sources):
+                    mapped = [ref for identity in target["range_ids"] for ref in self.sources.get(identity, [])]
+                    if any((s["source_index_ref"]["sha256"], s["unit_id"]) not in self.read_units for s in mapped):
                         problem("outline_source_not_read", "已定位目录来源，但模型尚未阅读正文，生成前须装载核对。", refs, target_id)
                     targets.append({"target_id": target_id, "kind": target["kind"], "purpose": target["purpose"],
                                     "rule_refs": refs, "source_refs": sources, "template_refs": templates,
+                                    **({"source_excerpts": excerpts} if excerpts else {}),
+                                    **({"response_table": {"rows": rows}} if rows else {}),
                                     "manual_fill": target["manual_fill"],
                                     "support_origins": target["support_origins"]})
                 result.append({"chapter_id": chapter_id, "title": chapter["title"], "targets": targets,

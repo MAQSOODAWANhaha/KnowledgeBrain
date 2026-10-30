@@ -163,6 +163,7 @@ async def test_structure_review_is_one_call_for_manual_empty_instances_and_share
                         "detail": "核对两份实例是否分别适用。",
                         "task_ids": ["w1", "w2"],
                         "can_revise": True,
+                        "reject_content": True,
                     }
                 ]
             }
@@ -175,6 +176,9 @@ async def test_structure_review_is_one_call_for_manual_empty_instances_and_share
     assert findings[0]["task_ids"] == ["w1", "w2"]
     assert findings[0]["can_revise"] is False, (
         "Structure feedback must not launch automatic reordering."
+    )
+    assert findings[0]["reject_content"] is False, (
+        "Structure-only feedback cannot reject generated content it has not received."
     )
 
 
@@ -281,7 +285,7 @@ async def test_structure_unknown_response_references_use_existing_contract_recov
         )
 
 
-async def test_structure_budget_failure_is_a_gap_and_does_not_send_or_reorder(
+async def test_structure_provider_failure_after_budget_trial_is_a_gap_without_reordering(
     tmp_path, monkeypatch
 ):
     from docreader.tender.authoring_structure import review_structure
@@ -291,12 +295,17 @@ async def test_structure_budget_failure_is_a_gap_and_does_not_send_or_reorder(
     current["chapters"][0]["targets"][0]["purpose"] = "长" * 50000
     original = deepcopy(current)
 
-    async def execute(*args):
-        pytest.fail("Failed admission must not call a model.")
+    calls = []
+
+    async def execute(task, request, _validate):
+        assert budget().measure_request(request, task)["fits"] is False
+        calls.append(request)
+        raise ModelWorkUnitExhausted(task)
 
     findings, gaps = await review_structure(
         ArtifactStore(tmp_path), current, [unit()], budget(), execute
     )
+    assert len(calls) == 1
     assert findings == [] and [g["code"] for g in gaps] == [
         "structure_review_unavailable"
     ]

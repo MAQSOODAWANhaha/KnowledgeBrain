@@ -26,6 +26,7 @@ from docreader.integrations.store import Cancelled, Conflict
 from docreader.llm.budget import RequestBudget
 from docreader.llm.client import OpenAIModel
 from docreader.llm.config import ModelConfig, ModelEndpoint
+from docreader.llm.contracts import schema_prompt
 from docreader.llm.request import (
     ModelBudgetError,
     ModelConfigurationError,
@@ -90,7 +91,7 @@ def pipeline(monkeypatch):
                 "outline_assemble" if payload.get("operation") == "assemble" else task
             )
             request = build_request(
-                request_budget.model, request_budget.prompts[prompt], payload
+                request_budget.model, request_budget.prompts[prompt], payload, task=task
             )
 
             def validate(value):
@@ -196,7 +197,11 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
     )
     assert (
         sent[0]["messages"][0]["content"]
-        == files("docreader.tender.prompts").joinpath("outline.md").read_text()
+        == schema_prompt(
+            files("docreader.tender.prompts").joinpath("outline.md").read_text(),
+            "outline",
+            pipeline.outline_payload,
+        )
     )
     assert await execute(analysis_runtime, execution_id, handler) == reference
     assert len(sent) == 2 and len(pipeline.snapshots) == 1
@@ -855,17 +860,49 @@ async def test_actual_pipeline_exports_forms_and_evidence_despite_one_exhausted_
     )
     assert len(sent) == sent_before
     recovered = True
+    recovery_execution_id = uuid4().hex
     second = await execute(
         runtime,
-        uuid4().hex,
+        recovery_execution_id,
         handler,
         materials=[proof, methods],
         previous_execution_id=execution_id,
     )
     assert len(service_calls) == 5
-    # The changed unit, its content review, and the changed final structure summary.
-    assert artifacts.read_json(second)["usage"]["sent_requests"] == 3
-    assert len(assembly_calls) == 1 and len(structure_calls) == 2
+    # Only the recovered service unit and its updated content review are sent.
+    assert artifacts.read_json(second)["usage"]["sent_requests"] == 2
+    recovered_requests = sent[sent_before:]
+    assert len(recovered_requests) == 2
+    assert recovered_requests[0]["title_path"] == ["服务方案"]
+    reviewed_units = recovered_requests[1]["units"]
+    assert {tuple(unit["title_path"]) for unit in reviewed_units} == {
+        ("技术方案",), ("人员表",), ("证明附件",), ("服务方案",)
+    }
+    assert all(unit["content"]["status"] == "generated" for unit in reviewed_units)
+    service_review = next(
+        unit for unit in reviewed_units if unit["title_path"] == ["服务方案"]
+    )
+    assert service_review["content"]["blocks"][0]["text"] == "拟建立服务受理和分级处置流程。"
+    assert len(assembly_calls) == len(structure_calls) == 1
+    assert structure_calls[0]["phase"] == "outline"
+    assert structure_calls[0]["units"] == []
+    recovery_row = await AuthoringStore(settings.dsn).get_execution(recovery_execution_id)
+    original_structure = [
+        receipt for receipt in row["receipts"]
+        if receipt["stage"] == "document-model-response"
+        and receipt["scope"].startswith("authoring_structure:")
+    ]
+    inherited_structure = [
+        receipt for receipt in recovery_row["receipts"]
+        if receipt["stage"] == "document-model-response"
+        and receipt["scope"].startswith("authoring_structure:")
+    ]
+    assert len(original_structure) == len(inherited_structure) == 1
+    assert all(
+        inherited_structure[0][key] == original_structure[0][key]
+        for key in ("scope", "input_digest", "artifact_ref")
+    )
+    assert inherited_structure[0]["metadata"]["reused_from_execution_id"] == execution_id
     assert all(
         artifacts.read_json(ref)["status"] == "generated"
         for ref in artifacts.read_json(second)["unit_refs"]
@@ -920,13 +957,13 @@ async def test_concurrent_requests_wait_only_for_an_identical_logical_call(
             client, store, artifacts, lease, budget(), spec, None
         )
         first_request = build_request(
-            config().chat.model, "synthetic prompt", {"text": "same"}
+            config().chat.model, "synthetic prompt", {"text": "same"}, task="authoring_write"
         )
         second_request = (
             deepcopy(first_request)
             if identical
             else build_request(
-                config().chat.model, "synthetic prompt", {"text": "different"}
+                config().chat.model, "synthetic prompt", {"text": "different"}, task="authoring_write"
             )
         )
         tasks = [

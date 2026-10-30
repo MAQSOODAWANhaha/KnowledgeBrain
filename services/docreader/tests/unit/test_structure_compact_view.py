@@ -4,7 +4,7 @@ from copy import deepcopy
 import json
 
 from docreader.llm.budget import RequestBudget
-from docreader.llm.request import build_request
+from docreader.llm.request import ModelWorkUnitExhausted, build_request
 from docreader.tender import authoring_structure
 from test_authoring_compact_view import native_grid, restore_cells
 
@@ -91,7 +91,7 @@ async def test_admitted_structure_keeps_exact_original_request_and_shared_prompt
     before = deepcopy(original)
     monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_: (original, []))
     admitted = budget()
-    expected = build_request(admitted.model, PROMPT, original)
+    expected = build_request(admitted.model, PROMPT, original, task="authoring_structure")
     admitted.require_request(expected, 'authoring_review')
     calls = []
 
@@ -105,19 +105,23 @@ async def test_admitted_structure_keeps_exact_original_request_and_shared_prompt
     assert len(calls) == 1 and original == before and admitted.prompts['authoring_review'] == PROMPT
 
 
-async def test_still_oversized_structure_keeps_full_source_and_existing_gap_without_sending(monkeypatch):
+async def test_still_oversized_structure_tries_complete_source_before_provider_failure_gap(monkeypatch):
     original = payload(large=True)
     original['submission_sources'].append({'source_id': 's5', 'text': '完整原文' * 10000})
     before = deepcopy(original)
     monkeypatch.setattr(authoring_structure, '_structure_payload', lambda *_: (original, []))
     calls = []
 
-    async def execute(*args):
-        calls.append(args)
-        raise AssertionError('Over-budget input must not be sent.')
+    async def execute(task, request, _validate):
+        data = json.loads(request['messages'][1]['content'][0]['text'])
+        assert task == 'authoring_structure' and data['structure_view'] == 'compact_v1'
+        assert data['submission_sources'][-1] == before['submission_sources'][-1]
+        assert budget().measure_request(request, task)['fits'] is False
+        calls.append(request)
+        raise ModelWorkUnitExhausted(task)
 
     findings, gaps = await authoring_structure.review_structure(None, {'chapters': [{}]},
         [{'task_id': 'w1'}], budget(), execute)
-    assert not findings and not calls
+    assert not findings and len(calls) == 1
     assert [gap['code'] for gap in gaps] == ['structure_review_unavailable']
     assert original == before

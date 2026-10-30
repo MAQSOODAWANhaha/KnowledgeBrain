@@ -259,7 +259,7 @@ def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositi
 def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
     """Keep usable model declarations; leave business interpretation to review."""
     from docreader.tender.schema import (
-        AnalysisExtractionResponse, Issue, ItemDispositionResponse, Relation, TenderItem,
+        AnalysisExtractionResponse, AnalysisIssue, ItemDispositionResponse, Relation, TenderItem,
     )
 
     response = deepcopy(AnalysisExtractionResponse.model_validate(result).model_dump(exclude_unset=True))
@@ -356,7 +356,7 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
             number_diagnostics = []
             try:
                 candidate = TenderItem.model_validate({**value, "numbers": numbers}).model_dump(exclude_unset=True)
-                for index, number_value in enumerate(candidate["numbers"]):
+                for index, number_value in enumerate(candidate.get("numbers", [])):
                     matches = {}
                     for citation in value["evidence"]:
                         found = resolve_evidence_quote(citation["range_id"], number_value["quote"], sources,
@@ -450,11 +450,9 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
         try:
             if not isinstance(original, dict) or not {"code", "detail", "blocking"} <= original.keys():
                 raise ValueError("incomplete issue")
-            if "range_id" in original and original["range_id"] is None:
-                raise ValueError("omit unknown issue range")
             routed = recover_issue_routing(original, {p["issue_id"] for p in issues if p.get("issue_id")},
                                            path, diagnostics)
-            value = Issue.model_validate(routed).model_dump(exclude_unset=True)
+            value = AnalysisIssue.model_validate(routed).model_dump(exclude_unset=True)
             if value.get("range_id") and value["range_id"] not in (sources.keys() | {
                     source["range_id"] for source in pack.get("pending_scope_context", [])}):
                 raise ValueError("unknown issue range")

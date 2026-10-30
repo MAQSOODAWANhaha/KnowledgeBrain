@@ -66,6 +66,7 @@ def outline_pipeline(monkeypatch):
                     budget.model,
                     budget.prompts[prompt],
                     {"operation": operation, "ordinal": ordinal},
+                    task="outline",
                 ),
                 validate,
             )

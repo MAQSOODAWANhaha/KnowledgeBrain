@@ -21,11 +21,11 @@ def test_decoded_content_and_reserves_decide_admission_wire_bytes_are_separate()
     payload = {"pack_id": "p1", "body": [{"text": '中文 "quoted" \\ path'}],
                "supporting": [{"text": "条件适用", "locator": {"page": 2}}],
                "pending_scope_context": []}
-    request = build_request("gpt-6-luna", PROMPTS["extract"], payload)
+    request = build_request("gpt-6-luna", PROMPTS["extract"], payload, task="extract")
     measured = budget().measure("extract", payload)
     wire_bytes = len(json.dumps(request, ensure_ascii=False, sort_keys=True,
                                 separators=(",", ":"), allow_nan=False).encode())
-    exact_bytes = len(PROMPTS["extract"].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
+    exact_bytes = len(request["messages"][0]["content"].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
     assert measured["wire_bytes"] == wire_bytes > exact_bytes
     assert measured["text_tokens"] == exact_bytes
     assert measured["input_tokens"] == exact_bytes + 32
@@ -56,7 +56,7 @@ def test_analysis_source_views_report_body_and_support_without_changing_admissio
     b = budget()
     request = b.request(task, payload)
     measured = b.measure_request(request)
-    exact_text_bytes = len(PROMPTS[task].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
+    exact_text_bytes = len(request["messages"][0]["content"].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
     expected = {
         field: sum(len(json.dumps(view[field], ensure_ascii=False, separators=(",", ":")).encode()) - 2
                    for view in payload["source_views"])
@@ -169,7 +169,7 @@ def test_default_domain_prompts_are_actual_schema_text_and_snapshot_is_immutable
     monkeypatch.setattr(prompts, "get_prompt", actual.__getitem__)
     b = RequestBudget()
     original = b.spec()
-    assert b.request("extract", {})["messages"][0]["content"] == actual["extract"]
+    assert b.request("extract", {}) == build_request(b.model, actual["extract"], {}, task="extract")
     actual["extract"] += " amended"
     assert b.spec() == original
     assert RequestBudget().spec() != original
@@ -191,7 +191,7 @@ def test_verified_tokenizer_counts_verify_only_and_keeps_extract_bytes():
                                  "supporting": [{"range_id": "r2", "text": "适用第一标段。"}]}]}
     plain, tokenized = budget(), budget(tokenizer="o200k_base")
     request = tokenized.request("verify", payload)
-    expected = (len(encoding.encode(PROMPTS["verify"]))
+    expected = (len(encoding.encode(request["messages"][0]["content"]))
                 + len(encoding.encode(request["messages"][1]["content"][0]["text"])))
     measured = tokenized.measure_request(request, "verify")
     assert tokenized.measure("verify", payload) == measured

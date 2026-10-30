@@ -217,8 +217,8 @@ async def test_reference_does_not_discard_an_unarranged_candidate(tmp_path):
     pending = next(c for c in outline['chapters'] if c['title'] == '待整理内容')
     assert pending['targets'] and pending['targets'][0]['template_refs']
     assert reference['rule_refs'] == reference['source_refs'] == reference['template_refs'] == []
-    assert reference['related_target_ids'] == []
-    assert any(i['code'] == 'outline_reference_ambiguous' for i in outline['issues'])
+    assert reference['related_target_ids'] == [pending['targets'][0]['target_id']]
+    assert not any(i['code'] == 'outline_reference_ambiguous' for i in outline['issues'])
 
 
 async def test_cover_and_explicit_native_table_header_are_bound(tmp_path):

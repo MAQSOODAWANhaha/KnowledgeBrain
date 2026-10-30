@@ -244,7 +244,7 @@ class OpenAIModel:
             raise ModelConfigurationError(
                 "prepared request model does not match its configured endpoint"
             )
-        context = budget.require_request(request, task)
+        context = budget.admit_request(request, task)
         digest = request_digest(endpoint.base_url, request)
         logical_digest = request_digest(
             endpoint.base_url,

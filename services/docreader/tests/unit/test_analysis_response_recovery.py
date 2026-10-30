@@ -71,7 +71,7 @@ async def test_deleted_lf_is_restored_without_mutating_model_response_or_source(
     [{"value": 30, "unit": "天"}],
     [{"value": 30, "unit": "天", "quote": "另一事项才有的数值"}],
     [{"value": 30, "unit": "天", "quote": "交付期限为30天"}, {"value": 1}],
-    [], None, "30天",
+    [], "30天",
 ])
 async def test_incomplete_optional_numbers_do_not_fail_the_item_or_create_a_blocker(numbers):
     response = result()
@@ -82,6 +82,19 @@ async def test_incomplete_optional_numbers_do_not_fail_the_item_or_create_a_bloc
     assert extracted["items"] == result()["items"]
     assert extracted["issues"] == []
     assert {d["code"] for d in extracted["diagnostics"]} == {"optional_numbers_omitted"}
+    assert response == before and len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_optional_numbers_null_is_omitted_without_a_defect_diagnostic():
+    response = result()
+    response["items"][0]["numbers"] = None
+    before = deepcopy(response)
+    model = FixedModel(response)
+    extracted = await extract_items(pack(), model, identity=IDENTITY)
+    assert extracted["items"] == result()["items"]
+    assert extracted["issues"] == []
+    assert extracted.get("diagnostics", []) == []
     assert response == before and len(model.calls) == 1
 
 

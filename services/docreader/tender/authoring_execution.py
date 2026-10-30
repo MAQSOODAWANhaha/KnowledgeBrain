@@ -25,7 +25,7 @@ class _OutlineModel:
             value = json.loads(content["text"])
             value["contract_feedback"] = payload["contract_feedback"]
             content["text"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        self.budget.require_request(request, task)
+        self.budget.admit_request(request, task)
         digest = request_digest(self.client.config.chat.base_url, request)
         logical = request_digest(self.client.config.chat.base_url, baseline)
         ref = await asyncio.to_thread(self.artifacts.put_json, request)

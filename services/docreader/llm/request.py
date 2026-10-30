@@ -110,16 +110,20 @@ def image_data_url(image: str | ImageInput) -> str:
 
 
 def build_request(model: str, prompt: str, payload: dict,
-                  images: Sequence[str | ImageInput] = ()) -> dict:
+                  images: Sequence[str | ImageInput] = (), *, task: str | None = None) -> dict:
     """The same complete API body is used for packing probes and sending.
 
-    Schema instructions are part of the actual prompt, not an invented API
-    schema field. Admission reserves never become provider output limits.
+    Tender response schemas are part of this actual prompt, so estimates and
+    request identity include them. Reserves never become provider output limits.
     """
     try:
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError):
         raise ModelSemanticError("model payload is not JSON serializable") from None
+    if task is not None:
+        from docreader.llm.contracts import schema_prompt
+
+        prompt = schema_prompt(prompt, task, payload)
     content = [{"type": "text", "text": serialized}]
     content.extend({"type": "image_url", "image_url": {"url": image_data_url(image)}} for image in images)
     return {"model": model,

@@ -51,14 +51,39 @@ def test_minimal_item_has_only_four_source_backed_fields():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("domains", []), ("subject", None), ("subject", "  "), ("scope", "\n"),
+    ("domains", []), ("subject", "  "), ("scope", "\n"),
     ("conditions", []), ("exceptions", [" "]), ("numbers", []),
-    ("scoring", {}), ("scoring", None), ("scoring", {"method": " "}),
+    ("scoring", {}), ("scoring", {"method": " "}),
     ("scoring", {"points": None}), ("submission", {"fields": []}),
 ])
-def test_optional_item_information_cannot_be_null_empty_or_placeholder(field, value):
+def test_optional_item_information_cannot_be_empty_or_placeholder(field, value):
     with pytest.raises(ValidationError):
         TenderItem.model_validate({**item(), field: value})
+
+
+@pytest.mark.parametrize('field', ['domains', 'subject', 'scope', 'conditions', 'exceptions',
+                                  'numbers', 'scoring', 'consequence', 'submission'])
+def test_nullable_optional_source_facts_are_omitted_without_mutating_the_input(field):
+    raw = {**item(), field: None}
+    original = deepcopy(raw)
+    assert TenderItem.model_validate(raw).model_dump(exclude_unset=True) == item()
+    assert raw == original
+
+
+def test_null_detail_fields_do_not_erase_zero_or_invent_source_facts():
+    raw = {**item(), 'scoring': {'points': 0, 'max_points': None, 'method': None}}
+    assert TenderItem.model_validate(raw).model_dump(exclude_unset=True)['scoring'] == {'points': 0}
+    with pytest.raises(ValidationError):
+        TenderItem.model_validate({**item(), 'scoring': {'points': None, 'method': None}})
+
+
+def test_required_fields_and_nonnullable_defaults_are_not_omitted_when_null():
+    for field in ('item_id', 'kind', 'text', 'evidence'):
+        with pytest.raises(ValidationError):
+            TenderItem.model_validate({**item(), field: None})
+    with pytest.raises(ValidationError):
+        ItemDispositionResponse.model_validate({'range_id': 'r1', 'status': 'non_item',
+            'reason': '说明性文字。', 'item_ids': None})
 
 
 @pytest.mark.parametrize("kind,detail,value", [
@@ -123,6 +148,44 @@ def test_model_disposition_omits_host_derived_ids_without_relaxing_canonical_con
     assert ItemDispositionResponse.model_validate(declaration).model_dump(exclude_unset=True) == declaration
     with pytest.raises(ValidationError):
         ItemDisposition.model_validate(declaration)
+
+
+def test_generated_disposition_declares_only_semantic_fields_without_host_item_ids():
+    from docreader.tender.schema import ItemDispositionOutput
+
+    schema = ItemDispositionOutput.model_json_schema()
+    assert set(schema['properties']) == {'range_id', 'status', 'reason'}
+    assert set(schema['required']) == {'range_id', 'status', 'reason'}
+    assert schema['properties']['status']['enum'] == ['non_item', 'unresolved']
+    declaration = {'range_id': 'r1', 'status': 'non_item', 'reason': '本段为项目背景说明。'}
+    assert ItemDispositionOutput.model_validate(declaration).model_dump() == declaration
+    for extra in ({'item_ids': []}, {'status': 'items'}):
+        with pytest.raises(ValidationError):
+            ItemDispositionOutput.model_validate({**declaration, **extra})
+
+
+def test_disposition_receiver_retains_legacy_items_and_ids_for_host_normalization():
+    declaration = {'range_id': 'r1', 'status': 'items', 'reason': '本段规定评分标准。',
+                   'item_ids': ['p1:i1']}
+    assert ItemDispositionResponse.model_validate(declaration).model_dump() == declaration
+
+
+def test_generated_ocr_contract_keeps_text_status_and_optional_issues():
+    from docreader.tender.schema import OCRResponse
+
+    schema = OCRResponse.model_json_schema()
+    assert set(schema['properties']) == {'text', 'status', 'issues'}
+    assert set(schema['required']) == {'text', 'status'}
+    assert schema['properties']['status']['enum'] == ['complete', 'partial', 'unresolved']
+    assert OCRResponse.model_validate({'text': '', 'status': 'unresolved'}).model_dump() == {
+        'text': '', 'status': 'unresolved', 'issues': [],
+    }
+    finding = {'code': 'image_unclear', 'detail': '图中文字无法辨认。'}
+    parsed = OCRResponse.model_validate({'text': '可见内容', 'status': 'partial', 'issues': [finding]})
+    assert parsed.issues[0].blocking is True
+    for invalid in ({'text': 0}, {'status': 'unknown'}, {'issues': None}):
+        with pytest.raises(ValidationError):
+            OCRResponse.model_validate({'text': '', 'status': 'complete', **invalid})
 
 
 @pytest.mark.parametrize("status,ids", [
@@ -198,12 +261,37 @@ def test_v2_issue_fields_are_explicit_without_changing_historical_defaults(field
     (LocateResult, "findings", {"schema_version": 2, "candidates": [], "findings": []}),
     (AssociationResult, "findings", {"schema_version": 2, "relations": [], "decisions": [], "findings": []}),
 ])
-def test_v2_output_issues_omit_unknown_locations_instead_of_null(model, collection, payload, field):
+def test_v2_output_issues_normalize_optional_null_locations(model, collection, payload, field):
     payload = deepcopy(payload)
     payload[collection] = [{"code": "reference_unresolved", "detail": "目标未定位。",
                             "blocking": True, field: None}]
+    parsed = model.model_validate(payload).model_dump(exclude_unset=True)
+    assert field not in parsed[collection][0]
+
+
+def test_analysis_issue_schema_and_issue_instances_require_explicit_blocking():
+    schema = AnalysisExtraction.model_json_schema()
+    finding_schema = schema['$defs'][schema['properties']['issues']['items']['$ref'].rsplit('/', 1)[-1]]
+    assert set(finding_schema['required']) == {'code', 'detail', 'blocking'}
+    base = extraction()
+    for finding in (Issue(code='unclear', detail='待核对。'),
+                    {'code': 'unclear', 'detail': '待核对。'}):
+        with pytest.raises(ValidationError):
+            AnalysisExtraction.model_validate({**base, 'issues': [finding]})
+    explicit = Issue(code='source_formatting_note', detail='只有格式问题。', blocking=False)
+    parsed = AnalysisExtraction.model_validate({**base, 'issues': [explicit]}).model_dump(exclude_unset=True)
+    assert parsed['issues'] == [{'code': 'source_formatting_note', 'detail': '只有格式问题。', 'blocking': False}]
+    assert Issue(code='legacy', detail='旧版本默认值。').blocking is True
+
+
+def test_analysis_issue_optional_nulls_preserve_explicit_false_and_reject_required_null():
+    raw = {'code': 'source_formatting_note', 'detail': '无须补读。', 'blocking': False,
+           'range_id': None, 'item_ids': None, 'related_issue_ids': None, 'needs_source': False}
+    parsed = AnalysisExtraction.model_validate({**extraction(), 'issues': [raw]}).model_dump(exclude_unset=True)
+    assert parsed['issues'] == [{'code': raw['code'], 'detail': raw['detail'],
+                                'blocking': False, 'needs_source': False}]
     with pytest.raises(ValidationError):
-        model.model_validate(payload)
+        AnalysisExtraction.model_validate({**extraction(), 'issues': [{**raw, 'blocking': None}]})
 
 
 @pytest.mark.parametrize("status,ids", [("items", []), ("non_item", ["p1:i1"]), ("unresolved", ["p1:i1"])])
@@ -326,14 +414,20 @@ def test_page_candidate_rejects_empty_duplicate_or_nonphysical_indices(refs):
             "item_ids": [], "page_refs": refs, "reason": "补读物理页。"})
 
 
-@pytest.mark.parametrize("page_count", [0, -1, True, "106", None])
+@pytest.mark.parametrize("page_count", [0, -1, True, "106"])
 def test_catalog_page_count_must_be_positive_or_omitted(page_count):
     with pytest.raises(ValidationError):
         CatalogEntry.model_validate({"document_id": "d1", "document_version": "v1", "role": "main",
                                      "sections": [], "page_count": page_count})
 
 
-@pytest.mark.parametrize("refs", [None, [], [{"document_id": "d1"}],
+def test_catalog_unknown_page_count_is_omitted_instead_of_becoming_zero():
+    raw = {'document_id': 'd1', 'document_version': 'v1', 'role': 'main', 'sections': [], 'page_count': None}
+    parsed = CatalogEntry.model_validate(raw).model_dump(exclude_unset=True)
+    assert 'page_count' not in parsed
+
+
+@pytest.mark.parametrize("refs", [[], [{"document_id": "d1"}],
     [{"document_id": "d1", "section_id": "s1"}, {"document_id": "d1", "section_id": "s1"}]])
 def test_section_candidate_omits_empty_fields_and_rejects_duplicate_or_incomplete_refs(refs):
     payload = {"candidate_id": "d1:c1", "issue_ids": [], "range_ids": [], "item_ids": ["i1"],

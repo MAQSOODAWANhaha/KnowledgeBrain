@@ -350,6 +350,48 @@ class _Assembler:
                 text = next(iter(values))
             target.text = text
 
+    def response_table(self, document, target, units, chapter_id):
+        from docreader.tender.authoring_excerpts import load_source_excerpt
+
+        rows = target.get("response_table", {}).get("rows", [])
+        if not rows:
+            return False
+        choices = defaultdict(set)
+        row_ids = {row["row_id"] for row in rows}
+        for unit in units:
+            for fill in unit.get("row_fills", []):
+                if fill["row_id"] not in row_ids:
+                    continue
+                if target.get("manual_fill", False):
+                    self.gap("export_manual_content_omitted", "人工填写响应表未采用自动填值。",
+                             chapter_id, target["target_id"])
+                elif fill.get("text", "").strip() and not fill.get("material_ids"):
+                    self.gap("export_row_fill_unsupported", "该行应答没有知识依据，保留要求和空白响应。",
+                             chapter_id, target["target_id"])
+                else:
+                    choices[fill["row_id"]].add(fill["text"])
+        table = document.add_table(rows=len(rows) + 1, cols=2)
+        table.style = "Table Grid"
+        _table_layout(document, table, [_page_width(document) * 0.65, _page_width(document) * 0.35], 1)
+        table.cell(0, 0).text, table.cell(0, 1).text = "招标要求", "投标响应"
+        for ordinal, row in enumerate(rows, 1):
+            texts = []
+            for excerpt in row["source_excerpts"]:
+                try:
+                    texts.append(load_source_excerpt(self.artifacts, excerpt, repository=self.repository)["text"])
+                except (OSError, ValueError, KeyError):
+                    texts.append("（原文要求待核对，来源引用已保留）")
+                    self.gap("export_response_source_unavailable", "该行部分原文不可读，保留来源和待核位置。",
+                             chapter_id, target["target_id"])
+            table.cell(ordinal, 0).text = re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", "\n".join(texts))
+            values = choices.get(row["row_id"], set())
+            if len(values) > 1:
+                self.gap("export_conflicting_row_fills", "该要求行存在冲突应答，保留完整要求及空白响应。",
+                         chapter_id, target["target_id"])
+            elif values:
+                table.cell(ordinal, 1).text = next(iter(values))
+        return True
+
     def attachment(self, document, attachment, chapter_id):
         reference = attachment["artifact_ref"]
         try:
@@ -387,7 +429,7 @@ class _Assembler:
             self.gap("export_attachment_not_embedded", f"{attachment['title']}未完整嵌入：{type(exc).__name__}；原件仍随包附送。",
                      chapter_id)
 
-    def writing_unit(self, document, unit, chapter_id, blocked_forms=(), manual_forms=()):
+    def writing_unit(self, document, unit, chapter_id, blocked_forms=(), manual_forms=(), response_tables=()):
         blocks = []
         for block in unit.get("blocks", []):
             target_ids = set(block.get("target_ids") or unit.get("target_ids", []))
@@ -407,7 +449,9 @@ class _Assembler:
         for gap in unit.get("gaps", []):
             self.gap("authoring_content_gap", gap, chapter_id)
         has_blocks = any(block.get("text", "").strip() or block.get("headers") or block.get("rows") for block in blocks)
-        if unit["status"] == "placeholder" or not (has_blocks or unit.get("cell_fills") or unit.get("attachments")):
+        table_only = bool(unit.get("target_ids")) and set(unit["target_ids"]).issubset(response_tables)
+        if not table_only and (unit["status"] == "placeholder"
+                               or not (has_blocks or unit.get("cell_fills") or unit.get("attachments"))):
             document.add_paragraph("（本部分内容待补）")
             self.gap("export_content_pending", "写作任务尚未形成完整内容，保留当前位置。", chapter_id)
 
@@ -422,7 +466,8 @@ class _Assembler:
         targets = chapter.get("targets", [])
         reference_only = {target['target_id'] for target in targets
             if target['kind'] == 'narrative' and not target.get('manual_fill', False)
-            and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'template_refs'))
+            and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'source_excerpts',
+                                                       'template_refs', 'response_table'))
             and target.get('related_target_ids')
             and all(identity in self.locations and identity != target['target_id']
                     for identity in target['related_target_ids'])}
@@ -448,13 +493,20 @@ class _Assembler:
                     continue
         part_uses = Counter(key for selected in forms.values() for key in selected)
         blocked_forms = (forms.keys() - grid_forms) | manual_forms
+        row_owners = {row["row_id"]: target["target_id"] for target in targets
+                      for row in (target.get("response_table") or {}).get("rows", [])}
         for unit in units:
             allowed = {_source_key(part["source_ref"]) for target_id in unit.get("target_ids", [])
                        for part in forms.get(target_id, {}).values()}
             for fill in unit.get("cell_fills", []):
                 if _source_key(fill["source_ref"]) not in allowed:
                     self.gap("export_cell_fill_unplaced", "填值来源不属于本写作任务响应位置的原格式。", chapter_id)
+            for fill in unit.get("row_fills", []):
+                if row_owners.get(fill["row_id"]) not in unit.get("target_ids", []):
+                    self.gap("export_row_fill_unplaced", "行应答无法绑定当前任务的实际响应行，要求保持不变。", chapter_id)
         rendered, unit_anchors = set(), {}
+        response_tables = {target["target_id"] for target in targets
+                           if (target.get("response_table") or {}).get("rows")}
         for target in targets:
             start_index = len(document.element.body) - 1
             target_id = target["target_id"]
@@ -468,6 +520,8 @@ class _Assembler:
             if related:
                 document.add_paragraph("参见 " + "、".join(dict.fromkeys(related)))
             linked = [(ordinal, unit) for ordinal, unit in enumerate(units) if target_id in unit.get("target_ids", [])]
+            if target_id in response_tables:
+                self.response_table(document, target, [unit for _, unit in linked], chapter_id)
             if target["kind"] == "form":
                 if any(part_uses[key] > 1 for key in forms[target_id]):
                     document.add_paragraph(target["purpose"], style="Caption")
@@ -486,18 +540,18 @@ class _Assembler:
                 if ordinal not in rendered:
                     has_content = (any(block.get('text', '').strip() or block.get('headers') or block.get('rows')
                                        for block in unit.get('blocks', []))
-                                   or unit.get('cell_fills') or unit.get('attachments'))
+                                   or unit.get('cell_fills') or unit.get('row_fills') or unit.get('attachments'))
                     if set(unit.get('target_ids', [])).issubset(reference_only) and not has_content:
                         for gap in unit.get('gaps', []):
                             self.gap('authoring_content_gap', gap, chapter_id)
                         rendered.add(ordinal)
                         continue
                     unit_start = len(document.element.body) - 1
-                    self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms)
+                    self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms, response_tables)
                     if len(document.element.body) - 1 > unit_start:
                         unit_anchors[ordinal] = document.element.body[unit_start]
                     rendered.add(ordinal)
-            if not linked and target_id not in reference_only:
+            if not linked and target_id not in reference_only and target_id not in response_tables:
                 document.add_paragraph(f"（待补：{target['purpose']}）")
                 self.gap("export_content_pending", "响应位置尚无写作内容。", chapter_id, target_id)
             if len(document.element.body) - 1 > start_index:
@@ -509,7 +563,7 @@ class _Assembler:
                         break
         for ordinal, unit in enumerate(units):
             if ordinal not in rendered:
-                self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms)
+                self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms, response_tables)
                 self.gap("export_unassigned_content", "写作内容未绑定当前章节的响应位置，已保留在章节末尾。", chapter_id)
         if not heading and len(document.element.body) - 1 > chapter_start:
             add_bookmark(document.element.body[chapter_start], chapter_id)

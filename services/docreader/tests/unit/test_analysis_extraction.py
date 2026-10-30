@@ -45,6 +45,19 @@ class FixedModel:
         return deepcopy(self.response)
 
 
+@pytest.mark.asyncio
+async def test_nullable_optional_facts_keep_items_and_explicit_issue_routing():
+    response = result(issues=[{'code': 'condition_unclear', 'detail': '仍须核对。', 'blocking': True,
+        'range_id': None, 'item_ids': None, 'related_issue_ids': None, 'needs_source': False}])
+    response['items'][0].update(subject=None, conditions=None, numbers=None)
+    original = deepcopy(response)
+    extracted = await extract_items(pack(), FixedModel(response), identity=IDENTITY)
+    assert extracted['items'] == result()['items']
+    assert extracted['issues'] == [{'code': 'condition_unclear', 'detail': '仍须核对。',
+                                    'blocking': True, 'needs_source': False}]
+    assert not extracted.get('diagnostics') and response == original
+
+
 def test_item_payload_has_complete_envelope_without_host_revision_fields():
     problem = {"issue_id": "issue-1", "code": "missing_source", "detail": "附件不可读。", "blocking": True}
     payload = item_payload(pack(), identity=IDENTITY, issues=[problem])

@@ -93,7 +93,8 @@ async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance
     artifacts = ArtifactStore(tmp_path)
     source_ref = {'source_index_ref': artifacts.put_json({'synthetic': True}), 'unit_id': 'table'}
     snapshot = deepcopy(outline()['authoring_input'])
-    source_rows = [{'source': {'range_id': key, 'text': '甲' * 3000}, 'rules': []} for key in ('a', 'b')]
+    # One complete row plus Schema/feedback fits; both rows still require two S calls.
+    source_rows = [{'source': {'range_id': key, 'text': '甲' * 1000}, 'rules': []} for key in ('a', 'b')]
     monkeypatch.setattr(pipeline, '_source_records', lambda artifacts, context: source_rows)
 
     def bind(value):
@@ -116,6 +117,9 @@ async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance
             return validate({'chapters': [{'title': '报价文件', 'is_volume': True, 'targets': [
                 {'kind': 'form', 'purpose': '同一报价表', 'target_ids': refs,
                  'template_part_ids': []}], 'children': []}]})
+        measured = budget.measure_request(request, 'outline')
+        assert measured['input_tokens'] + 2048 <= measured['effective_input_budget_tokens']
+        assert len(payload['sources']) == 1 and payload['sources'][0]['text'] == '甲' * 1000
         return validate({'schema_version': 2, 'chapters': [{'title': '报价', 'targets': [
             {'kind': 'form', 'purpose': '同一报价表', 'rule_ids': [],
              'range_ids': [payload['sources'][0]['range_id']]}], 'children': []}], 'findings': []})

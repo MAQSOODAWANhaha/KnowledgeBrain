@@ -52,7 +52,9 @@ async def test_adopted_condition_needs_its_existing_reference_to_reach_writing(t
     assert any(support["grid"] == native.raw["units"][1]["grid"] for support in loaded["supports"])
     if condition_supports:
         support = condition_supports[0]
-        assert bindings[support["support_id"]]["unit_id"] == condition["unit_id"]
+        reference = bindings[support["support_id"]]
+        assert reference['source_ref']['unit_id'] == condition['unit_id']
+        assert reference['selectors'][0]['source_range_id'] == condition['source_range_id']
         assert support["support_id"] in loaded["targets"][0]["support_ids"]
         assert support["target_ids"] == ["t1"]
     assert bool(task["targets"][0]["rule_refs"]) is (selection == "rule")
