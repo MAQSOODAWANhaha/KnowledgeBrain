@@ -18,8 +18,8 @@ def _source_inventory(original, selected, all_selected, common=()):
     selected_keys = {_key(ref) for ref in selected_refs}
     all_keys = {_key(part['source_ref']) for part in all_selected}
     common_keys = {_key(part['source_ref']) for part in common}
-    result = [ref for ref in original if _key(ref) not in all_keys
-              or _key(ref) in selected_keys or _key(ref) in common_keys]
+    omitted_keys = all_keys - selected_keys - common_keys
+    result = [ref for ref in original if _key(ref) not in omitted_keys]
     return _unique([*result, *selected_refs, *(part['source_ref'] for part in common)])
 
 

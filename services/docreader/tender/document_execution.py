@@ -167,39 +167,39 @@ class _DocumentExecutor:
                 None,
             )
             inherited = receipt is not None
-        if receipt is not None:
-            saved = await asyncio.to_thread(
-                self.artifacts.read_json, receipt["artifact_ref"]
+        if receipt is None:
+            return False, None
+        saved = await asyncio.to_thread(
+            self.artifacts.read_json, receipt["artifact_ref"]
+        )
+        if (
+            not isinstance(saved, dict)
+            or saved.get("task") != task
+            or saved.get("input_digest") != digest
+        ):
+            raise ArtifactIntegrityError(
+                "accepted document response belongs to another request"
             )
-            if (
-                not isinstance(saved, dict)
-                or saved.get("task") != task
-                or saved.get("input_digest") != digest
-            ):
+        try:
+            value = await asyncio.to_thread(validate, deepcopy(saved["response"]))
+        except ModelSemanticError:
+            if not inherited:
                 raise ArtifactIntegrityError(
-                    "accepted document response belongs to another request"
-                )
-            try:
-                value = await asyncio.to_thread(validate, deepcopy(saved["response"]))
-            except ModelSemanticError:
-                if not inherited:
-                    raise ArtifactIntegrityError(
-                        "accepted document response no longer matches its pinned contract"
-                    ) from None
-            else:
-                if inherited:
-                    await self.store.commit_artifact(
-                        self.lease,
-                        "document-model-response",
-                        receipt["artifact_ref"],
-                        scope=scope,
-                        input_digest=digest,
-                        metadata={
-                            "reused_from_execution_id": self.previous["execution_id"]
-                        },
-                    )
-                return True, value
-        return False, None
+                    "accepted document response no longer matches its pinned contract"
+                ) from None
+            return False, None
+        if inherited:
+            await self.store.commit_artifact(
+                self.lease,
+                "document-model-response",
+                receipt["artifact_ref"],
+                scope=scope,
+                input_digest=digest,
+                metadata={
+                    "reused_from_execution_id": self.previous["execution_id"]
+                },
+            )
+        return True, value
 
     async def _execute(self, task, request, validate, digest):
         hit, value = await self._replay(task, validate, digest)
