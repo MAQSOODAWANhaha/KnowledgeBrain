@@ -59,6 +59,10 @@ def pipeline(monkeypatch):
         after=None,
         write_text="same",
         outline_payload={"operation": "outline"},
+        saved_units=[],
+        published_units=[],
+        saved_plans=[],
+        published_plans=[],
     )
 
     async def generate(
@@ -71,8 +75,14 @@ def pipeline(monkeypatch):
         knowledge=None,
         concurrency=2,
         on_outline=None,
+        saved_units=(),
+        on_unit=None,
+        saved_plan=None,
+        on_plan=None,
     ):
         state.snapshots.append(deepcopy(snapshot))
+        state.saved_units.append(deepcopy(list(saved_units)))
+        state.saved_plans.append(deepcopy(saved_plan))
         if knowledge is not None:
             result = await knowledge.search(
                 [{"target_id": "target", "query": "所需能力"}], artifacts
@@ -87,6 +97,13 @@ def pipeline(monkeypatch):
             )
             if task == "authoring_write":
                 payload["text"] = state.write_text
+                if on_plan is not None:
+                    ref = artifacts.put_json({"synthetic_plan_dependency": True})
+                    plan = {"input_digest": hashlib.sha256(b"synthetic-plan").hexdigest(),
+                            "outline_ref": ref, "materials_ref": ref, "basis_ref": ref,
+                            "tasks": [], "gaps": []}
+                    await on_plan(artifacts.put_json(plan))
+                    state.published_plans.append(plan)
             prompt = (
                 "outline_assemble" if payload.get("operation") == "assemble" else task
             )
@@ -110,6 +127,12 @@ def pipeline(monkeypatch):
                 return result
 
             outputs.append(await execute(task, request, validate))
+            if task == "authoring_write" and on_unit is not None:
+                unit = {"schema_version": 2, "task_id": "synthetic-write", "chapter_id": "chapter",
+                        "target_ids": ["target"], "status": "generated", "blocks": [],
+                        "input_digest": hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()}
+                await on_unit(unit)
+                state.published_units.append(unit)
         if state.after is not None:
             await state.after()
         ref = artifacts.put_json({"synthetic_domain_results": outputs})
@@ -206,6 +229,10 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
     assert await execute(analysis_runtime, execution_id, handler) == reference
     assert len(sent) == 2 and len(pipeline.snapshots) == 1
     assert await store.get_run(run["run_id"]) == before
+    units = [r for r in row["receipts"] if r["stage"] == "document-unit"]
+    assert len(units) == len(pipeline.published_units) == 1
+    assert pipeline.saved_units == [[]]
+    assert pipeline.saved_plans == [None] and len(pipeline.published_plans) == 1
 
 
 async def test_explicit_predecessor_rebinds_cached_json_without_fabricating_paid_calls(
@@ -415,9 +442,11 @@ async def test_publication_failure_resumes_fixed_snapshot_and_knowledge_without_
         def spec(self):
             return {"provider": "fixture", "collection": "same"}
 
-        async def search(self, queries, artifacts):
-            queried.append(queries)
-            return {"materials": [], "issues": []}
+        async def search(self, queries, artifacts, *, run_operation):
+            async def send_once():
+                queried.append(queries)
+                return {"materials": [], "issues": []}
+            return await run_operation("search", "fixture-search", send_once)
 
     def handler(request):
         sent.append(request)

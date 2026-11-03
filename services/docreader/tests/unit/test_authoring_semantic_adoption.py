@@ -14,6 +14,7 @@ from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted, bu
 from docreader.tender.authoring_pipeline import _adopt_reviewed, generate_document
 from docreader.tender.authoring_revision import revise_units
 from docreader.tender.schema import AuthoringReviewResponse
+from docreader.tests.submission_responses import assemble_independent_candidates
 
 from test_authoring_pipeline_boundaries import snapshot
 from test_authoring_revision import bind, budget, finding, payload, response, task, unit
@@ -56,6 +57,75 @@ def test_free_code_only_removes_content_explicitly_rejected_by_the_reviewer(tmp_
         assert len(superseded) == 1 and artifacts.read_json(superseded[0]) == before
     else:
         assert adopted == before and superseded == []
+
+
+async def test_wrong_purpose_source_prose_is_removed_without_revision_and_fixed_text_still_exports(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    background = "本项目建设地点为甲园区。"
+    instruction = "技术文件应逐项响应招标要求，并提供性能说明及证明资料。"
+    letter = "我方按招标文件规定提交投标文件。投标总价：________元。签字：________。"
+    specs = [("项目背景", background, "narrative"), ("技术方案", instruction, "narrative"),
+             ("投标函", letter, "form")]
+    frozen = snapshot(artifacts, [{"heading": title, "text": text} for title, text, _ in specs])
+    writes, reviewed = [], []
+
+    async def execute(operation, request, validate):
+        value = request_payload(request)
+        stage = value.get("operation", operation)
+        if stage == "outline":
+            return validate({"schema_version": 2, "chapters": [
+                {"title": title, "children": [], "targets": [{
+                    "kind": kind, "purpose": "实际技术应答" if text == instruction else title,
+                    "range_ids": [source["range_id"]], "rule_ids": [],
+                    "support_origins": ["tender", "knowledge"],
+                    "template_part_ids": [part["part_id"] for part in value["template_parts"]
+                        if kind == "form" and source["range_id"] in part["range_ids"]]}]}
+                for (title, text, kind), source in zip(specs, value["sources"])], "findings": []})
+        if stage == "assemble":
+            return validate(assemble_independent_candidates(value))
+        if stage == "structure":
+            return validate({"findings": []})
+        if operation == "authoring_write":
+            writes.append(value)
+            assert "previous_content" not in value
+            assert all(support["origin"] == "tender" for support in value["supports"])
+            support, = value["supports"]
+            return validate({"blocks": [{"kind": "paragraph", "text": support["text"],
+                "target_ids": ["t1"], "support_ids": [support["support_id"]]}]})
+        assert operation == "authoring_review"
+        reviewed.extend(value["units"])
+        wrong, = [unit for unit in value["units"]
+                  if unit["content"]["blocks"][0]["text"] == instruction]
+        return validate({"findings": [{"code": "wrong_response_purpose", "detail": "编制说明替代了实际应答。",
+            "task_ids": [wrong["task_id"]], "content_ids": ["b1"],
+            "reject_content": True, "can_revise": False,
+            "suggestion": "删除生成的编制说明，无企业资料的实际应答留空。"}]})
+
+    result = artifacts.read_json(await generate_document(artifacts, frozen,
+        RequestBudget(model="fixture", context_tokens=131072, output_reserve=16384), execute))
+    assert len(writes) == 2 and len(reviewed) == 2
+    units = [artifacts.read_json(ref) for ref in result["unit_refs"]]
+    answered, = [unit for unit in units if unit["blocks"]]
+    assert answered["blocks"][0]["text"] == background
+    assert answered["blocks"][0]["material_ids"] == []
+    rejected_task = next(unit["task_id"] for unit in reviewed
+                         if unit["content"]["blocks"][0]["text"] == instruction)
+    rejected, = [unit for unit in units if unit["task_id"] == rejected_task]
+    assert rejected["status"] == "placeholder" and rejected["blocks"] == [] and rejected["gaps"]
+    assert any(unit["blocks"][0]["text"] == instruction for unit in
+               [artifacts.read_json(ref) for ref in result["superseded_unit_refs"]] if unit["blocks"])
+
+    def assert_document(data):
+        document = Document(BytesIO(data))
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        assert background in text and letter in text and instruction not in text
+
+    assert_document(artifacts.read_bytes(result["docx_ref"]))
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
+        documents = [name for name in archive.namelist() if name.endswith(".docx")]
+        assert documents
+        for name in documents:
+            assert_document(archive.read(name))
 
 
 async def test_revision_receives_the_explicit_rejection_without_reclassifying_its_code(tmp_path):

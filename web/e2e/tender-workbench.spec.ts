@@ -125,3 +125,59 @@ test("a failed initial read shows a retry error rather than an empty project", a
   f.state.failRead = false; await page.getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByTestId("docx-editor")).toBeVisible();
 });
+
+for (const source of ["manual", "recovered"] as const) {
+  test(`${source} Word does not inherit generated coverage despite sharing its execution`, async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const f = await fixture(page);
+    const generated = f.view.versions[0];
+    Object.assign(f.view, { coverage: { state: "draft", pending: 0, unreviewed: 0,
+      headline: "草稿已生成，0项待补、0项待核",
+      applies_to: { execution_id: generated.execution_id, version_id: generated.id, docx_sha256: generated.sha256 } } });
+    f.view.current_docx = { ...generated, id: "saved-word", revision: 2, source };
+    f.view.versions.unshift(f.view.current_docx);
+    await page.goto(`/#/bids/${project}/export`);
+    await expect(page.getByTestId("word-coverage")).toHaveText("当前查看稿 v2：覆盖待核");
+    await expect(page.getByTestId("generated-coverage")).toHaveText("生成稿 v1的覆盖统计：草稿已生成，0项待补、0项待核");
+    await expect(page.getByRole("button", { name: "下载 DOCX v2", exact: true })).toBeEnabled();
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("word-coverage.png") });
+  });
+}
+
+test("coverage follows the exact generated version and hash, and legacy identity stays unknown", async ({ page }) => {
+  const f = await fixture(page);
+  const generated = f.view.versions[0];
+  Object.assign(f.view, { coverage: { state: "draft", pending: 2, unreviewed: 3,
+    headline: "草稿已生成，2项待补、3项待核",
+    applies_to: { execution_id: generated.execution_id, version_id: generated.id, docx_sha256: generated.sha256 } } });
+  await page.goto(`/#/bids/${project}/export`);
+  await expect(page.getByTestId("word-coverage")).toHaveText("当前查看稿 v1：草稿已生成，2项待补、3项待核");
+  f.view.current_docx = { ...generated, sha256: "b".repeat(64) };
+  await page.reload();
+  await expect(page.getByTestId("word-coverage")).toHaveText("当前查看稿 v1：覆盖待核");
+  f.view.current_docx = generated;
+  Object.assign(f.view, { coverage: { state: "draft", pending: 0, unreviewed: 0, headline: "草稿已生成，0项待补、0项待核" } });
+  await page.reload();
+  await expect(page.getByTestId("word-coverage")).toHaveText("当前查看稿 v1：覆盖待核");
+  await expect(page.getByTestId("generated-coverage")).toHaveCount(0);
+});
+
+test("saving the pinned Word downgrades its coverage without replacing the document", async ({ page }) => {
+  await page.clock.install(); const f = await fixture(page);
+  const generated = f.view.versions[0];
+  Object.assign(f.view, { coverage: { state: "draft", pending: 0, unreviewed: 0,
+    headline: "草稿已生成，0项待补、0项待核",
+    applies_to: { execution_id: generated.execution_id, version_id: generated.id, docx_sha256: generated.sha256 } } });
+  await f.ready();
+  await f.edit();
+  await f.dirty(); await page.getByTestId("docx-save").click();
+  await expect(page.getByTestId("docx-status")).toHaveText("保存中");
+  f.publish(); await page.clock.runFor(1100);
+  await expect(page.getByTestId("docx-status")).toHaveText("已保存");
+  await expect(page.getByTestId("docx-version")).toHaveText("保存版本 2");
+  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "交付文件" }).click();
+  await expect(page.getByTestId("word-coverage")).toHaveText("当前查看稿 v2：覆盖待核");
+  await expect(page.getByTestId("generated-coverage")).toHaveText("生成稿 v1的覆盖统计：草稿已生成，0项待补、0项待核");
+});

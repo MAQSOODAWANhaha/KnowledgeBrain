@@ -53,8 +53,8 @@ def test_source_outline_request_explains_rule_and_source_reference_domains():
     assert 'evidence/context' in target_sources['description']
     constraint_sources = schema['properties']['constraint_range_ids']
     assert 'sources[].range_id' in constraint_sources['description']
-    assert 'read in this batch' in constraint_sources['description']
-    assert 'evidence' in constraint_sources['description']
+    for term in ['visible', 'bindable', 'evidence/context', 'full source', 'does not mark']:
+        assert term in constraint_sources['description']
     assert {'rule_ids', 'range_ids'} <= set(target['required'])
     assert 'rule_ids' in finding['required']
     assert not {'constraint_rule_ids', 'constraint_range_ids'} & set(schema['required'])
@@ -70,7 +70,8 @@ def test_source_outline_request_explains_rule_and_source_reference_domains():
     reference_domain = next(paragraph for paragraph in prompt.split('\n\n')
                             if paragraph.startswith('引用域：'))
     for term in ['rules[].rule_id', 'related_rules.item.item_id', '只读', '前缀',
-                 'range_ids', '证据上下文', 'constraint_range_ids', 'sources[].range_id', '实际阅读']:
+                 'range_ids', '证据上下文', 'constraint_range_ids', 'sources[].range_id', '实际阅读',
+                 '可见且可绑定', '装载完整原文']:
         assert term in reference_domain
 
 
@@ -79,7 +80,7 @@ def test_source_outline_request_explains_rule_and_source_reference_domains():
     ('outline', {'operation': 'assemble'}, 'OutlineAssemblyResponse'),
     ('authoring_basis', {}, 'AuthoringBasisResponse'),
     ('authoring_write', {'previous_content': {}}, 'WritingResponse'),
-    ('authoring_review', {}, 'AuthoringReviewResponse'),
+    ('authoring_review', {}, 'AuthoringContentReviewResponse'),
     ('authoring_review', {'operation': 'review_saved_word'}, 'AuthoringReviewResponse'),
     ('authoring_structure', {'operation': 'structure', 'phase': 'outline'}, 'AuthoringStructureResponse'),
     ('verify', {'schema_version': 2, 'operation': 'locate'}, 'LocateResult'),

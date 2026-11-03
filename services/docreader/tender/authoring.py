@@ -70,17 +70,19 @@ def _check_reference_ids(identities, allowed, path, detail="Select references su
                                        "detail": detail}])
 
 
-def validate_outline_references(value, *, rule_ids, source_ids, template_part_ids, constraint_source_ids=None):
+def validate_outline_references(value, *, rule_ids, source_ids, template_part_ids, constraint_source_ids=None,
+                                context_source_ids=None):
     """Check a parsed outline against its actual request, reporting one scalar.
 
-    Context/evidence aliases remain useful to targets but do not authorize a
-    submission constraint whose complete source was absent from this read.
+    Assembly handoffs can select visible frozen evidence. Table conditions still
+    require the source text read in this batch; callers supply that separate set.
     """
     rule_ids, source_ids, template_part_ids = set(rule_ids), set(source_ids), set(template_part_ids)
     constraint_sources = source_ids if constraint_source_ids is None else set(constraint_source_ids)
+    context_sources = constraint_sources if context_source_ids is None else set(context_source_ids)
     _check_reference_ids(value["constraint_rule_ids"], rule_ids, ["constraint_rule_ids"])
     _check_reference_ids(value["constraint_range_ids"], constraint_sources, ["constraint_range_ids"],
-                         "Select actual sources supplied in this request.")
+                         "Select bindable source references supplied in this request.")
 
     def chapters(entries, path):
         for number, chapter in enumerate(entries):
@@ -96,7 +98,7 @@ def validate_outline_references(value, *, rule_ids, source_ids, template_part_id
                                 "template_spans", span_number, field], "code": "outline_unknown_template",
                                 "detail": "Select a template part supplied in this request."}])
                 _check_reference_ids((target.get("response_table") or {}).get("context_range_ids", []),
-                    constraint_sources, [*current, "targets", ordinal, "response_table", "context_range_ids"],
+                    context_sources, [*current, "targets", ordinal, "response_table", "context_range_ids"],
                     "Select actual sources supplied in this request.")
                 for row_number, row in enumerate((target.get("response_table") or {}).get("rows", [])):
                     for field, allowed in (("rule_ids", rule_ids), ("range_ids", source_ids)):

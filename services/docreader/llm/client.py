@@ -368,6 +368,9 @@ class OpenAIModel:
                 f"model endpoint rejected the request (HTTP {status})"
             ) from None
         except (APIConnectionError, httpx.TransportError, TimeoutError) as error:
+            diagnostics = _transport_diagnostics(
+                error, "reading_body" if raw_response is not None else "before_headers"
+            )
             cause = error.__cause__ if isinstance(error, APIConnectionError) else error
             if isinstance(
                 cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
@@ -379,6 +382,7 @@ class OpenAIModel:
                     digest,
                     "connection_before_send",
                     started,
+                    transport_diagnostics=diagnostics,
                 )
                 raise ModelInfrastructureError(
                     "model connection failed before send"
@@ -393,6 +397,7 @@ class OpenAIModel:
                         digest,
                         "first_data_idle_timeout",
                         started,
+                        transport_diagnostics=diagnostics,
                     )
                     raise ModelInfrastructureError(
                         "model endpoint sent no data before the idle deadline"
@@ -407,6 +412,7 @@ class OpenAIModel:
                 digest,
                 failure,
                 started,
+                transport_diagnostics=diagnostics,
             )
             raise UncertainModelResponse(
                 "model response was lost after send; provider execution and billing are uncertain"
@@ -550,11 +556,13 @@ class OpenAIModel:
         return ArtifactRef.model_validate(reference).model_dump(mode="json")
 
     async def _finish_stream(
-        self, request_id, status, stream, digest, error_type, started
+        self, request_id, status, stream, digest, error_type, started,
+        *, transport_diagnostics=None,
     ):
-        response_ref = await self._save_response(
-            stream.audit(digest, error_type or "completed")
-        )
+        envelope = stream.audit(digest, error_type or "completed")
+        if transport_diagnostics is not None:
+            envelope.update(transport_diagnostics)
+        response_ref = await self._save_response(envelope)
         await self._finish(
             request_id,
             status,
@@ -564,6 +572,7 @@ class OpenAIModel:
             response_ref,
             provider_error=stream.provider_error,
             activity=_first_data_activity(stream.counts),
+            transport_diagnostics=transport_diagnostics,
         )
 
     async def _received_rejection(
@@ -597,6 +606,7 @@ class OpenAIModel:
         *,
         provider_error=None,
         activity=None,
+        transport_diagnostics=None,
     ):
         error = (
             {
@@ -613,6 +623,8 @@ class OpenAIModel:
                 if endpoint is not None and endpoint.api_key
             )
             error["provider_error"] = _redact_response(provider_error, secrets)
+        if error is not None and transport_diagnostics is not None:
+            error.update(transport_diagnostics)
         await self.store.finish_request(
             request_id,
             status,
@@ -622,6 +634,26 @@ class OpenAIModel:
             activity=activity,
         )
         self.usage.record(status, usage)
+
+
+def _transport_diagnostics(error, phase):
+    """Retain bounded exception identities, never exception messages or requests."""
+    details = {"transport_phase": phase, "transport_error_types": []}
+    seen = set()
+    while error is not None and id(error) not in seen and len(seen) < 4:
+        seen.add(id(error))
+        details["transport_error_types"].append(type(error).__name__)
+        if isinstance(error, httpx.RemoteProtocolError) and "transport_protocol_reason" not in details:
+            details["transport_protocol_reason"] = (
+                "server_disconnected_without_response"
+                if str(error) == "Server disconnected without sending a response."
+                else "other_remote_protocol_error"
+            )
+        number = getattr(error, "errno", None)
+        if type(number) is int and "transport_errno" not in details:
+            details["transport_errno"] = number
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    return details
 
 
 def _retry_after_seconds(value: str | None) -> float | None:

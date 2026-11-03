@@ -98,10 +98,10 @@ class WebKnowledgeProvider:
         return {"provider": "knowledgebrain_web_selection_v1", "base_url": self.base_url,
                 "selections": self.selections, "max_original_bytes": 50 * 1024 * 1024}
 
-    async def search(self, queries, artifacts):
+    async def search(self, queries, artifacts, *, run_operation=None):
         materials, issues = {}, []
         for provider in self.providers:
-            result = await provider.search(queries, artifacts)
+            result = await provider.search(queries, artifacts, run_operation=run_operation)
             issues.extend(result["issues"])
             for material in result["materials"]:
                 identity = material["material_id"]

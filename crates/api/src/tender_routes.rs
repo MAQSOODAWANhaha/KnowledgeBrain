@@ -650,6 +650,7 @@ async fn workbench(
             versions.get(field).cloned().unwrap_or(Value::Null),
         );
     }
+    bind_coverage_version(object);
     if let Some(current) = object
         .get_mut("current_docx")
         .and_then(Value::as_object_mut)
@@ -711,6 +712,36 @@ async fn workbench(
         ));
     }
     Ok(Json(value))
+}
+
+fn bind_coverage_version(object: &mut serde_json::Map<String, Value>) {
+    // Generated versions are immutable and unique per execution; manual and
+    // recovered descendants retain its execution_id but have different content.
+    let applies_to = object
+        .get("context_execution_id")
+        .and_then(Value::as_str)
+        .and_then(|execution| {
+            let version = object.get("versions")?.as_array()?.iter().find(|version| {
+                version["source"] == "generated" && version["execution_id"] == execution
+            })?;
+            Some(json!({
+                "execution_id":execution,
+                "version_id":version.get("id")?.as_str()?,
+                "docx_sha256":version.get("sha256")?.as_str()?
+            }))
+        });
+    let Some(coverage) = object.get_mut("coverage").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(identity) = applies_to {
+        coverage.insert("applies_to".into(), identity);
+    } else {
+        *coverage =
+            json!({"state":"unknown","pending":null,"unreviewed":null,"headline":"覆盖未知"})
+                .as_object()
+                .unwrap()
+                .clone();
+    }
 }
 
 async fn status(
@@ -978,6 +1009,50 @@ async fn material_original(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_is_bound_to_the_generated_word_identity_not_its_manual_descendant() {
+        let mut value = json!({
+            "context_execution_id":"document-1",
+            "coverage":{"state":"draft","pending":0,"unreviewed":0,"headline":"草稿已生成"},
+            "current_docx":{"id":"manual-2","source":"manual","execution_id":"document-1","sha256":"b".repeat(64)},
+            "versions":[
+                {"id":"manual-2","source":"manual","execution_id":"document-1","sha256":"b".repeat(64)},
+                {"id":"generated-1","source":"generated","execution_id":"document-1","sha256":"a".repeat(64)}
+            ]
+        });
+        bind_coverage_version(value.as_object_mut().unwrap());
+        assert_eq!(
+            value["coverage"]["applies_to"],
+            json!({
+                "execution_id":"document-1","version_id":"generated-1","docx_sha256":"a".repeat(64)
+            })
+        );
+        assert_eq!(value["current_docx"]["id"], "manual-2");
+        assert_eq!(value["coverage"]["pending"], 0);
+    }
+
+    #[test]
+    fn coverage_without_a_matching_generated_word_is_unknown() {
+        for versions in [
+            json!([]),
+            json!([
+                {"id":"manual-1","source":"manual","execution_id":"document-1","sha256":"a".repeat(64)},
+                {"id":"other-1","source":"generated","execution_id":"document-2","sha256":"a".repeat(64)}
+            ]),
+        ] {
+            let mut value = json!({"context_execution_id":"document-1", "versions":versions,
+                "coverage":{"state":"draft","pending":0,"unreviewed":0,"headline":"旧结论",
+                    "applies_to":{"version_id":"stale"}}});
+            bind_coverage_version(value.as_object_mut().unwrap());
+            assert_eq!(
+                value["coverage"],
+                json!({
+                    "state":"unknown","pending":null,"unreviewed":null,"headline":"覆盖未知"
+                })
+            );
+        }
+    }
 
     #[test]
     fn project_patch_rejects_unknown_status() {

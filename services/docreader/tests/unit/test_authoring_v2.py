@@ -126,6 +126,9 @@ async def test_source_only_retrieval_and_semantic_empty_result_can_be_corrected(
     calls, searched = [], []
 
     class Knowledge:
+        def spec(self):
+            return {'provider': 'fixture', 'collection': 'fixed'}
+
         async def search(self, queries, _artifacts):
             searched.extend(queries)
             return {'materials': [{'material_id': 'permissions', 'title': '功能资料',

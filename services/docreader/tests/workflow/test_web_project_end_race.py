@@ -1,11 +1,11 @@
 """Project closure racing an admitted command cannot publish new business work."""
 import asyncio
+from uuid import uuid4
 
 import psycopg
 import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.integrations.store import Conflict
 from docreader.integrations.web import WebBridge, WebError, handle_command
 from docreader.jobs.settings import Settings
 from docreader.tests.workflow.test_web_analysis import (
@@ -177,8 +177,12 @@ async def test_ended_document_confirmation_only_reads_matching_original_identity
     monkeypatch.setattr(ArtifactStore, "put_bytes", forbidden)
     before = await business_rows(runtime)
     assert (await handle_command(request, data))[0]["document"]["document_id"] == request["document_id"]
-    with pytest.raises(Conflict):
-        await handle_command(request | {"role": "amendment"}, data)
+    with pytest.raises(WebError) as wrong_project:
+        await handle_command(request | {"project_id": runtime.other}, data)
+    assert wrong_project.value.code == "DOCUMENT_NOT_FOUND"
+    with pytest.raises(WebError) as wrong_document:
+        await handle_command(request | {"document_id": str(uuid4())}, data)
+    assert wrong_document.value.code == "DOCUMENT_NOT_FOUND"
     with pytest.raises(WebError) as changed:
         await handle_command(request, data + b"changed")
     assert changed.value.code == "DOCUMENT_IDENTITY_MISMATCH"

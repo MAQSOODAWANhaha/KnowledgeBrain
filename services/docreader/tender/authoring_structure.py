@@ -17,11 +17,22 @@ from docreader.tender.schema import AUTHORING_GROUNDING_POLICY, AuthoringStructu
 
 
 _COMPACT_VIEW_PROMPT = (
+    "\nstructure_view=compact_v2时，support_sections按sections中的section_id分组，各组以原support_id为键；"
+    "顶层supports以原support_id为键保留未分组支持。组内条目继承section_id。submission_sources以原source_id为键。"
+    "条目为字符串时即完整text，否则读取其text/text_lines及其他字段。支持省略origin时为tender，grid和header_row_count省略时为null。"
+    "章节省略is_volume时为false、presentation_role为body，targets/children省略时为空；"
+    "目标省略manual_fill为false，related_target_ids/template_support_ids/source_support_ids/response_context_support_ids/"
+    "response_rows/task_ids/rule_ids省略时为空数组。非默认字段仍原样提供。\n"
     "\n结构视图grid.rows保留全部单元格明文，行列从0开始；空字符串为原生空白格，"
     "null表示该位置没有独立单元格。merged_cells各项为[row,column,row_span,col_span]，"
     "保留所有非1×1合并；原始列宽由宿主保存。submission_sources中的grid与supports中的grid含义相同。\n"
     "条目用text_lines代替text时，字符串是原文行，整数是顶层text_pool从0开始的索引；"
     "按序以换行连接恢复完整原文，空行保留。共享原文不合并来源身份、主体、条件、选择或引用。\n"
+)
+
+_RULE_FIELDS = (
+    "text", "kind", "domains", "subject", "scope", "conditions", "exceptions",
+    "numbers", "scoring", "consequence", "submission",
 )
 
 
@@ -58,19 +69,7 @@ def _rule_dispositions(context, issues):
                 {
                     **{
                         field: deepcopy(semantic[field])
-                        for field in (
-                            "text",
-                            "kind",
-                            "domains",
-                            "subject",
-                            "scope",
-                            "conditions",
-                            "exceptions",
-                            "numbers",
-                            "scoring",
-                            "consequence",
-                            "submission",
-                        )
+                        for field in _RULE_FIELDS
                         if field in semantic
                     },
                     "evidence": quotes,
@@ -90,7 +89,7 @@ def _rule_dispositions(context, issues):
 
 
 def _structure_payload(artifacts, outline, units, *, outline_phase=False, template_bindings=None):
-    from docreader.tender.authoring_pipeline import _constraint_context
+    from docreader.tender.authoring_pipeline import _constraint_context, _json
     from docreader.tender.authoring_templates import (
         load_template_part,
         template_part_key,
@@ -101,6 +100,7 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
     if outline_phase:
         units = []
     supports, part_ids, targets, gaps, task_ids = [], {}, {}, [], {}
+    pending_rules, target_rules, rule_ids, rule_issues = [], {}, {}, []
     target_prefix = "v" if outline_phase else "t"
     for unit in units:
         for identity in unit.get("target_ids", []):
@@ -115,6 +115,8 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         context, outline.get("issues", [])
     )
     gaps.extend(disposition_gaps)
+    views = {rule["rule_id"]: rule for rule in context.payload["rules"]}
+    rule_views = {_json(ref): views[identity] for identity, ref in context.rules.items() if identity in views}
 
     def register(entries):
         for chapter in entries:
@@ -235,6 +237,9 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
                         "source_support_ids": source_supports(row["source_excerpts"],
                             chapter["chapter_id"], target["target_id"])}
                         for ordinal, row in enumerate(target["response_table"]["rows"], 1)]
+                    pending_rules.extend((row_view, row.get("rule_refs", []), chapter["chapter_id"], target["target_id"])
+                        for row_view, row in zip(selected[-1]["response_rows"], target["response_table"]["rows"]))
+                pending_rules.append((selected[-1], target.get("rule_refs", []), chapter["chapter_id"], target["target_id"]))
             result.append(
                 {
                     "chapter_id": chapter["chapter_id"],
@@ -248,6 +253,49 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         return result
 
     tree = chapters(outline["chapters"])
+    support_texts = {entry["support_id"]: entry.get("text", "") for entry in supports}
+    unavailable_targets = set()
+    for selected, references, chapter_id, target_id in pending_rules:
+        selected["rule_ids"], unavailable = [], False
+        for reference in references:
+            key = _json(reference)
+            view = rule_views.get(key, {})
+            semantic = view.get("effective_rule", view.get("item", {}))
+            if not semantic.get("text", "").strip():
+                unavailable = True
+                continue
+            if key not in rule_ids:
+                evidence = []
+                for quote in semantic.get("evidence", []):
+                    if not quote.get("quote", "").strip():
+                        continue
+                    try:
+                        fragments = [{"source_ref": excerpt["source_ref"], "selectors": [selector]}
+                            for excerpt in getattr(context, "excerpts", {}).get(quote.get("range_id"), [])
+                            for selector in excerpt["selectors"]]
+                        support_ids = [part_ids.get(("excerpt", source_excerpt_key(excerpt))) for excerpt in fragments]
+                    except (ValueError, KeyError):
+                        support_ids = []
+                    if support_ids and all(support_ids) and "\n".join(support_texts[identity] for identity in support_ids) == quote["quote"]:
+                        evidence.append({"support_ids": support_ids})
+                    else:
+                        evidence.append({"quote": quote["quote"]})
+                rule_ids[key] = f"r{len(rule_ids) + 1}"
+                target_rules[rule_ids[key]] = {
+                    **{field: deepcopy(semantic[field]) for field in _RULE_FIELDS if field in semantic},
+                    "evidence": evidence,
+                }
+            identity = rule_ids[key]
+            if identity not in selected["rule_ids"]:
+                selected["rule_ids"].append(identity)
+            unavailable = unavailable or not target_rules[identity]["evidence"] or (
+                len(target_rules[identity]["evidence"]) != len(semantic.get("evidence", [])))
+        if unavailable and target_id not in unavailable_targets:
+            unavailable_targets.add(target_id)
+            issue = {"code": "structure_target_rule_unavailable",
+                "detail": "本位置部分规则的当前语义或引文无法读取，保留规则引用及结构待核。"}
+            gaps.append({**issue, "chapter_id": chapter_id, "target_id": target_id})
+            rule_issues.append({**issue, "target_id": targets[target_id]})
     summaries = [
         {
             "task_id": unit["task_id"],
@@ -275,15 +323,99 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         "chapters": tree,
         "sections": sections,
         "supports": supports,
+        "target_rules": target_rules,
         "units": summaries,
         "rule_dispositions": dispositions,
-        "input_issues": [*context.availability_issues, *disposition_gaps],
+        "input_issues": [*context.availability_issues, *disposition_gaps, *rule_issues],
         **submission,
     }, gaps
 
 
+def _move_chapters(outline, moves):
+    """Validate the complete edit batch before replacing any tree structure."""
+    nodes, parents, siblings = {}, {}, {None: []}
+    stack = [(outline['chapters'], None)]
+    while stack:
+        entries, parent = stack.pop()
+        for node in entries:
+            identity = node['chapter_id']
+            if identity in nodes:
+                raise ValueError('原大纲章节身份重复。')
+            nodes[identity], parents[identity] = node, parent
+            siblings[parent].append(identity)
+            siblings[identity] = []
+            stack.append((node['children'], identity))
+    selected, anchors = set(), set()
+    for move in moves:
+        identity, parent, after = (move[key] for key in ('chapter_id', 'parent_chapter_id', 'after_chapter_id'))
+        if identity not in nodes or parent is not None and parent not in nodes or after is not None and after not in nodes:
+            raise ValueError('章节移动引用不属于本次大纲。')
+        if identity in selected or identity == parent or identity == after:
+            raise ValueError('章节重复移动或引用自身。')
+        if (parent, after) in anchors:
+            raise ValueError('多个移动争用同一父章下的位置。')
+        selected.add(identity)
+        anchors.add((parent, after))
+        parents[identity] = parent
+    checked = set()
+    for identity in nodes:
+        path, cursor = set(), identity
+        while cursor is not None and cursor not in checked:
+            if cursor in path:
+                raise ValueError('移动后的父子关系存在循环。')
+            path.add(cursor)
+            cursor = parents[cursor]
+        checked.update(path)
+    for move in moves:
+        after = move['after_chapter_id']
+        if after is not None and parents[after] != move['parent_chapter_id']:
+            raise ValueError('相对位置引用不属于移动后的同一父章。')
+    for parent in siblings:
+        siblings[parent] = [identity for identity in siblings[parent] if identity not in selected]
+    pending = list(moves)
+    while pending:
+        waiting = []
+        for move in pending:
+            identity, parent, after = (move[key] for key in ('chapter_id', 'parent_chapter_id', 'after_chapter_id'))
+            group = siblings[parent]
+            if after is not None and after not in group:
+                waiting.append(move)
+            else:
+                group.insert(0 if after is None else group.index(after) + 1, identity)
+        if len(waiting) == len(pending):
+            raise ValueError('相对位置依赖存在循环。')
+        pending = waiting
+    copies = {identity: deepcopy({key: value for key, value in node.items() if key != 'children'})
+              for identity, node in nodes.items()}
+    for identity, node in copies.items():
+        node['children'] = [copies[child] for child in siblings[identity]]
+    outline['chapters'] = [copies[identity] for identity in siblings[None]]
+
+
+def _rename_chapters(outline, renames):
+    """Validate every chapter reference before applying title-only corrections."""
+    nodes = {}
+    stack = list(outline['chapters'])
+    while stack:
+        node = stack.pop()
+        identity = node['chapter_id']
+        if identity in nodes:
+            raise ValueError('原大纲章节身份重复。')
+        nodes[identity] = node
+        stack.extend(node['children'])
+    selected = set()
+    for rename in renames:
+        identity = rename['chapter_id']
+        if identity not in nodes or identity in selected:
+            raise ValueError('章节改名引用不属于本次大纲或重复。')
+        selected.add(identity)
+    for rename in renames:
+        nodes[rename['chapter_id']]['title'] = rename['title']
+
+
 async def review_structure(artifacts, outline, units, budget, execute, *, outline_phase=False,
-                           apply_source_decoration_exclusions=False):
+                           apply_source_decoration_exclusions=False, apply_hierarchy_edits=False,
+                           apply_title_edits=False):
     """Return findings/gaps; the durable executor owns the existing retry allowance.
 
     Inspect final adopted instances once, including manual or unfilled forms.
@@ -301,6 +433,10 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
         payload, gaps = _structure_payload(artifacts, outline, units, template_bindings=template_bindings)
     if apply_source_decoration_exclusions:
         payload["source_decoration_edits_allowed"] = True
+    if apply_hierarchy_edits:
+        payload["hierarchy_edits_allowed"] = True
+    if apply_title_edits:
+        payload["title_edits_allowed"] = True
     task_ids = {unit["task_id"] for unit in units}
 
     def validate(raw):
@@ -368,6 +504,38 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
             target = template_bindings[identity]["target"]
             target["template_refs"] = [part for part in target.get("template_refs", [])
                                        if template_part_key(part) not in keys]
+        moves = value['chapter_moves']
+        if moves:
+            if not apply_hierarchy_edits:
+                gaps.append({'code': 'structure_hierarchy_edits_not_applied',
+                    'detail': '本次结构核对仅保留章节移动建议，不修改固定大纲或已保存Word：' +
+                              '；'.join(move['chapter_id'] + '：' + move['reason'] for move in moves)})
+            else:
+                try:
+                    _move_chapters(outline, moves)
+                except ValueError as error:
+                    gaps.append({'code': 'structure_hierarchy_edits_invalid',
+                        'detail': f'章节移动未应用，保留原结构及复核意见待核：{error}'})
+                else:
+                    gaps.extend({'code': 'structure_hierarchy_edits_applied', 'chapter_id': move['chapter_id'],
+                        'detail': '已执行结构复核明确选择的章节移动，原语义意见仍保留待核：' + move['reason']}
+                        for move in moves)
+        renames = value['chapter_renames']
+        if renames:
+            if not apply_title_edits:
+                gaps.append({'code': 'structure_title_edits_not_applied',
+                    'detail': '本次结构核对仅保留标题建议，不修改固定大纲或已保存Word：' +
+                              '；'.join(rename['chapter_id'] + '：' + rename['reason'] for rename in renames)})
+            else:
+                try:
+                    _rename_chapters(outline, renames)
+                except ValueError as error:
+                    gaps.append({'code': 'structure_title_edits_invalid',
+                        'detail': f'章节改名未应用，保留原标题及复核意见待核：{error}'})
+                else:
+                    gaps.extend({'code': 'structure_title_edits_applied', 'chapter_id': rename['chapter_id'],
+                        'detail': '已执行结构复核明确选择的业务标题：' + rename['reason']}
+                        for rename in renames)
         return value["findings"], gaps
 
     prompt = budget.prompts.get("authoring_structure")

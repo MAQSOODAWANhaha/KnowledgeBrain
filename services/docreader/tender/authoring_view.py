@@ -108,7 +108,7 @@ def compact_assembly_payload(payload):
 def compact_structure_payload(payload):
     """Share exact prose and project grids; preserve the complete adopted structure."""
     result = deepcopy(payload)
-    result['structure_view'] = 'compact_v1'
+    result['structure_view'] = 'compact_v2'
     for support in result['supports']:
         if support.get('grid'):
             support['grid'] = _grid_view(support['grid'])
@@ -121,4 +121,46 @@ def compact_structure_payload(payload):
             source['grid'] = _grid_view(grid)
             source.pop('text')
     _share_text_lines(result, fields=('supports', 'submission_sources'))
+
+    def text_entry(record):
+        return record['text'] if set(record) == {'text'} else record
+
+    grouped, unsectioned = {}, {}
+    for support in result['supports']:
+        identity = support.pop('support_id')
+        section = support.get('section_id')
+        destination = unsectioned
+        if isinstance(section, str) and section:
+            support.pop('section_id')
+            destination = grouped.setdefault(section, {})
+        for field, default in (('origin', 'tender'), ('grid', None), ('header_row_count', None)):
+            if field in support and support[field] == default:
+                support.pop(field)
+        destination[identity] = text_entry(support)
+    result['supports'] = unsectioned
+    if grouped:
+        result['support_sections'] = grouped
+    result['submission_sources'] = {
+        source['source_id']: text_entry({key: value for key, value in source.items() if key != 'source_id'})
+        for source in result['submission_sources']}
+
+    def chapters(entries):
+        for chapter in entries:
+            chapters(chapter.get('children', []))
+            for target in chapter.get('targets', []):
+                if target.get('manual_fill') is False:
+                    target.pop('manual_fill')
+                for field in ('related_target_ids', 'template_support_ids', 'source_support_ids',
+                              'response_context_support_ids', 'response_rows', 'task_ids', 'rule_ids'):
+                    if target.get(field) == []:
+                        target.pop(field)
+            if chapter.get('is_volume') is False:
+                chapter.pop('is_volume')
+            if chapter.get('presentation_role') == 'body':
+                chapter.pop('presentation_role')
+            for field in ('targets', 'children'):
+                if chapter.get(field) == []:
+                    chapter.pop(field)
+
+    chapters(result.get('chapters', []))
     return result

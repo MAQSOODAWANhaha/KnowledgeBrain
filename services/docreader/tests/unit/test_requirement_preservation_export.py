@@ -349,9 +349,9 @@ def test_chapter_deduplicates_full_rule_identity_without_merging_form_instances(
     targets = [outline_target("description", [shared]),
                outline_target("comparison", [shared, other]),
                outline_target("proof", [shared], kind="attachment"),
-               outline_target("bidder", [shared], kind="form", purpose="投标人分别填写。",
+               outline_target("bidder", [shared], kind="form", purpose="投标人分别填写。", subject="投标人",
                               template_refs=[part(template)]),
-               outline_target("manufacturer", [shared], kind="form", purpose="原厂分别填写。",
+               outline_target("manufacturer", [shared], kind="form", purpose="原厂分别填写。", subject="原厂",
                               template_refs=[part(template)])]
     data = requirements(requirement(shared, "原厂证明须盖章。", targets=tuple(t["target_id"] for t in targets)),
                         requirement(other, "另一个有效规则必须保留。", targets=("comparison",)))
@@ -368,7 +368,8 @@ def test_chapter_deduplicates_full_rule_identity_without_merging_form_instances(
     assert bidder.cell(0, 0).text == manufacturer.cell(0, 0).text == "规定表头"
     assert bidder.cell(2, 1).text == manufacturer.cell(2, 1).text == ""
     captions = [p.text for p in document.paragraphs]
-    assert "投标人分别填写。" in captions and "原厂分别填写。" in captions
+    assert "投标人" in captions and "原厂" in captions
+    assert "投标人分别填写。" not in captions and "原厂分别填写。" not in captions
     assert_no_analysis_preamble(document)
     assert data == before
 

@@ -8,7 +8,8 @@ from pydantic import create_model
 from docreader.llm.request import ModelConfigurationError
 from docreader.tender.schema import (
     AnalysisIssue, AnalysisReviewResponse, AnalysisSharedFinding, AnalysisVersion,
-    AssociationResult, AuthoringBasisResponse, AuthoringReviewResponse, AuthoringStructureResponse, Contract,
+    AssociationResult, AuthoringBasisResponse, AuthoringContentReviewResponse, AuthoringReviewResponse,
+    AuthoringStructureResponse, Contract,
     Extraction, ItemDispositionOutput, LocateResult, OCRResponse, OutlineAssemblyResponse,
     OutlineResponse, Plan, Relation, TenderItem, Text, Verification, WritingResponse,
 )
@@ -39,12 +40,14 @@ _BATCHES = {operation: _batch_response(response.__name__, response)
             for operation, response in _VERIFY.items() if operation != 'locate'}
 _DIRECT = {
     'ocr': OCRResponse, 'plan': Plan, 'authoring_basis': AuthoringBasisResponse,
-    'authoring_write': WritingResponse, 'authoring_review': AuthoringReviewResponse,
+    'authoring_write': WritingResponse, 'authoring_review': AuthoringContentReviewResponse,
     'authoring_structure': AuthoringStructureResponse,
 }
 
 
 def response_model(task, payload):
+    if task == 'authoring_review' and payload.get('operation') == 'review_saved_word':
+        return AuthoringReviewResponse
     if task == 'outline':
         return OutlineAssemblyResponse if payload.get('operation') == 'assemble' else OutlineResponse
     if task == 'extract':
@@ -74,7 +77,8 @@ def output_schema(task, payload):
 
 def output_contract_spec():
     models = {*_DIRECT.values(), *_VERIFY.values(), *_BATCHES.values(), ExtractionOutput,
-              Extraction, Verification, OutlineResponse, OutlineAssemblyResponse}
+              Extraction, Verification, OutlineResponse, OutlineAssemblyResponse,
+              AuthoringReviewResponse, AuthoringContentReviewResponse}
     return {model.__name__: hashlib.sha256(_schema_text(model).encode()).hexdigest()
             for model in sorted(models, key=lambda model: model.__name__)}
 

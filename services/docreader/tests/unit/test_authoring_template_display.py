@@ -78,14 +78,16 @@ def test_selected_template_display_retains_exact_frozen_selector(tmp_path):
     assert load_template_part(artifacts, selected)["text"] == selected_text
 
 
-def test_shared_form_instances_display_each_existing_purpose_before_its_template(tmp_path):
+def test_shared_form_instances_display_each_existing_subject_before_its_template(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     reference = source(artifacts, "financial", text="8D 财务格式", grid=grid())
     selected = part(reference)
     targets = [target("bidder", templates=[selected]), target("manufacturer", templates=[selected])]
     purposes = ["投标人财务情况；与原厂同主体时按适用要求处理", "原厂财务情况；与投标人不同主体时填写"]
-    for item, purpose in zip(targets, purposes):
+    subjects = ["投标人", "产品原厂"]
+    for item, purpose, subject in zip(targets, purposes, subjects):
         item["purpose"] = purpose
+        item["subject"] = subject
     outline = {"chapters": [chapter("财务", targets, volume=True)]}
     units = [writing("w1", "财务", ["bidder"], status="placeholder"),
              writing("w2", "财务", ["manufacturer"], status="placeholder")]
@@ -97,9 +99,10 @@ def test_shared_form_instances_display_each_existing_purpose_before_its_template
         for content in [artifacts.read_bytes(exported["docx_ref"]), archive.read("volumes/001.docx")]:
             word = Document(BytesIO(content))
             paragraphs = [paragraph.text for paragraph in word.paragraphs]
-            assert all(paragraphs.count(purpose) == 1 for purpose in purposes)
+            assert all(purpose not in "\n".join(paragraphs) for purpose in purposes)
+            assert all(paragraphs.count(subject) == 1 for subject in subjects)
             body = list(word.element.body)
-            captions = [next(p for p in word.paragraphs if p.text == purpose) for purpose in purposes]
+            captions = [next(p for p in word.paragraphs if p.text == subject) for subject in subjects]
             assert body.index(captions[0]._p) < body.index(word.tables[0]._tbl)
             assert body.index(word.tables[0]._tbl) < body.index(captions[1]._p) < body.index(word.tables[1]._tbl)
             assert [table.cell(1, 1).text for table in word.tables] == ["", ""]

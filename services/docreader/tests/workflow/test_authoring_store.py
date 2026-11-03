@@ -3,10 +3,12 @@
 import asyncio
 from dataclasses import asdict
 import hashlib
+import json
 import os
 from uuid import uuid4
 
 import psycopg
+import httpx
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 import pytest
@@ -16,6 +18,8 @@ import pytest_asyncio
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.authoring_store import AuthoringStore
+from docreader.integrations.authoring_knowledge import KnowledgeResponseError, KnowledgeUnavailable
+from docreader.integrations.web_knowledge import build_web_knowledge
 from docreader.integrations.store import (
     Cancelled,
     Conflict,
@@ -23,6 +27,7 @@ from docreader.integrations.store import (
     StaleExecution,
 )
 from docreader.llm.request import ModelWorkUnitExhausted
+from docreader.tender.document_execution import _FrozenKnowledge, _digest
 
 
 @pytest_asyncio.fixture
@@ -537,3 +542,153 @@ async def test_exhausted_chapter_does_not_spend_another_chapters_retry_budget(
         metadata("second", "second-chapter"),
     )
     await store.finish_request("second", "sent")
+
+
+async def test_same_execution_survives_kill_and_rejects_the_expired_worker(authoring_store, monkeypatch):
+    """Lease takeover stays on one execution. It is not access to another user's project."""
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr("docreader.tender.document_execution.asyncio.sleep", no_wait)
+    store, artifacts = authoring_store, authoring_store.test_artifacts
+    identity, lease = await submitted(store)
+    spec = {"provider": "fixture", "scope": "collection"}
+
+    class Provider:
+        def __init__(self):
+            self.calls = 0
+            self.crash = True
+
+        async def search(self, queries, _artifacts, *, run_operation):
+            async def send_once():
+                self.calls += 1
+                if self.crash and self.calls == 2:
+                    self.crash = False
+                    raise RuntimeError("killed after the second send")
+                raise KnowledgeResponseError("synthetic failed response")
+            key = _digest({"query": queries[0]["query"], "provider": "fixture"})
+            try:
+                return await run_operation("search", key, send_once)
+            except KnowledgeUnavailable:
+                return {"materials": [], "issues": [{
+                    "code": "knowledge_unavailable", "detail": "失败", "target_id": "query"}]}
+
+    provider = Provider()
+    first = _FrozenKnowledge(provider, spec, store, artifacts, lease)
+    with pytest.raises(RuntimeError, match="killed"):
+        await first.search([{"query": "权限", "target_id": "target"}], artifacts)
+    resumed = _FrozenKnowledge(provider, spec, store, artifacts, lease)
+    failed = await resumed.search([{"query": "权限", "target_id": "target"}], artifacts)
+    assert provider.calls == 4
+    assert failed["issues"][0]["code"] == "knowledge_unavailable"
+    await resumed.search([{"query": "权限", "target_id": "other"}], artifacts)
+    assert provider.calls == 4
+
+    unit_ref = artifacts.put_json({"task_id": "w1", "text": "已保存章节"})
+    await store.commit_artifact(
+        lease, "document-unit", unit_ref, scope="w1", input_digest=_digest("w1"))
+    await expire(store, identity)
+    replacement = await store.acquire(identity)
+    assert replacement is not None and replacement.execution_id == identity
+    assert replacement.epoch == lease.epoch + 1
+    with pytest.raises(StaleExecution):
+        await _FrozenKnowledge(provider, spec, store, artifacts, lease).search(
+            [{"query": "权限", "target_id": "late"}], artifacts)
+    with pytest.raises(StaleExecution):
+        await store.commit_artifact(
+            lease, "document-unit", artifacts.put_json({"task_id": "w2"}),
+            scope="w2", input_digest=_digest("w2"))
+    assert provider.calls == 4
+    receipt = await store.receipt(
+        replacement, "document-unit", "w1", input_digest=_digest("w1"))
+    assert artifacts.read_json(receipt["artifact_ref"])["text"] == "已保存章节"
+    quiet = _FrozenKnowledge(provider, spec, store, artifacts, replacement)
+    replayed = await quiet.search([{"query": "权限", "target_id": "replacement"}], artifacts)
+    assert provider.calls == 4
+    assert replayed["issues"][0]["code"] == "knowledge_unavailable"
+
+
+def web_knowledge(store, artifacts, lease, handler):
+    provider = build_web_knowledge(execution_id=lease.execution_id,
+        selections=[{"product_id": "4c78bf65-9ee2-4788-bc0c-f14769bb153f",
+                     "version_id": "37f9257d-f030-46cb-ae5b-e34dfebcb14b"}],
+        base_url="https://knowledge.invalid", service_secret="synthetic-test-secret",
+        transport=httpx.MockTransport(handler))
+    return _FrozenKnowledge(provider, provider.spec(), store, artifacts, lease)
+
+
+async def test_real_web_operation_counts_are_persisted_without_nested_retries(authoring_store, monkeypatch):
+    async def no_wait(_seconds):
+        return None
+    monkeypatch.setattr("docreader.integrations.authoring_knowledge.asyncio.sleep", no_wait)
+    store, artifacts = authoring_store, authoring_store.test_artifacts
+    identity, lease = await submitted(store)
+    sent = []
+    async def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(503)
+    reader = web_knowledge(store, artifacts, lease, handler)
+    result = await reader.search([{"query": "完整要求", "target_id": "target"}], artifacts)
+    assert len(sent) == 4
+    assert result["issues"][0]["code"] == "knowledge_unavailable"
+    stored = await store.get_execution(identity)
+    receipts = [receipt for receipt in stored["receipts"] if receipt["stage"] == "knowledge-operation"]
+    assert sum(receipt["scope"].endswith(":start") for receipt in receipts) == 4
+    assert sum(receipt["scope"].endswith(":outcome") for receipt in receipts) == 4
+
+
+@pytest.mark.parametrize("empty", [False, True])
+async def test_real_pg_operation_result_resumes_before_snapshot_commit(authoring_store, monkeypatch, empty):
+    store, artifacts = authoring_store, authoring_store.test_artifacts
+    _, lease = await submitted(store)
+    sent = []
+    async def handler(request):
+        command = json.loads(request.content)
+        sent.append(command)
+        return httpx.Response(200, json={"hits": [] if empty else [{
+            "id": "chunk", "content": "测试资料", "document_id": "b78d5270-5938-48c2-acb7-e9538910fea7",
+            "product_id": command["product_id"], "version_id": command["version_id"]}]})
+    commit = store.commit_artifact
+    async def fail_snapshot(current, stage, reference, scope="", *, input_digest="", metadata=None):
+        if stage == "knowledge-snapshot":
+            raise OSError("injected snapshot failure")
+        return await commit(current, stage, reference, scope, input_digest=input_digest, metadata=metadata)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "commit_artifact", fail_snapshot)
+        with pytest.raises(OSError, match="snapshot failure"):
+            await web_knowledge(store, artifacts, lease, handler).search(
+                [{"query": "完整要求", "target_id": "before"}], artifacts)
+    result = await web_knowledge(store, artifacts, lease, handler).search(
+        [{"query": "完整要求", "target_id": "after"}], artifacts)
+    assert len(sent) == 1
+    assert bool(result["materials"]) is not empty
+    if not empty:
+        assert result["materials"][0]["locator"]["target_ids"] == ["after"]
+
+
+async def test_real_web_unknown_attempts_keep_budget_across_lease_takeover(authoring_store, monkeypatch):
+    async def no_wait(_seconds):
+        return None
+    monkeypatch.setattr("docreader.integrations.authoring_knowledge.asyncio.sleep", no_wait)
+    store, artifacts = authoring_store, authoring_store.test_artifacts
+    identity, lease = await submitted(store)
+    sent = []
+    async def handler(request):
+        sent.append(request)
+        if len(sent) == 2:
+            raise RuntimeError("interrupted after second HTTP send")
+        return httpx.Response(503)
+    with pytest.raises(RuntimeError, match="second HTTP"):
+        await web_knowledge(store, artifacts, lease, handler).search(
+            [{"query": "完整要求", "target_id": "before"}], artifacts)
+    await expire(store, identity)
+    replacement = await store.acquire(identity)
+    assert replacement.epoch == lease.epoch + 1
+    result = await web_knowledge(store, artifacts, replacement, handler).search(
+        [{"query": "完整要求", "target_id": "after"}], artifacts)
+    assert len(sent) == 4
+    assert result["issues"][0]["code"] == "knowledge_unavailable"
+    with pytest.raises(StaleExecution):
+        await web_knowledge(store, artifacts, lease, handler).search(
+            [{"query": "完整要求", "target_id": "old-owner"}], artifacts)
+    assert len(sent) == 4

@@ -7,6 +7,7 @@ from docreader.llm.budget import RequestBudget
 from docreader.llm.request import ModelWorkUnitExhausted, build_request
 from docreader.tender import authoring_structure
 from test_authoring_compact_view import native_grid, restore_cells
+from test_structure_section_view import expanded_structure
 
 
 PROMPT = "按完整原文核对实际提交结构，未知信息留空。"
@@ -62,20 +63,15 @@ async def test_over_budget_structure_preserves_every_cell_and_only_projects_grid
         assert 'grid.rows' in request['messages'][0]['content']
         assert 'merged_cells' in request['messages'][0]['content']
         view = json.loads(request['messages'][1]['content'][0]['text'])
-        assert view['structure_view'] == 'compact_v1'
-        assert restore_cells(view['supports'][0]['grid']) == before['supports'][0]['grid']['cells']
-        assert view['supports'][0]['grid'] == view['submission_sources'][0]['grid']
-        assert view['supports'][0]['grid']['rows'][0][1] is None
-        assert view['supports'][0]['grid']['rows'][1][1] == ''
-        assert view['supports'][1]['grid'] == before['supports'][1]['grid']
-        assert view['submission_sources'][1]['grid'] == before['supports'][1]['grid']
-        restored = deepcopy(view)
-        restored.pop('structure_view')
-        for number in range(2):
-            restored['supports'][number]['grid'] = before['supports'][number]['grid']
-            restored['submission_sources'][number].pop('grid')
-            restored['submission_sources'][number]['text'] = before['submission_sources'][number]['text']
-        assert restored == before
+        assert view['structure_view'] == 'compact_v2'
+        support = view['support_sections']['section-1']['s1']
+        assert restore_cells(support['grid']) == before['supports'][0]['grid']['cells']
+        assert support['grid'] == view['submission_sources']['s1']['grid']
+        assert support['grid']['rows'][0][1] is None
+        assert support['grid']['rows'][1][1] == ''
+        assert view['supports']['s2']['grid'] == before['supports'][1]['grid']
+        assert view['submission_sources']['s2']['grid'] == before['supports'][1]['grid']
+        assert expanded_structure(view) == expanded_structure(before)
         return validate({'findings': [{'code': 'check_scope', 'detail': '适用性保留待核。',
             'task_ids': ['w1'], 'can_revise': True}]})
 
@@ -114,8 +110,8 @@ async def test_still_oversized_structure_tries_complete_source_before_provider_f
 
     async def execute(task, request, _validate):
         data = json.loads(request['messages'][1]['content'][0]['text'])
-        assert task == 'authoring_structure' and data['structure_view'] == 'compact_v1'
-        assert data['submission_sources'][-1] == before['submission_sources'][-1]
+        assert task == 'authoring_structure' and data['structure_view'] == 'compact_v2'
+        assert data['submission_sources']['s5'] == before['submission_sources'][-1]['text']
         assert budget().measure_request(request, task)['fits'] is False
         calls.append(request)
         raise ModelWorkUnitExhausted(task)

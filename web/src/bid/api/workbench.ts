@@ -81,6 +81,8 @@ export type WorkbenchView = {
   outline: { chapters: TenderChapter[]; version_id?: string | null } | null;
   current_docx: TenderDraft | null;
   gaps: TenderIssue[];
+  coverage?: { state: "unknown" | "draft"; pending: number | null; unreviewed: number | null; headline: string;
+    applies_to?: { execution_id: string; version_id: string; docx_sha256: string } };
   requirements?: { rules: Array<{ rule_ref: RuleRef; rule: TenderItem | null; target_ids: string[] }> } | null;
   versions: TenderDraft[];
   artifacts?: { execution_id?: string; package_url?: string | null };

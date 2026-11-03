@@ -25,11 +25,17 @@ from docreader.tender.authoring_excerpts import (
     load_source_excerpt, source_excerpt_key, whole_source_excerpts, response_row_id,
 )
 from docreader.tender.evidence.references import EvidenceRepository
+from docreader.integrations.store import Conflict
+from docreader.tender.authoring_coverage import (
+    accept_assessments, batch_coverage_view, build_ledger, coverage_scope_index, fair_select, plan_queries,
+    settle_coverage, task_coverage_refs, unit_fingerprint,
+)
 from docreader.tender.schema import (
-    AUTHORING_GROUNDING_POLICY,
-    AuthoringBasis, AuthoringBasisContent, AuthoringBasisResponse, AuthoringDocument, AuthoringInput,
-    AuthoringOutline, AuthoringReviewResponse, AuthoringUsage, KnowledgeMaterial,
-    OutlineAssemblyResponse, OutlineResponse, SourceUnitRef, WritingResponse, WritingTask, WritingUnit,
+    AUTHORING_GROUNDING_POLICY, AUTHORING_UNIT_BINDING_CONTRACT,
+    AuthoringBasis, AuthoringBasisContent, AuthoringBasisResponse, AuthoringCoverage, AuthoringDocument, AuthoringDocumentPlan,
+    AuthoringInput, AuthoringOutline, AuthoringQueryPlan, AuthoringReviewRecord, AuthoringReviewResponse, AuthoringUsage,
+    KnowledgeMaterial, OutlineAssemblyResponse, OutlineResponse, SourceUnitRef, WritingResponse,
+    WritingTask, WritingUnit,
 )
 
 
@@ -158,32 +164,60 @@ def _material_applies(material, target):
             and bool(material.get('text', '').strip()))
 
 
-def _knowledge_queries(outline, tasks, gaps):
-    queries = []
-    for task in tasks:
-        for target in task['targets']:
-            if target.get('manual_fill', False) or 'knowledge' not in target.get('support_origins', ['knowledge']):
-                continue
-            rules = {_json(ref) for ref in target['rule_refs']}
-            sources = {_json(ref) for ref in target['source_refs']}
-            ranges = {selected['range_id'] for ref in [*target.get('source_excerpts', []),
-                *(target.get('response_table') or {}).get('context_source_excerpts', []),
-                *(ref for row in (target.get('response_table') or {}).get('rows', [])
-                  for ref in row['source_excerpts'])] for selected in ref['selectors']}
-            selected = [intent for intent in outline.get('search_intents', [])
-                        if rules.intersection(_json(ref) for ref in intent['rule_refs'])
-                        or sources.intersection(_json(ref) for ref in intent['source_refs'])
-                        or ranges.intersection(intent.get('range_ids', []))]
-            if not selected:
-                gaps.append({**_gap('retrieval_plan_missing', '本位置缺少基于实际原文的检索意图，使用已有资料并保留缺口。', task),
-                             'target_id': target['target_id']})
-            queries.extend({'target_id': target['target_id'], 'query': intent['query'],
-                            'include_original': target['kind'] == 'attachment'} for intent in selected)
-    return list({_json(query): query for query in queries}.values())
+def _excerpt_texts(artifacts, outline):
+    texts = {}
+    for target in _walk_targets(outline):
+        table = target.get('response_table') or {}
+        for row in [target, {'source_excerpts': table.get('context_source_excerpts', [])}, *table.get('rows', [])]:
+            for ref in row.get('source_excerpts', []):
+                key = _json(ref)
+                if key in texts:
+                    continue
+                try:
+                    loaded = load_source_excerpt(artifacts, ref)
+                except (OSError, ValueError, KeyError):
+                    texts[key] = ''
+                    continue
+                text = loaded.get('text') if isinstance(loaded, dict) else ''
+                if not text and isinstance(loaded, dict):
+                    text = (loaded.get('unit') or {}).get('text') or ''
+                texts[key] = text or ''
+    return texts
+
+
+def _walk_targets(outline):
+    def walk(chapters):
+        for chapter in chapters or []:
+            yield from chapter.get('targets', [])
+            yield from walk(chapter.get('children', []))
+    return list(walk(outline.get('chapters', [])))
+
+
+def _knowledge_queries(outline, tasks, gaps, requirements=None, excerpt_texts=None, scope=None):
+    entries = build_ledger(outline, requirements)
+    planned = plan_queries(outline, tasks, entries, requirements, excerpt_texts, scope)
+    gaps.extend(planned['gaps'])
+    return planned['search']
+
+
+def _retrieval_groups(materials, task):
+    groups = {}
+    for material in _task_materials(materials, task):
+        retrievals = material.get('locator', {}).get('retrievals') or []
+        if not retrievals:
+            return {}
+        for item in retrievals:
+            if not isinstance(item, dict) or type(item.get('rank')) not in {int, float}:
+                return {}
+            groups.setdefault(item.get('query_id') or 'query', []).append((item['rank'], material['material_id']))
+    return {key: [identity for _, identity in sorted(values)] for key, values in groups.items()}
 
 
 def _task_materials(materials, task):
-    return [m for m in materials if any(_material_applies(m, t) for t in task['targets'])]
+    selected = task.get('_selected_material_ids')
+    selected = set(selected) if selected is not None else None
+    return [m for m in materials if (selected is None or m['material_id'] in selected)
+            and any(_material_applies(m, t) for t in task['targets'])]
 
 
 def _support_bindings(sources, materials):
@@ -192,6 +226,19 @@ def _support_bindings(sources, materials):
                for identity, ref in sources.items()},
             **{f'k{i}': {'origin': 'knowledge', 'material_id': m['material_id']}
                for i, m in enumerate(materials, 1)}}
+
+
+def _writing_input_digest(task, payload, sources, materials, budget):
+    return hashlib.sha256(_json({'request': _request(budget, 'authoring_write', payload),
+        'task': task, 'bindings': _support_bindings(sources, materials),
+        'contract': AUTHORING_UNIT_BINDING_CONTRACT}).encode()).hexdigest()
+
+
+def _plan_input_digest(snapshot, outline_ref, materials_ref, basis_ref, budget):
+    return hashlib.sha256(_json({'snapshot': snapshot, 'outline_ref': outline_ref,
+        'materials_ref': materials_ref, 'basis_ref': basis_ref, 'budget': budget.spec(),
+        'write_prompt': _prompt(budget, 'authoring_write'),
+        'contract': AUTHORING_UNIT_BINDING_CONTRACT}).encode()).hexdigest()
 
 
 def _has_allowed_support(payload):
@@ -389,7 +436,8 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             def validate_local(raw):
                 value = _parse(OutlineResponse, wire.decode(raw))
                 validate_outline_references(value, rule_ids=local_rules, source_ids=local_sources,
-                    template_part_ids=local_parts, constraint_source_ids=read_sources)
+                    template_part_ids=local_parts, constraint_source_ids=local_sources,
+                    context_source_ids=read_sources)
                 context.read_units.update((ref['source_index_ref']['sha256'], ref['unit_id'])
                                           for identity in read_sources for ref in context.sources.get(identity, []))
                 return context.validate(value, template_part_ids=local_parts)
@@ -415,6 +463,10 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
     submission_refs = list(submission_refs.values())
     mapping, origins, entries, parts, part_map, part_ids = {}, {}, [], [], {}, {}
     candidate_roles, previous_positions, previous_selections = {}, {}, {}
+    decoration_exclusions = {}
+    instance_decoration_exclusions, target_decoration_exclusions = {}, {}
+    ambiguous_previous_scopes = set()
+    previously_scoped_candidates = set()
     repository = getattr(context, 'repository', None) or EvidenceRepository(artifacts)
     source_bindings, submission_excerpt_bindings, submission_source_ids = {}, {}, set()
     excerpt_ids, excerpt_map, excerpt_views, assembly_rules = {}, {}, [], {}
@@ -487,7 +539,8 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                     **({'subject': target['subject']} if target.get('subject') else {}),
                                     'manual_fill': target.get('manual_fill', False),
                                     'support_origins': target.get('support_origins', ['knowledge']),
-                                    'template_part_ids': linked_parts}
+                                    'template_part_ids': linked_parts,
+                                    'rule_ids': [register_rule(ref) for ref in target['rule_refs']]}
                     if target.get('source_excerpts'):
                         descriptor['range_ids'] = [register_excerpt(ref) for ref in target['source_excerpts']]
                     if target.get('response_table'):
@@ -515,6 +568,17 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
         covered = {_json(ref) for ref in refs}
         covered.update(_json(ref) for target in mapping.values() for ref in target['rule_refs'])
         views = {entry['rule_id']: entry for entry in context.payload['rules']}
+        def semantic_rule(view):
+            semantic = deepcopy(view.get('item', view.get('effective_rule', {})))
+            semantic.pop('item_id', None)
+            evidence = []
+            for entry in semantic.get('evidence', []):
+                ranges = [register_excerpt(ref) for ref in
+                          getattr(context, 'excerpts', {}).get(entry['range_id'], [])]
+                evidence.append({'quote': entry['quote'], **({'range_ids': ranges} if ranges else {})})
+            semantic['evidence'] = evidence
+            return semantic
+
         unassigned = []
         for identity, reference in context.rules.items():
             if _json(reference) in covered:
@@ -522,10 +586,12 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             alias = f'u{len(missing_rules) + 1}'
             missing_rules[alias] = reference
             view = views.get(identity, {})
-            semantic = deepcopy(view.get('item', view.get('effective_rule', {})))
-            semantic.pop('item_id', None)
-            semantic['evidence'] = [{'quote': e['quote']} for e in semantic.get('evidence', [])]
-            unassigned.append({'rule_id': alias, 'rule': semantic})
+            unassigned.append({'rule_id': alias, 'rule': semantic_rule(view)})
+        by_ref = {_json(ref): views.get(identity, {}) for identity, ref in context.rules.items()}
+        candidate_rules = []
+        for identity, reference in assembly_rules.items():
+            view = by_ref.get(_json(reference), {})
+            candidate_rules.append({'rule_id': identity, 'rule': semantic_rule(view)})
         sections, projected_parts = project_source_sections(parts)
         excerpt_sections, projected_excerpts = project_source_sections(excerpt_views)
         assembly_rules.update(missing_rules)
@@ -537,17 +603,19 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 'template_runs': template_part_runs(part_map, source_repository,
                     all_parts=getattr(context, 'template_parts', None)),
                 **({'source_sections': excerpt_sections, 'source_excerpts': projected_excerpts} if excerpt_views else {}),
-                'unassigned_rules': unassigned,
+                'unassigned_rules': unassigned, 'candidate_rules': candidate_rules,
                 'findings': list({_json({'code': issue['code'], 'detail': issue['detail']}):
                     {'code': issue['code'], 'detail': issue['detail']}
                     for fragment in fragments for issue in fragment['issues']
                     if issue['code'] != 'outline_rule_unassigned'}.values()),
                 **submission}
     payload = await asyncio.to_thread(prepare_assembly)
+    assembly_gap = None
     try:
         def assemble(raw):
             parsed = _parse(OutlineAssemblyResponse, raw)
             used, used_rules, header_issues = set(), set(), []
+            fully_used, scoped_coverage = set(), {}
             owners, links, selections = {}, [], []
             selected_parts = deepcopy(part_map)
             descriptors = {part['part_id']: part for part in parts}
@@ -597,8 +665,14 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             if identity in mapping and mapping[identity].get('subject')))
                         unknown_subjects = [identity for identity in dict.fromkeys(target['target_ids'])
                                             if not mapping[identity].get('subject')]
-                        if len(subjects) > 1 or (subjects and unknown_subjects
-                                and target['subject'] != subjects[0]):
+                        raw_target = raw
+                        for key in (*chapter_path, 'targets', number):
+                            raw_target = raw_target[key]
+                        previous_key = (tuple(sorted(set(target['target_ids']))), target['subject'])
+                        target = {**target, 'same_instance': raw_target.get('same_instance',
+                            previous_selections.get(previous_key, {}).get('same_instance', False))}
+                        if not target['same_instance'] and (len(subjects) > 1 or (subjects and unknown_subjects
+                                and target['subject'] != subjects[0])):
                             for subject in subjects:
                                 instances.append((number, {**target, 'subject': subject,
                                     'target_ids': [identity for identity in target['target_ids']
@@ -609,7 +683,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                 'detail': '组装合并了不同填写主体，已保留来源明确的各份实例，归属待核。', 'rule_refs': []})
                         else:
                             instances.append((number, {**target, 'subject': target['subject'] or
-                                (subjects[0] if subjects else None)}))
+                                (subjects[0] if len(subjects) == 1 else None)}))
                     for number, target in instances:
                         target_path = (*chapter_path, 'targets', number)
                         for field in ('target_ids', 'related_target_ids'):
@@ -622,12 +696,48 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                         raw_target = raw
                         for key in target_path:
                             raw_target = raw_target[key]
+                        scope = target['candidate_scope'] if 'candidate_scope' in raw_target else (
+                            previous_selections.get(previous_key, {}).get('candidate_scope'))
+                        if 'candidate_scope' not in raw_target and (
+                                previous_key in ambiguous_previous_scopes or (
+                                    previous_key not in previous_positions
+                                    and previously_scoped_candidates.intersection(target['target_ids']))):
+                            raise ModelContractError([{'path': [*target_path, 'candidate_scope'],
+                                'code': 'outline_scope_ambiguous',
+                                'detail': 'Select this position\'s candidate_scope explicitly; the previous candidate has multiple scoped positions.'}])
+                        candidate_rules = [ref for entry in selected for ref in entry['rule_refs']]
+                        candidate_excerpts = [ref for entry in selected for ref in entry.get('source_excerpts', [])]
+                        candidate_sources = [ref for entry in selected for ref in entry['source_refs']]
+                        if scope is not None:
+                            if (len(selected) != 1 or target['kind'] != 'narrative' or selected[0]['kind'] != 'narrative'
+                                    or any(entry.get('template_refs') or entry.get('response_table')
+                                           for entry in [*selected, *([previous] if previous else [])])
+                                    or target['template_part_ids'] or target['template_spans'] or target['response_table']):
+                                raise ModelContractError([{'path': [*target_path, 'candidate_scope'],
+                                    'code': 'outline_scope_carrier_conflict',
+                                    'detail': 'Scope only one narrative candidate without a native template or response table; retain complete carriers.'}])
+                            allowed_ranges = {excerpt_ids[source_excerpt_key(ref)] for ref in candidate_excerpts}
+                            allowed_rules = {identity for identity, ref in assembly_rules.items() if ref in candidate_rules}
+                            _check_reference_ids(scope['range_ids'], allowed_ranges,
+                                (*target_path, 'candidate_scope', 'range_ids'), 'Select excerpts belonging to this candidate.')
+                            _check_reference_ids(scope['rule_ids'], allowed_rules,
+                                (*target_path, 'candidate_scope', 'rule_ids'), 'Select complete rules belonging to this candidate.')
+                            candidate_rules = rule_refs(scope['rule_ids'], (*target_path, 'candidate_scope', 'rule_ids'))
+                            candidate_excerpts = [deepcopy(excerpt_map[identity])
+                                for identity in dict.fromkeys(scope['range_ids'])]
+                            candidate_sources = [ref['source_ref'] for ref in candidate_excerpts]
+                        else:
+                            fully_used.update(target['target_ids'])
                         manual_fill = target['manual_fill']
                         if 'manual_fill' not in raw_target and previous:
                             manual_fill = previous.get('manual_fill', False)
                         selection = {field: list(dict.fromkeys(target[field] if field in raw_target else
                             previous_selections.get(previous_key, {}).get(field, [])))
                             for field in ('rule_ids', 'source_ids', 'related_target_ids')}
+                        if scope is not None:
+                            selection['candidate_scope'] = deepcopy(scope)
+                        if target['same_instance'] or 'same_instance' in raw_target:
+                            selection['same_instance'] = target['same_instance']
                         _check_reference_ids(selection['related_target_ids'], mapping,
                             (*target_path, 'related_target_ids'), 'Select supplied response-target references.')
                         additional = rule_refs(selection['rule_ids'], (*target_path, 'rule_ids'))
@@ -645,6 +755,12 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                         if not template_override(target_path):
                             template_ids = list(dict.fromkeys(part_ids[template_part_key(part)]
                                 for entry in inherited for part in entry.get('template_refs', [])))
+                        excluded_parts = set().union(*(decoration_exclusions.get(identity, set())
+                                                       for identity in target['target_ids']))
+                        raw_key = (tuple(sorted(set(raw_target.get('target_ids', [])))), raw_target.get('subject'))
+                        excluded_parts.update(instance_decoration_exclusions.get(raw_key, set()))
+                        template_ids = [identity for identity in template_ids
+                                        if template_part_key(part_map[identity]) not in excluded_parts]
                         additional_sources = []
                         _check_reference_ids(selection['source_ids'], submission_source_ids, (*target_path, 'source_ids'),
                             'Select sources supplied in this assembly request.', code='outline_unknown_source')
@@ -652,25 +768,26 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             'This source has no frozen reference; select a bindable source or leave it unresolved.',
                             code='outline_source_unbindable')
                         additional_sources.extend(ref for identity in selection['source_ids'] for ref in source_bindings[identity])
-                        exact_sources = [ref for t in selected for ref in t.get('source_excerpts', [])]
+                        exact_sources = list(candidate_excerpts)
                         exact_sources.extend(ref for identity in selection['source_ids']
                                              for ref in submission_excerpt_bindings.get(identity, []))
-                        for reference in additional:
+                        for reference in [*(candidate_rules if scope is not None else []), *additional]:
                             view = by_ref[_json(reference)]
                             semantic = view.get('item', view.get('effective_rule', {}))
-                            additional_sources.extend(ref for e in semantic.get('evidence', [])
-                                                      for ref in context.sources.get(e['range_id'], []))
-                            exact_sources.extend(ref for e in semantic.get('evidence', [])
-                                                 for ref in getattr(context, 'excerpts', {}).get(e['range_id'], []))
+                            for evidence in semantic.get('evidence', []):
+                                exact = getattr(context, 'excerpts', {}).get(evidence['range_id'], [])
+                                additional_sources.extend([ref['source_ref'] for ref in exact] if scope is not None and exact
+                                    else context.sources.get(evidence['range_id'], []))
+                                exact_sources.extend(exact)
                         bound = {'kind': target['kind'], 'purpose': target['purpose'],
                             **({'subject': target['subject']} if target['subject'] else {}),
                             'manual_fill': manual_fill or any(t.get('manual_fill', False) for t in selected),
                             'support_origins': list(dict.fromkeys(origin for t in selected
                                 for origin in t.get('support_origins', ['knowledge']))) if selected else target['support_origins'],
                             'rule_refs': list({_json(r): r for r in [
-                                *(ref for t in selected for ref in t['rule_refs']), *additional]}.values()),
+                                *candidate_rules, *additional]}.values()),
                             'source_refs': list({_json(r): r for r in [
-                                *(ref for t in selected for ref in t['source_refs']), *additional_sources]}.values()),
+                                *candidate_sources, *additional_sources]}.values()),
                             'template_refs': [deepcopy(selected_parts[p]) for p in template_ids]}
                         if exact_sources:
                             bound['source_excerpts'] = list({source_excerpt_key(ref): ref for ref in exact_sources}.values())
@@ -776,6 +893,11 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             bound['rule_refs'] = list({_json(ref): ref for ref in [*bound['rule_refs'],
                                 *(ref for row in row_values for ref in row['rule_refs'])]}.values())
                         targets.append(bound)
+                        if scope is not None:
+                            identity = target['target_ids'][0]
+                            covered = scoped_coverage.setdefault(identity, {'ranges': set(), 'rules': set()})
+                            covered['ranges'].update(source_excerpt_key(ref) for ref in bound.get('source_excerpts', []))
+                            covered['rules'].update(_json(ref) for ref in bound['rule_refs'])
                         selections.append((bound, selection))
                         links.append((bound, selection['related_target_ids']))
                         for identity in dict.fromkeys(target['target_ids']):
@@ -786,8 +908,12 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 return output
             result = bind(parsed['chapters'])
             excluded, exclusion_issues = set(), list(header_issues)
-            added_constraints = rule_refs(parsed['constraint_rule_ids'], ['constraint_rule_ids'])
-            used_rules.update(parsed['constraint_rule_ids'])
+            retained_constraints = {rule['rule_id'] for rule in payload['submission_rules']}
+            _check_reference_ids(parsed['constraint_rule_ids'], assembly_rules.keys() | retained_constraints,
+                                 ['constraint_rule_ids'], 'Select only supplied rule references.')
+            new_constraints = [identity for identity in parsed['constraint_rule_ids'] if identity not in retained_constraints]
+            added_constraints = rule_refs(new_constraints, ['constraint_rule_ids'])
+            used_rules.update(new_constraints)
             for number, entry in enumerate(parsed['excluded_rules']):
                 path = ['excluded_rules', number, 'rule_ids']
                 excluded_refs = rule_refs(entry['rule_ids'], path)
@@ -808,15 +934,56 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                     'detail': entry['reason'] + ' 原候选用途：' + '；'.join(t['purpose'] for t in selected),
                     'rule_refs': list({_json(ref): ref for t in selected for ref in t['rule_refs']}.values())})
             used.update(excluded)
-            omitted = {key: deepcopy(t) for key, t in mapping.items() if key not in used}
+            omitted = {}
+            for key, original in mapping.items():
+                if key in excluded or key in fully_used:
+                    continue
+                if key not in scoped_coverage:
+                    omitted[key] = deepcopy(original)
+                    continue
+                covered = scoped_coverage[key]
+                remaining_excerpts = [ref for ref in original.get('source_excerpts', [])
+                                      if source_excerpt_key(ref) not in covered['ranges']]
+                remaining_rules = [ref for ref in original['rule_refs'] if _json(ref) not in covered['rules']]
+                accounted_sources = {_json(ref['source_ref']) for ref in original.get('source_excerpts', [])}
+                for reference in original['rule_refs']:
+                    view = by_ref.get(_json(reference), {})
+                    semantic = view.get('item', view.get('effective_rule', {}))
+                    accounted_sources.update(_json(ref) for evidence in semantic.get('evidence', [])
+                        for ref in context.sources.get(evidence['range_id'], []))
+                if any(_json(ref) not in accounted_sources for ref in original['source_refs']):
+                    omitted[key] = deepcopy(original)
+                    continue
+                if not remaining_excerpts and not remaining_rules:
+                    continue
+                retained = deepcopy(original)
+                retained['rule_refs'] = remaining_rules
+                retained['source_excerpts'] = deepcopy(remaining_excerpts)
+                sources = [ref['source_ref'] for ref in remaining_excerpts]
+                for reference in remaining_rules:
+                    view = by_ref.get(_json(reference), {})
+                    semantic = view.get('item', view.get('effective_rule', {}))
+                    for evidence in semantic.get('evidence', []):
+                        exact = getattr(context, 'excerpts', {}).get(evidence['range_id'], [])
+                        retained['source_excerpts'].extend(deepcopy(exact))
+                        sources.extend([ref['source_ref'] for ref in exact] if exact
+                                       else context.sources.get(evidence['range_id'], []))
+                retained['source_excerpts'] = list({source_excerpt_key(ref): ref
+                    for ref in retained['source_excerpts']}.values())
+                retained['source_refs'] = list({_json(ref): deepcopy(ref) for ref in sources}.values())
+                omitted[key] = retained
+                selections.append((retained, {'candidate_scope': {
+                    'range_ids': [excerpt_ids[source_excerpt_key(ref)] for ref in remaining_excerpts],
+                    'rule_ids': [identity for reference in remaining_rules
+                                 for identity, ref in assembly_rules.items() if reference == ref]}}))
             for role in ('body', 'submission_note'):
                 retained = [target for key, target in omitted.items()
                             if (candidate_roles[key] == 'submission_note') == (role == 'submission_note')]
                 if retained:
                     result.append({'title': '待核提交待办' if role == 'submission_note' else '待整理内容',
                         'is_volume': False, 'presentation_role': role, 'targets': retained, 'children': []})
-            if omitted:
-                owners.update({key: [target] for key, target in omitted.items()})
+            for key, target in omitted.items():
+                owners.setdefault(key, []).append(target)
             # Resolve links after the same host numbering used by the persisted tree.
             for ordinal, chapter in enumerate(_flatten(result)):
                 for number, target in enumerate(chapter['targets']):
@@ -858,21 +1025,20 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
          candidate_bindings, candidate_selections) = assembled
         refs = list({_json(ref): ref for ref in [*refs, *added_constraints]}.values())
         if omitted:
-            gaps.append(_gap('outline_assembly_incomplete', '归并未安排的响应位置已保留在末尾，顺序待核对。'))
+            assembly_gap = _gap('outline_assembly_incomplete', '归并未安排的响应位置已保留在末尾，顺序待核对。')
+            gaps.append(assembly_gap)
     except _LOCAL_FAILURES:
         exclusion_issues = []
         excluded_origins = set()
         added_intents = []
-        candidate_bindings = {}
         candidate_selections = {}
-        chapters = []
-        for role in ('body', 'submission_note'):
-            retained = [deepcopy(target) for key, target in mapping.items()
-                        if (candidate_roles[key] == 'submission_note') == (role == 'submission_note')]
-            if retained:
-                chapters.append({'title': '待核提交待办' if role == 'submission_note' else '待整理内容',
-                    'is_volume': False, 'presentation_role': role, 'children': [], 'targets': retained})
-        gaps.append(_gap('outline_assembly_unavailable', '正式归并未完成，已保留待整理总稿及全部响应位置，不宣称分卷已完成。'))
+        chapters = _renumber([chapter for fragment in fragments for chapter in fragment['chapters']])
+        for chapter in _flatten(chapters):
+            chapter['is_volume'] = False
+        retained = (target for chapter in _flatten(chapters) for target in chapter['targets'])
+        candidate_bindings = {target['target_id']: [alias] for alias, target in zip(mapping, retained)}
+        assembly_gap = _gap('outline_assembly_unavailable', '正式归并未完成，已保留来源局部章节及全部响应位置，全局目录、重复及顺序待核对。')
+        gaps.append(assembly_gap)
     def finalize(chapters, exclusion_issues, excluded_origins, added_intents):
         issues = [{**i, 'detail': '来源读取阶段观察（最终情况以全局核对为准）：' + i['detail']}
                   for ordinal, f in enumerate(fragments) for i in f['issues']
@@ -896,18 +1062,43 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
     outline = finalize(chapters, exclusion_issues, excluded_origins, added_intents)
     if structure_results is not None:
         from docreader.tender.authoring_structure import review_structure
+        previous_parts = {target['target_id']: {template_part_key(part)
+            for part in target.get('template_refs', [])}
+            for chapter in _flatten(outline['chapters']) for target in chapter['targets']}
         findings, structure_gaps = await review_structure(
             artifacts, outline, [], budget, execute, outline_phase=True,
-            apply_source_decoration_exclusions=True)
-        if findings:
-            choices = {}
-            for chapter in _flatten(outline['chapters']):
-                for target in chapter['targets']:
+            apply_source_decoration_exclusions=True, apply_title_edits=True)
+        choices, candidate_instances = {}, {}
+        for chapter in _flatten(outline['chapters']):
+            for target in chapter['targets']:
+                aliases = candidate_bindings.get(target['target_id'], [])
+                if aliases:
+                    key = (tuple(sorted(aliases)), target.get('subject'))
+                    choices.setdefault(key, []).append(target)
+                    for identity in aliases:
+                        candidate_instances.setdefault(identity, []).append(target['target_id'])
+        for chapter in _flatten(outline['chapters']):
+            for target in chapter['targets']:
+                removed = previous_parts[target['target_id']] - {
+                    template_part_key(part) for part in target.get('template_refs', [])}
+                if removed:
+                    target_decoration_exclusions[target['target_id']] = removed
                     aliases = candidate_bindings.get(target['target_id'], [])
-                    if aliases:
-                        key = (tuple(sorted(aliases)), target.get('subject'))
-                        choices.setdefault(key, []).append(target)
+                    key = (tuple(sorted(aliases)), target.get('subject'))
+                    if aliases and len(choices[key]) == 1:
+                        instance_decoration_exclusions[key] = removed
+                    for identity in aliases:
+                        if len(candidate_instances[identity]) == 1:
+                            decoration_exclusions.setdefault(identity, set()).update(removed)
+        if findings:
             previous_positions = {key: values[0] for key, values in choices.items() if len(values) == 1}
+            ambiguous_previous_scopes = {key for key, values in choices.items() if len(values) > 1
+                and any(candidate_selections.get(target['target_id'], {}).get('candidate_scope') is not None
+                        for target in values)}
+            previously_scoped_candidates = {alias for chapter in _flatten(outline['chapters'])
+                for target in chapter['targets']
+                if candidate_selections.get(target['target_id'], {}).get('candidate_scope') is not None
+                for alias in candidate_bindings.get(target['target_id'], [])}
             previous_selections = {key: candidate_selections.get(target['target_id'], {})
                                    for key, target in previous_positions.items()}
             previous_targets = {target['target_id']: f'v{ordinal}' for ordinal, target in enumerate(
@@ -925,6 +1116,10 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                       **({'subject': target['subject']} if target.get('subject') else {}),
                                       'template_part_ids': [part_ids[template_part_key(part)]
                                           for part in target.get('template_refs', [])],
+                                      **({'excluded_template_part_ids': [identity
+                                          for identity, part in part_map.items() if template_part_key(part)
+                                          in target_decoration_exclusions[target['target_id']]]}
+                                         if target['target_id'] in target_decoration_exclusions else {}),
                                       **({'response_table': {'context_range_ids': [excerpt_ids[source_excerpt_key(ref)]
                                               for ref in target['response_table'].get('context_source_excerpts', [])],
                                           'rows': [{'range_ids': [excerpt_ids[source_excerpt_key(ref)]
@@ -937,7 +1132,10 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                          'children': previous_structure(chapter['children'])} for chapter in entries]
 
             feedback = {**payload, 'previous_structure': previous_structure(outline['chapters']),
-                        'review_findings': findings}
+                        'review_findings': findings,
+                        **({'candidate_excluded_template_part_ids': {identity: [part_id
+                            for part_id, part in part_map.items() if template_part_key(part) in removed]
+                            for identity, removed in decoration_exclusions.items()}} if decoration_exclusions else {})}
             try:
                 repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = await _ask(
                     execute, budget, 'outline', feedback, assemble)
@@ -945,10 +1143,13 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 candidate = finalize(repaired, new_issues, new_excluded, new_intents)
                 changed = candidate['chapters'] != outline['chapters']
                 outline = candidate
+                if assembly_gap is not None:
+                    gaps[:] = [gap for gap in gaps if gap is not assembly_gap]
                 if changed:
                     new_findings, new_gaps = await review_structure(
                         artifacts, outline, [], budget, execute, outline_phase=True,
-                        apply_source_decoration_exclusions=True)
+                        apply_source_decoration_exclusions=True, apply_hierarchy_edits=True,
+                        apply_title_edits=True)
                     if any(g['code'] == 'structure_review_unavailable' for g in new_gaps):
                         findings = [{**f, 'can_revise': False,
                             'detail': '结构修订后尚未复核的上一版观察：' + f['detail']} for f in findings]
@@ -1244,7 +1445,7 @@ def _has_content(unit):
                 or unit['attachments'])
 
 
-def _review_record(task, unit, payload, sources, materials):
+def _review_record(task, unit, payload, sources, materials, *, rule_refs=None):
     if (not _has_content(unit) and not materials
             and all(target['kind'] == 'form' for target in task['targets'])):
         return None
@@ -1254,6 +1455,7 @@ def _review_record(task, unit, payload, sources, materials):
         unit['gaps'].append('已有内容的依据无法绑定本次复核，保留草稿待核。')
         return None
     return {'task_id': task['task_id'], 'title_path': task['title_path'],
+            '_coverage_refs': task_coverage_refs(task, payload, rule_refs or {}),
             'rules': payload['rules'], 'supports': payload['supports'], 'targets': payload['targets'], 'basis': payload['basis'],
             **{key: payload[key] for key in ('analysis_issues', 'issue_resolutions', 'relations',
                                            'unverified_relation_ids', 'related_rules')},
@@ -1290,7 +1492,8 @@ def _adopt_reviewed(units, findings, artifacts, superseded):
 
 async def generate_document(artifacts, snapshot, budget, execute, *, materials=(), knowledge=None,
                             concurrency=2, review_request=None, submission_sources=(), on_outline=None,
-                            outline=None, outline_only=False):
+                            outline=None, outline_only=False, saved_units=(), on_unit=None,
+                            saved_plan=None, on_plan=None):
     """Plan an outline or compile its fixed tree; the executor supplies document usage."""
     snapshot = AuthoringInput.model_validate(snapshot).model_dump()
     supplied_outline = outline is not None
@@ -1346,14 +1549,22 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     available = {target['target_id'] for task in tasks for target in task['targets']}
     if requested - available:
         gaps.append(_gap('review_request_unbound', '部分重审位置未能绑定当前大纲，保留待核；其余位置继续。'))
+    entries = build_ledger(outline, requirements)
+    query_plan = {'queries': [], 'search': [], 'gaps': []}
+    knowledge_issues = []
     if knowledge is not None:
-        queries = _knowledge_queries(outline, tasks, gaps)
-        retrieved = await knowledge.search(queries, artifacts)
-        combined, issues = prepare_materials(artifacts, [*materials, *retrieved['materials']])
-        materials = combined
-        gaps.extend(issues)
-        gaps.extend({k: v for k, v in issue.items() if k in {'code', 'detail', 'target_id'}}
-                    for issue in retrieved['issues'])
+        scope = knowledge.spec()
+        texts = await asyncio.to_thread(_excerpt_texts, artifacts, outline)
+        query_plan = plan_queries(outline, tasks, entries, requirements, texts, scope)
+        gaps.extend(query_plan['gaps'])
+        if query_plan['search']:
+            retrieved = await knowledge.search(query_plan['search'], artifacts)
+            combined, issues = prepare_materials(artifacts, [*materials, *retrieved['materials']])
+            materials = combined
+            gaps.extend(issues)
+            knowledge_issues = retrieved['issues']
+            gaps.extend({k: v for k, v in issue.items() if k in {'code', 'detail', 'target_id'}}
+                        for issue in knowledge_issues)
     # Summarize supplied methods only. Tender requirements are never bidder proof.
     basis_response = AuthoringBasisContent().model_dump()
     candidates = [m for m in materials if m['text'].strip() and
@@ -1420,11 +1631,15 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     basis_response['shared_arrangements'] = supported
     basis = AuthoringBasis(authoring_input=snapshot, response=basis_response, materials=materials).model_dump()
     basis_ref = artifacts.put_json(basis)
+    materials_ref = artifacts.put_json(materials)
+    plan_digest = _plan_input_digest(snapshot, outline_ref, materials_ref, basis_ref, budget)
     gaps.extend(_gap('basis_gap', detail) for detail in basis_response['gaps'] if detail.strip())
     # Keep forms as independent instances. Narrative may split at a target boundary
     # when its complete context does not fit; it is never split by page count.
     from docreader.tender.authoring_fragments import split_writing_task
     planned = []
+    saved_by_id = {unit['task_id']: unit for unit in saved_units or []
+                   if isinstance(unit, dict) and unit.get('task_id')}
 
     async def fit_task(task):
         if all(t.get('manual_fill', False) for t in task['targets']):
@@ -1440,6 +1655,24 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         if hit or await asyncio.to_thread(_fits, budget, 'authoring_write', payload):
             planned.append(task)
             return
+        groups = _retrieval_groups(materials, task)
+        unique = list(dict.fromkeys(identity for values in groups.values() for identity in values))
+        if groups and len(unique) > len(groups):
+            limit = len(unique) - 1
+            while limit >= len(groups):
+                chosen, omitted = fair_select(groups, limit)
+                trial = {**task, '_selected_material_ids': chosen}
+                trial_payload, _, _ = await asyncio.to_thread(_load_task, artifacts, context, trial, basis, materials)
+                if await asyncio.to_thread(_fits, budget, 'authoring_write', trial_payload):
+                    task['_selected_material_ids'] = chosen
+                    if omitted:
+                        gaps.append(_gap('knowledge_candidates_not_loaded',
+                                         '部分知识候选未装入本单元，完整片段仍保留在资料快照。', task))
+                    planned.append(task)
+                    return
+                limit -= 1
+            gaps.append(_gap('knowledge_candidates_not_loaded',
+                             '知识候选无法按完整片段装入本单元，资料快照仍保留。', task))
         if len(task['targets']) > 1:
             middle = len(task['targets']) // 2
             parts = [{**task, 'targets': task['targets'][:middle]}, {**task, 'targets': task['targets'][middle:]}]
@@ -1453,38 +1686,66 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             part['task_id'] = task['task_id'].split(':part-')[0] + ':part-' + scope
             await fit_task(part)
 
-    for task in tasks:
-        await fit_task(task)
+    if saved_plan is not None:
+        plan = AuthoringDocumentPlan.model_validate(saved_plan).model_dump(by_alias=True, exclude_unset=True)
+        if plan['input_digest'] != plan_digest or any(plan[key] != value for key, value in (
+                ('outline_ref', outline_ref), ('materials_ref', materials_ref), ('basis_ref', basis_ref))):
+            raise Conflict('stored writing plan inputs changed; preserve this execution and create an explicit successor')
+        planned = plan['tasks']
+        gaps.extend(plan.get('gaps', []))
+    else:
+        start = len(gaps)
+        for task in tasks:
+            await fit_task(task)
+        plan = AuthoringDocumentPlan(input_digest=plan_digest, outline_ref=outline_ref,
+            materials_ref=materials_ref, basis_ref=basis_ref, tasks=planned,
+            gaps=gaps[start:]).model_dump(by_alias=True, exclude_unset=True)
+        planned = plan['tasks']
+    plan_ref = artifacts.put_json(plan)
+    if on_plan is not None:
+        await on_plan(plan_ref)
+
     async def write_one(task):
         payload, sources, source_issues = await asyncio.to_thread(_load_task, artifacts, context, task, basis, materials)
+        selected = _task_materials(materials, task)
+        input_digest = _writing_input_digest(task, payload, sources, selected, budget)
+        def done(unit, record):
+            unit['input_digest'] = input_digest
+            return unit, record
         if all(t.get('manual_fill', False) for t in task['targets']):
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
-                blocks=[{'kind': 'paragraph', 'text': t['purpose'] + '\n________（人工填写）'}
+                blocks=[{'kind': 'paragraph', 'text': '________（人工填写）'}
                         for t in task['targets'] if t['kind'] != 'form'],
                 gaps=['此处为人工填写位置；最终报价等数据留空，不由模型代填或按0计算。']).model_dump()
             unit['gaps'].extend(source_issues)
-            return unit, None
+            return done(unit, None)
         if all(t['kind'] == 'form' and not t.get('response_table') for t in task['targets']) and not any(
                 support.get('grid') and support['support_id'] in target.get('template_support_ids', [])
                 for target in payload['targets'] for support in payload['supports']):
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
                 gaps=['文字原格式保留空位，或实际原表尚未定位；不另外生成一份重写声明。', *source_issues]).model_dump()
-            return unit, None
+            return done(unit, None)
         if (all(t['kind'] == 'attachment' for t in task['targets']) and
                 not any(s.get('attachment') for s in payload['supports'] if s['origin'] == 'knowledge')):
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
                 gaps=['当前响应位置没有可用的真实证明原件，保留附件位置待人工补充。']).model_dump()
             unit['gaps'].extend(source_issues)
-            return unit, None
+            return done(unit, None)
         if not _has_allowed_support(payload):
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
                 gaps=['未取得本位置允许使用的可读依据，不生成无依据应答；原模板及响应位置保留空白。']).model_dump()
             unit['gaps'].extend(source_issues)
-            return unit, None
+            return done(unit, None)
+        saved = saved_by_id.get(task['task_id'])
+        if saved is not None and saved.get('input_digest') == input_digest:
+            saved = WritingUnit.model_validate(saved).model_dump()
+            record = None if saved.get('error_type') else _review_record(
+                task, saved, payload, sources, selected, rule_refs=context.rules)
+            return done(saved, record)
         try:
             unit = await _ask(execute, budget, 'authoring_write', payload,
                               lambda raw: bind_writing_response(task, raw, sources,
@@ -1495,12 +1756,15 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                                error_type=type(error).__name__, gaps=['本单元生成未完成，已保留待补位置。']).model_dump()
         unit['gaps'].extend(source_issues)
         record = None if unit.get('error_type') else _review_record(
-            task, unit, payload, sources, _task_materials(materials, task))
-        return unit, record
+            task, unit, payload, sources, _task_materials(materials, task), rule_refs=context.rules)
+        return done(unit, record)
     limiter = asyncio.Semaphore(concurrency)
     async def bounded(task):
         async with limiter:
-            return await write_one(task)
+            unit, record = await write_one(task)
+            if on_unit is not None and saved_by_id.get(task['task_id']) != unit:
+                await on_unit(unit)
+            return unit, record
     pending = [asyncio.create_task(bounded(task)) for task in planned]
     try:
         written = await asyncio.gather(*pending)
@@ -1517,13 +1781,19 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             review_records.append(review_record)
     def review_scope(task):
         return [f't{i}' for i, target in enumerate(task['targets'], 1) if target['target_id'] in requested]
-    async def review(records, previous=()):
+    accepted_assessments = []
+    coverage_index = coverage_scope_index(planned)
+    async def review(records, previous=(), unit_by_task=None, *, review_round=0):
         findings, completed, replaced = [], set(), set()
+        unit_by_task = unit_by_task or {}
         def review_payload(batch):
             identities = {r['task_id'] for r in batch}
             scopes = [{'task_id': task['task_id'], 'target_ids': review_scope(task)} for task in planned
                       if task['task_id'] in identities and review_scope(task)]
-            return {'grounding_policy': AUTHORING_GROUNDING_POLICY, 'units': batch,
+            coverage, _ = batch_coverage_view(entries, planned, batch, scope_index=coverage_index)
+            return {'grounding_policy': AUTHORING_GROUNDING_POLICY,
+                    'units': [{k: v for k, v in record.items() if k != '_coverage_refs'} for record in batch],
+                    **({'coverage': coverage} if coverage else {}),
                     **({'review_request': {'reason': review_request['reason'], 'targets': scopes}} if scopes else {}),
                     'previous_findings': [{**{k: v for k, v in f.items() if k != 'content_ids'},
                                            'task_ids': [identity for identity in f['task_ids'] if identity in identities],
@@ -1533,7 +1803,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         for batch in _batches(records, budget, 'authoring_review', review_payload):
             ids = {entry['task_id'] for entry in batch}
             def validate_review(raw):
-                value = _parse(AuthoringReviewResponse, raw)
+                body = {key: value for key, value in raw.items() if key != 'assessments'} if isinstance(raw, dict) else raw
+                value = _parse(AuthoringReviewResponse, body)
                 for finding in value['findings']:
                     if set(finding['task_ids']) - ids:
                         raise ModelContractError([{'path': ['findings'], 'code': 'review_unknown_task',
@@ -1555,18 +1826,35 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                     else:
                         normalized.append(finding)
                 value['findings'] = normalized
+                _, mapping = batch_coverage_view(entries, planned, batch, scope_index=coverage_index)
+                supplied = raw.get('assessments') if isinstance(raw, dict) else None
+                accepted = accept_assessments(supplied, mapping, batch)
+                if isinstance(supplied, list) and len(accepted) < len(supplied):
+                    value['findings'].append({'code': 'coverage_assessment_invalid',
+                        'detail': '部分逐要求判定未能绑定本批允许的内容或依据，保留正文及有效兄弟判定，相关要求待核。',
+                        'task_ids': sorted(ids), 'content_ids': [], 'suggestion': '',
+                        'can_revise': False, 'reject_content': False})
+                for item in accepted:
+                    item['review_round'] = review_round
+                    item['unit_fps'] = {task_id: unit_fingerprint(unit_by_task[task_id])
+                                        for task_id in item['reviewed_task_ids'] if task_id in unit_by_task}
+                    item['reviewed_unit_refs'] = {task_id: artifacts.put_json(unit_by_task[task_id])
+                        for task_id in item['reviewed_task_ids'] if task_id in unit_by_task}
+                value['assessments'] = accepted
                 return value
             try:
                 value = await _ask(execute, budget, 'authoring_review', review_payload(batch), validate_review)
                 findings.extend(value['findings'])
+                accepted_assessments.extend(value.get('assessments') or [])
                 completed.update(ids)
                 replaced.update(i for i, f in enumerate(previous) if f['task_ids'] and set(f['task_ids']) <= ids)
             except _LOCAL_FAILURES as error:
                 findings.append({'code': 'review_unavailable', 'detail': f'本批实际正文尚未复核（{type(error).__name__}）。',
                                  'task_ids': sorted(ids), 'suggestion': '保留文件，后续针对这些单元重试复核。'})
         return findings, completed, replaced
-    findings, _, _ = await review(review_records)
-    initial_review_ref = artifacts.put_json(AuthoringReviewResponse(findings=findings).model_dump())
+    findings, _, _ = await review(review_records, unit_by_task={unit['task_id']: unit for unit in units})
+    initial_review_ref = artifacts.put_json(AuthoringReviewRecord(
+        findings=findings, coverage_assessments=accepted_assessments).model_dump())
     from docreader.tender.authoring_revision import revise_units
     def revision_payload(task):
         payload, sources, _ = _load_task(artifacts, context, task, basis, materials)
@@ -1591,10 +1879,11 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         for task, unit in zip(planned, revised):
             if task['task_id'] in affected:
                 payload, sources, _ = await asyncio.to_thread(_load_task, artifacts, context, task, basis, materials)
-                record = _review_record(task, unit, payload, sources, _task_materials(materials, task))
+                record = _review_record(task, unit, payload, sources, _task_materials(materials, task), rule_refs=context.rules)
                 if record is not None:
                     records.append(record)
-        new_findings, completed, replaced = await review(records, findings)
+        new_findings, completed, replaced = await review(
+            records, findings, {unit['task_id']: unit for unit in revised}, review_round=1)
         adopted = []
         for old, new, safe in zip(units, revised, safe_units):
             identity = old['task_id']
@@ -1617,7 +1906,14 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     unit_refs = [artifacts.put_json(unit) for unit in units]
     for task, unit in zip(planned, units):
         gaps.extend(_gap('writing_gap', detail, task) for detail in unit['gaps'] if detail.strip())
-    review_ref = artifacts.put_json(AuthoringReviewResponse(findings=findings).model_dump())
+    review_ref = artifacts.put_json(AuthoringReviewRecord(
+        findings=findings, coverage_assessments=accepted_assessments).model_dump())
+    settled = settle_coverage(entries, units, unit_refs, accepted_assessments, knowledge_issues, query_plan['queries'])
+    retrieval_ref = artifacts.put_json(AuthoringQueryPlan.model_validate({'queries': query_plan['queries']}).model_dump())
+    coverage = AuthoringCoverage(authoring_input=snapshot, outline_ref=outline_ref,
+        requirements_ref=requirements_ref, retrieval_ref=retrieval_ref, unit_refs=unit_refs,
+        review_ref=review_ref, entries=settled).model_dump()
+    coverage_ref = artifacts.put_json(coverage)
     by_id = {t['task_id']: t for t in planned}
     for finding in findings:
         for task_id in finding['task_ids'] or [None]:
@@ -1627,11 +1923,12 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                  **({'target_id': i['target_id']} if i.get('target_id') else {})} for i in outline['issues'])
     from docreader.tender.authoring_export import export_authoring_document
     exported = await asyncio.to_thread(export_authoring_document, artifacts, outline, units, gaps,
-                                      requirements=requirements)
+                                      requirements=requirements, coverage=coverage)
     all_gaps = list({_json(g): g for g in [*gaps, *exported['gaps']]}.values())
     result = AuthoringDocument(authoring_input=snapshot, outline_ref=outline_ref, requirements_ref=requirements_ref,
                                basis_ref=basis_ref,
                                unit_refs=unit_refs, review_ref=review_ref, initial_review_ref=initial_review_ref,
+                               coverage_ref=coverage_ref,
                                superseded_unit_refs=superseded_refs, docx_ref=exported['docx_ref'],
                                package_ref=exported['package_ref'], gaps=all_gaps, usage=AuthoringUsage()).model_dump()
     return artifacts.put_json(result)

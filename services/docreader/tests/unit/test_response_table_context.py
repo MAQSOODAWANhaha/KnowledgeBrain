@@ -25,6 +25,7 @@ from test_authoring_pipeline_boundaries import snapshot
 from test_authoring_templates import create_context, create_source
 from test_authoring_compact_view import native_grid, payload as compact_payload
 from test_response_table_export import excerpts, opened, outline, unit
+from test_structure_section_view import expanded_structure
 
 
 HEADER = "指标要求（同等及以上配置）"
@@ -206,7 +207,9 @@ def test_compact_views_preserve_table_context_references_and_text():
         "response_rows": [{"row_id": "q1", "source_support_ids": ["s3"]}]}]}],
         "supports": [{"support_id": f"s{i}", "origin": "tender", "text": text}
             for i, text in enumerate([HEADER, GUIDANCE, REQUIREMENTS[0]], 1)], "submission_sources": []}
-    assert compact_structure_payload(structure) == {**structure, "structure_view": "compact_v1"}
+    compact = compact_structure_payload(structure)
+    assert compact['structure_view'] == 'compact_v2'
+    assert expanded_structure(compact) == expanded_structure(structure)
 
 
 def test_unreadable_shared_context_keeps_a_located_placeholder_and_all_requirements(tmp_path):

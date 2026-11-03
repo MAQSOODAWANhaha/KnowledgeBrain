@@ -157,6 +157,9 @@ async def test_unrelated_retrieval_can_be_semantically_rejected_without_free_wri
     fixed = frozen_snapshot(artifacts, [{"text": "应支持角色权限管理。"}])
 
     class Knowledge:
+        def spec(self):
+            return {"provider": "fixture", "collection": "fixed"}
+
         async def search(self, queries, _artifacts):
             return {"materials": [{"material_id": "unrelated", "title": "绿化养护手册",
                 "text": "每月修剪树木。", "locator": {"target_ids": [queries[0]["target_id"]]}}], "issues": []}
@@ -367,6 +370,9 @@ async def test_short_knowledge_queries_preserve_full_conditions_in_writing_and_r
     queries, writing, reviewed = [], [], []
 
     class Knowledge:
+        def spec(self):
+            return {"provider": "fixture", "collection": "fixed"}
+
         async def search(self, submitted, _artifacts):
             queries.extend(submitted)
             return {"materials": [{"material_id": "permissions", "title": "产品功能说明",

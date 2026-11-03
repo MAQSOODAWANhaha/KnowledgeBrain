@@ -50,8 +50,8 @@ async def test_complete_structure_still_calls_executor_after_compact_exceeds_est
 
     async def execute(task, request, validate):
         data = json.loads(request['messages'][1]['content'][0]['text'])
-        assert task == 'authoring_structure' and data['structure_view'] == 'compact_v1'
-        assert data['supports'][0]['grid']['rows'][0][0] == '仅本标段填写'
+        assert task == 'authoring_structure' and data['structure_view'] == 'compact_v2'
+        assert data['support_sections']['section-1']['s1']['grid']['rows'][0][0] == '仅本标段填写'
         assert admitted.measure_request(request, task)['fits'] is False
         calls.append(request)
         return validate({'findings': []})

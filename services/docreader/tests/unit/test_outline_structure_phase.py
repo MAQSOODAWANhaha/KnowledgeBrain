@@ -106,7 +106,7 @@ async def test_structure_accepted_compact_cache_precedes_compact_admission(monke
         async def replay(self, stage, request, validate):
             data = json.loads(request["messages"][1]["content"][0]["text"])
             calls.append(data)
-            if data.get("structure_view") == "compact_v1":
+            if data.get("structure_view") == "compact_v2":
                 assert admitted.measure_request(request, stage)["fits"] is False
                 return True, validate({"findings": []})
             return False, None
@@ -115,4 +115,4 @@ async def test_structure_accepted_compact_cache_precedes_compact_admission(monke
             pytest.fail("Already accepted compact responses must not be sent again.")
 
     assert await authoring_structure.review_structure(None, {"chapters": [{}]}, [], admitted, Executor()) == ([], [])
-    assert len(calls) == 2 and "structure_view" not in calls[0] and calls[1]["structure_view"] == "compact_v1"
+    assert len(calls) == 2 and "structure_view" not in calls[0] and calls[1]["structure_view"] == "compact_v2"

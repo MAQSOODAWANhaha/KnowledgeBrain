@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from io import BytesIO
 import json
 import mimetypes
@@ -515,10 +515,11 @@ class _Assembler:
             and all(identity in self.locations and identity != target['target_id']
                     for identity in target['related_target_ids'])}
         forms, grid_forms = {}, set()
+        form_ids = {target["target_id"] for target in targets if target["kind"] == "form"}
         manual_forms = {target["target_id"] for target in targets
                         if target["kind"] == "form" and target.get("manual_fill", False)}
         for target in targets:
-            if target["kind"] != "form":
+            if target["kind"] != "form" and not target.get("template_refs"):
                 continue
             selected = forms[target["target_id"]] = {}
             for part in target.get("template_refs", []):
@@ -534,13 +535,12 @@ class _Assembler:
                 except Exception:
                     # Rendering below records the unavailable part without substituting its whole unit.
                     continue
-        part_uses = Counter(key for selected in forms.values() for key in selected)
-        blocked_forms = (forms.keys() - grid_forms) | manual_forms
+        blocked_forms = (form_ids - grid_forms) | manual_forms
         row_owners = {row["row_id"]: target["target_id"] for target in targets
                       for row in (target.get("response_table") or {}).get("rows", [])}
         for unit in units:
             allowed = {_source_key(part["source_ref"]) for target_id in unit.get("target_ids", [])
-                       for part in forms.get(target_id, {}).values()}
+                       if target_id in form_ids for part in forms.get(target_id, {}).values()}
             for fill in unit.get("cell_fills", []):
                 if _source_key(fill["source_ref"]) not in allowed:
                     self.gap("export_cell_fill_unplaced", "填值来源不属于本写作任务响应位置的原格式。", chapter_id)
@@ -565,19 +565,18 @@ class _Assembler:
             linked = [(ordinal, unit) for ordinal, unit in enumerate(units) if target_id in unit.get("target_ids", [])]
             if target_id in response_tables:
                 self.response_table(document, target, [unit for _, unit in linked], chapter_id)
-            if target["kind"] == "form":
-                if target.get("subject") or any(part_uses[key] > 1 for key in forms[target_id]):
-                    label = (target["subject"] + "：" if target.get("subject") else "") + target["purpose"]
-                    document.add_paragraph(label, style="Caption")
+            if target_id in forms:
+                if target["kind"] == "form" and target.get("subject"):
+                    document.add_paragraph(target["subject"], style="Caption")
                 for part in forms[target_id].values():
                     key = _source_key(part["source_ref"])
                     fills = [fill for _, unit in linked for fill in unit.get("cell_fills", [])
-                             if _source_key(fill["source_ref"]) == key]
+                             if target_id in form_ids and _source_key(fill["source_ref"]) == key]
                     if target_id in manual_forms and fills:
                         fills = []
                         self.gap("export_manual_content_omitted", "人工填写表格未采用自动填值。", chapter_id, target_id)
                     self.template(document, part, fills, chapter_id, target_id)
-                if not forms[target_id] and target_id not in response_tables:
+                if target["kind"] == "form" and not forms[target_id] and target_id not in response_tables:
                     document.add_paragraph("（原格式待补）")
                     self.gap("export_template_missing", "该填写位置尚无可用原格式。", chapter_id, target_id)
             for ordinal, unit in linked:
@@ -596,7 +595,7 @@ class _Assembler:
                         unit_anchors[ordinal] = document.element.body[unit_start]
                     rendered.add(ordinal)
             if not linked and target_id not in reference_only and target_id not in response_tables:
-                document.add_paragraph(f"（待补：{target['purpose']}）")
+                document.add_paragraph("（本部分内容待补）")
                 self.gap("export_content_pending", "响应位置尚无写作内容。", chapter_id, target_id)
             if len(document.element.body) - 1 > start_index:
                 add_bookmark(document.element.body[start_index], target_id, "target")
@@ -666,7 +665,8 @@ class _Assembler:
 
 
 def export_authoring_document(artifacts, outline: dict, writing_units: list[dict],
-                              review_issues: list[dict] | None = None, *, requirements: dict | None = None) -> dict:
+                              review_issues: list[dict] | None = None, *, requirements: dict | None = None,
+                              coverage: dict | None = None) -> dict:
     """Return immutable DOCX/ZIP references; source and business gaps remain deliverable."""
     entries = list(_walk(outline.get("chapters", [])))
     assembler = _Assembler(artifacts, writing_units, review_issues, entries)
@@ -720,9 +720,15 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
         requirement_files.append(manifest["requirements"])
     notes = artifacts.put_bytes(_submission_notes(outline, requirements, gaps, artifacts).encode(), "text/markdown")
     manifest["submission_notes"] = {"artifact_ref": notes, "package_path": "提交要求与待办.md"}
+    coverage_file = None
+    if coverage is not None:
+        coverage_ref = artifacts.put_json(coverage)
+        coverage_file = {"artifact_ref": coverage_ref, "package_path": "覆盖结算.json"}
+        manifest["coverage"] = coverage_file
     output = BytesIO()
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
-        for entry in [manifest["document"], *volumes, *attachments, *requirement_files, manifest["submission_notes"]]:
+        for entry in [manifest["document"], *volumes, *attachments, *requirement_files, manifest["submission_notes"],
+                      *([coverage_file] if coverage_file else [])]:
             archive.write(artifacts.path(entry["artifact_ref"]), entry["package_path"])
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         archive.writestr("待补事项.json", json.dumps(gaps, ensure_ascii=False, indent=2))

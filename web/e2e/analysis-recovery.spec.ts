@@ -37,7 +37,8 @@ test("recovering a failed analysis continues its original run and requires a rea
   const f = await recoveryFixture(page); await f.open();
   const button = f.region.getByRole("button", { name: "继续原分析任务", exact: true });
   await expect(button).toBeDisabled();
-  await expect(f.region.getByText(/成功回执保留；未完成的模型调用仍可能产生费用/)).toBeVisible();
+  await expect(f.region.getByText("继续原任务和原资料。未完成的模型调用仍可能产生费用。", { exact: true })).toBeVisible();
+  await expect(f.region.getByText(f.recovery.notice, { exact: true })).toBeVisible();
   await page.getByLabel("分析恢复理由").fill("已核实网络故障修复，请继续原任务。");
   await button.click();
   await expect.poll(() => f.state.calls.length).toBe(1);

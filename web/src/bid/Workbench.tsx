@@ -241,6 +241,14 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const reviewSourceLabel = reviewGeneratedVersion ? `生成稿 v${reviewGeneratedVersion.revision}` : "当前稿对应的生成稿";
   const candidate = view?.versions.find(version => ["generated", "recovered"].includes(version.source) && version.id !== draftId && version.id !== dismissedDraft && version.revision > (pinned?.revision ?? view.current_docx?.revision ?? 0));
   const packageVersion = view?.versions.find(version => version.source === "generated" && version.execution_id === view.artifacts?.execution_id);
+  const coverageIdentity = view?.coverage?.applies_to;
+  const coverageVersion = coverageIdentity && view?.versions.find(version => version.source === "generated"
+    && version.id === coverageIdentity.version_id && version.sha256 === coverageIdentity.docx_sha256
+    && version.execution_id === coverageIdentity.execution_id);
+  const coverageMatches = !!coverageVersion && displayedSource === "generated"
+    && savedReviewVersion?.version_id === coverageIdentity?.version_id
+    && savedReviewVersion?.docx_sha256 === coverageIdentity?.docx_sha256
+    && displayedDraft?.execution_id === coverageIdentity?.execution_id;
   const ended = view?.project.status === "ended";
   const sectionLabel = step === "files" ? "项目资料" : step === "analysis" ? "招标解读" : step === "authoring" ? "标书编制" : "交付文件";
   const locate = (bookmark?: string | null) => {
@@ -303,6 +311,8 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
           <aside className="tender-inspector" aria-label="要求、依据与待补"><div className="tender-pane-heading"><strong>章节核对</strong><button aria-expanded={!rightClosed} aria-label={rightClosed ? "展开核对栏" : "收起核对栏"} onClick={() => setRightClosed(value => !value)}>{rightClosed ? "‹" : "›"}</button></div>{!rightClosed && <>{reviewShortcuts}<ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></>}</aside>
         </div>
         {step === "export" && <section className="tender-section"><p className="tender-note">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</p>
+          {displayedDraft && <p className="tender-note" data-testid="word-coverage">当前查看稿 v{displayedDraft.revision}：{coverageMatches ? view.coverage?.headline : "覆盖待核"}</p>}
+          {coverageVersion && view.coverage?.headline && <p className="tender-note" data-testid="generated-coverage">生成稿 v{coverageVersion.revision}的覆盖统计：{view.coverage.headline}</p>}
           {!view.versions.length ? <p className="tender-empty">尚无已保存稿件。</p> : <div className="tender-table-scroll"><table className="tender-table"><thead><tr><th>版本</th><th>来源</th><th>状态</th><th>文件</th></tr></thead><tbody>{view.versions.map(version => <tr key={version.id}><td>v{version.revision}</td><td>{version.source === "manual" ? "人工保存稿" : version.source === "recovered" ? "会话恢复稿（待核对）" : "编制生成稿"}</td><td>{version.id === view.current_docx?.id ? "当前稿件" : "已保留"}</td><td><button onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)}>下载 DOCX v{version.revision}</button>{version.id !== view.current_docx?.id && <button disabled={busy || unsafe || ended} onClick={() => void selectDraft(version)}>选为当前稿 v{version.revision}</button>}</td></tr>)}</tbody></table></div>}
           {view.artifacts?.package_url && <><button onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")}>下载编制交付包（包含待补清单）</button><p className="tender-note">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</p><p className="tender-note">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</p></>}{view.gaps.length > 0 && <div className="tender-gap-list"><h3>编制时的待补记录</h3>{view.gaps.map((gap, index) => <p key={`${gap.code}:${index}`}>{gap.detail}</p>)}</div>}
         </section>}

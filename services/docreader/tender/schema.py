@@ -14,6 +14,7 @@ from pydantic import (
     AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool,
     StrictFloat, StrictInt, StrictStr, field_validator, model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 
 from docreader.tender.status import CommandStatus, ModelRequestStatus, RunStatus
@@ -29,6 +30,7 @@ ScopeStatus = Literal["bound", "unresolved"]
 DispositionStatus = Literal["requirements", "non_requirement", "unresolved"]
 DocumentStatus = Literal["complete", "partial", "unresolved"]
 AUTHORING_GROUNDING_POLICY = "knowledge_required_v2"
+AUTHORING_UNIT_BINDING_CONTRACT = "ordered_task_supports_v1"
 
 
 class Model(Protocol):
@@ -410,28 +412,53 @@ class OutlineResponse(Contract):
         "Select only this request's top-level rules[].rule_id. item_id values in related_rules, "
         "relations or issues are read-only context; never create a rule ID by changing an item ID prefix."))
     constraint_range_ids: list[Identity] = Field(default_factory=list, description=(
-        "Select only sources[].range_id actually read in this batch. A range mentioned only in "
-        "evidence, relations or issues does not qualify."))
+        "Select only bindable source references visible in this request, including sources[].range_id "
+        "or evidence/context references. The host loads the full source for global assembly; "
+        "selection does not mark its full text as read in this batch."))
     search_intents: list[SearchIntentResponse] = Field(default_factory=list)
+
+
+class OutlineCandidateScope(Contract):
+    range_ids: list[Identity]
+    rule_ids: list[Identity]
+
+    @model_validator(mode="after")
+    def nonempty_scope(self):
+        if not self.range_ids and not self.rule_ids:
+            raise ValueError("select at least one complete candidate excerpt or rule")
+        return self
 
 
 class OutlineAssemblyTarget(Contract):
     kind: ResponseTargetKind
     purpose: Text
     target_ids: list[Identity] = Field(default_factory=list)
+    same_instance: StrictBool = Field(default=False, description=(
+        "Explicitly declare that the selected candidates describe one filling or delivery instance, "
+        "even when their subject-role or condition labels differ. This does not declare the same legal entity. "
+        "Keep separately required instances separate. Omit for default subject preservation; on revision, "
+        "omission retains the unique previous choice for the same non-empty candidate set and subject, "
+        "while explicit false restores default subject grouping."))
+    candidate_scope: OutlineCandidateScope | SkipJsonSchema[None] = Field(
+        default=None, json_schema_extra=lambda schema: schema.pop("default", None), description=(
+        "Optionally select complete range_ids and rule_ids belonging to exactly one narrative candidate "
+        "without a template or response table. Omit to inherit the full candidate initially, or the unique "
+        "previous position's scope on revision. When previous positions are ambiguous, select the scope "
+        "explicitly. Both arrays are required; at least one must be nonempty. Do not provide null."))
     rule_ids: list[Identity] = Field(default_factory=list, description=(
         "Select additional supplied rules. On revision, omit to retain the unique previous position's explicit "
         "selection for the same non-empty candidate ID set and subject; an explicit array replaces that additional selection, "
-        "and [] clears it. Original candidate rules always remain."))
+        "and [] clears it. Candidate rules remain unless explicitly selected by candidate_scope."))
     source_ids: list[Identity] = Field(default_factory=list, description=(
         "Select additional bindable submission_sources for understanding. On revision, omit to retain the unique "
         "previous position's explicit selection for the same non-empty candidate ID set and subject; an explicit array replaces "
         "that additional selection, and [] clears it. This selection is independent of rule_ids; original candidate "
-        "sources and the currently selected rules' exact evidence remain."))
+        "sources remain unless selected by candidate_scope; the currently selected rules' complete evidence remains."))
     template_part_ids: list[Identity] = Field(default_factory=list, description=(
         "Omit both template_part_ids and template_spans to retain the selected instances' complete formats. "
         "Providing either field replaces the format selection; explicit empty arrays clear a mistaken format "
-        "while retaining its rules and source context."))
+        "while retaining its rules and source context. Accepted source-decoration exclusions supplied for "
+        "the selected candidates remain in effect even with explicit parts or complete spans."))
     template_spans: list[TemplateSpanResponse] = Field(default_factory=list, description=(
         "Optional inclusive ranges of a complete format in the supplied native order. "
         "When combined with explicit part IDs, the host keeps native order. Omit both template selection "
@@ -450,8 +477,17 @@ class OutlineAssemblyTarget(Contract):
         "requirements always remain."))
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
 
+    @field_validator("candidate_scope", mode="before")
+    @classmethod
+    def omit_unknown_scope(cls, value):
+        if value is None:
+            raise ValueError("omit candidate_scope to inherit instead of providing null")
+        return value
+
     @model_validator(mode="after")
     def grounded_position(self):
+        if self.candidate_scope is not None and (len(set(self.target_ids)) != 1 or self.kind != "narrative"):
+            raise ValueError("candidate_scope requires exactly one narrative candidate")
         if not self.target_ids and not self.rule_ids and not (
                 self.kind == "narrative" and self.related_target_ids):
             raise ValueError("a position requires a candidate, an unassigned rule, or a narrative reference to a candidate")
@@ -670,6 +706,10 @@ class WritingTask(Contract):
     targets: list[ResponseTarget]
 
 
+class PlannedWritingTask(WritingTask):
+    selected_material_ids: list[Identity] | None = Field(default=None, alias="_selected_material_ids")
+
+
 class WritingUnit(Contract):
     schema_version: AnalysisVersion = 2
     task_id: Identity
@@ -682,6 +722,7 @@ class WritingUnit(Contract):
     attachments: list[AuthoringAttachment] = Field(default_factory=list)
     gaps: list[StrictStr] = Field(default_factory=list)
     error_type: StrictStr | None = None
+    input_digest: Digest | None = None
 
 
 class AuthoringReviewRequest(Contract):
@@ -697,12 +738,41 @@ class AuthoringReviewFinding(Contract):
     suggestion: StrictStr = ""
     can_revise: StrictBool = False
     reject_content: StrictBool = Field(default=False, description=(
-        "True only when identified generated content is incorrect or unsupported. "
+        "True when identified generated content is incorrect, unsupported, or unsuitable for its target purpose, "
+        "including authoring instructions or source-rule restatements substituted for an actual bidder response. "
+        "Genuine fixed source templates and relevant background facts are not rejected merely for using tender evidence. "
         "Missing content, missing materials and unavailable review do not reject existing content."))
+
+
+class AssessmentContentRef(Contract):
+    task_id: Identity
+    content_ids: list[Identity] = Field(min_length=1)
+
+
+class RequirementAssessmentResponse(Contract):
+    coverage_id: Identity
+    content_refs: list[AssessmentContentRef] = Field(default_factory=list)
+    result: Literal["supported", "partial", "unsupported"]
+    detail: StrictStr = ""
 
 
 class AuthoringReviewResponse(Contract):
     findings: list[AuthoringReviewFinding]
+
+
+class BoundRequirementAssessment(RequirementAssessmentResponse):
+    scope_complete: StrictBool
+    context_incomplete: StrictBool
+    task_ids: list[Identity]
+    required_task_ids: list[Identity]
+    reviewed_task_ids: list[Identity]
+    review_round: Literal[0, 1]
+    unit_fps: dict[Identity, Digest]
+    reviewed_unit_refs: dict[Identity, ArtifactRef]
+
+
+class AuthoringReviewRecord(AuthoringReviewResponse):
+    coverage_assessments: list[BoundRequirementAssessment] = Field(default_factory=list)
 
 
 class SourceDecorationExclusion(Contract):
@@ -717,7 +787,32 @@ class SourceDecorationExclusion(Contract):
         "Inapplicability of a substantive clause never authorizes exclusion."))
 
 
+class StructureChapterMove(Contract):
+    chapter_id: Identity = Field(description="Select an existing chapter_id from the current structure view.")
+    parent_chapter_id: Identity | None = Field(description="Select the final parent chapter; null means a root chapter.")
+    after_chapter_id: Identity | None = Field(description=(
+        "Select the final sibling to follow; null means first under the selected parent. "
+        "Each final parent and position anchor may be selected only once."))
+    reason: Text = Field(description="Explain the exact hierarchy or order correction supported by the tender source.")
+
+
+class StructureChapterRename(Contract):
+    chapter_id: Identity = Field(description="Select an existing chapter_id from the current structure view.")
+    title: Text = Field(description=(
+        "The business chapter title, preserving any explicitly required name. Source form codes and "
+        "host-generated chapter numbering belong outside the title; native form text stays unchanged."))
+    reason: Text = Field(description="Explain the title correction using the actual tender and chapter purpose.")
+
+
 class AuthoringStructureResponse(AuthoringReviewResponse):
+    chapter_renames: list[StructureChapterRename] = Field(default_factory=list, description=(
+        "Optional title-only corrections to existing chapters, executable only when title_edits_allowed "
+        "is true; otherwise retained as suggestions. Preserve identities, hierarchy, targets, templates "
+        "and references. Do not infer actions from findings or repeat the complete tree."))
+    chapter_moves: list[StructureChapterMove] = Field(default_factory=list, description=(
+        "Optional exact chapter subtree moves, executable only when hierarchy_edits_allowed is true. "
+        "Preserve all chapter and target identities, titles, templates, response rows and references. "
+        "Do not infer moves from finding codes or prose, invent chapters or repeat the complete tree."))
     source_decoration_exclusions: list[SourceDecorationExclusion] = Field(default_factory=list, description=(
         "Optional exclusions of standalone source page headers, footers or page numbers only. "
         "Never remove substantive fixed-format content or applicability notes. "
@@ -726,12 +821,85 @@ class AuthoringStructureResponse(AuthoringReviewResponse):
         "and response rows remain unchanged."))
 
 
+class AuthoringContentReviewResponse(AuthoringReviewResponse):
+    assessments: list[RequirementAssessmentResponse] = Field(default_factory=list)
+
+
+CoverageResolution = Literal["content", "manual", "constraint", "submission", "excluded", "pending"]
+CoverageAssessment = Literal["supported", "partial", "unsupported"]
+CoverageReviewStatus = Literal["reviewed", "unreviewed", "not_required"]
+QueryOrigin = Literal["intent", "effective_requirement", "source_excerpt"]
+
+
+class QueryBinding(Contract):
+    coverage_id: Identity
+    origin: QueryOrigin
+
+
+class AuthoringQuery(Contract):
+    query_id: Identity
+    query: StrictStr = Field(min_length=1)
+    bindings: list[QueryBinding] = Field(min_length=1)
+    scope: dict = Field(default_factory=dict)
+    include_original: StrictBool = False
+
+
+class AuthoringQueryPlan(Contract):
+    queries: list[AuthoringQuery] = Field(default_factory=list)
+
+
+class CoverageContentPointer(Contract):
+    unit_ref: ArtifactRef
+    content_id: Identity
+
+
+class AuthoringCoverageEntry(Contract):
+    coverage_id: Identity
+    rule_ref: EffectiveItemRef | None = None
+    target_id: Identity | None = None
+    row_id: Identity | None = None
+    source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
+    resolution: CoverageResolution
+    query_ids: list[Identity] = Field(default_factory=list)
+    material_ids: list[Identity] = Field(default_factory=list)
+    content_refs: list[CoverageContentPointer] = Field(default_factory=list)
+    assessment: CoverageAssessment | None = None
+    review_status: CoverageReviewStatus = "unreviewed"
+    gap_codes: list[Text] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def identifiable(self):
+        if self.rule_ref is None and self.target_id is None and self.row_id is None:
+            raise ValueError("coverage entry requires a rule, a target, or a response row")
+        return self
+
+
+class AuthoringCoverage(Contract):
+    schema_version: AnalysisVersion = 2
+    authoring_input: AuthoringInput
+    outline_ref: ArtifactRef
+    requirements_ref: ArtifactRef | None = None
+    retrieval_ref: ArtifactRef | None = None
+    unit_refs: list[ArtifactRef]
+    review_ref: ArtifactRef | None = None
+    entries: list[AuthoringCoverageEntry]
+
+
 class AuthoringGap(Contract):
     code: Text
     detail: Text
     task_id: Identity | None = None
     chapter_id: Identity | None = None
     target_id: Identity | None = None
+
+
+class AuthoringDocumentPlan(Contract):
+    input_digest: Digest
+    outline_ref: ArtifactRef
+    materials_ref: ArtifactRef
+    basis_ref: ArtifactRef
+    tasks: list[PlannedWritingTask]
+    gaps: list[AuthoringGap] = Field(default_factory=list)
 
 
 class AuthoringUsage(Contract):
@@ -753,6 +921,7 @@ class AuthoringDocument(Contract):
     unit_refs: list[ArtifactRef]
     review_ref: ArtifactRef
     initial_review_ref: ArtifactRef | None = None
+    coverage_ref: ArtifactRef | None = None
     superseded_unit_refs: list[ArtifactRef] = Field(default_factory=list)
     docx_ref: ArtifactRef
     package_ref: ArtifactRef

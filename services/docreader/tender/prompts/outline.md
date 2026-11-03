@@ -15,7 +15,7 @@
 通常任务是组织响应位置。完整返回结构遵循宿主随本次请求附带的JSON Schema；下文JSON仅为局部字段示例，不是完整响应。
 kind为narrative（正文）、form（规定格式/表格）、attachment（真实证明附件位置）。每个target可返回template_part_ids，选择本请求template_parts提供的p1等原格式部件；没有实际格式则留空。range_ids仅是解释上下文，不能授权宿主把整段原文当成表单。manual_fill默认false，support_origins默认["knowledge"]；必填字段以Schema的required为准，targets/children可省略，默认空列表。不生成章节/响应位置ID、CAS、版本摘要或覆盖名单。
 
-引用域：target.rule_ids、findings[].rule_ids及constraint_rule_ids只选择本请求顶层rules[].rule_id。related_rules.item.item_id及关系、问题中的事项身份只读，不得把i前缀改成e来推导规则身份。target.range_ids仍可选择本请求提供、可绑定的证据上下文；constraint_range_ids只选择本批实际阅读的sources[].range_id，仅在证据、关系或问题中出现过该引用不足以选入。
+引用域：target.rule_ids、findings[].rule_ids及constraint_rule_ids只选择本请求顶层rules[].rule_id。related_rules.item.item_id及关系、问题中的事项身份只读，不得把i前缀改成e来推导规则身份。target.range_ids仍可选择本请求提供、可绑定的证据上下文；constraint_range_ids可选择本请求可见且可绑定的sources[].range_id及证据、关系或问题中的来源引用，由宿主为全局组装装载完整原文；交接不代表本批实际阅读过其全文，不能选择本请求未出现或不可绑定的来源。
 
 response_table.context_range_ids只选择本批实际sources中适用于整表的原表头、单位、条件或必要引导，宿主在表前保留一次，不复制到每行，也不生成企业应答格。只适用部分行的条件仍随相应行选择，不能放到整表上下文。
 
@@ -39,4 +39,4 @@ support_origins选择本位置允许使用的依据：项目背景、现状、�
 rules中的item是抽取事项，effective_rule只含既有接受决议保留的部分，不恢复删除内容。rule_origin=extraction表示未核验的抽取观察；verified_projection仅表示既有有效决议投影，不表示人已确认或企业满足。item_id只用于关系关联，选择响应规则返回rule_ids。关系中unverified_relation_ids、issues、人工issue_resolutions和scope_decisions保持原义，不能扩大补遗范围或消除疑点。
 独立编制可消费部分/未确认资料，不以确认或资料齐备为条件。品牌型号配置是可选事实，不能虚构。未形成rules时，直接据实际sources组织有依据的响应位置，rule_ids留空并说明分析待补；不能因为规则台账缺失而忽略可读原文。这里不代写正文、不判断企业符合或实际得分。
 
-sources为本批实际原文（range_id、text、section_id、role）；完整标题路径在sections中按section_id共享，同一路径只出现一次，依据该关联理解每段所属章节，不回抄sections。source_catalog仅为未读来源目录。range_ids选择解释上下文；原格式仅通过template_part_ids选择。上传期限、签章、规定提交顺序/分册等直接原文约束，除了已有规则可选constraint_rule_ids，也可用constraint_range_ids选择本批实际sources引用，由宿主带入全局组装；不要只写“按招标文件要求”而丢掉规定目录。跨unit格式选多个有序部件，不重写原表。input_issues记录可用性缺口。局部批次只读到了本批原文，不宣称全文件已覆盖；宿主后续归并并复核实际内容。
+sources为本批实际原文（range_id、text、section_id、role）；完整标题路径在sections中按section_id共享，同一路径只出现一次，依据该关联理解每段所属章节，不回抄sections。source_catalog仅为未读来源目录。range_ids选择解释上下文；原格式仅通过template_part_ids选择。上传期限、签章、规定提交顺序/分册等直接原文约束，除了已有规则可选constraint_rule_ids，也可用constraint_range_ids交接本请求可见且可绑定的来源引用，由宿主装载全文带入全局组装；不因此宣称已读全文，不改变表格共同条件或原格式选择范围。不要只写“按招标文件要求”而丢掉规定目录。跨unit格式选多个有序部件，不重写原表。input_issues记录可用性缺口。局部批次只读到了本批原文，不宣称全文件已覆盖；宿主后续归并并复核实际内容。

@@ -569,6 +569,7 @@ class WebBridge:
                                 "status": "uploaded"}
                                for row in await self.documents(project_id)],
                  "outline": None, "requirements": None, "units": [], "gaps": [], "materials": [],
+                 "coverage": {"state": "unknown", "pending": None, "unreviewed": None, "headline": "覆盖未知"},
                  "artifacts": {"docx_available": False, "package_available": False}}
         if completed:
             value["artifacts"] = {"execution_id": completed["execution_id"], "docx_available": True, "package_available": True}
@@ -582,6 +583,14 @@ class WebBridge:
                          requirements=self.artifacts.read_json(document["requirements_ref"]) if document.get("requirements_ref") else None,
                          units=[self.artifacts.read_json(ref) for ref in document["unit_refs"]], gaps=document["gaps"],
                          materials=materials)
+            from docreader.tender.authoring_coverage import coverage_headline
+            stored_coverage = None
+            if document.get("coverage_ref"):
+                try:
+                    stored_coverage = self.artifacts.read_json(document["coverage_ref"])
+                except (OSError, ValueError):
+                    stored_coverage = None
+            value["coverage"] = coverage_headline(stored_coverage)
         else:
             active = next((view for view in views if view["status"] in {AuthoringJobStatus.PENDING, AuthoringJobStatus.PUBLISHED, AuthoringExecutionStatus.RUNNING}), None)
             execution = await self.authoring.get_execution(active["execution_id"], missing_ok=True) if active else None

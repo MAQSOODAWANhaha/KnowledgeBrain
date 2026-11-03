@@ -35,7 +35,10 @@ async def test_submission_sources_are_deduplicated_frozen_forwarded_and_conflict
     observed = []
 
     async def generate(artifacts, snapshot, request_budget, execute, *, materials=(), knowledge=None,
-                       concurrency=2, submission_sources=(), on_outline=None):
+                       concurrency=2, submission_sources=(), on_outline=None,
+                       saved_units=(), on_unit=None, saved_plan=None, on_plan=None):
+        assert list(saved_units) == [] and saved_plan is None
+        assert callable(on_outline) and callable(on_unit) and callable(on_plan)
         observed.append(deepcopy(submission_sources))
         ref = artifacts.put_json({"fixture": "entry-contract-only"})
         return artifacts.put_json({"schema_version": 2, "authoring_input": snapshot,

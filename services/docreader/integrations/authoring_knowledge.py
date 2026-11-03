@@ -14,12 +14,53 @@ import hashlib
 import json
 import mimetypes
 import re
+from copy import deepcopy
 from uuid import UUID
 
 import httpx
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
 from docreader.tender.schema import KnowledgeMaterial
+
+
+class KnowledgeResponseError(ValueError):
+    """The remote operation returned an unusable HTTP payload."""
+
+
+class KnowledgeUnavailable(RuntimeError):
+    """A fixed knowledge operation exhausted its retry budget."""
+
+
+class _MemoryOperations:
+    """Standalone reads share the same single-layer operation contract."""
+
+    def __init__(self, attempts):
+        self.attempts, self.results, self.used, self.locks = attempts, {}, {}, {}
+
+    async def __call__(self, kind, key, send_once):
+        identity = kind, key
+        async with self.locks.setdefault(identity, asyncio.Lock()):
+            if identity in self.results:
+                return deepcopy(self.results[identity])
+            while self.used.get(identity, 0) < self.attempts:
+                number = self.used[identity] = self.used.get(identity, 0) + 1
+                try:
+                    value = await send_once()
+                except (httpx.HTTPError, KnowledgeResponseError):
+                    if number < self.attempts:
+                        await asyncio.sleep(2 ** (number - 1))
+                    continue
+                self.results[identity] = deepcopy(value)
+                return value
+            raise KnowledgeUnavailable("knowledge operation attempts exhausted")
+
+
+def _response_json(response):
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        raise KnowledgeResponseError("invalid knowledge response JSON") from None
 
 
 class KnowledgeProvider:
@@ -55,7 +96,11 @@ class KnowledgeProvider:
             spec["include_library"] = False
         return spec
 
-    async def _original(self, client, api, hit, artifacts, documents, originals):
+    def _operation_key(self, parameters):
+        return hashlib.sha256(json.dumps({"provider": self.spec(), "parameters": parameters},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    async def _original(self, client, api, hit, artifacts, documents, originals, run_operation):
         try:
             product, version, document = (str(UUID(hit[field])) for field in
                                           ("product_id", "version_id", "document_id"))
@@ -63,22 +108,19 @@ class KnowledgeProvider:
             return None, {}
         scope = product, version, document
         if scope not in documents:
-            documents[scope] = None
-            for attempt in range(4):
-                try:
-                    response = await client.get(f"{api}/documents/{document}")
-                    response.raise_for_status()
-                    meta = response.json()
-                    if (not isinstance(meta, dict) or meta.get("id") != document
-                            or meta.get("product_version_id") != version
-                            or not isinstance(meta.get("file_name"), str)
-                            or not re.fullmatch(r"objects/[0-9a-f]{64}", str(meta.get("object_ref", "")))):
-                        raise ValueError("original document identity unavailable")
-                    documents[scope] = meta
-                    break
-                except (httpx.HTTPError, ValueError):
-                    if attempt < 3:
-                        await asyncio.sleep(2 ** attempt)
+            async def metadata_once():
+                meta = _response_json(await client.get(f"{api}/documents/{document}"))
+                if (not isinstance(meta, dict) or meta.get("id") != document
+                        or meta.get("product_version_id") != version
+                        or not isinstance(meta.get("file_name"), str)
+                        or not re.fullmatch(r"objects/[0-9a-f]{64}", str(meta.get("object_ref", "")))):
+                    raise KnowledgeResponseError("original document identity unavailable")
+                return meta
+            try:
+                documents[scope] = await run_operation("document", self._operation_key({
+                    "product_id": product, "version_id": version, "document_id": document}), metadata_once)
+            except KnowledgeUnavailable:
+                documents[scope] = None
         meta = documents[scope]
         if meta is None:
             return None, {}
@@ -93,31 +135,35 @@ class KnowledgeProvider:
                 except (OSError, ArtifactIntegrityError):
                     self._original_refs.pop(cache_key, None)
         if key not in originals:
-            originals[key] = None
-            for attempt in range(4):
-                try:
-                    async with client.stream("GET", f"{api}/products/{product}/versions/{version}/files",
-                                             params={"key": meta["object_ref"]}) as response:
-                        response.raise_for_status()
-                        if int(response.headers.get("content-length", "0")) > self.max_original_bytes:
-                            raise ValueError("original exceeds size limit")
-                        content = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            if len(content) + len(chunk) > self.max_original_bytes:
-                                raise ValueError("original exceeds size limit")
-                            content.extend(chunk)
-                    if not content or hashlib.sha256(content).hexdigest() != meta["object_ref"][8:]:
-                        raise ValueError("original content digest mismatch")
-                    media_type = mimetypes.guess_type(meta["file_name"])[0] or "application/octet-stream"
-                    reference = await asyncio.to_thread(artifacts.put_bytes, bytes(content), media_type)
-                    originals[key] = self._original_refs[cache_key] = reference
-                    break
-                except (httpx.HTTPError, ValueError, OSError):
-                    if attempt < 3:
-                        await asyncio.sleep(2 ** attempt)
+            async def original_once():
+                async with client.stream("GET", f"{api}/products/{product}/versions/{version}/files",
+                                         params={"key": meta["object_ref"]}) as response:
+                    response.raise_for_status()
+                    try:
+                        size = int(response.headers.get("content-length", "0"))
+                    except ValueError:
+                        raise KnowledgeResponseError("invalid original content length") from None
+                    if size > self.max_original_bytes:
+                        raise KnowledgeResponseError("original exceeds size limit")
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(content) + len(chunk) > self.max_original_bytes:
+                            raise KnowledgeResponseError("original exceeds size limit")
+                        content.extend(chunk)
+                if not content or hashlib.sha256(content).hexdigest() != meta["object_ref"][8:]:
+                    raise KnowledgeResponseError("original content digest mismatch")
+                media_type = mimetypes.guess_type(meta["file_name"])[0] or "application/octet-stream"
+                return await asyncio.to_thread(artifacts.put_bytes, bytes(content), media_type)
+            try:
+                reference = await run_operation("file", self._operation_key({
+                    "product_id": product, "version_id": version, "object_ref": meta["object_ref"]}), original_once)
+                await asyncio.to_thread(artifacts.path, reference)
+                originals[key] = self._original_refs[cache_key] = reference
+            except KnowledgeUnavailable:
+                originals[key] = None
         return originals[key], {field: meta[field] for field in ("file_name", "object_ref")}
 
-    async def search(self, queries: list[dict], artifacts) -> dict:
+    async def search(self, queries: list[dict], artifacts, attempts: int = 4, *, run_operation=None) -> dict:
         """Return materials and per-target diagnostics, without issuing LLM calls.
 
         product_id selects an existing knowledge collection for this API. It is
@@ -125,11 +171,15 @@ class KnowledgeProvider:
         Every query is supplied by the caller; no keyword business routing or
         suitability inference happens here. Direct user materials need no API.
         """
-        issues, grouped, materials = [], {}, {}
+        issues, grouped, materials, query_ids = [], {}, {}, {}
         original_queries, documents, originals = set(), {}, {}
+        if type(attempts) is not int or attempts < 1:
+            raise ValueError("knowledge attempts must be a positive attempt budget")
+        run_operation = run_operation or _MemoryOperations(attempts)
 
-        def problem(targets, code, detail):
-            issues.extend({"code": code, "detail": detail, "target_id": target} for target in targets)
+        def problem(targets, code, detail, query_text=None):
+            issues.extend({"code": code, "detail": detail, "target_id": target,
+                           **({"query": query_text} if query_text else {})} for target in targets)
 
         for entry in queries:
             target, query = entry.get("target_id"), entry.get("query")
@@ -138,9 +188,14 @@ class KnowledgeProvider:
             if not isinstance(query, str) or not query.strip():
                 problem([target], "knowledge_query_missing", "未提供检索内容，使用现有资料继续编制。")
                 continue
+            if len(query.encode()) > 20000:
+                problem([target], "knowledge_query_too_large", "要求超过当前知识检索入口上限，完整原要求保留，此项待补。", query)
+                continue
             targets = grouped.setdefault(query, [])
             if target not in targets:
                 targets.append(target)
+            if isinstance(entry.get("query_id"), str) and entry.get("query_id"):
+                query_ids.setdefault(query, entry["query_id"])
             if entry.get("include_original") is True:
                 original_queries.add(query)
         if not grouped:
@@ -174,42 +229,36 @@ class KnowledgeProvider:
                            "include_library": self.include_library}
                 if self.version_id is not None:
                     request["version_id"] = self.version_id
-                response = None
-                for attempt in range(4):
-                    try:
-                        received = await client.post(endpoint, json=request)
-                        received.raise_for_status()
-                        parsed = received.json()
-                        if not isinstance(parsed, dict) or not isinstance(parsed.get("hits"), list):
-                            raise ValueError("invalid knowledge response")
-                        response = parsed
-                        break
-                    except (httpx.HTTPError, ValueError):
-                        if attempt < 3:
-                            await asyncio.sleep(2 ** attempt)
-                if response is None:
-                    problem(targets, "knowledge_unavailable", "知识检索重试后仍未取得可用结果，相关资料待补。")
+                async def search_once():
+                    parsed = _response_json(await client.post(endpoint, json=request))
+                    if not isinstance(parsed, dict) or not isinstance(parsed.get("hits"), list):
+                        raise KnowledgeResponseError("invalid knowledge response")
+                    return parsed
+                try:
+                    response = await run_operation("search", self._operation_key(request), search_once)
+                except KnowledgeUnavailable:
+                    problem(targets, "knowledge_unavailable", "知识检索重试后仍未取得可用结果，相关资料待补。", query)
                     continue
                 if not response["hits"]:
-                    problem(targets, "knowledge_no_hits", "本次未取得可用资料，相关事实与证明待补。")
-                for hit in response["hits"]:
+                    problem(targets, "knowledge_no_hits", "本次未取得可用资料，相关事实与证明待补。", query)
+                for rank, hit in enumerate(response["hits"], 1):
                     if (not isinstance(hit, dict) or not isinstance(hit.get("content"), str)
                             or not hit["content"].strip() or not isinstance(hit.get("id"), str)
                             or not isinstance(hit.get("document_id"), str)):
-                        problem(targets, "knowledge_hit_invalid", "部分检索结果缺少可追溯的原文或来源，已保留其余资料。")
+                        problem(targets, "knowledge_hit_invalid", "部分检索结果缺少可追溯的原文或来源，已保留其余资料。", query)
                         continue
                     if not self.include_library and (hit.get("product_id") != product_id
                             or self.version_id is not None and hit.get("version_id") != self.version_id):
-                        problem(targets, "knowledge_hit_out_of_scope", "部分检索结果不属于已选资料版本，未作为编制依据。")
+                        problem(targets, "knowledge_hit_out_of_scope", "部分检索结果不属于已选资料版本，未作为编制依据。", query)
                         continue
-                    try:
-                        reference = await asyncio.to_thread(artifacts.put_bytes, hit["content"].encode("utf-8"),
-                                                            "text/plain; charset=utf-8")
-                    except (OSError, ArtifactIntegrityError):
-                        problem(targets, "knowledge_material_unavailable", "部分检索原文未能保存，未作为可用资料引用。")
-                        continue
+                    reference = await asyncio.to_thread(artifacts.put_bytes, hit["content"].encode("utf-8"),
+                                                        "text/plain; charset=utf-8")
                     source = {key: hit[key] for key in ("document_id", "product_id", "version_id", "version_label", "is_current",
                                                        "start_at", "end_at", "image_object_ref") if key in hit}
+                    retrieval = {"query_id": query_ids.get(query, query), "rank": rank}
+                    score = hit.get("score")
+                    if type(score) in {int, float} and not isinstance(score, bool) and score == score and abs(score) != float("inf"):
+                        retrieval["score"] = score
                     source.update(chunk_id=hit["id"], kind="search_excerpt", service_url=base)
                     identity = hashlib.sha256(json.dumps({"source": source, "sha256": reference["sha256"]},
                         ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -217,10 +266,10 @@ class KnowledgeProvider:
                     original_ref, original_locator = None, {}
                     if query in original_queries:
                         original_ref, original_locator = await self._original(
-                            client, api, hit, artifacts, documents, originals)
+                            client, api, hit, artifacts, documents, originals, run_operation)
                         if original_ref is None:
                             problem(targets, "knowledge_original_unavailable",
-                                    "候选文字已保留，未取得可核对的同版本原件；证明材料待补。")
+                                    "候选文字已保留，未取得可核对的同版本原件；证明材料待补。", query)
                     if material_id in materials:
                         locator = materials[material_id]["locator"]
                         if original_ref is not None:
@@ -230,14 +279,18 @@ class KnowledgeProvider:
                         locator["target_ids"] = list(dict.fromkeys([*locator["target_ids"], *targets]))
                         if request not in locator["searches"]:
                             locator["searches"].append(request)
+                        for item in (retrieval,):
+                            if item not in locator.setdefault("retrievals", []):
+                                locator["retrievals"].append(item)
                         continue
                     title = hit.get("document_title")
                     materials[material_id] = KnowledgeMaterial.model_validate({
                         "material_id": material_id, "title": title if isinstance(title, str) and title else "知识资料",
                         "text": hit["content"], "content_ref": reference, "original_ref": original_ref,
-                        "locator": {**source, **original_locator, "target_ids": targets.copy(), "searches": [request]},
+                        "locator": {**source, **original_locator, "target_ids": targets.copy(), "searches": [request],
+                                     "retrievals": [retrieval]},
                         "usage": "reference", "attachment": original_ref is not None}).model_dump()
                 warnings = response.get("warnings")
                 if isinstance(warnings, list) and warnings:
-                    problem(targets, "knowledge_partial_results", "知识服务报告部分检索限制，现有命中不代表资料齐备。")
+                    problem(targets, "knowledge_partial_results", "知识服务报告部分检索限制，现有命中不代表资料齐备。", query)
         return {"materials": list(materials.values()), "issues": issues}

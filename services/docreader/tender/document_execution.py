@@ -11,6 +11,7 @@ import json
 import math
 
 import psycopg
+import httpx
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
 from docreader.integrations.authoring import (
@@ -18,6 +19,7 @@ from docreader.integrations.authoring import (
     read_authoring_input,
 )
 from docreader.integrations.authoring_store import AuthoringStore
+from docreader.integrations.authoring_knowledge import KnowledgeResponseError, KnowledgeUnavailable
 from docreader.integrations.store import Cancelled, Conflict, StaleExecution
 from docreader.llm.budget import RequestBudget
 from docreader.llm.client import OpenAIModel
@@ -33,14 +35,17 @@ from docreader.tender.authoring_execution import _OutlineModel
 from docreader.tender.authoring_pipeline import generate_document
 from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY,
+    AUTHORING_UNIT_BINDING_CONTRACT,
     ArtifactRef,
     AuthoringDocument,
+    AuthoringDocumentPlan,
     AuthoringInput,
     AuthoringOutline,
     AuthoringReviewRequest,
     AuthoringUsage,
     KnowledgeMaterial,
     SourceUnitRef,
+    WritingUnit,
 )
 from docreader.tender.status import AUTHORING_MODEL_TASKS, AuthoringExecutionStatus
 
@@ -242,8 +247,12 @@ class _DocumentExecutor:
 
 class _FrozenKnowledge:
     def __init__(self, provider, spec, store, artifacts, lease):
-        self.provider, self.spec = provider, spec
+        self.provider, self._spec = provider, deepcopy(spec)
         self.store, self.artifacts, self.lease = store, artifacts, lease
+        self._operation_locks = {}
+
+    def spec(self):
+        return deepcopy(self._spec)
 
     async def search(self, queries, artifacts):
         grouped, materials, issues = {}, {}, []
@@ -268,9 +277,15 @@ class _FrozenKnowledge:
             targets = grouped.setdefault(query, [])
             if target not in targets:
                 targets.append(target)
+        query_ids = {}
+        for entry in queries:
+            query = entry.get("query")
+            if isinstance(query, str) and isinstance(entry.get("query_id"), str) and entry.get("query_id"):
+                query_ids.setdefault(query, entry["query_id"])
         for query, targets in grouped.items():
             value = await self._query(
-                query, artifacts, include_original=query in original_queries
+                query, artifacts, include_original=query in original_queries,
+                query_id=query_ids.get(query),
             )
             issues.extend(
                 {**issue, "target_id": target}
@@ -303,13 +318,68 @@ class _FrozenKnowledge:
                 for search in locator.get("searches", []):
                     if search not in existing.setdefault("searches", []):
                         existing["searches"].append(search)
+                for retrieval in locator.get("retrievals", []):
+                    if retrieval not in existing.setdefault("retrievals", []):
+                        existing["retrievals"].append(retrieval)
         return {"materials": list(materials.values()), "issues": issues}
 
-    async def _query(self, query, artifacts, *, include_original=False):
+    async def run_operation(self, kind, key, send_once):
+        """One durable attempt budget for each actual scoped HTTP operation."""
+        identity = kind, key
+        async with self._operation_locks.setdefault(identity, asyncio.Lock()):
+            for number in range(1, 5):
+                prefix = f"{kind}:{key}:attempt:{number}"
+                start = await self.store.receipt(
+                    self.lease, "knowledge-operation", prefix + ":start", input_digest=key)
+                outcome = await self.store.receipt(
+                    self.lease, "knowledge-operation", prefix + ":outcome", input_digest=key)
+                expected = {"kind": kind, "key": key, "attempt": number}
+                if outcome is not None:
+                    value = await asyncio.to_thread(self.artifacts.read_json, outcome["artifact_ref"])
+                    if (start is None or not isinstance(value, dict)
+                            or any(value.get(field) != item for field, item in expected.items())
+                            or value.get("status") not in {"succeeded", "failed"}):
+                        raise ArtifactIntegrityError("knowledge operation outcome identity changed")
+                    if value["status"] == "succeeded":
+                        if kind == "file":
+                            reference = ArtifactRef.model_validate(value["result_ref"]).model_dump()
+                            await asyncio.to_thread(self.artifacts.path, reference)
+                            return reference
+                        return await asyncio.to_thread(self.artifacts.read_json, value["result_ref"])
+                    continue
+                if start is not None:
+                    # Remote completion is unknown; this attempt still consumes
+                    # its slot, including a crash immediately before sending.
+                    continue
+                reference = await asyncio.to_thread(self.artifacts.put_json, expected)
+                await self.store.commit_artifact(
+                    self.lease, "knowledge-operation", reference,
+                    scope=prefix + ":start", input_digest=key)
+                try:
+                    result = await send_once()
+                except (httpx.HTTPError, KnowledgeResponseError) as error:
+                    value = {**expected, "status": "failed", "error_code":
+                             "knowledge_http_error" if isinstance(error, httpx.HTTPError)
+                             else "knowledge_response_invalid"}
+                else:
+                    result_ref = (ArtifactRef.model_validate(result).model_dump() if kind == "file"
+                                  else await asyncio.to_thread(self.artifacts.put_json, result))
+                    value = {**expected, "status": "succeeded", "result_ref": result_ref}
+                reference = await asyncio.to_thread(self.artifacts.put_json, value)
+                await self.store.commit_artifact(
+                    self.lease, "knowledge-operation", reference,
+                    scope=prefix + ":outcome", input_digest=key)
+                if value["status"] == "succeeded":
+                    return result
+                if number < 4:
+                    await asyncio.sleep(2 ** (number - 1))
+            raise KnowledgeUnavailable("knowledge operation attempts exhausted")
+
+    async def _query(self, query, artifacts, *, include_original=False, query_id=None):
         digest = _digest(
             {
                 "query": query,
-                "provider": self.spec,
+                "provider": self._spec,
                 "include_original": include_original,
             }
         )
@@ -323,7 +393,7 @@ class _FrozenKnowledge:
             if (
                 not isinstance(value, dict)
                 or value.get("query") != query
-                or value.get("provider") != self.spec
+                or value.get("provider") != self._spec
                 or value.get("include_original", False) != include_original
             ):
                 raise ArtifactIntegrityError(
@@ -335,10 +405,12 @@ class _FrozenKnowledge:
         request = {"query": query, "target_id": "query"}
         if include_original:
             request["include_original"] = True
-        result = await self.provider.search([request], artifacts)
+        if query_id:
+            request["query_id"] = query_id
+        result = await self.provider.search([request], artifacts, run_operation=self.run_operation)
         value = {
             "query": query,
-            "provider": self.spec,
+            "provider": self._spec,
             "include_original": include_original,
             "materials": deepcopy(result["materials"]),
             "issues": [
@@ -514,18 +586,11 @@ async def execute_document(
     )
     knowledge_spec = None
     if knowledge is not None:
-        knowledge_spec = (
-            knowledge.spec()
-            if callable(getattr(knowledge, "spec", None))
-            else {
-                "provider": type(knowledge).__module__
-                + "."
-                + type(knowledge).__qualname__
-            }
-        )
+        knowledge_spec = knowledge.spec()
     spec = {
         "protocol": _PROTOCOL,
         "grounding_policy": AUTHORING_GROUNDING_POLICY,
+        "unit_binding_contract": AUTHORING_UNIT_BINDING_CONTRACT,
         "endpoint": completions_url(config.chat.base_url),
         "model": config.chat.model,
         "context_tokens": config.chat.context_tokens,
@@ -620,6 +685,37 @@ async def execute_document(
                     lease, "document-outline", reference, input_digest=_digest(snapshot)
                 )
 
+            stored = await store.get_execution(execution_id)
+            plan_receipt = next((r for r in stored.get("receipts") or []
+                                 if r.get("stage") == "document-plan" and r.get("scope") == ""), None)
+            saved_plan = (await asyncio.to_thread(artifacts.read_json, plan_receipt["artifact_ref"])
+                          if plan_receipt is not None and not outline_only else None)
+            saved_units = []
+            for receipt in stored.get("receipts") or []:
+                if receipt.get("stage") != "document-unit" or not receipt.get("artifact_ref"):
+                    continue
+                try:
+                    saved_units.append(await asyncio.to_thread(artifacts.read_json, receipt["artifact_ref"]))
+                except (OSError, ValueError, ArtifactIntegrityError):
+                    continue
+
+            async def publish_plan(reference):
+                plan = AuthoringDocumentPlan.model_validate(
+                    await asyncio.to_thread(artifacts.read_json, reference))
+                await store.commit_artifact(
+                    lease, "document-plan", reference, input_digest=plan.input_digest,
+                )
+
+            async def publish_unit(unit):
+                unit = WritingUnit.model_validate(unit).model_dump()
+                if unit["input_digest"] is None:
+                    raise ArtifactIntegrityError("writing unit lacks its actual input digest")
+                reference = await asyncio.to_thread(artifacts.put_json, unit)
+                await store.commit_artifact(
+                    lease, "document-unit", reference, scope=unit["task_id"],
+                    input_digest=unit["input_digest"],
+                )
+
             reference = await generate_document(
                 artifacts,
                 snapshot,
@@ -629,6 +725,10 @@ async def execute_document(
                 knowledge=frozen_knowledge,
                 concurrency=concurrency,
                 on_outline=publish_outline,
+                saved_units=saved_units,
+                on_unit=publish_unit,
+                saved_plan=saved_plan,
+                on_plan=publish_plan,
                 **review_options,
             )
             value = await asyncio.to_thread(artifacts.read_json, reference)
