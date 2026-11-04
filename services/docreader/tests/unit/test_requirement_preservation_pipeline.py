@@ -155,7 +155,8 @@ async def test_unassigned_rule_remains_in_requirement_snapshot_without_false_tar
     records = preserved(artifacts, result)["rules"]
     pending = next(record for record in records if record["rule"]["text"] == UNASSIGNED)
     assert pending["rule"] == expected[1] and pending["target_ids"] == []
-    assert UNASSIGNED not in document_text(artifacts, result), "The host must not assign unknown semantic placement."
+    text = document_text(artifacts, result)
+    assert "尚未归入响应表" in text and text.index("尚未归入响应表") < text.index(UNASSIGNED)
     assert UNASSIGNED in submission_notes(artifacts, result)
     assert any(gap["code"] == "export_requirement_unassigned" for gap in result["gaps"])
     outline = artifacts.read_json(result["outline_ref"])

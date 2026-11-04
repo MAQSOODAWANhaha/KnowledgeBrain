@@ -3,6 +3,7 @@
 from copy import deepcopy
 from collections import Counter
 import json
+import re
 
 
 def _grid_view(grid):
@@ -64,6 +65,55 @@ def _share_text_lines(payload, fields=('template_parts', 'source_excerpts', 'sub
     for entry, lines in plans:
         entry.pop('text')
         entry['text_lines'] = lines
+
+
+def slim_revision_payload(payload, previous, findings):
+    """Keep decision text; already adopted bodies stay on the host.
+
+    Call count is unchanged: one revision still replaces one A1. The request grows with
+    unassigned rules and targets named by findings, not with every adopted form.
+    The worst input is still the first full assembly. A model that cannot see a stripped
+    form keeps that form by omission; a later finding that names its v-id sends it again.
+    Old full-tree revision responses do not replay, because this request is different.
+    """
+    named = set()
+    for finding in findings or []:
+        for field in ('detail', 'suggestion'):
+            named.update(re.findall(r'\bv\d+\b', finding.get(field) or ''))
+    keep_parts, keep_excerpts = set(), set()
+
+    def walk(chapters):
+        for chapter in chapters or []:
+            for target in chapter.get('targets') or []:
+                if target.get('review_target_id') not in named:
+                    continue
+                keep_parts.update(target.get('template_part_ids') or [])
+                keep_parts.update(target.get('excluded_template_part_ids') or [])
+                table = target.get('response_table') or {}
+                keep_excerpts.update(table.get('context_range_ids') or [])
+                for row in table.get('rows') or []:
+                    keep_excerpts.update(row.get('range_ids') or [])
+            walk(chapter.get('children'))
+    walk(previous)
+    for rule in payload.get('unassigned_rules') or []:
+        for evidence in (rule.get('rule') or {}).get('evidence') or []:
+            keep_excerpts.update(evidence.get('range_ids') or [])
+    result = deepcopy(payload)
+    result['previous_structure'] = previous
+    result['revision_view'] = 'bound_v1'
+
+    def strip(entry, identity, keep):
+        if identity in keep:
+            return entry
+        kept = {key: value for key, value in entry.items() if key not in {'text', 'text_lines', 'grid'}}
+        kept['retained'] = True
+        return kept
+    if isinstance(result.get('template_parts'), list):
+        result['template_parts'] = [strip(part, part.get('part_id'), keep_parts) for part in result['template_parts']]
+    if isinstance(result.get('source_excerpts'), list):
+        result['source_excerpts'] = [strip(excerpt, excerpt.get('range_id'), keep_excerpts)
+                                     for excerpt in result['source_excerpts']]
+    return result
 
 
 def compact_assembly_payload(payload):

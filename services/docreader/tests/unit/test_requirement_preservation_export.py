@@ -495,7 +495,9 @@ def test_complete_requirements_are_packaged_with_unassigned_and_unknown_rules(tm
     notes = submission_notes(artifacts, result)
     assert "待核" in notes and "尚未安排的要求。" in notes
     assert "设备应支持原文规定的功能。" in notes
-    assert "尚未安排的要求。" not in "\n".join(p.text for p in document.paragraphs)
+    body = "\n".join(p.text for p in document.paragraphs)
+    assert "尚未归入响应表" in body and "尚未安排的要求。" in body
+    assert body.index("尚未归入响应表") < body.index("尚未安排的要求。")
     assert any(g["code"] == "export_requirement_unassigned" for g in result["gaps"])
     assert any(g["code"] == "export_requirement_unavailable" for g in result["gaps"])
     assert data == before

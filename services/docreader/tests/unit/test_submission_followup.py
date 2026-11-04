@@ -403,7 +403,7 @@ async def test_explanatory_candidate_exclusion_keeps_submission_basis_and_real_f
     assert [p.text for p in word.paragraphs if p.style.name.startswith("Heading")] == ["1 财务资料"]
     assert sum("TOC" in (node.text or "") for node in word.element.iter(qn("w:instrText"))) == 1
     assert all(text not in body for text in (SUBMISSION_TEXT, "装订安排说明", "待整理内容", "补充内容"))
-    assert body.count("（本部分内容待补）") == 1  # Only the real form still awaits bidder data.
+    assert body.count("（本部分内容待补）") == 0  # The rendered form keeps the blank cell; no second pending chapter.
     assert len(word.tables) == 1
     assert word.tables[0].cell(0, 0).text == "8D财务情况表"
     assert word.tables[0].cell(0, 0)._tc is word.tables[0].cell(0, 1)._tc

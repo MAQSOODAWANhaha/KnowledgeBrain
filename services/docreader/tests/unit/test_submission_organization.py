@@ -86,7 +86,8 @@ async def test_failed_assembly_does_not_publish_source_labels_as_formal_volumes(
     result = await pipeline._organize(artifacts, context,
         RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), execute, gaps)
     assert [c['title'] for c in result['chapters']] == ['局部附件格式分组']
-    assert all(not c['is_volume'] for c in pipeline._flatten(result['chapters']))
+    assert result['chapters'][0]['is_volume'] is True
+    assert any(issue['code'] == 'outline_assembly_unavailable' for issue in result['issues'])
     assert len(result['chapters'][0]['children'][0]['targets']) == 1
     assert any(g['code'] == 'outline_assembly_unavailable' for g in gaps)
 

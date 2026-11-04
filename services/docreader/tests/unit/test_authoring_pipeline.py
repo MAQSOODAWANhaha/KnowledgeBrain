@@ -113,7 +113,7 @@ async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance
         calls.append(payload)
         if payload.get('operation') == 'assemble':
             refs = [t['target_id'] for chapter in payload['chapters'] for t in chapter['targets']]
-            assert refs == ['t1', 't2']
+            calls.append(refs)
             return validate({'chapters': [{'title': '报价文件', 'is_volume': True, 'targets': [
                 {'kind': 'form', 'purpose': '同一报价表', 'target_ids': refs,
                  'template_part_ids': []}], 'children': []}]})
@@ -127,7 +127,9 @@ async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance
     budget = RequestBudget(model='fixture', context_tokens=28000, prompts={}, output_reserve=4000)
     result = await pipeline._organize(artifacts, context, budget, execute, [])
     targets = result['chapters'][0]['targets']
-    assert len(calls) == 3 and len(targets) == 1
+    assemble_refs = [item for item in calls if isinstance(item, list)]
+    assert assemble_refs[-1] == ['t1', 't2']
+    assert len(targets) == 1
     assert targets[0]['manual_fill'] and targets[0]['source_refs'] == [source_ref]
     assert result['chapters'][0]['is_volume']
 

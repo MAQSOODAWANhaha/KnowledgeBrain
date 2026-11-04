@@ -109,7 +109,9 @@ async def test_failed_assembly_keeps_nested_local_trees_and_unique_bound_identit
     assert [chapter['title'] for chapter in chapters] == [
         '投标文件封面', '商务文件', '电子递交待办', '财务证明', '技术文件']
     assert chapters[1]['targets'] == chapters[4]['targets'] == []
-    assert all(not chapter['is_volume'] for chapter in pipeline._flatten(chapters))
+    flags = {chapter['title']: chapter.get('is_volume', False) for chapter in pipeline._flatten(chapters)}
+    assert flags['商务文件'] and flags['技术文件']
+    assert not flags['投标文件封面']
     assert fragments[0]['chapters'][1]['is_volume'] and fragments[1]['chapters'][1]['is_volume']
     assert [chapter['title'] for chapter in chapters[4]['children']] == ['技术参数响应']
     assert [chapter['chapter_id'] for chapter in pipeline._flatten(chapters)] == [

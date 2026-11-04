@@ -1058,11 +1058,11 @@ review的content_ids按任务选择宿主提供的b1/f1等正文块/填值别名
 
 ### 调用、预算、恢复与修订
 
-1. 全文件新增调用为`O + B + W + R + C + R改`：O是原文/规则按预算组织及必要归并次数，
-   B为有候选资料的共享依据批次，W为有候选资料的完整写作任务数，R为初次实际正文复核批次，C为本轮允许的一次
-   定向改稿任务数，R改为改稿后的复核批次。首次加三次重试上界`4*(O+B+W+R+C+R改)`；
-   不做任务两两组合、不固定逐要求调用。N个组织包只在N>1时另发一次候选响应位置归并；
-   归并超限或失败保留原批次章节与待核顺序，不假称已具备递归归并。共同依据按完整记录
+1. 全文件新增调用为`L=S+A0+F0+[A1]+[F1]+B+W+Rb+C+R2`。S是来源阅读，A0是归并请求数，
+   B为有候选资料的共享依据批次，W为有候选资料的完整写作任务数，Rb为初次实际正文复核批次，C为本轮允许的一次
+   定向改稿任务数，R2为改稿后的复核批次。首次加三次重试上界`4L`；
+   不做任务两两组合、不固定逐要求调用。整棵归并树放得下时A0为1。放不下时按完整章节分组各发一次，再发一次去掉已持有正文、但仍包含全部候选身份的归并；该次放不下才由宿主拼接，不再重发整棵原文树。
+   单章仍放不下时沿既有超预算发送出口，不新增阻断。任一分组失败则保留来源局部章节与待核顺序，不假称已具备递归归并。共同依据按完整记录
    顺序分批并携带受限previous摘要，不反复回传全量原文。知识检索另计实际次数。
    W不计manual_fill、无候选资料及缺原件的纯附件任务；其格式占位新增调用为0，不参与
    无资料改稿。语义匹配包含在W内，不增加独立匹配轮次。知识查询Q次最多按既有首次
@@ -1381,10 +1381,10 @@ template_refs，也非manual_fill。它没有独立写作任务，显示实际�
 | TemplatePartRef.header_row_count | `NonnegativeInt或null=null`，仅展示信息；显式值需在实际行数内、不能切断跨行合并。无值可用原生header_cells，否则保留未知，不改冻结原表或selector |
 
 unassigned_rules只发送当前未被候选或提交约束安排的完整规则语义和实际证据一次；
-短引用与context.rules建立宿主映射。未选择不等于排除，仍保存未安排诊断与全量底稿。
+短引用与context.rules建立宿主映射。未选择不等于排除，也不等于把规则放进某一张技术响应表。已登记规则必须出现在导出的 Word 里，位置是“尚未归入响应表”的待核空行，左栏只用已绑定原文。这是展示台账，不是判定归属。诊断和全量底稿仍保留，但不能只有侧车、正文看不见。
 candidate_rules/unassigned_rules的rule.evidence保留quote，并在已有精确冻结映射时提供
 range_ids（本A请求source_excerpts的x短引用）。宿主登记完整范围原文并去重，不以quote
-代替全文或从摘要造响应行；无映射时不生成引用。模型据这些引用选择响应行和共同条件。
+代替全文或从摘要造响应行；无映射时不生成引用。模型用显式动作把规则挂到指定表，或沿排除出口说明不适用。宿主不把条件从另一张表抄过来。
 新位置沿实际规则证据绑定source_refs，禁止从标题/关键词决定技术、评分或后果归属。
 完整请求过大沿原预算出口保留待整理稿，不截断规则，不新增逐条模型核对。
 A的template_parts沿已有来源投影使用section_id，完整heading_path在template_sections
@@ -1447,7 +1447,7 @@ assembly形成的正式章节树为准。
 | --- | --- |
 | OutlineAssemblyTarget.target_ids | 选择已有候选短引用；与rule_ids至少一者非空，或按上文narrative纯参见合同只选择related_target_ids。用于绑定候选规则、上下文和既有检索关联，所选候选的template_refs不随之自动全部插入 |
 | ResponseTarget.target_id | 由宿主产生的本大纲内正式位置身份。对kind=form，一个target就是一次实际填写并提交的完整实例；一个实例可有多个有序template_refs，多份独立填写表单不共用一个target |
-| OutlineChapter | 沿用chapter_id、title、targets、children和is_volume；正式树的位置表达提交归属，仅原文明示独立分册时is_volume=true。不另加instance_id、owner_id或volume_id，也不把source标签当提交归属 |
+| OutlineChapter | 沿用chapter_id、title、targets、children和is_volume；正式树的位置表达提交归属，仅原文明示独立分册时is_volume=true。来源给出的true是分卷建议，失败或省略不得改成false。未经过显式分卷动作不导出独立文件；导出只跟随会话结构上的显式is_volume动作。不另加instance_id、owner_id或volume_id，也不把source标签当提交归属 |
 | CellFillResponse.source_id / CellFill.source_ref | 仍使用现有请求短引用与SourceUnitRef回绑。原表必须属于对应target.template_refs中的实际grid；仅属于source_refs、其他target或同任务上下文的表不得填入。坐标沿用该原生grid，不因目录重排改变 |
 | OutlineTargetResponse.manual_fill / ResponseTarget.manual_fill | 沿用`StrictBool=false`，作用于整个target。含最终报价、单价、总价、折扣等且没有精确价格字段策略的form整体为true；不另建一个引用同表的价格target。该实例保留原格式、固定数量和技术条件，非价格企业字段也可最终由人工补齐，其他正文目标照常生成 |
 
@@ -1901,17 +1901,17 @@ WritingUnit的placeholder只表示没有生成正文/填值，不表示原格式
 模型来源/组装共用`response_table:{rows:[{range_ids:Identity[],rule_ids:Identity[]=[]}]}`，
 不返回持久行身份。来源range_ids选本批WirePayload的短r引用；组装range_ids选共享
 source_excerpts中的x引用，行rule_ids选择已给候选的a引用或未安排规则的u引用。
-组装候选带原有行选择；省略新response_table时优先继承同lineage前版已采纳表，
-没有唯一前版位置时继承被选候选的表，重新分组也不能
-静默丢已知原文行。宿主保留未安排的完整行及诊断，是否本次不适用仍由模型沿原
-候选排除出口明确说明。写作response_rows给q引用，回包row_fills只选本请求q引用；
+会话大纲是当前结构。回包只表达显式动作：排除、移动、把一条已登记规则挂到指定表、
+新增本表条件。没有点名的行、条件、模板和章节保持原样。省略`response_table`或
+`context_range_ids`不是删除；调用失败、拒收或断连不改这棵树。条件已经在这张
+`response_table`上就继续属于这张表，只存在于另一张表的条件不抄过来。是否不适用仍由模型沿原
+候选排除出口显式说明。写作response_rows给q引用，回包row_fills只选本请求q引用；
 复核使用rN内容引用定位已生成答案，与来源阶段r引用处于不同请求命名空间。
 
-BUG-102补充：来源/组装的response_table还可携带context_range_ids。组装继承所选
-候选已有的共享上下文，并合并明确新增的精确来源；省略或重排行不能静默丢掉这些
-限定。不同原表的共享条件不相同时，不可把它们自动合并为整表共同条件。模型须
-显式重交response_table.context_range_ids，并在整表或相应行完整交接原条件及原行引用，才能
-采用该重组；未完整交接时保留各原表边界及归属待核，不阻断其他生成。新增来源
+BUG-102补充：来源/组装的response_table还可携带context_range_ids，只表示本次显式新增的整表条件。
+宿主把新增精确来源并入该表已有条件，不要求模型重交已绑定的context_range_ids或原行。
+不同原表的共享条件不相同时不自动合并，也不因标题或相邻位置推断为续表。
+模型未把条件显式挂到另一张表时，条件留在原表，稿内保留待核，不阻断其他生成。新增来源
 可保留为只读理解依据，新增未安排规则沿既有rule_refs待核出口，不升级为全局提交
 约束。条件是否语义适用仍由模型核对，宿主只比较精确来源覆盖，不按文字猜范围。
 写作、复核及结构核对通过response_context_support_ids读取同一共享supports，

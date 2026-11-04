@@ -385,6 +385,135 @@ def _constraint_context(context, refs, submission_refs=(), *, source_bindings=No
     return {'submission_rules': rules, 'submission_sources': sources}
 
 
+def _chapter_refs(chapters):
+    part_ids, excerpt_ids, rule_ids = set(), set(), set()
+    def walk(nodes):
+        for chapter in nodes:
+            for target in chapter.get('targets') or []:
+                part_ids.update(target.get('template_part_ids') or [])
+                excerpt_ids.update(target.get('range_ids') or [])
+                rule_ids.update(target.get('rule_ids') or [])
+                table = target.get('response_table') or {}
+                excerpt_ids.update(table.get('context_range_ids') or [])
+                for row in table.get('rows') or []:
+                    excerpt_ids.update(row.get('range_ids') or [])
+                    rule_ids.update(row.get('rule_ids') or [])
+            walk(chapter.get('children') or [])
+    walk(chapters)
+    return part_ids, excerpt_ids, rule_ids
+
+
+def _assembly_subset(payload, chapters, *, include_unassigned):
+    """One fitting assembly request: this chapter group plus shared submission constraints."""
+    part_ids, excerpt_ids, rule_ids = _chapter_refs(chapters)
+    if include_unassigned:
+        for rule in payload.get('unassigned_rules') or []:
+            for evidence in (rule.get('rule') or {}).get('evidence') or []:
+                excerpt_ids.update(evidence.get('range_ids') or [])
+    result = {key: value for key, value in payload.items() if key not in {
+        'chapters', 'template_parts', 'template_runs', 'source_excerpts', 'candidate_rules', 'unassigned_rules'}}
+    result['chapters'] = chapters
+    result['template_parts'] = [part for part in payload.get('template_parts') or [] if part.get('part_id') in part_ids]
+    result['source_excerpts'] = [item for item in payload.get('source_excerpts') or [] if item.get('range_id') in excerpt_ids]
+    result['candidate_rules'] = [rule for rule in payload.get('candidate_rules') or [] if rule.get('rule_id') in rule_ids]
+    result['unassigned_rules'] = list(payload.get('unassigned_rules') or []) if include_unassigned else []
+    order = [part.get('part_id') for part in payload.get('template_parts') or []]
+    index = {identity: position for position, identity in enumerate(order)}
+    runs = []
+    for run in payload.get('template_runs') or []:
+        if len(run) < 2 or run[0] not in index or run[1] not in index:
+            continue
+        start, end = index[run[0]], index[run[1]]
+        if start <= end and all(order[point] in part_ids for point in range(start, end + 1)):
+            runs.append(run)
+    result['template_runs'] = runs
+    return result
+
+
+def _request_fits(budget, payload):
+    if _fits(budget, 'outline', payload):
+        return True
+    from docreader.tender.authoring_view import compact_assembly_payload
+    try:
+        compact = compact_assembly_payload(payload)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return _fits(budget, 'outline', compact)
+
+
+def _assembly_batches(payload, budget):
+    """Send one assembly when it fits. Otherwise pack whole chapters; do not resend the full tree."""
+    if _request_fits(budget, payload):
+        return [payload]
+    chapters = list(payload.get('chapters') or [])
+    if len(chapters) <= 1:
+        return [payload]
+    groups, current = [], []
+    for chapter in chapters:
+        trial = _assembly_subset(payload, [*current, chapter], include_unassigned=False)
+        if current and not _request_fits(budget, trial):
+            groups.append(current)
+            current = [chapter]
+        else:
+            current.append(chapter)
+    if current:
+        groups.append(current)
+    if len(groups) <= 1:
+        return [payload]
+    return [_assembly_subset(payload, group, include_unassigned=index == len(groups) - 1)
+            for index, group in enumerate(groups)]
+
+
+def _targets_of(chapters):
+    for chapter in _flatten(chapters):
+        yield from chapter.get('targets') or []
+
+
+def _strip_assembly_bodies(payload):
+    """Drop adopted prose the host already holds so one merge can still see every candidate."""
+    result = deepcopy(payload)
+    def strip(entry):
+        if not any(key in entry for key in ('text', 'text_lines', 'grid')):
+            return entry
+        kept = {key: value for key, value in entry.items() if key not in {'text', 'text_lines', 'grid'}}
+        kept['retained'] = True
+        return kept
+    if isinstance(result.get('template_parts'), list):
+        result['template_parts'] = [strip(part) for part in result['template_parts']]
+    if isinstance(result.get('source_excerpts'), list):
+        result['source_excerpts'] = [strip(item) for item in result['source_excerpts']]
+    result['assembly_bodies'] = 'retained_on_host'
+    return result
+
+
+def _join_assemblies(results):
+    """Host-concatenate fitting batches. No second full-tree assembly call."""
+    chapters, omitted, issues, origins, constraints, intents = [], False, [], set(), [], []
+    bindings, selections = {}, {}
+    alias_lists, selection_list = [], []
+    for numbered, one_omitted, one_issues, one_origins, one_constraints, one_intents, one_bindings, one_selections in results:
+        omitted = omitted or one_omitted
+        issues.extend(one_issues)
+        origins.update(one_origins)
+        constraints.extend(one_constraints)
+        intents.extend(one_intents)
+        for target in _targets_of(numbered):
+            alias_lists.append(one_bindings.get(target['target_id'], []))
+            selection_list.append(one_selections.get(target['target_id'], {}))
+        chapters.extend(numbered)
+    old_ids = [target['target_id'] for target in _targets_of(chapters)]
+    combined = _renumber(chapters)
+    new_targets = list(_targets_of(combined))
+    remap = dict(zip(old_ids, (target['target_id'] for target in new_targets)))
+    for target, aliases, selection in zip(new_targets, alias_lists, selection_list):
+        if aliases:
+            bindings[target['target_id']] = aliases
+        if selection:
+            selections[target['target_id']] = selection
+        target['related_target_ids'] = [remap[identity] for identity in target.get('related_target_ids') or [] if identity in remap]
+    return combined, omitted, issues, origins, constraints, intents, bindings, selections
+
+
 def _flatten(chapters):
     for chapter in chapters:
         yield chapter
@@ -832,8 +961,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             t['response_table'].get('context_source_excerpts', []))
                             for t in inherited if t.get('response_table')}
                         if len(context_sets) > 1:
-                            assigned_context = {source_excerpt_key(ref) for ref in [*explicit_context,
-                                *(ref for row in row_values for ref in row['source_excerpts'])]}
+                            assigned_context = {source_excerpt_key(ref) for ref in explicit_context}
                             if ('context_range_ids' not in (raw_target.get('response_table') or {})
                                     or set().union(*context_sets) - assigned_context
                                     or any(row_atoms(row) - covered_atoms for row in inherited_rows)):
@@ -1020,7 +1148,16 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                     for target, selection in selections}
             return (numbered, bool(omitted), exclusion_issues, {origins[key] for key in excluded},
                     added_constraints, added_intents, candidate_bindings, candidate_selections)
-        assembled = await _ask(execute, budget, 'outline', payload, assemble)
+        batches = _assembly_batches(payload, budget)
+        if len(batches) == 1:
+            assembled = await _ask(execute, budget, 'outline', batches[0], assemble)
+        else:
+            batch_results = [await _ask(execute, budget, 'outline', batch, assemble) for batch in batches]
+            slim = _strip_assembly_bodies(payload)
+            try:
+                assembled = await _ask(execute, budget, 'outline', slim, assemble)
+            except _LOCAL_FAILURES:
+                assembled = _join_assemblies(batch_results)
         (chapters, omitted, exclusion_issues, excluded_origins, added_constraints, added_intents,
          candidate_bindings, candidate_selections) = assembled
         refs = list({_json(ref): ref for ref in [*refs, *added_constraints]}.values())
@@ -1028,13 +1165,13 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             assembly_gap = _gap('outline_assembly_incomplete', '归并未安排的响应位置已保留在末尾，顺序待核对。')
             gaps.append(assembly_gap)
     except _LOCAL_FAILURES:
-        exclusion_issues = []
+        exclusion_issues = [{'code': 'outline_assembly_unavailable',
+            'detail': '正式归并未完成，已保留来源局部章节及全部响应位置，全局目录、重复及顺序待核对。',
+            'rule_refs': []}]
         excluded_origins = set()
         added_intents = []
         candidate_selections = {}
         chapters = _renumber([chapter for fragment in fragments for chapter in fragment['chapters']])
-        for chapter in _flatten(chapters):
-            chapter['is_volume'] = False
         retained = (target for chapter in _flatten(chapters) for target in chapter['targets'])
         candidate_bindings = {target['target_id']: [alias] for alias, target in zip(mapping, retained)}
         assembly_gap = _gap('outline_assembly_unavailable', '正式归并未完成，已保留来源局部章节及全部响应位置，全局目录、重复及顺序待核对。')
@@ -1131,11 +1268,12 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                      for target in chapter['targets']],
                          'children': previous_structure(chapter['children'])} for chapter in entries]
 
-            feedback = {**payload, 'previous_structure': previous_structure(outline['chapters']),
-                        'review_findings': findings,
+            from docreader.tender.authoring_view import slim_revision_payload
+            feedback = slim_revision_payload(payload, previous_structure(outline['chapters']), findings)
+            feedback.update({'review_findings': findings,
                         **({'candidate_excluded_template_part_ids': {identity: [part_id
                             for part_id, part in part_map.items() if template_part_key(part) in removed]
-                            for identity, removed in decoration_exclusions.items()}} if decoration_exclusions else {})}
+                            for identity, removed in decoration_exclusions.items()}} if decoration_exclusions else {})})
             try:
                 repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = await _ask(
                     execute, budget, 'outline', feedback, assemble)

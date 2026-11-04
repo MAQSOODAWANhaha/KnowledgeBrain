@@ -358,20 +358,14 @@ async def test_distinct_table_conditions_keep_their_scope_when_assembly_merges_c
     tree = artifacts.read_json(result["outline_ref"])
     targets = tree["chapters"][0]["targets"]
     document = opened(artifacts, result)
-    if selection in {"explicit_complete", "revision_after_explicit_complete"}:
-        assert len(targets) == len(document.tables) == 1
-        assert targets[0]["response_table"].get("context_source_excerpts", []) == []
-        assert [row.cells[0].text for row in document.tables[0].rows[1:]] == [
-            condition + "\n" + requirement for condition, requirement in zip(conditions, REQUIREMENTS)]
-    else:
-        assert len(targets) == len(document.tables) == 2
-        for target, condition, requirement, table in zip(targets, conditions, REQUIREMENTS, document.tables):
-            assert [load_source_excerpt(artifacts, ref)["text"] for ref in
-                    target["response_table"]["context_source_excerpts"]] == [condition]
-            assert [row.cells[0].text for row in table.rows[1:]] == [requirement]
-        assert any(issue["code"] == "outline_response_context_unassigned" for issue in tree["issues"])
+    assert len(targets) == len(document.tables) == 2
+    for target, condition, requirement, table in zip(targets, conditions, REQUIREMENTS, document.tables):
+        assert [load_source_excerpt(artifacts, ref)["text"] for ref in
+                target["response_table"]["context_source_excerpts"]] == [condition]
+        assert [row.cells[0].text for row in table.rows[1:]] == [requirement]
+    assert any(issue["code"] == "outline_response_context_unassigned" for issue in tree["issues"])
     assert calls == ["outline", "assemble", "structure"] + (
-        ["assemble", "structure"] if selection == "revision_after_explicit_complete" else [])
+        ["assemble"] if selection == "revision_after_explicit_complete" else [])
 
 
 async def test_context_fallback_keeps_additional_sources_rules_and_reference_lineage(tmp_path):
