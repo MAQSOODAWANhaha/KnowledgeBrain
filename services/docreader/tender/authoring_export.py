@@ -25,6 +25,96 @@ DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingm
 PENDING_ANALYSIS_NOTE = "分析整理（待确认）：摘要及适用范围仍需结合原文和有效补遗核对。"
 
 
+def _hard_paragraph_break(previous, following):
+    """A PDF line wrap is not a new paragraph. A finished sentence, a citation, or a new item is."""
+    if following.startswith("《") or re.match(r"^(?:\d+[.、．]|[（(]\d+[）)]|[一二三四五六七八九十]+、)", following):
+        return True
+    return previous.endswith(("。", "！", "？", "；", "：", ":", "》"))
+
+
+def _display_line(line):
+    return re.sub(r"^( {0,3})#{1,6}[ \t]+", r"\1", line)
+
+
+def _flow_lines(lines):
+    paragraphs, buffer = [], []
+    def flush():
+        if buffer:
+            paragraphs.append("".join(buffer))
+            buffer.clear()
+    for line in lines:
+        visible = line.strip()
+        if not visible:
+            flush()
+            continue
+        if buffer and _hard_paragraph_break(buffer[-1].strip(), visible):
+            flush()
+        buffer.append(line[:len(line) - len(line.lstrip())] + visible)
+        if visible.endswith(("。", "！", "？", "；")):
+            flush()
+    flush()
+    return paragraphs
+
+
+def _paragraphs_from_pieces(pieces):
+    """Join adjacent slices of one source range unless the source marks a real paragraph."""
+    paragraphs, buffer, previous = [], [], None
+
+    def flush():
+        if buffer:
+            paragraphs.extend(_flow_lines(buffer))
+            buffer.clear()
+
+    for piece in pieces:
+        if previous is not None:
+            same = previous["range_id"] == piece["range_id"] and piece["start"] >= previous["end"]
+            cut = any(offset in previous["breaks"] for offset in range(previous["end"], piece["start"] + 1))
+            if not same or cut:
+                flush()
+        cursor = piece["start"]
+        for index, line in enumerate(piece["text"].split("\n")):
+            if index:
+                if cursor in piece["breaks"]:
+                    flush()
+                cursor += 1
+            cleaned = _display_line(line)
+            if cleaned.strip():
+                buffer.append(cleaned)
+            elif buffer:
+                flush()
+            cursor += len(line)
+        previous = piece
+    flush()
+    return [item for item in paragraphs if item]
+
+
+def _template_paragraphs(text, breaks, start=0):
+    """A whole form keeps its line breaks. Only a recorded paragraph boundary starts a new paragraph."""
+    if not breaks:
+        shown = re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", text)
+        return [shown] if shown.strip() else []
+    chunks, chunk = [], []
+    for index, char in enumerate(text):
+        if char == "\n" and start + index in breaks:
+            chunks.append("".join(chunk))
+            chunk = []
+        else:
+            chunk.append(char)
+    chunks.append("".join(chunk))
+    shown = []
+    for chunk in chunks:
+        value = re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", chunk)
+        if value.strip():
+            shown.append(value)
+    return shown
+
+
+def _display_title(title):
+    """Drop a source appendix locator when a business title remains. Do not invent one."""
+    match = re.match(r"技术附表[A-Za-z0-9]+\s+(\S.*)", title or "")
+    return match.group(1) if match else title
+
+
 def _source_key(reference):
     return reference["source_index_ref"]["sha256"], reference["unit_id"]
 
@@ -288,6 +378,9 @@ class _Assembler:
                 continue
             self.units[unit["chapter_id"]].append(unit)
         self.gaps = list(review_issues or [])
+        self.pending_rules = []
+        self._running_headers = {}
+        self._response_context = None
         self.attachments = {}
         self.template_parts = {}
         self.repository = EvidenceRepository(artifacts)
@@ -295,6 +388,148 @@ class _Assembler:
         self.locations = {target["target_id"]: " ".join(part for part in (
             ".".join(map(str, self.display_paths.get(chapter["chapter_id"], ()))), chapter["title"]) if part)
             for chapter, _ in _body_entries(entries) for target in chapter.get("targets", [])}
+
+    def _running_header(self, source_ref, text):
+        stripped = text.strip()
+        if not stripped or "\n" in stripped or len(stripped) > 80:
+            return False
+        index_ref = source_ref["source_index_ref"]
+        digest = index_ref["sha256"]
+        if digest not in self._running_headers:
+            counts = {}
+            try:
+                index = self.artifacts.read_json(index_ref)
+                raw = self.artifacts.read_json(index["raw_ref"])
+                for unit in raw.get("units") or []:
+                    value = (unit.get("text") or "").strip()
+                    if value and "\n" not in value and len(value) <= 80:
+                        counts[value] = counts.get(value, 0) + 1
+            except (OSError, ValueError, KeyError, TypeError):
+                counts = {}
+            self._running_headers[digest] = {value for value, count in counts.items() if count >= 3}
+        return stripped in self._running_headers[digest]
+
+    def _selected_grid(self, excerpt, loaded):
+        ranges = [item for item in loaded.get("ranges") or [] if item.get("row_start") is not None]
+        if not ranges:
+            return None
+        try:
+            index = self.repository.source_index(excerpt["source_ref"]["source_index_ref"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        unit = next((item for item in index.raw["units"]
+                     if item["unit_id"] == excerpt["source_ref"]["unit_id"] and item.get("grid")), None)
+        if unit is None:
+            return None
+        return unit["grid"], {item["row_start"] for item in ranges}
+
+    def _grid_rows(self, grid, selected):
+        if not selected:
+            return None
+        chosen = set(selected)
+        if 0 not in chosen and any(row > 0 for row in chosen):
+            chosen.add(0)
+        order = [row for row in range(grid["row_count"]) if row in chosen]
+        remap = {row: index for index, row in enumerate(order)}
+        cells = []
+        for cell in grid["cells"]:
+            start = cell["row"]
+            if start not in remap:
+                continue
+            covered = [remap[start + offset] for offset in range(cell.get("row_span", 1)) if start + offset in remap]
+            if not covered:
+                continue
+            cells.append({**cell, "row": remap[start], "row_span": max(covered) - min(covered) + 1})
+        return {"row_count": len(order), "column_count": grid["column_count"],
+                "cells": cells, **({"widths_mm": grid["widths_mm"]} if grid.get("widths_mm") else {})}
+
+    def _source_index(self, source_ref):
+        try:
+            return self.repository.source_index(source_ref["source_index_ref"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _prose_pieces(self, excerpt, loaded):
+        index = self._source_index(excerpt["source_ref"])
+        pieces = []
+        for item in loaded.get("ranges") or []:
+            source_id = item.get("source_range_id") or item.get("range_id")
+            base = index.by_id.get(source_id) if index is not None else None
+            pieces.append({"range_id": source_id, "start": item.get("start", 0), "end": item.get("end", 0),
+                           "text": item.get("text") or "", "breaks": set((base or {}).get("paragraph_breaks") or [])})
+        if not pieces and loaded.get("text"):
+            pieces.append({"range_id": None, "start": 0, "end": len(loaded["text"]),
+                           "text": loaded["text"], "breaks": set()})
+        return pieces
+
+    def _template_breaks(self, part, unit):
+        # Selector text is already joined for display. Offsets belong to the frozen range, not that join.
+        if part.get("selectors") or not unit.get("unit_id"):
+            return set(), 0
+        index = self._source_index(part["source_ref"])
+        text = unit.get("text") or ""
+        matched = next((row for row in (index.ranges if index is not None else [])
+                        if row.get("unit_id") == unit.get("unit_id") and row.get("row_start") is None
+                        and row.get("text") == text), None)
+        if matched is None:
+            return set(), 0
+        return set(matched.get("paragraph_breaks") or []), matched.get("start", 0)
+
+    def _write_prose(self, document, pieces):
+        written = False
+        for paragraph in _paragraphs_from_pieces(pieces):
+            document.add_paragraph(paragraph)
+            written = True
+        return written
+
+    def _show_bound_requirements(self, document, target, chapter_id):
+        from docreader.tender.authoring_excerpts import load_source_excerpt
+        if target.get("template_refs") or (target.get("response_table") or {}).get("rows") or not target.get("source_excerpts"):
+            return False
+        shown = False
+        pending = None
+        prose = []
+        def flush_prose():
+            nonlocal shown
+            if prose and self._write_prose(document, prose):
+                shown = True
+            prose.clear()
+        def flush():
+            nonlocal pending, shown
+            if pending is None:
+                return
+            grid, rows, _key = pending
+            table = self._grid_rows(grid, rows)
+            if table is not None:
+                self.table(document, table, [], chapter_id, target["target_id"])
+                shown = True
+            pending = None
+        for excerpt in target["source_excerpts"]:
+            try:
+                loaded = load_source_excerpt(self.artifacts, excerpt, repository=self.repository)
+            except (OSError, ValueError, KeyError):
+                flush()
+                flush_prose()
+                continue
+            selected = self._selected_grid(excerpt, loaded)
+            if selected is not None:
+                flush_prose()
+                grid, rows = selected
+                key = excerpt["source_ref"]["unit_id"]
+                if pending is not None and pending[2] == key:
+                    pending[1].update(rows)
+                else:
+                    flush()
+                    pending = [grid, set(rows), key]
+                continue
+            flush()
+            prose.extend(self._prose_pieces(excerpt, loaded))
+        flush()
+        flush_prose()
+        if not shown:
+            return False
+        self.gap("export_bound_requirement_answer_blank", "已展示绑定的招标要求，企业应答留空。", chapter_id, target["target_id"])
+        return True
 
     def gap(self, code, detail, chapter_id, target_id=None):
         value = {"code": code, "detail": detail, "chapter_id": chapter_id}
@@ -313,9 +548,15 @@ class _Assembler:
             loaded = self.load_template(part)
             unit = loaded["unit"]
             grid = unit.get("grid")
-            if unit.get("text"):
-                # Display parser heading syntax without changing frozen evidence.
-                document.add_paragraph(re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", unit["text"]))
+            header = bool(unit.get("text")) and self._running_header(part["source_ref"], unit["text"])
+            if header and not grid:
+                self.gap("export_running_header_omitted", "已省略在多页独立重复出现的源页眉。", chapter_id, target_id)
+                return
+            if unit.get("text") and not header and not grid:
+                # Keep a whole form's own line breaks. Split only where the source recorded a paragraph.
+                breaks, start = self._template_breaks(part, unit)
+                for paragraph in _template_paragraphs(unit["text"], breaks, start):
+                    document.add_paragraph(paragraph)
             if grid:
                 count = part.get("header_row_count")
                 if count is None:
@@ -381,22 +622,90 @@ class _Assembler:
                 text = next(iter(values))
             target.text = text
 
-    def response_table(self, document, target, units, chapter_id):
-        from docreader.tender.authoring_excerpts import load_source_excerpt
+    def _native_row(self, excerpt, loaded):
+        selected = self._selected_grid(excerpt, loaded)
+        if not selected:
+            return None
+        grid, rows = selected
+        if len(rows) != 1:
+            return None
+        row = next(iter(rows))
+        width = grid["column_count"]
+        values = [""] * width
+        for cell in grid["cells"]:
+            if cell["row"] == row and cell["column"] < width:
+                values[cell["column"]] = cell.get("text") or ""
+        return {"unit_id": excerpt["source_ref"]["unit_id"], "row": row, "values": values, "grid": grid,
+                "text": "\n".join(value for value in values if value.strip())}
 
+    def _describe_excerpt(self, excerpt):
+        from docreader.tender.authoring_excerpts import load_source_excerpt
+        try:
+            loaded = load_source_excerpt(self.artifacts, excerpt, repository=self.repository)
+        except (OSError, ValueError, KeyError):
+            return {"kind": "prose", "text": "（原文要求待核对，来源引用已保留）", "missing": True}
+        native = self._native_row(excerpt, loaded)
+        if native:
+            return {"kind": "grid", **native}
+        return {"kind": "prose", "text": re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", loaded["text"])}
+
+    def _row_answer(self, choices, row_id, chapter_id, target_id):
+        values = choices.get(row_id, set())
+        if len(values) > 1:
+            self.gap("export_conflicting_row_fills", "该要求行存在冲突应答，保留完整要求及空白响应。",
+                     chapter_id, target_id)
+            return ""
+        return next(iter(values), "")
+
+    def _write_prose_response(self, document, entries):
+        table = document.add_table(rows=len(entries) + 1, cols=2)
+        table.style = "Table Grid"
+        _table_layout(document, table, [_page_width(document) * 0.65, _page_width(document) * 0.35], 1)
+        table.cell(0, 0).text, table.cell(0, 1).text = "招标要求", "投标响应"
+        for ordinal, (text, answer) in enumerate(entries, 1):
+            table.cell(ordinal, 0).text = text
+            if answer:
+                table.cell(ordinal, 1).text = answer
+
+    def _write_native_response(self, document, grid, entries):
+        """Draw selected native rows, plus one blank answer column. Do not reprint the reading string."""
+        body = list(entries)
+        if 0 not in {row for row, _, _ in body} and any(row > 0 for row, _, _ in body):
+            header = [""] * grid["column_count"]
+            for cell in grid["cells"]:
+                if cell["row"] == 0 and cell["column"] < grid["column_count"]:
+                    header[cell["column"]] = cell.get("text") or ""
+            body.insert(0, (0, header, None))
+        columns = grid["column_count"] + 1
+        table = document.add_table(rows=len(body), cols=columns)
+        table.style = "Table Grid"
+        _table_layout(document, table, None, 1 if body and body[0][0] == 0 else 0)
+        for ordinal, (source_row, values, answer) in enumerate(body):
+            for column, text in enumerate(values):
+                table.cell(ordinal, column).text = text
+            table.cell(ordinal, columns - 1).text = "投标响应" if source_row == 0 and answer is None else (answer or "")
+
+    def response_table(self, document, target, units, chapter_id):
         rows = target.get("response_table", {}).get("rows", [])
         if not rows:
             return False
+        bound_context = target["response_table"].get("context_source_excerpts", [])
         context_texts = []
-        for excerpt in target["response_table"].get("context_source_excerpts", []):
-            try:
-                context_texts.append(load_source_excerpt(self.artifacts, excerpt, repository=self.repository)["text"])
-            except (OSError, ValueError, KeyError):
+        for excerpt in bound_context:
+            item = self._describe_excerpt(excerpt)
+            if item.get("missing"):
                 context_texts.append("（原表共同条件待核对，来源引用已保留）")
                 self.gap("export_response_source_unavailable", "该表部分共同条件不可读，保留来源和待核位置。",
                          chapter_id, target["target_id"])
+            elif item["kind"] == "prose" and item["text"].strip():
+                context_texts.append(item["text"])
+        if not context_texts and not bound_context and self._response_context:
+            context_texts = list(self._response_context)
+            self.gap("export_response_context_continued",
+                     "本表未单独绑定共同条件，已沿用上一张响应表已绑定的条件展示。", chapter_id, target["target_id"])
         if context_texts:
-            document.add_paragraph(re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", "\n".join(context_texts)))
+            self._response_context = list(context_texts)
+            document.add_paragraph("\n".join(context_texts))
         choices = defaultdict(set)
         row_ids = {row["row_id"] for row in rows}
         for unit in units:
@@ -411,27 +720,62 @@ class _Assembler:
                              chapter_id, target["target_id"])
                 else:
                     choices[fill["row_id"]].add(fill["text"])
-        table = document.add_table(rows=len(rows) + 1, cols=2)
-        table.style = "Table Grid"
-        _table_layout(document, table, [_page_width(document) * 0.65, _page_width(document) * 0.35], 1)
-        table.cell(0, 0).text, table.cell(0, 1).text = "招标要求", "投标响应"
-        for ordinal, row in enumerate(rows, 1):
-            texts = []
+        described = []
+        for row in rows:
+            parts = []
             for excerpt in row["source_excerpts"]:
-                try:
-                    texts.append(load_source_excerpt(self.artifacts, excerpt, repository=self.repository)["text"])
-                except (OSError, ValueError, KeyError):
-                    texts.append("（原文要求待核对，来源引用已保留）")
+                item = self._describe_excerpt(excerpt)
+                if item.get("missing"):
                     self.gap("export_response_source_unavailable", "该行部分原文不可读，保留来源和待核位置。",
                              chapter_id, target["target_id"])
-            table.cell(ordinal, 0).text = re.sub(r"(?m)^( {0,3})#{1,6}[ \t]+", r"\1", "\n".join(texts))
-            values = choices.get(row["row_id"], set())
-            if len(values) > 1:
-                self.gap("export_conflicting_row_fills", "该要求行存在冲突应答，保留完整要求及空白响应。",
-                         chapter_id, target["target_id"])
-            elif values:
-                table.cell(ordinal, 1).text = next(iter(values))
+                parts.append(item)
+            described.append((row, parts, self._row_answer(choices, row["row_id"], chapter_id, target["target_id"])))
+        index = 0
+        while index < len(described):
+            _, parts, answer = described[index]
+            grids = [part for part in parts if part["kind"] == "grid"]
+            if not grids:
+                prose_rows = []
+                while index < len(described):
+                    row, parts, answer = described[index]
+                    if any(part["kind"] == "grid" for part in parts):
+                        break
+                    prose_rows.append(("\n".join(part["text"] for part in parts), answer))
+                    index += 1
+                if prose_rows:
+                    self._write_prose_response(document, prose_rows)
+                continue
+            unit_id = grids[0]["unit_id"]
+            if len({part["unit_id"] for part in grids}) != 1:
+                self._write_split_native_row(document, parts, answer)
+                index += 1
+                continue
+            grid = grids[0]["grid"]
+            native_rows = []
+            while index < len(described):
+                row, parts, answer = described[index]
+                grids = [part for part in parts if part["kind"] == "grid"]
+                if not grids or len({part["unit_id"] for part in grids}) != 1 or grids[0]["unit_id"] != unit_id:
+                    break
+                prose = "\n".join(part["text"] for part in parts if part["kind"] == "prose" and part["text"].strip())
+                for ordinal, native in enumerate(grids):
+                    values = list(native["values"])
+                    if prose and ordinal == len(grids) - 1:
+                        values[-1] = "\n".join(part for part in (values[-1], prose) if part.strip())
+                    native_rows.append((native["row"], values, answer if ordinal == 0 else ""))
+                index += 1
+            self._write_native_response(document, grid, native_rows)
         return True
+
+    def _write_split_native_row(self, document, parts, answer):
+        prose = "\n".join(part["text"] for part in parts if part["kind"] == "prose" and part["text"].strip())
+        grids = [part for part in parts if part["kind"] == "grid"]
+        for ordinal, native in enumerate(grids):
+            values = list(native["values"])
+            if prose and ordinal == len(grids) - 1:
+                values[-1] = "\n".join(part for part in (values[-1], prose) if part.strip())
+            self._write_native_response(document, native["grid"],
+                                        [(native["row"], values, answer if ordinal == 0 else "")])
 
     def attachment(self, document, attachment, chapter_id):
         reference = attachment["artifact_ref"]
@@ -470,7 +814,8 @@ class _Assembler:
             self.gap("export_attachment_not_embedded", f"{attachment['title']}未完整嵌入：{type(exc).__name__}；原件仍随包附送。",
                      chapter_id)
 
-    def writing_unit(self, document, unit, chapter_id, blocked_forms=(), manual_forms=(), response_tables=()):
+    def writing_unit(self, document, unit, chapter_id, blocked_forms=(), manual_forms=(), response_tables=(),
+                    templated_forms=(), shown_requirements=()):
         blocks = []
         for block in unit.get("blocks", []):
             target_ids = set(block.get("target_ids") or unit.get("target_ids", []))
@@ -492,8 +837,11 @@ class _Assembler:
         for gap in unit.get("gaps", []):
             self.gap("authoring_content_gap", gap, chapter_id)
         has_blocks = any(block.get("text", "").strip() or block.get("headers") or block.get("rows") for block in blocks)
-        table_only = bool(unit.get("target_ids")) and set(unit["target_ids"]).issubset(response_tables)
-        if not table_only and (unit["status"] == "placeholder"
+        targets = set(unit.get("target_ids") or [])
+        table_only = bool(targets) and targets.issubset(response_tables)
+        form_already_rendered = bool(targets) and targets.issubset(templated_forms)
+        requirement_shown = bool(targets) and targets.issubset(shown_requirements)
+        if not table_only and not form_already_rendered and not requirement_shown and (unit["status"] == "placeholder"
                                or not (has_blocks or unit.get("cell_fills") or unit.get("attachments"))):
             document.add_paragraph("（本部分内容待补）")
             self.gap("export_content_pending", "写作任务尚未形成完整内容，保留当前位置。", chapter_id)
@@ -503,7 +851,7 @@ class _Assembler:
         chapter_start = len(document.element.body) - 1
         if heading:
             path = self.display_paths.get(chapter_id, path)
-            paragraph = document.add_heading(f"{'.'.join(map(str, path))} {chapter['title']}", level=min(len(path), 9))
+            paragraph = document.add_heading(f"{'.'.join(map(str, path))} {_display_title(chapter['title'])}", level=min(len(path), 9))
             add_bookmark(paragraph._p, chapter_id)
         units = self.units.get(chapter_id, [])
         targets = chapter.get("targets", [])
@@ -536,6 +884,7 @@ class _Assembler:
                     # Rendering below records the unavailable part without substituting its whole unit.
                     continue
         blocked_forms = (form_ids - grid_forms) | manual_forms
+        templated_forms = {identity for identity, parts in forms.items() if parts}
         row_owners = {row["row_id"]: target["target_id"] for target in targets
                       for row in (target.get("response_table") or {}).get("rows", [])}
         for unit in units:
@@ -550,9 +899,12 @@ class _Assembler:
         rendered, unit_anchors = set(), {}
         response_tables = {target["target_id"] for target in targets
                            if (target.get("response_table") or {}).get("rows")}
+        shown_requirements = set()
         for target in targets:
             start_index = len(document.element.body) - 1
             target_id = target["target_id"]
+            if self._show_bound_requirements(document, target, chapter_id):
+                shown_requirements.add(target_id)
             related = []
             for identity in dict.fromkeys(target.get("related_target_ids", [])):
                 if identity in self.locations and identity != target_id:
@@ -590,11 +942,13 @@ class _Assembler:
                         rendered.add(ordinal)
                         continue
                     unit_start = len(document.element.body) - 1
-                    self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms, response_tables)
+                    self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms,
+                                      response_tables, templated_forms, shown_requirements)
                     if len(document.element.body) - 1 > unit_start:
                         unit_anchors[ordinal] = document.element.body[unit_start]
                     rendered.add(ordinal)
-            if not linked and target_id not in reference_only and target_id not in response_tables:
+            if (not linked and target_id not in reference_only and target_id not in response_tables
+                    and not forms.get(target_id) and target_id not in shown_requirements):
                 document.add_paragraph("（本部分内容待补）")
                 self.gap("export_content_pending", "响应位置尚无写作内容。", chapter_id, target_id)
             if len(document.element.body) - 1 > start_index:
@@ -606,12 +960,13 @@ class _Assembler:
                         break
         for ordinal, unit in enumerate(units):
             if ordinal not in rendered:
-                self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms, response_tables)
+                self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms,
+                                  response_tables, templated_forms, shown_requirements)
                 self.gap("export_unassigned_content", "写作内容未绑定当前章节的响应位置，已保留在章节末尾。", chapter_id)
         if not heading and len(document.element.body) - 1 > chapter_start:
             add_bookmark(document.element.body[chapter_start], chapter_id)
 
-    def render(self, entries, title):
+    def render(self, entries, title, *, include_pending=False):
         entries = _body_entries(entries)
         document = Document()
         section = document.sections[0]
@@ -647,9 +1002,16 @@ class _Assembler:
         for chapter, path in entries:
             if chapter.get("presentation_role", "body") == "cover":
                 continue
+            if chapter.get("is_volume"):
+                self._response_context = None
             if chapter.get("is_volume") and path != scope:
                 render_covers(path)
             self.chapter(document, chapter, path)
+        if include_pending and self.pending_rules:
+            document.add_heading("尚未归入响应表", 1)
+            for pending in self.pending_rules:
+                document.add_paragraph(pending)
+                document.add_paragraph("")
         field = OxmlElement("w:fldSimple")
         field.set(qn("w:instr"), "PAGE")
         # Word rejects a simple field that has no result run.
@@ -696,15 +1058,20 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
                         for ref in issue.get("rule_refs", []))
         for entry in requirements.get("rules", []):
             if _requirement_key(entry["rule_ref"]) not in assigned:
+                text = (entry.get("rule") or {}).get("text")
+                if isinstance(text, str) and text.strip():
+                    assembler.pending_rules.append(text)
                 assembler.gap("export_requirement_unassigned", "底稿中有尚未安排正文或交付位置的要求，完整内容保留在底稿中。", None)
     chapter_ids = {chapter["chapter_id"] for chapter, _ in entries}
     for chapter_id in assembler.units.keys() - chapter_ids:
         assembler.gap("export_unassigned_content", "内容的章节已不在当前大纲中，保留在补充内容中。", chapter_id)
         entries.append(({"chapter_id": chapter_id, "title": "补充内容", "targets": []}, (len(entries) + 1,)))
-    docx_ref = assembler.render(entries, "投标文件")
+    docx_ref = assembler.render(entries, "投标文件", include_pending=True)
     volumes = []
+    publish_volumes = not any(issue.get("code") == "outline_assembly_unavailable"
+                              for issue in outline.get("issues", []))
     for chapter, path in _body_entries(entries):
-        if chapter.get("is_volume"):
+        if publish_volumes and chapter.get("is_volume"):
             subtree = [(value, value_path) for value, value_path in entries if value_path[:len(path)] == path]
             reference = assembler.render(subtree, chapter["title"])
             volumes.append({"chapter_id": chapter["chapter_id"], "title": chapter["title"],
