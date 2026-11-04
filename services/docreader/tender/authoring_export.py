@@ -484,7 +484,8 @@ class _Assembler:
 
     def _show_bound_requirements(self, document, target, chapter_id):
         from docreader.tender.authoring_excerpts import load_source_excerpt
-        if target.get("template_refs") or (target.get("response_table") or {}).get("rows") or not target.get("source_excerpts"):
+        if (target.get("template_refs") or (target.get("response_table") or {}).get("rows")
+                or not target.get("source_excerpts") or not target.get("rule_refs")):
             return False
         shown = False
         pending = None

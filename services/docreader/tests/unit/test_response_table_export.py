@@ -154,7 +154,7 @@ def test_bound_narrative_requirement_is_shown_and_answer_stays_blank(tmp_path):
     selected = excerpts(artifacts, ["按照技术规范逐段应答，并说明是否接受各项技术要求。"])
     tree = {"chapters": [{"chapter_id": "tech", "title": "技术总则", "children": [], "targets": [
         {"target_id": "narrative", "kind": "narrative", "purpose": "逐段应答",
-         "rule_refs": [], "source_refs": [], "source_excerpts": selected}]}]}
+         "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="tech", target_ids=["narrative"])]))
     body = "\n".join(paragraph.text for paragraph in doc.paragraphs)
     assert "按照技术规范逐段应答" in body
@@ -167,7 +167,7 @@ def test_unmatched_narrative_does_not_invent_a_general_or_special_chapter(tmp_pa
     tree = {"chapters": [{"chapter_id": "tech", "title": "技术文件", "is_volume": True, "children": [
         {"chapter_id": "item", "title": "技术附表A 供货范围及可选配置", "children": [], "targets": [
             {"target_id": "scope", "kind": "narrative", "purpose": "供货范围",
-             "rule_refs": [], "source_refs": [], "source_excerpts": selected}]}], "targets": []}]}
+             "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}], "targets": []}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="item", target_ids=["scope"])]))
     headings = [paragraph.text for paragraph in doc.paragraphs if paragraph.style.name.startswith("Heading")]
     assert any(text.endswith("供货范围及可选配置") for text in headings)
@@ -207,7 +207,7 @@ def test_scoring_row_excerpts_render_the_native_grid_with_blank_answers(tmp_path
                 for row in rows]
     tree = {"chapters": [{"chapter_id": "biz", "title": "资格审查", "children": [], "targets": [
         {"target_id": "score", "kind": "narrative", "purpose": "财务评分",
-         "rule_refs": [], "source_refs": [], "source_excerpts": selected}]}]}
+         "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="biz", target_ids=["score"])]))
     assert len(doc.tables) == 1
     table = doc.tables[0]
@@ -246,7 +246,7 @@ def test_pdf_line_wraps_join_but_numbered_items_stay_separate(tmp_path):
     selected = _section_excerpts(artifacts, text)
     tree = {"chapters": [{"chapter_id": "biz", "title": "财务", "children": [], "targets": [
         {"target_id": "clause", "kind": "narrative", "purpose": "财务报表",
-         "rule_refs": [], "source_refs": [], "source_excerpts": selected}]}]}
+         "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="biz", target_ids=["clause"])]))
     paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text]
     assert "13. 需提供原厂财务报表（包含资产负债表、现金流量表、利润表等）。" in paragraphs
@@ -261,7 +261,7 @@ def test_docx_paragraph_breaks_stay_separate_without_a_period(tmp_path):
     selected = _section_excerpts(artifacts, text, word_paragraphs=True)
     tree = {"chapters": [{"chapter_id": "biz", "title": "说明", "children": [], "targets": [
         {"target_id": "clause", "kind": "narrative", "purpose": "分段",
-         "rule_refs": [], "source_refs": [], "source_excerpts": selected}]}]}
+         "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="biz", target_ids=["clause"])]))
     paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text]
     assert "前一段没有句号" in paragraphs
@@ -316,7 +316,7 @@ def test_citation_lines_stay_separate_while_wrapped_sentences_join(tmp_path):
     selected = _section_excerpts(artifacts, text)
     tree = {"chapters": [{"chapter_id": "biz", "title": "标准", "children": [], "targets": [
         {"target_id": "clause", "kind": "narrative", "purpose": "适用标准",
-         "rule_refs": [], "source_refs": [], "source_excerpts": selected}]}]}
+         "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="biz", target_ids=["clause"])]))
     paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text]
     assert "《中华人民共和国网络安全法》" in paragraphs
