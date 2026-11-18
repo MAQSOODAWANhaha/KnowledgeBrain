@@ -53,7 +53,7 @@ async def test_joint_classification_over_budget_preserves_named_original_and_bla
     await _request_directory_details(compiled, documents, request_budget, execute, snapshot, artifacts=artifacts,
         source_carrier_contract='source_carriers_closed_v1', native_requirement_contract=CONTRACT,
         reviewed_source_facts=facts)
-    assert measured == ['directory_classification']
+    assert measured == ['directory_classification', 'directory_classification']
     assert sent == ['directory_material', 'directory_requirement']
     record, = compiled['_reviewed_source_fact_applications']
     assert record['state'] == 'unresolved'
@@ -66,7 +66,7 @@ async def test_joint_classification_over_budget_preserves_named_original_and_bla
     assert named > review_from
     assert paragraphs[named].endswith('应制定保密方案\n包括管理与应急')
     assert paragraphs[named + 1] == '处理结果：________（人工核定）'
-    assert any('完整联合分类未完成' in p for p in paragraphs[review_from:])
+    assert any('部分来源分类待核' in p for p in paragraphs[review_from:])
     with ZipFile(BytesIO(artifacts.read_bytes(delivery['package_ref']))) as package:
         assert package.read('投标文件.docx') == word
 

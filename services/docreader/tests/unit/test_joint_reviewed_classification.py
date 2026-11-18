@@ -113,3 +113,83 @@ def test_joint_C_preserves_partially_overlapping_legacy_case_without_copying_its
     joint.apply(compiled, joint.accept(result))
     assert compiled['_requirement_cases'] == original
     assert any(i.get('requirement_case_id') == original[0]['id'] for i in compiled['issues'])
+
+
+def test_scoped_joint_C_rejects_hidden_interior_and_preserves_failed_case(tmp_path):
+    artifacts, snapshot, documents, _, compiled, _ = fixture(tmp_path)
+    for page in (0, 2, 3):
+        apply_requirements(compiled, documents, [{**window(page, 0), 'scope': 'unassigned'}], complete_basis=True)
+    ledger = SourceLedger(artifacts, artifacts.read_json(snapshot['frozen_ref'])['documents'], chapters=compiled['chapters'])
+    joint = JointClassification(ledger, compiled, documents)
+    scope = joint.scope_payload(('q1', 'q2'))
+    first, last = [page['lines'][0][0] for page in scope['documents'][0]['pages']]
+    raw = {'basis_groups': [{'ranges': [[first, last]]}], 'requirement_adjudications': [
+        {'item_ids': ['q1'], 'scope': 'not_applicable', 'basis_id': 1},
+        {'item_ids': ['q2'], 'scope': 'unassigned'},
+    ]}
+    with pytest.raises(ModelContractError) as rejected:
+        joint.accept_scope(scope, raw)
+    assert 'outside the supplied reading' in rejected.value.errors[0]['detail']
+    raw['basis_groups'][0]['ranges'] = [[first, first]]
+    result = joint.accept_scope(scope, raw)
+    pending = compiled['_requirement_cases'][-1]
+    joint.apply(compiled, joint.merge_scopes([result]))
+    assert any(issue.get('requirement_case_id') == pending['id'] for issue in compiled['issues'])
+    assert len(compiled['requirement_decisions']) == 3
+    assert compiled['requirement_decisions'][0]['scope'] == 'not_applicable'
+
+
+async def test_joint_C_budget_fallback_sends_measured_scopes_and_retains_failed_sources(tmp_path, monkeypatch):
+    import json
+
+    from docreader.llm.request import ModelBudgetError
+    from docreader.tender.authoring_pipeline import _request_joint_classification
+    from docreader.tender import native_requirement_flow as flow
+    from test_native_requirement_sources import budget
+
+    artifacts, snapshot, documents, _, compiled, _ = fixture(tmp_path)
+    for page in (0, 2):
+        apply_requirements(compiled, documents, [{**window(page, 0), 'scope': 'unassigned'}], complete_basis=True)
+    ledger = SourceLedger(artifacts, artifacts.read_json(snapshot['frozen_ref'])['documents'], chapters=compiled['chapters'])
+    joint = JointClassification(ledger, compiled, documents)
+    real_gate = flow.require_classification_budget
+    admitted = []
+    sent = []
+
+    def gate(resolved_budget, request, payload):
+        if 'classification_scope' not in payload or len(payload['requirement_cases']) > 1:
+            raise ModelBudgetError('simulated cap')
+        measured = real_gate(resolved_budget, request, payload)
+        admitted.append(request)
+        return measured
+
+    async def execute(_, request, validate):
+        assert request in admitted
+        payload = json.loads(request['messages'][1]['content'][0]['text'])
+        sent.append(payload)
+        cases = payload['requirement_cases']
+        if not cases:
+            return validate({})
+        if cases[0]['id'] == 'q2':
+            raise ModelBudgetError('simulated late budget rejection')
+        return validate({'requirement_adjudications': [{'item_ids': ['q1'], 'scope': 'procedure'}]})
+
+    monkeypatch.setattr(flow, 'require_classification_budget', gate)
+    original = deepcopy(compiled['_requirement_cases'])
+    await _request_joint_classification(compiled, joint, budget(), execute, {})
+    assert [payload['classification_scope'] for payload in sent] == ['document_v1', 'cases_v1', 'cases_v1']
+    assert compiled['_native_classification_budget']['held_case_count'] == 1
+    assert [record['scope'] for record in compiled['requirement_decisions']] == ['procedure', 'unassigned']
+    unresolved, = [issue for issue in compiled['issues'] if issue.get('requirement_case_id')]
+    assert unresolved['requirement_case_id'] == original[1]['id']
+    assert unresolved['detail'] == original[1]['source_text']
+    from io import BytesIO
+
+    from docx import Document
+    from docreader.tender.authoring_export import export_authoring_document
+
+    outline = outline_from_compiled(snapshot, compiled)
+    output = export_authoring_document(artifacts, outline, [])
+    word = Document(BytesIO(artifacts.read_bytes(output['docx_ref'])))
+    paragraphs = [paragraph.text for paragraph in word.paragraphs]
+    assert original[1]['source_text'] in '\n'.join(paragraphs[paragraphs.index('适用性与来源待核'):])

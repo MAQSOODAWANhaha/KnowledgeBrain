@@ -281,9 +281,17 @@ def _request(budget, task, payload):
                        '两类引用均不得进入native_assignments，仍须逐个处置。')
     if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == 'classify_with_native_requirement_cases_v1':
         prompt += '\n\n' + _prompt(budget, 'directory_classification_native')
+        if payload.get('classification_scope') == 'cases_v1':
+            prompt += ('\n本次只裁定当前 requirement_cases，每个短 ID 恰出现一次。items 必须为空。'
+                       '所有章仍可选。依据只能引用本次显示的原文行，包含范围内每一行。'
+                       '需要合并范围之外的续段或缺少依据时，保留该事项独立未归属。')
+        elif payload.get('classification_scope') == 'document_v1':
+            prompt += ('\n本次只处理文件级 items 和本次提供的已核正文事实。'
+                       'requirement_adjudications 和 basis_groups 必须为空。')
         if payload.get('reviewed_source_facts'):
-            prompt += ('\n同时裁定 reviewed_source_facts，保留原生 items、basis_groups 和 '
-                       'requirement_adjudications。reviewed_body_dispositions 每条事实恰出现一次，'
+            if payload.get('classification_scope') != 'document_v1':
+                prompt += '\n同时裁定 reviewed_source_facts，保留原生 items、basis_groups 和 requirement_adjudications。'
+            prompt += ('reviewed_body_dispositions 每条事实恰出现一次，'
                        '只返回 fact_id（短 fN）、scope 和 chapter_id（短 cN 或 null）。'
                        'scope=chapter 时选一个真实职责、主体和提交实例相容的已有章节。'
                        '无法确认时 scope=unassigned 且 chapter_id=null，保留具名待核。'
@@ -532,7 +540,7 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
     if concurrency < 1:
         raise ValueError('native requirement concurrency must be positive')
     from docreader.tender.native_requirement_sources import SourceLedger, plan_native_packs, require_native_budget
-    from docreader.tender.native_requirement_flow import JointRequirements, JointClassification, require_classification_budget
+    from docreader.tender.native_requirement_flow import JointRequirements, JointClassification
     requirement_chapters = deepcopy(chapters)
     originals = {chapter['id']: chapter for chapter in compiled['chapters']}
     for chapter in requirement_chapters:
@@ -592,18 +600,106 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
     joint.reviewed_partial_geometry(compiled)
     classification = JointClassification(ledger, compiled, documents, proof=joint.proof,
         reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
-    payload = {**classification.payload, 'applicability': applicability,
-               **joint.identity}
+    await _request_joint_classification(compiled, classification, budget, execute,
+                                        {'applicability': applicability, **joint.identity})
+
+
+async def _request_joint_classification(compiled, classification, budget, execute, context):
+    from docreader.tender.native_requirement_flow import require_classification_budget
+
+    task = AuthoringTask.DIRECTORY_CLASSIFICATION
+
+    def admit(payload):
+        payload = {**payload, **context}
+        measured = require_classification_budget(budget, _request(budget, task, payload), payload)
+        return payload, {key: value for key, value in measured.items() if key != 'request'}
+
     try:
-        measured = require_classification_budget(budget, _request(budget, AuthoringTask.DIRECTORY_CLASSIFICATION, payload), payload)
-        compiled['_native_classification_budget'] = {k: v for k, v in measured.items() if k != 'request'}
-        prepared = await _ask(execute, budget, AuthoringTask.DIRECTORY_CLASSIFICATION, payload, classification.accept)
-    except _LOCAL_FAILURES:
-        compiled['issues'].append({'code': 'outline_directory_classification_rejected',
-            'detail': '完整联合分类未完成或超出完整输入/输出预算；全部精确来源保留，请核定具名未决来源后修订。'})
-        classification.fallback(compiled)
+        payload, measured = admit(classification.payload)
+    except ModelBudgetError:
+        pass
     else:
-        classification.apply(compiled, prepared)
+        compiled['_native_classification_budget'] = measured
+        try:
+            prepared = await _ask(execute, budget, task, payload, classification.accept)
+        except _LOCAL_FAILURES:
+            compiled['issues'].append({'code': 'outline_directory_classification_rejected',
+                'detail': '完整联合分类未完成或超出完整输入/输出预算；全部精确来源保留，请核定具名未决来源后修订。'})
+            classification.fallback(compiled)
+        else:
+            classification.apply(compiled, prepared)
+        return
+
+    scopes, budgets = [], []
+    held = 0
+    document_completed = False
+
+    async def request_scope(payload, measured):
+        budgets.append(measured)
+        try:
+            prepared = await _ask(execute, budget, task, payload,
+                                  lambda raw: classification.accept_scope(payload, raw))
+        except _LOCAL_FAILURES:
+            return False
+        scopes.append(prepared)
+        return True
+
+    try:
+        document = admit(classification.scope_payload())
+    except ModelBudgetError:
+        pass
+    else:
+        document_completed = await request_scope(*document)
+
+    def admit_cases(groups):
+        aliases = [alias for group in groups for alias in group]
+        try:
+            return admit(classification.scope_payload(aliases))
+        except ModelBudgetError:
+            return None
+
+    groups = classification.scoped_groups()
+    start = 0
+    while start < len(groups):
+        admitted = admit_cases(groups[start:start + 1])
+        if admitted is None:
+            held += len(groups[start])
+            start += 1
+            continue
+        size, rejected = 1, None
+        remaining = len(groups) - start
+        while size < remaining:
+            probe = min(size * 2, remaining)
+            candidate = admit_cases(groups[start:start + probe])
+            if candidate is None:
+                rejected = probe
+                break
+            size, admitted = probe, candidate
+        while rejected is not None and rejected - size > 1:
+            probe = (size + rejected) // 2
+            candidate = admit_cases(groups[start:start + probe])
+            if candidate is None:
+                rejected = probe
+            else:
+                size, admitted = probe, candidate
+        if not await request_scope(*admitted):
+            held += len(admitted[0]['requirement_cases'])
+        start += size
+
+    compiled['_native_classification_budget'] = {'mode': 'scoped_v1', 'scopes': budgets,
+        'document_completed': document_completed, 'held_case_count': held}
+    if scopes:
+        try:
+            prepared = classification.merge_scopes(scopes)
+        except ModelContractError:
+            scopes.clear()
+        else:
+            classification.apply(compiled, prepared)
+    if not scopes:
+        classification.fallback(compiled)
+    if not scopes or held or not document_completed:
+        compiled['issues'].append({'code': 'outline_directory_classification_rejected',
+            'detail': '部分来源分类待核。请根据具名未决事项核对完整原文、适用性和所属章节。'})
 
 
 async def _request_directory_plans(documents, budget, execute, identity=None, *, contract=None):

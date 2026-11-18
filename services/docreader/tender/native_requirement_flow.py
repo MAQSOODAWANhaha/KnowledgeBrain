@@ -266,7 +266,7 @@ def native_classification_model(payload):
     chapters = tuple(c['id'] for c in payload['chapters'])
     c = Literal.__getitem__(chapters) if chapters else Literal['__none__']
     ref = Annotated[StrictInt, Field(ge=0, le=max(0, payload['source_line_count'] - 1))]
-    span = tuple[ref, ref]
+    span = Annotated[tuple[ref, ref], Field(strict=False)]
     basis = create_model('NativeSharedBasis', __base__=Contract,
                          ranges=(Annotated[list[span], Field(min_length=1, max_length=max(s, 1))], ...))
     decision = create_model('JointNativeRequirementAdjudication', __base__=NativeRequirementAdjudication,
@@ -349,6 +349,114 @@ class JointClassification:
             self.payload['source_binding'] = _hash({'joint': self.payload['source_binding'], 'reviewed_facts': self.fact_map,
                                                     'entry_contract': self.reviewed_body_entry_contract})
 
+    def scoped_groups(self):
+        """Keep exact shared sources and certified continuations in one scope."""
+        cases = self.payload['requirement_cases']
+        parents = {case['id']: case['id'] for case in cases}
+        owners, continuations = {}, []
+        native_sources = {self.reverse[case['id']]: case['source'] for case in self.native}
+
+        def root(alias):
+            while parents[alias] != alias:
+                parents[alias] = parents[parents[alias]]
+                alias = parents[alias]
+            return alias
+
+        def link(alias, key):
+            parents[root(alias)] = root(owners.setdefault(key, alias))
+
+        for case in cases:
+            alias = case['id']
+            for window in case.get('source_windows', []):
+                for line in range(window['start_line'], window['end_line'] + 1):
+                    link(alias, (window['document_id'], window['page'], line))
+            if alias not in native_sources:
+                continue
+            for ref in self.ledger._refs(native_sources[alias]['body']['source_excerpts']):
+                link(alias, ref)
+                if ref in self.ledger.literal_body_refs:
+                    page, line = self.ledger.literal_body_refs[ref]
+                    document = f"d{self.ledger.atoms[ref]['document']}"
+                    link(alias, (document, page, line))
+                previous = self.ledger.literal_predecessors.get(ref)
+                if previous is not None:
+                    continuations.append((alias, previous))
+        for alias, previous in continuations:
+            if previous in owners:
+                parents[root(alias)] = root(owners[previous])
+        groups = defaultdict(list)
+        for case in cases:
+            if not case.get('manual_only'):
+                groups[root(case['id'])].append(case['id'])
+        return list(groups.values())
+
+    def scope_payload(self, aliases=None):
+        payload = {**self.payload}
+        payload['classification_scope'] = 'document_v1' if aliases is None else 'cases_v1'
+        selected = set(aliases or ())
+        cases = [case for case in payload['requirement_cases'] if case['id'] in selected]
+        context_ids = {identity for case in cases for identity in case.get('context_ids', [])}
+        payload['requirement_cases'] = cases
+        payload['native_contexts'] = [context for context in payload['native_contexts'] if context['id'] in context_ids]
+        if aliases is not None:
+            pages = {(window['document_id'], window['page']) for case in cases
+                     for window in case.get('source_windows', [])}
+            pages.update((f"d{loc['document']}", loc['page']) for case in cases for loc in case.get('source_locations', []))
+            reading = []
+            for document in payload['documents']:
+                local = [page for page in document['pages'] if (document['document_id'], page['page']) in pages]
+                if local:
+                    reading.append(dict(document, pages=local))
+            payload['documents'] = reading
+            payload['document_count'] = 0
+            payload.pop('reviewed_source_facts', None)
+        payload['source_binding'] = _hash({'authority': self.payload['source_binding'],
+            'scope': payload['classification_scope'], 'cases': [case['id'] for case in cases]})
+        return payload
+
+    def accept_scope(self, payload, raw):
+        value = _parse(native_classification_model(payload), raw)
+        visible = {ref for doc in payload['documents'] for page in doc['pages'] for ref, _ in page['lines']}
+        ranges = [span for group in value['basis_groups'] for span in group['ranges']]
+        for start, end in [*(item['range'] for item in value['items']), *ranges]:
+            self.refs.windows(start, end, visible=visible)
+        expected = {case['id'] for case in payload['requirement_cases']}
+        selected = [alias for decision in value['requirement_adjudications'] for alias in decision['item_ids']]
+        if set(selected) != expected or len(selected) != len(expected):
+            _reject('Cover every case in this scope exactly once.')
+        if len(ranges) > len(expected):
+            _reject('Shared C basis ranges exceed this scope case budget.')
+        self.merge_scopes([value])
+        return value
+
+    def merge_scopes(self, scopes):
+        """Validate complete coverage against the original authorities before publishing."""
+        plan = {'items': [], 'basis_groups': [], 'requirement_adjudications': []}
+        selected = set()
+        for scope in scopes:
+            plan['items'].extend(scope['items'])
+            if 'reviewed_body_dispositions' in scope:
+                if 'reviewed_body_dispositions' in plan:
+                    _reject('Reviewed facts are decided once in the document scope.')
+                plan['reviewed_body_dispositions'] = scope['reviewed_body_dispositions']
+            offset = len(plan['basis_groups'])
+            for decision in scope['requirement_adjudications']:
+                basis = decision['basis_id']
+                if basis and basis > len(scope['basis_groups']):
+                    _reject('C decision references a missing basis group.')
+                selected.update(decision['item_ids'])
+                plan['requirement_adjudications'].append({**decision, 'basis_id': basis + offset if basis else None})
+            plan['basis_groups'].extend(scope['basis_groups'])
+        plan['requirement_adjudications'].extend({'item_ids': [alias], 'scope': 'unassigned'}
+                                                for alias in self.mapping if alias not in selected)
+        if self.fact_map and 'reviewed_body_dispositions' not in plan:
+            plan['reviewed_body_dispositions'] = [{'fact_id': alias, 'scope': 'unassigned'} for alias in self.fact_map]
+        prepared = self.accept(plan)
+        # A singleton still pending needs no new source case or identity.
+        prepared['native'] = [record for record in prepared['native']
+                              if record['scope'] != 'unassigned' or len(record['item_ids']) > 1]
+        return prepared
+
     def _shadow(self):
         shadow = (reviewed_classification_view(self.compiled, self.reviewed_body_facts)[0]
                   if self.reviewed_body_facts else deepcopy(self.compiled))
@@ -381,6 +489,8 @@ class JointClassification:
             if any(is_native) and not all(is_native):
                 _reject('Keep mixed source authorities as separate unassigned cases; do not replace legacy source text.')
             identity = decision.pop('basis_id')
+            if identity and identity > len(bases):
+                _reject('C decision references a missing basis group.')
             basis = bases[identity - 1] if identity else []
             if identity:
                 used.add(identity)

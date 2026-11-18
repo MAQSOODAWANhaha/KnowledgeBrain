@@ -29,6 +29,14 @@ def test_joint_C_uses_one_q_pool_and_atomic_existing_guards(tmp_path):
     joint=JointClassification(ledger,compiled,documents)
     assert len(joint.payload['requirement_cases'])==2
     assert [x['id'] for x in joint.payload['requirement_cases']]==['q1','q2']
+    scope = joint.scope_payload(['q2'])
+    assert [page['page'] for page in scope['documents'][0]['pages']] == [0, 1]
+    assert scope['documents'][0]['document_id'] == 'd1'
+    assert scope['document_count'] == 0
+    retained = deepcopy(compiled)
+    scoped = joint.accept_scope(scope, {'requirement_adjudications': [{'item_ids': ['q2'], 'scope': 'unassigned'}]})
+    joint.apply(retained, joint.merge_scopes([scoped]))
+    assert retained['_native_requirement_cases'] == compiled['_native_requirement_cases']
     before=deepcopy(compiled)
     bad={'items':[],'basis_groups':[],'requirement_adjudications':[
       {'item_ids':['q1'],'scope':'unassigned','chapter_ids':[],'basis_id':None},
@@ -76,6 +84,7 @@ async def test_explicit_native_pipeline_uses_joint_B_and_one_C_then_binds_same_s
             assert value['operation'] == REQUIREMENT_OPERATION
             return validate(reply(ledger))
         assert task == 'directory_classification' and value['operation'] == CLASSIFICATION_OPERATION
+        assert list(value)[-3:] == ['applicability', 'source_version', 'domain_revision']
         return validate({'items': [], 'basis_groups': [], 'requirement_adjudications': [
             {'item_ids': [c['id']], 'scope': 'chapter' if c.get('body') == 'Alpha  Beta  0.5 / 5' else 'unassigned',
              'chapter_ids': ['c1'] if c.get('body') == 'Alpha  Beta  0.5 / 5' else [], 'basis_id': None,
