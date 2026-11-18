@@ -6,6 +6,7 @@ blob cell covering the whole page. Scanned pages are out of scope.
 
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass, field
 
@@ -210,7 +211,7 @@ def _ruled_regions(
     tol: float = 6.0,
 ) -> list[tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]]:
     """Split ruling lines into independently extractable table regions."""
-    if len(horizontal) < 3 or len(vertical) < 3:
+    if len(horizontal) < 2 or len(vertical) < 2:
         return []
     parent = list(range(len(horizontal) + len(vertical)))
 
@@ -227,6 +228,11 @@ def _ruled_regions(
             parent[right_root] = left_root
 
     n_h = len(horizontal)
+    for left, (x, start, end) in enumerate(vertical):
+        for right in range(left + 1, len(vertical)):
+            other_x, other_start, other_end = vertical[right]
+            if abs(x - other_x) <= tol and start <= other_end + tol and other_start <= end + tol:
+                union(n_h + left, n_h + right)
     for hi, (x0, y, x1) in enumerate(horizontal):
         for vi, (x, y0, y1) in enumerate(vertical):
             if x0 - tol <= x <= x1 + tol and y0 - tol <= y <= y1 + tol:
@@ -241,7 +247,7 @@ def _ruled_regions(
             bucket["v"].append(vertical[index - n_h])
     regions = []
     for bucket in groups.values():
-        if len(bucket["h"]) >= 3 and len(bucket["v"]) >= 3:
+        if len(bucket["h"]) >= 2 and len(bucket["v"]) >= 2:
             regions.append((bucket["h"], bucket["v"]))
     return regions
 
@@ -281,11 +287,25 @@ def extract_tables_from_page(page, raw, chars: list[dict]) -> list[PdfTableGrid]
     tables = _usable_ruled_tables(horizontal, vertical, chars)
     if tables:
         return tables
+    # Fill-in underlines are not column borders. Guessing columns from the
+    # gaps splits a form into a table the tender does not have.
+    if _underlines_only(page, horizontal, vertical):
+        return []
     try:
         aligned = extract_tables_from_chars(chars)
     except TableExtractionLimitError:
         return []
     return [grid for grid in aligned if _grid_usable(grid)]
+
+
+def _underlines_only(page, horizontal, vertical) -> bool:
+    if len(vertical) >= 2 or not horizontal:
+        return False
+    try:
+        width = page.get_size()[0]
+    except Exception:
+        return False
+    return width > 0 and all((x1 - x0) < width * 0.55 for x0, _y, x1 in horizontal)
 
 
 def widths_mm(grid: PdfTableGrid, printable_mm: float = 180.0) -> list[float]:
@@ -381,7 +401,9 @@ def _tabular_bands(
     flags = []
     for row in rows:
         words = _word_clusters(row)
-        flags.append(len(words) >= 2)
+        text = ''.join(glyph['ch'] for glyph in sorted(row, key=lambda glyph: glyph['x0']))
+        leader = re.search(r'(?:[.·…]\s*){4,}[-–—]?\s*\d+\s*$', text)
+        flags.append(len(words) >= 2 and not leader)
     bands: list[list[list[dict]]] = []
     index = 0
     while index < len(rows):
@@ -561,23 +583,34 @@ def _merged_ranges_from_rules(
     return sorted(merged)
 
 
+def _text_in_box(chars, left, bottom, right, top):
+    inside = [glyph for glyph in chars
+              if left <= (glyph['x0'] + glyph['x1']) / 2 <= right
+              and bottom <= (glyph['y0'] + glyph['y1']) / 2 <= top]
+    return '\n'.join(''.join(glyph['ch'] for glyph in row).strip()
+                     for row in _group_rows(inside)).strip()
+
+
 def _tables_from_rules(
     horizontal: list[tuple[float, float, float]],
     vertical: list[tuple[float, float, float]],
     chars: list[dict],
 ) -> list[PdfTableGrid]:
-    if len(horizontal) < 3 or len(vertical) < 3 or not chars:
+    if len(horizontal) < 2 or len(vertical) < 2 or not chars:
         return []
     # vertical stored as (x, y0, y1)
-    xs = _cluster_positions([line[0] for line in vertical], 3.5)
-    ys = _cluster_positions([line[1] for line in horizontal], 3.5)
-    if len(xs) < 3 or len(ys) < 3:
+    xs = sorted(_cluster_positions([line[0] for line in vertical], 3.5))
+    # A short underline inside a one-column box is not a row boundary.
+    row_rules = horizontal
+    if len(xs) == 2:
+        row_rules = [line for line in horizontal if line[0] <= xs[0] + 3.5 and line[2] >= xs[-1] - 3.5]
+    ys = _cluster_positions([line[1] for line in row_rules], 3.5)
+    if len(xs) < 2 or len(ys) < 2:
         return []
-    xs = sorted(xs)
     ys = sorted(ys, reverse=True)  # top to bottom in visual order, y still up
     # Rebuild y edges increasing for bounds, but rows top-first.
     y_visual = sorted(ys, reverse=True)
-    if len(xs) - 1 < 2 or len(y_visual) - 1 < 2:
+    if len(xs) - 1 < 1 or len(y_visual) - 1 < 1:
         return []
     column_count = len(xs) - 1
     row_count = len(y_visual) - 1
@@ -590,12 +623,7 @@ def _tables_from_rules(
         for column in range(column_count):
             x0 = xs[column]
             x1 = xs[column + 1]
-            text = "".join(
-                glyph["ch"]
-                for glyph in chars
-                if x0 <= (glyph["x0"] + glyph["x1"]) / 2 <= x1
-                and y_bottom <= (glyph["y0"] + glyph["y1"]) / 2 <= y_top
-            ).strip()
+            text = _text_in_box(chars, x0, y_bottom, x1, y_top)
             cells.append(
                 PdfTableCell(
                     row=row,
@@ -625,11 +653,8 @@ def _tables_from_rules(
         anchor = (start_row, start_column)
         # Read the merged rectangle as a whole. Concatenating virtual cells
         # column-first interleaves wrapped lines and corrupts declarations.
-        texts[anchor] = "".join(
-            glyph["ch"] for glyph in chars
-            if xs[start_column] <= (glyph["x0"] + glyph["x1"]) / 2 <= xs[end_column + 1]
-            and y_visual[end_row + 1] <= (glyph["y0"] + glyph["y1"]) / 2 <= y_visual[start_row]
-        ).strip()
+        texts[anchor] = _text_in_box(chars, xs[start_column], y_visual[end_row + 1],
+                                      xs[end_column + 1], y_visual[start_row])
         for row in range(start_row, end_row + 1):
             for column in range(start_column, end_column + 1):
                 if (row, column) != anchor:

@@ -1,0 +1,9 @@
+# 原式职责先决裁定
+
+仅operation=select_native_response_form_v2使用本补充规则。M提供的选择是待核建议，不是必须展开的结论。先依据完整mandate裁定decision，再处理范围内条款：
+
+- expand：原文明示须在这份原式中逐条列出来源要求原文，且条款列尚待展开。选择支撑该职责的mandate_indices，再按前述完整原子去向、原格、独立响应及布局规则选择；含unresolved仍不是完整计划。
+- keep_original：原件只要求企业据实填写资料、报价、偏离及原因、签章，或已有全部固定条款，不要求转录全部来源。选择支撑此判断的mandate_indices，保留原表；layout为null，contexts/table_context_refs/rows/source_guidance/dispositions留空。不得把缺少企业事实填为无偏离、完全响应或已完成。其他章的技术要求和方案仍须单独承载，本裁定只决定这份原式是否展开。
+- unresolved：完整依据仍不足以判断，原式保留并进入具名人工核定。不能用keep_original隐藏明确逐条职责，也不能为了凑条款将全部须知、合同或评委程序抄入偏离表。此时也不返回部分展开字段。
+
+mandate_indices为mandate数组的零基索引，须唯一且存在。expand/keep_original至少选择一项依据；unresolved可以为空。宿主保存完整依据的来源坐标及原文，不回抄依据文本。表名中含“响应”或“偏离”均不直接证明要求全量转录；以原件实际职责判断。

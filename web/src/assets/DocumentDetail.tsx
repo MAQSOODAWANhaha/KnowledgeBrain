@@ -1,5 +1,6 @@
+import { Button } from "@astryxdesign/core/Button";
 import { useEffect, useMemo, useState } from "react";
-import { Skeleton } from "../components/ui/skeleton";
+import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { cn } from "../lib/utils";
 import { type DocChunk, type DocContent, api } from "../api";
 import { GfmPreview, formatPlainLayout } from "../bid/gfm";
@@ -80,8 +81,8 @@ export function DocumentDetail({
   if (!data) {
     return (
       <div className="card stack">
-        <Skeleton className="h-11" />
-        <Skeleton className="h-80" />
+        <Skeleton height={44} />
+        <Skeleton height={320} />
       </div>
     );
   }
@@ -108,8 +109,7 @@ export function DocumentDetail({
           {tabs
             .filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0)
             .map((item) => (
-              <button
-                key={item.key}
+              <Button key={item.key}
                 type="button"
                 role="tab"
                 aria-selected={tab === item.key}
@@ -118,6 +118,7 @@ export function DocumentDetail({
                   tab === item.key ? "font-semibold text-ink" : "text-quiet hover:text-ink",
                 )}
                 onClick={() => setTab(item.key)}
+                label={item.label}
               >
                 {item.label}
                 {item.n != null ? (
@@ -131,7 +132,7 @@ export function DocumentDetail({
                     tab === item.key ? "opacity-100" : "opacity-0",
                   )}
                 />
-              </button>
+              </Button>
             ))}
         </div>
       </div>

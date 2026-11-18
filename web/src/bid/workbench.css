@@ -1,22 +1,11 @@
-.tender-workspace { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; color: var(--ink); }
+.tender-workspace { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; background: white; color: var(--color-text-primary, var(--ink)); }
 .tender-workspace.is-authoring { overflow: hidden; }
-.tender-workspace button, .tender-page-actions button { height: 32px; border: 1px solid var(--line); border-radius: 6px; padding: 0 12px; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .tender-page-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.tender-page-actions .tender-authoring-tabs { min-height: 0; margin: 0; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-.tender-page-actions .tender-authoring-tabs button { border: 0; background: transparent; border-radius: 4px; }
-.tender-page-actions .tender-authoring-tabs button[aria-selected="true"] { background: var(--iris); color: #fff; }
-.tender-workspace .btn.ghost { height: 32px; padding: 0 12px; font-size: 13px; background: #fff; border: 1px solid var(--line); color: var(--ink); }
-.tender-workspace .btn.pri, .tender-workspace .tender-primary { height: 32px; padding: 0 12px; font-size: 13px; }
-.tender-workspace button:hover:not(:disabled), .tender-page-actions button:hover:not(:disabled) { background: var(--fill); }
-.tender-workspace button:disabled, .tender-page-actions button:disabled { opacity: .5; cursor: default; }
-.tender-workspace button:focus-visible, .tender-page-actions button:focus-visible, .tender-workspace input:focus-visible, .tender-workspace select:focus-visible { outline: 2px solid var(--iris); outline-offset: 2px; }
+.tender-page-actions .tender-authoring-tabs { display: flex; gap: 8px; min-height: 0; margin: 0; }
 .tender-alert { display: flex; gap: 12px; align-items: center; padding: 12px 20px; background: var(--amber-soft); border-bottom: 1px solid var(--line); color: var(--ink); font-size: 13px; }
-.tender-alert button:last-child { margin-left: auto; }
 .tender-loading, .tender-empty { padding: 28px; color: var(--muted); }
 .tender-inline-status { display: flex; gap: 16px; flex-shrink: 0; margin: 0; padding: 6px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 .tender-primary-actions { display: flex; gap: 8px; margin-left: auto; }
-.tender-workspace .tender-primary, .tender-page-actions .tender-primary { background: var(--iris); border-color: var(--iris); color: white; }
-.tender-workspace .tender-primary:hover:not(:disabled), .tender-page-actions .tender-primary:hover:not(:disabled) { background: var(--iris-600); }
 .tender-note { font-size: 12px; color: var(--muted); line-height: 1.8; margin: 8px 0; }
 .tender-new-draft { display: flex; align-items: center; gap: 12px; flex-shrink: 0; background: var(--fill); border-bottom: 1px solid var(--line); padding: 8px 16px; font-size: 13px; }
 .tender-new-draft p { margin: 5px 0 0; font-size: 12px; color: var(--muted); }
@@ -111,12 +100,7 @@
 .tender-foot .tender-task-details[open] { position: absolute; z-index: 30; bottom: calc(100% + 4px); left: 12px; width: min(640px, calc(100% - 24px)); max-height: min(52vh, 480px); overflow: auto; padding: 8px 12px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; box-shadow: var(--elev); }
 .tender-project-status a { color: inherit; text-decoration: none; border-radius: 4px; padding: 2px 4px; }
 .tender-project-status a:hover { background: #fff; color: var(--ink); }
-.tender-project-status .tender-authoring-tabs { min-height: 0; margin-right: auto; gap: 0; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-.tender-project-status .tender-authoring-tabs button { border: 0; background: transparent; border-radius: 4px; }
-.tender-project-status .tender-authoring-tabs button[aria-selected="true"] { background: var(--iris); color: #fff; border-color: transparent; }
-.tender-authoring-tabs { display: flex; align-items: center; gap: 0; flex-shrink: 0; min-height: 40px; padding: 0 16px; border-bottom: 1px solid var(--line); background: #fff; }
-.tender-authoring-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); }
-.tender-authoring-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--iris); background: transparent; font-weight: 600; }
+.tender-authoring-tabs { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .outline-planner-panel { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .outline-planner { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--bg); }
 .outline-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--line); background: #fff; }
@@ -136,8 +120,6 @@
 .outline-chapter-editor h2 { margin: 0 0 20px; font-size: 18px; }
 .outline-chapter-editor h3 { margin: 24px 0 12px; font-size: 13px; }
 .outline-chapter-editor > label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; margin-bottom: 16px; }
-.outline-chapter-editor input, .outline-chapter-editor textarea, .outline-tree-actions select { border: 1px solid var(--input-line); border-radius: 6px; padding: 9px 10px; font: inherit; background: #fff; }
-.outline-chapter-editor textarea { resize: vertical; }
 .outline-notice, .outline-execution { padding: 8px 20px; margin: 0; background: transparent; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.6; color: var(--muted); }
 .outline-arrangement .tender-empty { display: flex; align-items: center; justify-content: center; min-height: 280px; margin: 0; text-align: center; }
 .outline-notice button, .outline-execution button { margin-left: 8px; }

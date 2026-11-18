@@ -30,6 +30,33 @@ _COMPACT_VIEW_PROMPT = (
     "按序以换行连接恢复完整原文，空行保留。共享原文不合并来源身份、主体、条件、选择或引用。\n"
 )
 
+_NATIVE_RESPONSE_PROMPT = (
+    "\n原式native_response_layout的response_rows中，context_support_ids是名称、分值等上下文，"
+    "source_support_ids只含该行条款正文；上下文与正文以换行分开，不得混为同一续句。"
+    "source_join=paragraphs表示正文片段按序以换行连接，continuation表示按序直接续接且保留原片段空白；"
+    "source_guidance同样按其source_join恢复完整参考原文，kind为参考规则或评审程序，不能作为企业已满足的应答。\n"
+)
+
+_RESPONSE_FORM_DECISION_PROMPT = (
+    "\nresponse_form_decisions提供对应原式的展开决议及全部已给职责依据。核对keep_original/expand是否符合全部依据，"
+    "不能只看被选中的依据索引；明确要求逐条列原文的原式仍为空表时应指出遗漏，"
+    "只要求据实填写偏差或资料时不强迫转录全部招标条款。决议完成不表示企业事实已确认或已经响应。\n"
+)
+
+_RESPONSE_FORM_ROLE_PROMPT = (
+    "\nresponse_form_contract=source_bound_response_forms_v3的response_form_decisions中，row_roles按实际原式行序绑定"
+    "row_id及review_row_id；review_row_id对应此target的response_rows。source_role=criterion是投标人应答条款，"
+    "reference是参考规则，procedure是评委或他方程序。核对全部mandate_scope要求的原文入表范围，"
+    "程序可因全列职责进入原文列但不能变为企业义务、自评分或已执行；企业应答与证明格应留空。"
+    "核对正文与source_guidance没有重复拥有同源条款，不得只因procedure/reference入表就强改criterion或删原文。\n"
+)
+
+_SOURCE_BODY_CONTEXT_PROMPT = (
+    "\nsource_body_contract=source_bound_native_body_v1时，source_support_ids是精确正文片段，"
+    "source_context_support_ids是独立保留的同原格上下文，不是企业应答。"
+    "核对正文与上下文均完整且不串列，不将cell片段扩大为整行，也不以context代替独立正文职责。\n"
+)
+
 _RULE_FIELDS = (
     "text", "kind", "domains", "subject", "scope", "conditions", "exceptions",
     "numbers", "scoring", "consequence", "submission",
@@ -89,6 +116,8 @@ def _rule_dispositions(context, issues):
 
 
 def _structure_payload(artifacts, outline, units, *, outline_phase=False, template_bindings=None):
+    from docreader.tender.source_body import validate_outline_source_bodies
+    validate_outline_source_bodies(artifacts, outline)
     from docreader.tender.authoring_pipeline import _constraint_context, _json
     from docreader.tender.authoring_templates import (
         load_template_part,
@@ -96,10 +125,12 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
     )
 
     from docreader.tender.authoring_excerpts import load_source_excerpt, source_excerpt_key
+    from docreader.tender.directory_response_forms import RESPONSE_FORM_ROLE_RECORD, response_form_role_record
 
     if outline_phase:
         units = []
     supports, part_ids, targets, gaps, task_ids = [], {}, {}, [], {}
+    actual_targets = {}
     pending_rules, target_rules, rule_ids, rule_issues = [], {}, {}, []
     target_prefix = "v" if outline_phase else "t"
     for unit in units:
@@ -122,6 +153,7 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         for chapter in entries:
             for target in chapter.get("targets", []):
                 targets.setdefault(target["target_id"], f"{target_prefix}{len(targets) + 1}")
+                actual_targets[target['target_id']] = target
             register(chapter.get("children", []))
 
     register(outline["chapters"])
@@ -226,17 +258,48 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
                         "task_ids": task_ids.get(target["target_id"], []),
                     }
                 )
-                if target.get("source_excerpts"):
+                if target.get("source_excerpts") and not target.get('source_body_contract'):
                     selected[-1]["source_support_ids"] = source_supports(target["source_excerpts"],
                         chapter["chapter_id"], target["target_id"])
+                if target.get('source_body_contract'):
+                    selected[-1]['source_body_contract'] = target['source_body_contract']
+                    key = ('body', target['source_body_ref']['sha256'])
+                    if key not in part_ids:
+                        part_ids[key] = f's{len(supports) + 1}'
+                        supports.append({'support_id': part_ids[key], 'origin': 'tender', 'text': target['purpose']})
+                    selected[-1]['source_support_ids'] = [part_ids[key]]
+                    selected[-1]['source_context_support_ids'] = source_supports(
+                        target.get('source_context_excerpts', []), chapter['chapter_id'], target['target_id'])
                 if target.get("response_table"):
                     if target["response_table"].get("context_source_excerpts"):
                         selected[-1]["response_context_support_ids"] = source_supports(
                             target["response_table"]["context_source_excerpts"], chapter["chapter_id"], target["target_id"])
-                    selected[-1]["response_rows"] = [{"row_id": f"q{ordinal}",
-                        "source_support_ids": source_supports(row["source_excerpts"],
-                            chapter["chapter_id"], target["target_id"])}
-                        for ordinal, row in enumerate(target["response_table"]["rows"], 1)]
+                    layout = target['response_table'].get('native_layout')
+                    if layout:
+                        selected[-1]["response_rows"] = [{"row_id": f"q{ordinal}",
+                            "context_support_ids": source_supports(row.get("context_source_excerpts", []),
+                                chapter["chapter_id"], target["target_id"]),
+                            "source_support_ids": source_supports(row["source_excerpts"],
+                                chapter["chapter_id"], target["target_id"]),
+                            "source_join": row.get("source_join", "paragraphs")}
+                            for ordinal, row in enumerate(target["response_table"]["rows"], 1)]
+                    else:
+                        selected[-1]["response_rows"] = [{"row_id": f"q{ordinal}",
+                            "source_support_ids": source_supports([*row.get("context_source_excerpts", []), *row["source_excerpts"]],
+                                chapter["chapter_id"], target["target_id"])}
+                            for ordinal, row in enumerate(target["response_table"]["rows"], 1)]
+                    if layout:
+                        keys = {template_part_key(part) for part in target.get('template_refs', [])
+                                if part['source_ref'] == layout['source_ref']}
+                        selected[-1]['native_response_layout'] = {
+                            **{key: value for key, value in layout.items() if key != 'source_ref'},
+                            'template_support_ids': [support for support, key in selected_bindings.items() if key in keys]}
+                    if target['response_table'].get('source_guidance'):
+                        selected[-1]['source_guidance'] = [
+                            {'kind': entry['kind'], 'source_support_ids': source_supports(
+                                entry['source_excerpts'], chapter['chapter_id'], target['target_id']),
+                             **({'source_join': entry.get('source_join', 'paragraphs')} if layout else {})}
+                            for entry in target['response_table']['source_guidance']]
                     pending_rules.extend((row_view, row.get("rule_refs", []), chapter["chapter_id"], target["target_id"])
                         for row_view, row in zip(selected[-1]["response_rows"], target["response_table"]["rows"]))
                 pending_rules.append((selected[-1], target.get("rule_refs", []), chapter["chapter_id"], target["target_id"]))
@@ -316,6 +379,25 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         for unit in units
     ]
     sections, supports = project_source_sections(supports)
+    form_decisions = []
+    for issue in outline.get('issues', []):
+        if issue['code'] == RESPONSE_FORM_ROLE_RECORD:
+            target = actual_targets.get(issue.get('target_id'))
+            record = response_form_role_record(issue, target) if target else None
+            if record is None:
+                gaps.append({'code': 'structure_response_form_role_unbound',
+                             'detail': '原式行责任未能绑定当前实际条款行，保留原表及职责人工核定。'})
+                continue
+            form_decisions.append({**record, 'target_id': targets[target['target_id']],
+                'row_roles': [{**entry, 'review_row_id': f"q{entry['row_ordinal']}"} for entry in record['row_roles']]})
+            continue
+        if issue['code'] != 'outline_directory_response_form_decision':
+            continue
+        identity = targets.get(issue.get('target_id'))
+        form_decisions.append({'target_id': identity, 'detail': issue['detail']})
+        if identity is None:
+            gaps.append({'code': 'structure_response_form_decision_unbound',
+                         'detail': '原式展开决议没有对应当前响应位置，须核定原式及完整依据。'})
     return {
         "grounding_policy": AUTHORING_GROUNDING_POLICY,
         "operation": "structure",
@@ -327,6 +409,7 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         "units": summaries,
         "rule_dispositions": dispositions,
         "input_issues": [*context.availability_issues, *disposition_gaps, *rule_issues],
+        **({'response_form_decisions': form_decisions} if form_decisions else {}),
         **submission,
     }, gaps
 
@@ -543,7 +626,26 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
         from docreader.tender.document_execution import load_prompts
 
         prompt = load_prompts()["authoring_structure"]
-    request = build_request(budget.model, prompt, payload, task="authoring_structure")
+    chapters = list(payload.get('chapters', []))
+    if payload.get('response_form_decisions'):
+        prompt += _RESPONSE_FORM_DECISION_PROMPT
+    if any(record.get('response_form_contract') == 'source_bound_response_forms_v3'
+           for record in payload.get('response_form_decisions', [])):
+        prompt += _RESPONSE_FORM_ROLE_PROMPT
+    native_response, source_body = False, False
+    while chapters:
+        chapter = chapters.pop()
+        if any(target.get('native_response_layout') for target in chapter.get('targets', [])):
+            native_response = True
+        if any(target.get('source_body_contract') for target in chapter.get('targets', [])):
+            source_body = True
+        chapters.extend(chapter.get('children', []))
+    if native_response:
+        prompt += _NATIVE_RESPONSE_PROMPT
+    if source_body:
+        prompt += _SOURCE_BODY_CONTEXT_PROMPT
+    request = build_request(budget.model, prompt, payload, task="authoring_structure",
+                            reasoning_effort=budget.reasoning_effort)
     try:
         from docreader.tender.authoring_pipeline import _replay
 
@@ -560,6 +662,7 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
                 prompt + _COMPACT_VIEW_PROMPT,
                 compact_structure_payload(payload),
                 task="authoring_structure",
+                reasoning_effort=budget.reasoning_effort,
             )
             hit, value = await _replay(execute, "authoring_structure", request, validate)
             if hit:

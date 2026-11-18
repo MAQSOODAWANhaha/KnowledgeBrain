@@ -6,97 +6,19 @@ import { tenderApi } from "./bid/api/workbench";
 import { authoringHref } from "./bid/authoring/routes";
 import { BidTree } from "./bid/BidTree";
 import { Workbench } from "./bid/Workbench";
-import { Alert } from "./components/ui/alert";
-import { Badge } from "./components/ui/badge";
-import { Button } from "./components/ui/button";
-import { Dialog, DialogContent } from "./components/ui/dialog";
-import { Input } from "./components/ui/input";
-import { Label } from "./components/ui/label";
-import { Skeleton } from "./components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "./components/ui/table";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
+import { Skeleton } from "@astryxdesign/core/Skeleton";
+import { Table } from "@astryxdesign/core/Table";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { Crumbs } from "./Crumbs";
 import { go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
-import { cn } from "./lib/utils";
+import { LoginScreen } from "./login/LoginScreen";
 import { Shell } from "./Shell";
 
 const bidApi = tenderApi;
-
-function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  return (
-    <div className="grid min-h-dvh place-items-center bg-canvas px-6 py-12">
-      <form
-        className="w-full max-w-[400px] rounded-[8px] border border-line bg-white px-8 py-8"
-        data-testid="login-form"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setErr("");
-          setBusy(true);
-          try {
-            const r = await api.login(email.trim(), password);
-            setToken(r.token);
-            go("/");
-          } catch (ex) {
-            setErr(
-              ex instanceof ApiError
-                ? "登录失败，请再试一次"
-                : ex instanceof Error
-                  ? ex.message
-                  : "网络错误",
-            );
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <div className="mb-7 flex items-center gap-2.5">
-          <span className="grid h-7 w-7 place-items-center rounded-[6px] bg-sky text-[11px] font-semibold tracking-wide text-white">
-            KB
-          </span>
-          <strong className="text-[13px] font-semibold">KnowledgeBrain</strong>
-        </div>
-        <h1 className="mb-6 text-[20px] font-semibold tracking-tight">登录</h1>
-        <Label htmlFor="login-email">账号</Label>
-        <Input
-          id="login-email"
-          data-testid="login-email"
-          required
-          autoComplete="username"
-          placeholder="账号"
-          value={email}
-          onChange={(e) => setEmail(e.currentTarget.value)}
-        />
-        <div className="mt-4">
-          <Label htmlFor="login-password">密码</Label>
-          <Input
-            id="login-password"
-            data-testid="login-password"
-            required
-            autoComplete="current-password"
-            type="password"
-            placeholder="密码"
-            value={password}
-            onChange={(e) => setPassword(e.currentTarget.value)}
-          />
-        </div>
-        {err ? <p className="mt-3 text-sm text-stop">{err}</p> : null}
-        <Button type="submit" className="mt-6 w-full" size="lg" disabled={busy || !email.trim() || !password.trim()} data-testid="login-submit">
-          {busy ? "进入中…" : "进入"}
-        </Button>
-      </form>
-    </div>
-  );
-}
 
 function Bids({ email }: { email: string }) {
   const [rows, setRows] = useState<BidProjectView[] | null>(null);
@@ -134,22 +56,17 @@ function Bids({ email }: { email: string }) {
       crumbs={<Crumbs items={[{ label: "投标项目" }, { label: "在办项目" }]} />}
       title="在办项目"
       extra={
-        <Button data-testid="new-bid" onClick={() => setOpen(true)}>
-          新建项目
-        </Button>
+        <Button data-testid="new-bid" label="新建项目" variant="primary" onClick={() => setOpen(true)} />
       }
       tree={<BidTree rows={rows} />}
     >
-      <div className="wrap stack">
-        {listError && <Alert role="alert">
-          项目读取失败，已有项目不会因此被清空。
-          <Button size="sm" className="ml-3" onClick={() => setListRetry((value) => value + 1)}>重试读取项目</Button>
-        </Alert>}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-6">
+        {listError && <div role="alert"><Banner status="error" title="项目读取失败，已有项目不会因此被清空。" endContent={<Button size="sm" label="重试读取项目" onClick={() => setListRetry((value) => value + 1)} />} /></div>}
         {rows === null ? listError ? null : (
           <div className="panel space-y-3 p-4">
-            <Skeleton className="h-12" />
-            <Skeleton className="h-12" />
-            <Skeleton className="h-12" />
+            <Skeleton height={48} />
+            <Skeleton height={48} />
+            <Skeleton height={48} />
           </div>
         ) : rows.length === 0 ? (
           <div className="panel">
@@ -160,12 +77,7 @@ function Bids({ email }: { email: string }) {
         ) : (
           <div className="panel">
             <div className="toolbar">
-              <Input
-                placeholder="按项目名过滤…"
-                value={query}
-                onChange={(event) => setQuery(event.currentTarget.value)}
-                className="flex-1"
-              />
+              <TextInput label="过滤项目" isLabelHidden placeholder="按项目名过滤…" value={query} onChange={setQuery} />
               <div className="flex rounded-[6px] border border-line p-0.5">
                 {(
                   [
@@ -174,53 +86,20 @@ function Bids({ email }: { email: string }) {
                     ["ended", "已结束"],
                   ] as const
                 ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className={cn(
-                      "h-7 rounded-[4px] px-2.5 text-[12px] font-medium",
-                      filter === value ? "bg-sky text-white" : "text-quiet hover:text-ink",
-                    )}
-                    onClick={() => setFilter(value)}
-                  >
-                    {label}
-                  </button>
+                  <Button key={value} type="button" size="sm" label={label} variant={filter === value ? "primary" : "secondary"} onClick={() => setFilter(value)} />
                 ))}
               </div>
             </div>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>项目</TableHead>
-                  <TableHead className="w-[140px]">结束时间</TableHead>
-                  <TableHead className="w-[88px]">状态</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {shown.map((p) => (
-                  <TableRow
-                    key={p.id}
-                    className="cursor-pointer"
-                    onClick={() => go(authoringHref(p.id, "files"))}
-                  >
-                    <TableCell className="font-semibold"><a className="block rounded-[4px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky" href={`#${authoringHref(p.id, "files")}`}>{p.title}</a></TableCell>
-                    <TableCell className="text-quiet">
-                      {p.ended_at ? p.ended_at.slice(0, 10) : "—"}
-                    </TableCell>
-                    <TableCell>
-                      <Badge tone={p.status === "ended" ? "gray" : "sky"}>
-                        {p.status === "ended" ? "已结束" : "在办"}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <Table hasHover data={shown} columns={[
+              { key: "title", header: "项目", renderCell: (p) => <a href={`#${authoringHref(p.id, "files")}`}>{p.title}</a> },
+              { key: "ended_at", header: "结束时间", renderCell: (p) => p.ended_at ? p.ended_at.slice(0, 10) : "—" },
+              { key: "status", header: "状态", renderCell: (p) => <Badge label={p.status === "ended" ? "已结束" : "在办"} /> },
+            ]} />
           </div>
         )}
       </div>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent title="新建项目">
+      <Dialog isOpen={open} onOpenChange={setOpen}>
+        <DialogHeader title="新建项目" onOpenChange={setOpen} />
           <form
             data-testid="create-bid-form"
             className="space-y-4"
@@ -240,31 +119,14 @@ function Bids({ email }: { email: string }) {
               }
             }}
           >
-            <div>
-              <Label htmlFor="bid-title">项目名称</Label>
-              <Input
-                id="bid-title"
-                data-testid="bid-title"
-                value={title}
-                onChange={(e) => setTitle(e.currentTarget.value)}
-                required
-              />
-            </div>
-            <div>
-              <Label>负责人</Label>
-              <Input value={email} readOnly />
-            </div>
-            {err ? <Alert>{err}</Alert> : null}
+            <TextInput id="bid-title" data-testid="bid-title" label="项目名称" isRequired value={title} onChange={setTitle} />
+            <TextInput label="负责人" value={email} isReadOnly />
+            {err ? <Banner status="error" title={err} /> : null}
             <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" type="button" onClick={() => setOpen(false)}>
-                取消
-              </Button>
-              <Button type="submit" data-testid="bid-create">
-                创建
-              </Button>
+              <Button variant="secondary" type="button" label="取消" onClick={() => setOpen(false)} />
+              <Button type="submit" variant="primary" label="创建" data-testid="bid-create" />
             </div>
           </form>
-        </DialogContent>
       </Dialog>
     </Shell>
   );
@@ -320,8 +182,8 @@ export function App() {
       </div>
     );
   }
-  if (path === "/login") return <Login />;
-  const retrySession = <Button size="sm" onClick={() => setSessionRetry((value) => value + 1)}>重试验证登录</Button>;
+  if (path === "/login") return <LoginScreen />;
+  const retrySession = <Button size="sm" label="重试验证登录" onClick={() => setSessionRetry((value) => value + 1)} />;
   if (email === null || verifiedToken !== token()) return <div className="grid min-h-dvh place-items-center bg-canvas p-6">
     <div role={sessionError ? "alert" : "status"} className="panel max-w-md space-y-4 p-6">
       <p>{sessionError ? "暂时无法验证登录状态，登录信息已保留。" : "正在验证登录状态…"}</p>

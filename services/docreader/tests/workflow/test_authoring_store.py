@@ -372,12 +372,19 @@ async def test_late_usage_audit_retains_terminal_outcome_and_immutable_response(
         "failed",
         usage={"total_tokens": 25},
         error={"type": "late-disconnect"},
-        activity={"first_data_seconds": 1.2},
+        activity={"first_data_seconds": 1.2, "first_raw_seconds": 0.8,
+                  "first_content_seconds": 2.4, "max_raw_idle_seconds": 3,
+                  "semaphore_wait_seconds": 0.5, "raw_body": "private"},
     )
     row = (await store.get_execution(identity))["requests"][0]
     assert row["status"] == "succeeded" and row["usage"] == {"total_tokens": 25}
     assert row["response_ref"] == ref and row["error"] is None
     assert row["metadata"]["first_data_seconds"] == 1.2
+    assert row["metadata"]["first_raw_seconds"] == 0.8
+    assert row["metadata"]["first_content_seconds"] == 2.4
+    assert row["metadata"]["max_raw_idle_seconds"] == 3
+    assert row["metadata"]["semaphore_wait_seconds"] == 0.5
+    assert "raw_body" not in row["metadata"]
     with pytest.raises(Conflict):
         await store.finish_request(
             "audit",

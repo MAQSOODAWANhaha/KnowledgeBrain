@@ -1,3 +1,5 @@
+import { Button } from "@astryxdesign/core/Button";
+import { Selector } from "@astryxdesign/core/Selector";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 
@@ -42,15 +44,13 @@ export function KnowledgeSelection({ value, onChange, disabled = false }: {
   return <section className="tender-info-card" aria-label="编制参考资料版本">
     <h3>编制参考资料版本</h3>
     <p className="tender-note">选择产品或企业资料的固定版本，供后续编制参考。未选择或资料暂不可读取时，仍可使用项目已上传资料。</p>
-    <div className="tender-filter"><select aria-label="选择资料版本" value={picked} disabled={disabled || loading || !!error} style={{ flex: 1, minWidth: 0 }} onChange={event => setPicked(event.target.value)}>
-      <option value="">请选择资料版本</option>{choices.map(choice => <option key={keyOf(choice)} value={keyOf(choice)} disabled={value.some(item => keyOf(item) === keyOf(choice))}>{choice.label}</option>)}
-    </select><button disabled={disabled || loading || !!error || !chosen || duplicate || value.length >= 20} onClick={() => {
+    <div className="tender-filter"><Selector label="选择资料版本" value={picked} isDisabled={disabled || loading || !!error} onChange={setPicked} options={[{ value: "", label: "请选择资料版本" }, ...choices.map(choice => ({ value: keyOf(choice), label: choice.label, disabled: value.some(item => keyOf(item) === keyOf(choice)) }))]} /><Button isDisabled={disabled || loading || !!error || !chosen || duplicate || value.length >= 20} onClick={() => {
       if (chosen && !duplicate && value.length < 20) { onChange([...value, { product_id: chosen.product_id, version_id: chosen.version_id }]); setPicked(""); }
-    }}>添加资料版本</button><button disabled={disabled || loading} onClick={() => void load()}>刷新资料目录</button></div>
+    }} label="添加资料版本" /><Button isDisabled={disabled || loading} onClick={() => void load()} label="刷新资料目录" /></div>
     {loading && <p role="status">正在读取可选资料版本…</p>}
-    {error && <p role="alert">{error} <button disabled={disabled || loading} onClick={() => void load()}>重试资料目录</button></p>}
+    {error && <p role="alert">{error} <Button isDisabled={disabled || loading} onClick={() => void load()} label="重试资料目录" /></p>}
     {!loading && !error && !choices.length && <p className="tender-note">当前没有可选的有效资料版本，可先上传项目资料继续编制。</p>}
-    {value.length ? <ul aria-label="已选资料版本">{value.map(item => <li key={keyOf(item)}>{labelOf(item)} <button aria-label={`移除 ${labelOf(item)}`} disabled={disabled} onClick={() => onChange(value.filter(existing => keyOf(existing) !== keyOf(item)))}>移除</button></li>)}</ul> : <p className="tender-note">尚未选择参考资料版本。</p>}
+    {value.length ? <ul aria-label="已选资料版本">{value.map(item => <li key={keyOf(item)}>{labelOf(item)} <Button aria-label={`移除 ${labelOf(item)}`} isDisabled={disabled} onClick={() => onChange(value.filter(existing => keyOf(existing) !== keyOf(item)))} label="移除" /></li>)}</ul> : <p className="tender-note">尚未选择参考资料版本。</p>}
     {value.length >= 20 && <p className="tender-note">最多选择 20 个资料版本，请移除部分选择后再添加。</p>}
   </section>;
 }

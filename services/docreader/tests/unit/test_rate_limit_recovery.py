@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import json
+import time
 
 import httpx
 import pytest
@@ -12,13 +13,66 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import Cancelled, Lease, StaleExecution
 from docreader.llm import client as client_module
 from docreader.llm import request as request_module
-from docreader.llm.recovery import call_validated
+from docreader.llm.recovery import call_groups_validated, call_validated
 from docreader.llm.request import ModelInfrastructureError, ModelWorkUnitExhausted
 from test_contract_recovery import Model, Store, validate
 from test_tender_llm import model
 
 
 NOW = datetime(2026, 10, 30, 6, 0, tzinfo=timezone.utc)
+
+
+class GroupJournal:
+    def __init__(self):
+        self.rows = []
+
+    async def group_receipts(self, lease, basis_digest):
+        return list(self.rows)
+
+    async def assert_fence(self, lease):
+        pass
+
+    async def commit_artifact(self, lease, stage, artifact_ref, *, scope, input_digest, metadata):
+        row = {"stage": stage, "scope": scope, "artifact_ref": artifact_ref, "metadata": metadata}
+        self.rows.append(row)
+        return row
+
+    async def reserve_group_attempt(self, lease, attempt_id, artifact_ref, basis_digest, keys):
+        if sum(row["stage"] == "model-group-attempt" for row in self.rows) >= 4:
+            raise ModelWorkUnitExhausted("verify")
+        return await self.commit_artifact(lease, "model-group-attempt", artifact_ref, scope=attempt_id,
+                                         input_digest=basis_digest, metadata={"group_work_unit_keys": keys})
+
+
+@pytest.mark.parametrize("error,expected", [
+    (request_module.ModelRateLimitError(), [30, 60, 120]),
+    (request_module.ModelRateLimitError(45), [45, 60, 120]),
+    (request_module.ModelRateLimitError(600), [120, 120, 120]),
+    (ModelInfrastructureError("offline"), [1, 2, 4]),
+])
+async def test_grouped_failures_use_the_same_bounded_retry_policy(monkeypatch, tmp_path, error, expected):
+    delays = []
+    now = [NOW.timestamp()]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    async def sleep(seconds):
+        delays.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("docreader.llm.recovery.asyncio.sleep", sleep)
+    instance = Model([error] * 3 + [{"work_units": [{"work_unit_id": "unit-a", "accepted": True}]}])
+    journal = GroupJournal()
+    result = await call_groups_validated(instance, journal, ArtifactStore(tmp_path), Lease("run", 1, 1, "cmd"),
+        "verify", {"operation": "associate", "work_units": [{"work_unit_id": "unit-a"}],
+                   "target_work_unit_ids": ["unit-a"]}, lambda unit, value: value,
+        validate_shared=lambda response, current: [])
+    assert result["work_units"] == [{"work_unit_id": "unit-a", "accepted": True}]
+    assert len(instance.calls) == 4 and delays == expected
+    failures = [ArtifactStore(tmp_path).read_json(row["artifact_ref"]) for row in journal.rows
+                if row["stage"] == "model-group-response"][:3]
+    if isinstance(error, request_module.ModelRateLimitError):
+        assert all(row["failure_class"] == "http_429" for row in failures)
+        assert all(row.get("retry_after_seconds") == error.retry_after_seconds for row in failures)
 
 
 @pytest.mark.parametrize("header,expected", [

@@ -10,6 +10,11 @@ def _targets(chapters):
         yield from _targets(chapter['children'])
 
 
+def _owned_targets(outline):
+    yield from outline.get('unplaced_targets', [])
+    yield from _targets(outline['chapters'])
+
+
 async def outline_history(bridge, project_id):
     async with bridge.store.transaction() as conn:
         rows = await (await conn.execute(
@@ -26,7 +31,7 @@ async def response_catalog(bridge, project_id, base, *, revision=None, execution
     if execution_id is not None:
         _, original = await bridge.execution_outline(project_id, execution_id)
         if original['authoring_input'] == base['authoring_input']:
-            catalog.update((target['target_id'], target) for target in _targets(original['chapters']))
+            catalog.update((target['target_id'], target) for target in _owned_targets(original))
     if revision is not None:
         async with bridge.store.transaction() as conn:
             rows = await (await conn.execute(
@@ -42,8 +47,8 @@ async def response_catalog(bridge, project_id, base, *, revision=None, execution
                 continue
             outline = await asyncio.to_thread(bridge.artifacts.read_json, row['outline_ref'])
             if outline['authoring_input'] == base['authoring_input']:
-                catalog.update((target['target_id'], target) for target in _targets(outline['chapters']))
-    catalog.update((target['target_id'], target) for target in _targets(base['chapters']))
+                catalog.update((target['target_id'], target) for target in _owned_targets(outline))
+    catalog.update((target['target_id'], target) for target in _owned_targets(base))
     return list(catalog.values())
 
 

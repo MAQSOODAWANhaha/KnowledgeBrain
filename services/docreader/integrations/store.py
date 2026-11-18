@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import math
 import re
+import time
 from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
 
@@ -17,7 +19,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from docreader.llm.request import ModelWorkUnitExhausted
+from docreader.llm.request import ModelWorkUnitExhausted, model_retry_delay
 from docreader.tender.schema import Task, validate_issue_resolutions
 from docreader.tender.status import CommandStatus, ModelRequestStatus, RunStatus, status_row
 from docreader.workflow.state import WORKFLOW_PROTOCOL
@@ -63,6 +65,22 @@ class Lease:
 SOURCE_STAGES = frozenset({"register", "freeze", "freeze-document", "ocr", "source-spec"})
 
 
+def _request_retry_delay(error, attempt):
+    error = error if isinstance(error, dict) else {}
+    return model_retry_delay(attempt, rate_limited=error.get("type") == "http_429",
+                             retry_after_seconds=error.get("retry_after_seconds"))
+
+
+def _request_deadline(row, attempt):
+    deadline = row["metadata"].get("not_before")
+    if type(deadline) in {int, float} and math.isfinite(deadline) and deadline >= 0:
+        return deadline
+    # Legacy audits have no recorded wait. Anchor the fallback to their actual
+    # failure time, then persist it, rather than adding a fresh delay on restart.
+    finished = row.get("finished_at")
+    return (finished.timestamp() if finished else time.time()) + _request_retry_delay(row.get("error"), attempt)
+
+
 def _assert_analysis_protocol(revision: dict[str, Any]) -> None:
     spec = revision.get("execution_spec")
     if spec is not None and spec.get("workflow_protocol") != WORKFLOW_PROTOCOL:
@@ -71,10 +89,15 @@ def _assert_analysis_protocol(revision: dict[str, Any]) -> None:
 
 
 def _recorded_first_data(activity: dict[str, Any] | None) -> dict[str, float] | None:
-    value = activity.get("first_data_seconds") if isinstance(activity, dict) else None
-    if type(value) not in {int, float} or isinstance(value, bool) or value < 0:
+    if not isinstance(activity, dict):
         return None
-    return {"first_data_seconds": value}
+    timings = {}
+    for key in ("first_data_seconds", "first_raw_seconds", "first_content_seconds",
+                "max_raw_idle_seconds", "semaphore_wait_seconds"):
+        value = activity.get(key)
+        if type(value) in {int, float} and math.isfinite(value) and value >= 0:
+            timings[key] = value
+    return timings or None
 
 
 def _safe_metadata(value: Any) -> Any:
@@ -930,6 +953,37 @@ class Store:
                  basis_digest, Jsonb(metadata), lease.epoch),
             )).fetchone()
 
+    async def request_not_before(self, lease, task, logical_digest, *, group_work_unit_keys=None, group_attempt_id=None):
+        async with self.transaction() as conn:
+            await self.assert_fence(lease, conn)
+            match = ("metadata->'group_work_unit_keys' ?| %s" if group_work_unit_keys else
+                     "metadata->>'logical_request_digest' = %s AND NOT metadata ? 'group_attempt_id'")
+            rows = await (await conn.execute(
+                "SELECT * FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s "
+                "AND domain_revision = %s AND task = %s AND metadata->>'command_id' = %s "
+                "AND sent_at IS NOT NULL AND " + match + " ORDER BY created_at, request_id",
+                (lease.run_id, lease.source_version, lease.domain_revision, task, lease.command_id,
+                 group_work_unit_keys or logical_digest),
+            )).fetchall()
+            deadlines, counts = [], {}
+            for row in rows:
+                keys = row["metadata"].get("group_work_unit_keys") or [logical_digest]
+                attempt = max(counts.get(key, 0) for key in keys)
+                for key in keys:
+                    counts[key] = counts.get(key, 0) + 1
+                if group_attempt_id is not None and row["metadata"].get("group_attempt_id") != group_attempt_id:
+                    continue
+                if row["status"] not in {"failed", "uncertain"}:
+                    continue
+                deadline = _request_deadline(row, attempt)
+                if row["metadata"].get("not_before") != deadline:
+                    await conn.execute(
+                        "UPDATE tender_analysis_model_requests SET metadata = metadata || %s WHERE request_id = %s",
+                        (Jsonb({"not_before": deadline, "retry_deadline_origin": "legacy_failure_time"}), row["request_id"]),
+                    )
+                deadlines.append(deadline)
+            return max(deadlines, default=None)
+
     async def _matching_model_requests(
         self, conn: AsyncConnection, run_id: str, source_version: int, domain_revision: int, task: Task, digest: str,
     ) -> list[dict[str, Any]]:
@@ -1031,6 +1085,29 @@ class Store:
                     )
                 return
             observed = _recorded_first_data(activity) or {}
+            if (status in {ModelRequestStatus.FAILED, ModelRequestStatus.UNCERTAIN} and row["sent_at"] is not None
+                    and row["metadata"].get("logical_request_digest") is not None
+                    and "not_before" not in row["metadata"]):
+                if keys := row["metadata"].get("group_work_unit_keys"):
+                    reservations = await (await conn.execute(
+                        "SELECT metadata->'group_work_unit_keys' AS keys FROM tender_analysis_artifacts "
+                        "WHERE run_id = %s AND source_version = %s AND domain_revision = %s "
+                        "AND stage = 'model-group-attempt' AND metadata->>'command_id' = %s "
+                        "AND metadata->'group_work_unit_keys' ?| %s",
+                        (row["run_id"], row["source_version"], row["domain_revision"],
+                         row["metadata"]["command_id"], keys),
+                    )).fetchall()
+                    count = max(sum(key in entry["keys"] for entry in reservations) for key in keys)
+                else:
+                    count = (await (await conn.execute(
+                        "SELECT count(*) AS count FROM tender_analysis_model_requests WHERE run_id = %s "
+                        "AND source_version = %s AND domain_revision = %s AND task = %s "
+                        "AND metadata->>'logical_request_digest' = %s AND metadata->>'command_id' = %s "
+                        "AND sent_at IS NOT NULL",
+                        (row["run_id"], row["source_version"], row["domain_revision"], row["task"],
+                         row["metadata"]["logical_request_digest"], row["metadata"]["command_id"]),
+                    )).fetchone())["count"]
+                observed["not_before"] = time.time() + _request_retry_delay(error, count - 1)
             await conn.execute(
                 "UPDATE tender_analysis_model_requests SET status = %s, usage = COALESCE(%s, usage), error = %s, "
                 "response_ref = COALESCE(%s, response_ref), metadata = metadata || %s, "

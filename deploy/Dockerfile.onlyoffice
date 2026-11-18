@@ -1,0 +1,15 @@
+FROM onlyoffice/documentserver:8.3.3@sha256:0daa2d1d414d49286bfa9495fc0c936e7e73edaf8944a61102a7a6353a952297
+
+# The base includes unmodified WenQuanYi Zen Hei 0.9.45. Register it with
+# Fontconfig so system fallback and the editor/converter font sets agree.
+# License: GPL-2 with font embedding exception and M+ FONTS License.
+# https://helpcenter.onlyoffice.com/docs/installation/docs-install-fonts-docker.aspx
+RUN set -eu; \
+    echo '79c18ebe7b811951e8311bad7103ebeae8c337ed9988ea69e8a78a66cfe029b9  /var/www/onlyoffice/documentserver/core-fonts/wqy-zenhei/wqy-zenhei.ttc' | sha256sum -c -; \
+    install -d /usr/local/share/fonts/knowledgebrain; \
+    ln -s /var/www/onlyoffice/documentserver/core-fonts/wqy-zenhei/wqy-zenhei.ttc /usr/local/share/fonts/knowledgebrain/wqy-zenhei.ttc; \
+    fc-cache -f; \
+    documentserver-generate-allfonts.sh true; \
+    test -n "$(fc-list :lang=zh family)"; \
+    grep -q 'WenQuanYi Zen Hei' /var/www/onlyoffice/documentserver/sdkjs/common/AllFonts.js; \
+    grep -q 'WenQuanYi Zen Hei' /var/www/onlyoffice/documentserver/server/FileConverter/bin/AllFonts.js

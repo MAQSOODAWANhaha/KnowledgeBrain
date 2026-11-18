@@ -1,16 +1,21 @@
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
 @import "tailwindcss";
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "@astryxdesign/theme-neutral/theme.css";
 
 @theme {
   --font-sans: "PingFang SC", -apple-system, BlinkMacSystemFont, "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
   --default-transition-duration: 140ms;
-  --color-canvas: #f4f5f7;
+  --color-canvas: #f1f1f1;
   --color-surface: #ffffff;
-  --color-ink: #18181b;
-  --color-quiet: #3f3f46;
-  --color-line: #e4e4e7;
-  --color-input-line: #d4d4d8;
+  --color-ink: #1b1b1b;
+  --color-quiet: #474747;
+  --color-line: #e4e4e4;
+  --color-input-line: #d0d0d0;
   --color-sky: #1e3a5f;
-  --color-sky-wash: #eef2f6;
+  --color-sky-wash: #e7eef6;
   --color-sky-ink: #1e3a5f;
   --color-rail: #f4f5f7;
   --color-rail-fg: #3f3f46;
@@ -21,22 +26,22 @@
 }
 
 :root {
-  --bg: #f4f5f7;
+  --bg: #f1f1f1;
   --surface: #ffffff;
-  --ink: #18181b;
-  --muted: #3f3f46;
-  --faint: #52525b;
-  --crumb: #52525b;
-  --line: #e4e4e7;
-  --input-line: #d4d4d8;
-  --line-soft: #ececee;
-  --fill: #f4f4f5;
+  --ink: #1b1b1b;
+  --muted: #474747;
+  --faint: #5c5c5c;
+  --crumb: #5c5c5c;
+  --line: #e4e4e4;
+  --input-line: #d0d0d0;
+  --line-soft: #eeeeee;
+  --fill: #f1f1f1;
   --fill-2: #ffffff;
   --iris: #1e3a5f;
   --iris-600: #16304f;
-  --iris-soft: #eef2f6;
-  --iris-wash: #eef2f6;
-  --iris-tint: #eef2f6;
+  --iris-soft: #e7eef6;
+  --iris-wash: #e7eef6;
+  --iris-tint: #e7eef6;
   --iris-ink: #1e3a5f;
   --amber: #92400e;
   --amber-soft: #faf6f0;
@@ -45,7 +50,7 @@
   --rose: #9f1239;
   --rose-soft: #faf3f5;
   --shadow: none;
-  --elev: 0 8px 24px rgba(24, 24, 27, 0.12);
+  --elev: none;
   --r-card: 8px;
   --r-in: 6px;
   --r-ctl: 6px;
@@ -523,7 +528,78 @@ table.grid tr:hover td {
   .split-eq {
     grid-template-columns: 1fr;
   }
-  .login-body {
+  .login-/* Product bar: 64px, same height used by GitHub and Linear. Astryx items top out at 36px. */
+.kb-top {
+  box-sizing: border-box;
+  height: 64px !important;
+  min-height: 64px !important;
+  padding-inline: 20px !important;
+  background: var(--sky) !important;
+}
+.kb-top a {
+  color: #f7fafc !important;
+  font-size: 15px !important;
+  min-height: 40px !important;
+}
+.kb-top a[aria-current="page"] {
+  background: rgba(255, 255, 255, 0.16) !important;
+  border-radius: 6px;
+}
+.kb-account {
+  color: #f7fafc;
+  font-size: 14px;
+}
+
+/* Atlassian layout: top nav, side nav, one page header, main. */
+.kb-side {
+  width: var(--nav-w);
+  background: var(--color-rail) !important;
+  padding: 12px 8px;
+}
+.kb-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.kb-page-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+  min-height: 72px;
+  padding: 12px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.kb-page-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.kb-page-heading h1 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+  font-weight: 650;
+}
+.kb-crumbs {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.kb-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+body {
     padding: 32px 24px 48px;
     gap: 32px;
   }

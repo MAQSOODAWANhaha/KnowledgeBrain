@@ -34,7 +34,8 @@ async function structuredFixture(page: Page) {
 
 test("business correction edits quantities and scoring while freezing evidence and replaying the same request", async ({ page }) => {
   const f = await structuredFixture(page); await f.open();
-  await page.getByLabel("事项 1 类型", { exact: true }).selectOption("scoring_rule");
+  await page.getByRole("combobox", { name: "事项 1 类型", exact: true }).click();
+  await page.getByRole("option", { name: "评分规则", exact: true }).click();
   await page.getByLabel("事项 1 纠正文案", { exact: true }).fill("持证加3分。");
   await page.getByLabel("事项 1 涉及领域", { exact: true }).fill("技术\n服务");
   await page.getByLabel("事项 1 主体", { exact: true }).fill("投标人");
@@ -66,7 +67,8 @@ test("business correction edits quantities and scoring while freezing evidence a
 
 test("business correction exposes consequence and submission forms and can remove optional quantities", async ({ page }) => {
   const f = await structuredFixture(page); await f.open();
-  await page.getByLabel("事项 1 类型", { exact: true }).selectOption("consequence_rule");
+  await page.getByRole("combobox", { name: "事项 1 类型", exact: true }).click();
+  await page.getByRole("option", { name: "后果规则", exact: true }).click();
   await page.getByLabel("事项 1 触发条件", { exact: true }).fill("缺少证明");
   await page.getByLabel("事项 1 后果", { exact: true }).fill("否决投标");
   await page.getByRole("button", { name: "事项 1 删除数值 1", exact: true }).click();
@@ -76,7 +78,8 @@ test("business correction exposes consequence and submission forms and can remov
   expect(f.state.calls[0].body.changes).toEqual([{ pack_id: "pack-1", item_id: "item-1", kind: "consequence_rule",
     numbers: null, consequence: { trigger: "缺少证明", effect: "否决投标" } }]);
   await page.getByText("事项 1：服务响应不超过2小时", { exact: true }).click();
-  await page.getByLabel("事项 1 类型", { exact: true }).selectOption("submission_requirement");
+  await page.getByRole("combobox", { name: "事项 1 类型", exact: true }).click();
+  await page.getByRole("option", { name: "提交要求", exact: true }).click();
   await page.getByLabel("事项 1 填写字段", { exact: true }).fill("联系人\n联系电话");
   await page.getByLabel("事项 1 提交材料", { exact: true }).fill("资质证明");
   await page.getByLabel("事项纠正理由", { exact: true }).fill("补齐提交要求。");

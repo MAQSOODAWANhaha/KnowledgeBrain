@@ -14,7 +14,7 @@ import pytest
 from docreader.integrations.artifacts import ArtifactIntegrityError, ArtifactStore
 from docreader.integrations.store import Cancelled, Conflict, StaleExecution
 from docreader.llm.budget import RequestBudget
-from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
+from docreader.llm.request import ModelConfigurationError, ModelContractError, ModelWorkUnitExhausted
 from docreader.tender import document_execution, saved_word_review
 from docreader.tender.schema import AuthoringInput, AuthoringOutline
 from docreader.tests.unit.test_saved_word_review import saved_bytes
@@ -30,7 +30,7 @@ def runtime(tmp_path, monkeypatch):
     }]).model_dump()
     document = {"outline_ref": artifacts.put_json(outline), "basis_ref": artifacts.put_json({"materials": []}),
                 "unit_refs": [artifacts.put_json({"blocks": [{"text": "已过时的生成正文不得用于保存稿复核"}]})]}
-    data, rows, calls = saved_bytes(), {}, []
+    data, rows, calls, requests = saved_bytes(), {}, [], []
     state = SimpleNamespace(hook=None, response=None, release_error=None)
     store = SimpleNamespace(setup=AsyncMock(), heartbeat=AsyncMock())
 
@@ -87,6 +87,7 @@ def runtime(tmp_path, monkeypatch):
             pass
 
         async def __call__(self, request, validate):
+            requests.append(deepcopy(request))
             payload = json.loads(request["messages"][1]["content"][0]["text"])
             calls.append(payload)
             if state.hook:
@@ -101,14 +102,38 @@ def runtime(tmp_path, monkeypatch):
         "version_id": "saved-version-one", "docx_sha256": hashlib.sha256(data).hexdigest(),
         "reason": "核对人工填写的工期", "heartbeat_seconds": 20}
     budget = RequestBudget(context_tokens=131072, model="fixture", prompts={})
+    config = SimpleNamespace(chat=SimpleNamespace(model="fixture", context_tokens=131072, base_url="http://fixture"))
 
     async def execute(**changes):
         return await saved_word_review.execute_saved_review(SimpleNamespace(dsn="fixture"), artifacts,
-            SimpleNamespace(chat=SimpleNamespace(model="fixture", context_tokens=131072, base_url="http://fixture")),
+            config,
             budget, **{**options, **changes})
 
     return SimpleNamespace(artifacts=artifacts, snapshot=snapshot, document=document, budget=budget,
-        data=data, options=options, execute=execute, rows=rows, calls=calls, state=state, active=active, store=store)
+        data=data, options=options, execute=execute, rows=rows, calls=calls, requests=requests,
+        config=config, state=state, active=active, store=store)
+
+
+async def test_saved_review_keeps_explicit_option_in_rebuilt_budget_and_cache_identity(runtime):
+    runtime.config.chat.reasoning_effort = runtime.budget.reasoning_effort = 'medium'
+    result = await runtime.execute()
+    assert runtime.requests and all(request.get('reasoning_effort') == 'medium' for request in runtime.requests)
+    assert runtime.rows[runtime.options['execution_id']]['execution_spec']['budget']['reasoning_effort'] == 'medium'
+    count = len(runtime.requests)
+    assert await runtime.execute() == result and len(runtime.requests) == count
+    runtime.config.chat.reasoning_effort = runtime.budget.reasoning_effort = 'high'
+    with pytest.raises(Conflict):
+        await runtime.execute()
+    assert len(runtime.requests) == count
+
+
+async def test_saved_review_rejects_mismatched_configuration_before_cached_return(runtime):
+    await runtime.execute()
+    count = len(runtime.requests)
+    runtime.config.chat.reasoning_effort = 'medium'
+    with pytest.raises(ModelConfigurationError):
+        await runtime.execute()
+    assert len(runtime.requests) == count
 
 
 async def test_review_uses_saved_human_text_and_tables_with_reason_and_no_generated_units(runtime, monkeypatch):
@@ -151,6 +176,15 @@ async def test_publication_failure_reuses_same_execution_accepted_response(runti
     assert runtime.artifacts.read_json(reference)["reviewed_record_count"] > 0
     assert len(runtime.calls) == 1
     assert await runtime.execute() == reference
+    assert len(runtime.calls) == 1
+
+
+async def test_saved_review_legacy_retry_policy_cannot_resume_under_new_execution(runtime):
+    await runtime.execute()
+    spec = runtime.rows["saved-review"]["execution_spec"]
+    assert spec.pop("retry_policy") == "bounded_work_unit_deadline_v1"
+    with pytest.raises(Conflict, match="immutable review"):
+        await runtime.execute()
     assert len(runtime.calls) == 1
 
 

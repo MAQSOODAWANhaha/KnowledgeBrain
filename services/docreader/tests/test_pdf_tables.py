@@ -40,6 +40,16 @@ def _cell_text(x: float, y: float, text: str) -> list[dict]:
     return glyphs
 
 
+def test_table_of_contents_leader_dots_are_not_a_borderless_table() -> None:
+    chars = []
+    for index in range(6):
+        y = 700.0 - index * 18
+        chars.extend(_cell_text(40, y, f'章节{index}'))
+        chars.extend(_cell_text(200, y, '........'))
+        chars.extend(_cell_text(400, y, str(index + 1)))
+    assert extract_tables_from_chars(chars) == []
+
+
 def test_alignment_grid_has_cells_not_page_blob() -> None:
     chars: list[dict] = []
     headers = ["列甲", "列乙", "列丙", "列丁"]
@@ -70,6 +80,36 @@ def test_alignment_grid_has_cells_not_page_blob() -> None:
     mm = widths_mm(grid)
     assert len(mm) == grid.column_count
     assert sum(mm) <= 180.0 + 1e-6
+
+
+def test_ruled_cell_preserves_source_line_breaks() -> None:
+    horizontal = [(0.0, y, 100.0) for y in (0.0, 60.0)]
+    vertical = [(x, 0.0, 60.0) for x in (0.0, 100.0)]
+    chars = _cell_text(5.0, 45.0, '类型:') + _cell_text(5.0, 28.0, '等级:') + _cell_text(5.0, 11.0, '证书号:')
+    tables = _tables_from_rules(horizontal, vertical, chars)
+    assert tables[0].cells[0].text == '类型:\n等级:\n证书号:'
+
+
+def test_single_cell_frame_with_segmented_vertical_borders_and_underlines(monkeypatch) -> None:
+    horizontal = [(0.0, 0.0, 100.0), (0.0, 100.0, 100.0), (0.0, 25.0, 20.0), (0.0, 75.0, 20.0)]
+    vertical = [(x, start, end) for x in (0.0, 100.0) for start, end in ((0.0, 50.0), (50.0, 100.0))]
+    monkeypatch.setattr(pdf_tables, 'collect_rule_lines', lambda _page, _raw: (horizontal, vertical))
+    chars = _cell_text(10.0, 45.0, '固定文字')
+    tables = extract_tables_from_page(object(), object(), chars)
+    assert len(tables) == 1
+    assert (tables[0].row_count, tables[0].column_count) == (1, 1)
+    assert tables[0].cells[0].text == '固定文字'
+
+
+@pytest.mark.parametrize('columns', [1, 2])
+def test_single_row_ruled_forms_keep_complete_boxes(columns) -> None:
+    horizontal = [(0.0, y, columns * 60.0) for y in (0.0, 30.0)]
+    vertical = [(float(x * 60), 0.0, 30.0) for x in range(columns + 1)]
+    chars = _cell_text(8.0, 10.0, '扫描件')
+    tables = _tables_from_rules(horizontal, vertical, chars)
+    assert len(tables) == 1
+    assert (tables[0].row_count, tables[0].column_count) == (1, columns)
+    assert tables[0].cells[0].text == '扫描件'
 
 
 def test_ruled_grid_freezes_objective_merged_span() -> None:
@@ -157,6 +197,23 @@ def test_oversize_band_does_not_wipe_valid_band() -> None:
     assert tables
     assert all(grid.column_count <= MAX_PDF_TABLE_COLUMNS for grid in tables)
     assert any(grid.column_count >= 3 for grid in tables)
+
+
+def test_short_underlines_are_not_turned_into_a_table(monkeypatch) -> None:
+    class _Page:
+        def get_size(self):
+            return (600.0, 800.0)
+
+    horizontal = [(40.0, float(y), 180.0) for y in (10, 30, 50, 70)]
+    monkeypatch.setattr(pdf_tables, 'collect_rule_lines', lambda _page, _raw: (horizontal, []))
+    monkeypatch.setattr(pdf_tables, 'extract_tables_from_chars', lambda _chars: [_grid(4, 3)])
+    assert extract_tables_from_page(_Page(), object(), []) == []
+
+
+def _grid(rows, columns):
+    return PdfTableGrid(
+        left=0, top=100, right=100, bottom=0, row_count=rows, column_count=columns,
+        column_edges=[float(index * 10) for index in range(columns + 1)])
 
 
 def test_page_limit_falls_back_without_raising(monkeypatch) -> None:
@@ -284,7 +341,7 @@ def test_merged_wrapped_text_does_not_concatenate_virtual_columns() -> None:
              for label, x, y in [('A', 2, 33), ('B', 12, 33),
                                  ('C', 2, 23), ('D', 12, 23)]]
     grid, = _tables_from_rules(horizontal, vertical, chars)
-    assert grid.cells[0].text == 'ABCD'
+    assert grid.cells[0].text == 'AB\nCD'
     assert grid.cells[0].col_span == 2
     assert grid.cells[1].text == ''
 

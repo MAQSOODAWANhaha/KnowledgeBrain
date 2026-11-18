@@ -217,3 +217,191 @@ F0—F5已实现并完成定向验证；以下勾选区分源码/定向结果与
 
 验证：真实模型/Word/ZIP人工对照；受控知识资料验收与真实企业资料验收分别记录。
 依赖：F8.1—F8.3及检查点三。证据仓库外保存，动态状态只在handoff.md更新。
+
+## F9：分析与编制性能修复清单（BUG-139）
+
+合同见[完整方案](plan.md#f9分析与编制性能修复方案bug-139)。这是原招标修复工作的增量，
+不替换F0—F8未完成项。60秒连续raw idle已有源码和隔离验证，部署/真实效果按交接记录；
+下面其他能力均不因规划完成而勾选。每个实现切片先失败反例、最小修改、定向验证、增量审查。
+
+### F9.0a 请求耗时观测
+
+- [x] 在现有activity/回执补first_raw、first_content、max_raw_idle和排队时间，保留旧first_data含义。
+- [x] 覆盖gzip缓冲、纯心跳/thinking、空块、末尾静默、取消；日志不含原文/headers/密钥，实际请求与摘要不变。
+- [x] 定向streaming/client及两条PG保存链路测试通过，观测自身新增模型调用为0。
+
+依赖：60秒基线。范围：`llm/streaming.py`、`client.py`及对应2份测试，约4文件。
+验证：`test_tender_streaming.py`、`test_tender_llm.py`；全部时间来自虚拟时钟或本地SSE，不以真实模型替代边界测试。
+
+### F9.0b 阶段准备与输出成本基线
+
+- [x] 禁网真实回放分别计_Analysis、review/locate/association、描述计量、装批、CAS和回执恢复；重复测量并报告波动。
+- [x] 列输出字段/visible/reasoning成本，传输成功与正式采纳、墙钟/请求并集/请求总和、未知用量分开。
+- [x] 给出F9.2热点、F9.5字段成本及F9.6启用条件缺口的证据；不将历史612秒全部认定为可消除成本。
+
+依赖：F9.0a指标口径；离线profile可并行准备。范围：窄诊断脚本、`llm/usage.py`或必要阶段计时及对应测试，拆成各约3文件。
+验证：`test_budget_observation.py`、`test_analysis_responsiveness.py`和真实冻结回包回放；证据仓库外保存。
+
+### F9.1a 普通与合批429策略一致
+
+- [x] 保留安全失败类别及Retry-After数值，沿用既有30/60/120且封顶120的策略，非429不套用长退避。
+- [x] 相同429失败序列下两条路径语义一致；成功兄弟保留、uncertain未知用量、每逻辑单元首次加三次均不改变。
+- [x] 无效/缺失/超上限Retry-After与最终耗尽反例通过，不把延长等待等同于已经提速。
+
+依赖：F9.0a；可与F9.2离线工作并行。范围：`llm/recovery.py`、必要`client.py`及rate-limit/failure测试，约3—4文件。
+验证：扩展`test_rate_limit_recovery.py`、`test_failure_retry_table.py`、`test_contract_recovery.py`。
+
+### F9.1b 等待期限持久化及崩溃恢复
+
+- [x] 普通与合批在既有回执中保存失败身份及not_before；新发送和unfinished恢复均只等剩余时间。
+- [x] 失败保存后、预留后等待中、截止过后重启；等待时取消/失租；部分成功叶恢复均不重复发送或增加额度。
+- [x] 明确旧回执缺字段/无时间信息的回退；sleep不持事务锁，旧worker恢复发送仍受epoch围栏约束。
+
+依赖：F9.1a。范围：`llm/recovery.py`、必要现有store回执接口及unit/隔离PG恢复测试，约4—5文件。
+验证：`workflow/test_group_recovery.py`、`test_request_replay.py`、`test_work_unit_attempts.py`、`test_expired_retry.py`；普通路径同样覆盖崩溃点。
+
+### F9.1c 外部断连与实际并发边界
+
+- [ ] 用request_id/时间对照已有HTTP阶段与上游排队、首字节、deadline、关闭方；缺日志则明确待查。
+- [ ] 计算多个execution/worker的真实重叠峰值；真实对照先单任务运行，不把单实例2当成Key全局2。
+- [ ] 若证实共享额度争用，先评估既有接单配置；若没有对应证据，不改网络、代理、模型或并发来猜修。
+
+依赖：F9.0a；与本地实现并行。范围：现有诊断/报告与服务侧证据，不预设生产代码修改。
+验收：有上游证据和匹配的修复后结果才能关闭断连；60秒本地超时、一次成功或更快失败均不算解决。
+
+### 检查点F9-A：可靠性
+
+- [x] F9.0/1的确定性与隔离恢复测试完成，旧断言修正复验无失败/错误/必需项跳过，完整请求/既有回包身份未受观测影响。
+- [x] 429策略修复与待查61秒断连分开；退避/重启不增加尝试次数，隔离取消测试确认无遗留后台调用；真实服务状态不据此推定。
+
+### F9.2a 纯规划描述缓存收益评估
+
+- [x] 重复剖析operation_plan/Token计量与各阶段请求构建，比较潜在收益与波动。
+- [x] 描述缓存潜在收益未超过整体测量波动，保留原实现，进入已证实热点的F9.2b；实际数值与证据见交接。
+- [ ] 若后续样本使该片成立，再验证完整依赖失效、冷/热请求一致及发送围栏；当前不声称已实现描述缓存。
+
+依赖：F9.0b热点结果。候选范围：`checks/analysis.py`、必要`analysis_batch_execution.py`及计划复用测试；无净收益不落生产代码。
+验证：新计划复用测试、`test_analysis_batch_execution.py`、`test_analysis_concurrency.py`、`test_analysis_responsiveness.py`。
+
+### F9.2b 完整阶段请求复用（按profile决定）
+
+- [x] 仅构造确为热点时缓存纯review请求；复用既有CAS/回执，保留JSON键顺序，不增加通用缓存框架。
+- [x] 命中不重做对应构造，未命中重建、损坏失败、依赖变化失效；不缓存租约/凭证/attempt或pickle活对象。
+- [x] 真实冻结回包冷/热重放的完整核验产物、实际review请求摘要相同，新增模型调用0；实测在交接维护。
+- [ ] 仅未来另有热点证据才缓存locate/association，并显式恢复其候选、路由、问题、保护和未完成集合；本片保留原实现。
+
+依赖：F9.2a测量。范围：一个阶段的analysis/必要接线及plan-reuse/隔离replay测试，各片≤5文件。
+完成出口：有净收益则保留；无需实现时记录profile依据并保留原实现，不伪称已缓存全阶段。
+
+### F9.3 当前A0/A1请求与内容验证
+
+- [ ] 零网络构造当前A0各包/全局归并/F/A1，报告实际总调用、最大/累计输入、全部保留正文及未分配要求。
+- [ ] 精确身份相同的S才复用；原表/技术行/共同条件逐值核对，不能用旧151k/162k请求当新版测量。
+- [ ] 有限真实对照同时核对采纳、Token、重试、耗时及Word；现有实现无缺陷时不重复写compact或精简器。
+
+依赖：F9.0；真实对照采用检查点F9-A配置。范围：离线脚本/测试，发现缺陷先入BUG再限域修改。
+验证：`test_revision_context.py`、`test_session_outline_contract.py`、`test_assembly_candidate_scope.py`、`test_assembly_condition_handoff.py`、`test_outline_revision_selections.py`。
+
+禁网预审已确认当前S Prompt与旧v8不同，首个请求即无精确回包；不得移植旧S假冒新版
+A0/A1实测。实际输入体量与停止位置见交接，以上完整真实对照仍未完成。
+
+真实执行暴露BUG-140，修改前五问见plan.md的F9.3补充：
+
+- [x] 先失败复现并补齐每个A0子包的候选/未分配规则证据闭包，完整原文逐值保全。
+- [x] 以含全部依赖及未分配规则的最终请求装包，复现并修复末包后追加超估；保留不可分单元的明确出口。
+- [x] 全局表示先做无损去重试算；实测仍超预算，未增加生产协议，不盲发已知超估global。容量出口仍待解决。
+- [ ] 完成新冻结合同及受影响回归后，以新执行精确复用已成功S/A0，再推进真实F/A1/Word和新分析。
+
+真实全局出口检查另发现BUG-141：
+
+- [x] 以多包反例锁住局部候选/引用域，遗漏保全不再重复其他包候选。
+- [x] 拼接按包身份重映射关联，覆盖相同局部编号与候选绑定的保全。
+- [x] 完成新接收合同、回归与冻结证据；全局容量未解决时不称完整编制通过。
+
+### F9.4a S包校验隔离
+
+- [x] 每包固定wire、别名和可读范围；移出共享read_units完成时序依赖，由协调者按计划序归并。
+- [x] 逆序返回、前包纠正/耗尽、同unit不同片段、跨包仅有引用身份反例通过；语义变化显式记录冻结合同。
+- [x] 既有来源缓存/引用绑定和安全稿保全定向回归通过。
+
+依赖：F9.3离线来源基线。范围：`authoring.py`、`authoring_pipeline.py`及来源绑定/新增阶段并发测试，约4文件。
+验证：`test_authoring_source_cache.py`、`test_outline_source_binding.py`、新`test_authoring_stage_concurrency.py`。
+
+### F9.4b S受限并发，F9.4c R多包并发
+
+- [x] S利用同client既有并发参数，默认2；真实样本R仅单包，保留原实现，不为并行额外拆包。
+- [x] 固定回包下请求内容/数量/最终顺序相同；重复摘要只发送一次，局部错误不串兄弟身份。
+- [x] 普通包耗尽保留gap和兄弟；取消/失租/存储错误停止新发送并结算在途；恢复成功包零重发。
+- [ ] 仅后续真实多包R具有净收益证据时，单独实施顺序归并的R并发切片。
+
+依赖：S依赖F9.4a，R依赖固定复核输入及多包测量。范围：每片pipeline、新并发测试及现有execution测试，约3—4文件。
+验证：新增并发反例、`test_authoring_review_scope.py`、`test_authoring_coverage_review_fixes.py`；PG运行`acceptance/test_document_source_recovery.py`、`test_document_plan_recovery.py`、`test_document_execution.py`。
+
+### F9.5a 新关系ID由宿主派生
+
+- [x] 完整抽取回包按冻结关系顺序派生正式ID；关系文本/端点/证据/数量不变，不顺手改全局持久Relation类型。
+- [x] 原BUG-077回包离线恢复；非法端点和重复事项ID仍保留纠正/问题，不能猜测映射或去重业务关系。
+- [x] 输出合同、Prompt及冻结版本一起更新；旧执行不热替换，独立核验仍完整执行。
+
+依赖：F9.0b；先于缺集合纠正。范围：`llm/contracts.py`、`requirements/extract.py`、extract prompt及2份测试，约5文件。
+验证：`test_output_contracts.py`、`test_analysis_response_recovery.py`、`test_analysis_extraction.py`、`test_wire_references.py`。
+
+### F9.5b 输出成本精简，F9.5c 补缺集合纠正
+
+- [x] 现成回包字段成本及可行性评估：关系ID省量有限，其余事项text多数不等于quote；缺少准确缺集合候选的成本/质量对照，暂不启用进一步精简或补集合协议，依据见交接。
+- [ ] 先按字段证明可精确恢复的重复；不把语义text当原文quote，不删条件/例外/必要证据，不重做已有短引用。
+- [ ] 仅完整JSON且items/引用可验证时冻结候选，补明确缺失集合，完整合并校验后原子采纳；截断/歧义/缺items走原出口。
+- [ ] 输入超容量或补充失败仍消耗原逻辑单元剩余额度；不提前暴露候选、不重置预算；已采纳及完整成功回包恢复零重发。
+- [ ] sent/uncertain沿既有围栏及授权重试，未知用量不计零；不承诺供应商只执行或计费一次。
+
+依赖：F9.5a及真实样本离线可行性。先合同/纯合并约5文件，再recovery/nodes/extract及恢复测试约5文件；不同时实现通用Patch。
+验证：已有response/contract/output测试；拟新增`unit/test_extraction_partial_recovery.py`、`workflow/test_extraction_partial_recovery.py`，并回归work-unit/replay围栏。
+完成出口：只有总调用/输入/输出/真实质量综合有收益才启用；不适用或超容量明确保留原有限纠正。
+
+### F9.6 分包与合批校准（条件试验）
+
+- [x] 核对启用条件：尚无新的可靠传输基线及1/2/4同依据净收益对照，保留当前分包和4目标上限；不把规划完成当成试验通过。
+- [x] 完成旧真实台账固定完整依据的1/2/4目标拆分容量试算，核对全部目标、成员及发现配对覆盖；仅有输入/输出预留与请求数对照，未据此更改生产合批，真实质量/延时仍待验。
+- [ ] 同一依据分别比较1/2/4目标关联及joint完整成本；另一次试验比较抽取输出负载分包，禁止同时改变两项。
+- [ ] 每个候选列完整调用公式、最大/累计输入输出及修订失效范围；完整来源/表头/共同条件/配对覆盖不减少。
+- [ ] 只有超过测量波动且质量不退化的方案才落地；无净收益保留原实现并记录结论，不扩大到8目标或取消独立核验。
+
+依赖：F9.0、可靠性基线及相应F9.5成本数据。先1—2个试算文件；胜出后packing或analysis_batches/budget与测试单独成片。
+验证：`test_analysis_packing.py`、`test_analysis_locate_packing.py`、`test_analysis_relation_batching.py`、`test_analysis_batches.py`、`test_batch_budget.py`、`test_batch_wire.py`。
+
+### 检查点F9-B：技术与性能对照
+
+- [x] 已实施切片的冷/恢复、固定延迟并发及完整产物对照保存；定向与完整unit通过，隔离workflow/acceptance全量扫描的旧断言失败项已精准修正复验，详情见交接。
+- [x] 纯调度/缓存内容等价，协议修改列清语义差异及证据；失败更快、Token更少或单次更快均不能单独判真实验收完成。
+- [x] 隔离测试与禁网回放核对旧身份/回执保全，旧Word未改；必要integration未以缺环境skip计通过，候选优化条件不足时保留原实现。
+- [ ] 当前新版完整A0/A1及同文件真实性能/Word对照仍按F9.3/F9.7执行，不由上述技术检查代替。
+
+### F9.7 同文件真实验收与分批发布
+
+- [ ] 同原件、同模型端点、同60秒、同并发，从头分析与失败恢复分别验证；编制阶段另列，旧98分钟续跑不冒充新运行基准。
+- [ ] 完整原文、事项、条件/例外、技术行、共同条件、narrative正文、分卷/标题/原表/图片/分页审计满足F8 C1—C10；人工未决和空应答/报价保持。
+- [ ] 发布前核对新旧冻结runtime和接单边界，准备停止新版本接单及保留其执行恢复的回滚；实际部署/真实结果只更新交接。
+
+依赖：检查点F9-A/B和F8相关内容修复。范围：现有验收/发布流程及记录；不新增业务节点。
+最终完成标准：速度/失败成本的有效改善、完整业务验收和可恢复交付分别有证据；外部故障或已知正文缺口未关闭就如实保留未完成。
+
+### 验证命令约定
+
+在`services/docreader`执行。本机已存在`.venv/bin/python`；CI继续使用仓库冻结依赖环境。
+新测试名是拟新增文件，落地后才加入命令。例：
+
+```sh
+KB_PERF_EVIDENCE="$(mktemp -d /opt/workspace/kb-tender-evidence/perf-repair-XXXXXX)"
+.venv/bin/python -m pytest tests/unit -q --basetemp="$KB_PERF_EVIDENCE/unit-tmp" --junitxml="$KB_PERF_EVIDENCE/unit.xml"
+```
+
+PG/Redis测试须先按runbook提供独立测试库的`TENDER_TEST_DATABASE_URL`、`TENDER_TEST_DSN`
+及隔离Redis DB，不能使用共享业务库/清理已有任务。配置完成后执行：
+
+```sh
+.venv/bin/python -m pytest tests/workflow tests/acceptance -q --basetemp="$KB_PERF_EVIDENCE/integration-tmp" --junitxml="$KB_PERF_EVIDENCE/integration.xml"
+```
+
+每片先运行其定向文件，检查点再运行完整受影响套件；无代码变化不重复刷测。真实模型及
+独立Word/ZIP审计另跑并独立记账，所有运行证据留在上述仓库外目录。勾选只对应明确
+完成的源码/离线能力，不代表部署或付费真实流程；实际执行状态与报告见handoff.md。

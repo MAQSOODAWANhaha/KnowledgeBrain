@@ -5,7 +5,8 @@ test("volume and cover settings survive save/reload and can be explicitly cleare
   const f = await fixture(page); await f.ready(); await f.edit(); await f.dirty();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   await page.getByLabel("导出为独立分册", { exact: true }).check();
-  await page.getByLabel("章节展示方式", { exact: true }).selectOption("cover");
+  await page.getByRole("combobox", { name: "章节展示方式", exact: true }).click();
+  await page.getByRole("option", { name: "封面（不参与编号与目录）", exact: true }).click();
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
   await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 2");
   expect(f.state.outlineSaves[0].body.chapters[0]).toMatchObject({ chapter_id: "chapter-1", is_volume: true, presentation_role: "cover" });
@@ -18,9 +19,10 @@ test("volume and cover settings survive save/reload and can be explicitly cleare
   await page.reload();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   await expect(page.getByLabel("导出为独立分册", { exact: true })).toBeChecked();
-  await expect(page.getByLabel("章节展示方式", { exact: true })).toHaveValue("cover");
+  await expect(page.getByRole("combobox", { name: "章节展示方式", exact: true })).toContainText("封面");
   await page.getByLabel("导出为独立分册", { exact: true }).uncheck();
-  await page.getByLabel("章节展示方式", { exact: true }).selectOption("body");
+  await page.getByRole("combobox", { name: "章节展示方式", exact: true }).click();
+  await page.getByRole("option", { name: "正文章节（参与编号与目录）", exact: true }).click();
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
   await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 3");
   expect(f.state.outlineSaves[1].body.chapters[0]).toMatchObject({ is_volume: false, presentation_role: "body" });

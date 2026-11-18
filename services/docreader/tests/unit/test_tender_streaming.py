@@ -4,14 +4,15 @@ import asyncio
 import json
 import zlib
 from copy import deepcopy
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from docreader.integrations.store import RequestReplayBlocked
 from docreader.llm import ModelConfig, ModelInfrastructureError, ModelSemanticError, OpenAIModel, UncertainModelResponse
-from docreader.llm.request import ImageInput, build_request, request_digest
-from docreader.llm import streaming
+from docreader.llm.request import ImageInput, ModelRateLimitError, build_request, request_digest
+from docreader.llm import client as client_module, streaming
 from test_tender_llm import Audit, CountedArtifacts, environment, model, response
 
 
@@ -45,6 +46,7 @@ class ScheduledStream(httpx.AsyncByteStream):
 def timed_model(monkeypatch, chunks, *, header_delay=0, artifacts=None, headers=None):
     clock = [0.0]
     monkeypatch.setattr(streaming, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: clock[0], time=client_module.time.time))
     source = ScheduledStream(clock, chunks)
 
     def handler(request):
@@ -55,8 +57,102 @@ def timed_model(monkeypatch, chunks, *, header_delay=0, artifacts=None, headers=
     return client, audit, clock, source
 
 
-@pytest.mark.parametrize("header_delay,body_delay", [(0, 181), (170, 11), (181, 0)])
-async def test_first_body_shares_180_seconds_with_headers(monkeypatch, tmp_path, header_delay, body_delay):
+async def test_request_timing_separates_raw_content_and_empty_deltas(monkeypatch, tmp_path):
+    artifacts = CountedArtifacts(tmp_path)
+    chunks = [(2, b""), (1, b": heartbeat\n\n"), (4, event("")),
+              (7, event(delta={"reasoning_content": "thinking"})),
+              (3, event('{"ok":true}')), (1, event(delta={}, finish="stop")), (9, DONE)]
+    client, audit, _, _ = timed_model(monkeypatch, chunks, header_delay=5, artifacts=artifacts)
+    async with client:
+        assert await client.call("extract", {}) == {"ok": True}
+    expected = {"first_raw_seconds": 8.0, "first_data_seconds": 8.0,
+                "first_content_seconds": 22.0, "max_raw_idle_seconds": 9.0,
+                "semaphore_wait_seconds": 0.0}
+    assert audit.events[-1]["activity"] == expected
+    saved = artifacts.read_json(audit.events[-1]["response_ref"])
+    assert {key: saved["activity"][key] for key in expected} == expected
+
+
+@pytest.mark.parametrize("ending,error,expected_idle", [
+    (httpx.ReadError("connection reset"), UncertainModelResponse, 17.0),
+    (b"", UncertainModelResponse, 17.0),
+    (GOOD, UncertainModelResponse, 60.0),
+])
+async def test_request_timing_includes_empty_chunks_and_terminal_silence(
+    monkeypatch, tmp_path, ending, error, expected_idle,
+):
+    artifacts = CountedArtifacts(tmp_path)
+    client, audit, _, _ = timed_model(monkeypatch, [
+        (5, b": heartbeat\n\n"), (10, b""), (expected_idle - 10, ending),
+    ], artifacts=artifacts)
+    async with client:
+        with pytest.raises(error):
+            await client.call("extract", {})
+    activity = audit.events[-1]["activity"]
+    assert activity["first_raw_seconds"] == 5
+    assert activity["first_data_seconds"] == 5
+    assert activity["max_raw_idle_seconds"] == expected_idle
+    assert "first_content_seconds" not in activity
+    assert artifacts.read_json(audit.events[-1]["response_ref"])["activity"]["max_raw_idle_seconds"] == expected_idle
+
+
+async def test_request_timing_records_initial_silence_without_fake_first_raw(monkeypatch, tmp_path):
+    client, audit, _, _ = timed_model(monkeypatch, [(60, GOOD)], artifacts=CountedArtifacts(tmp_path))
+    async with client:
+        with pytest.raises(ModelInfrastructureError):
+            await client.call("extract", {})
+    assert audit.events[-1]["activity"] == {"max_raw_idle_seconds": 60.0, "semaphore_wait_seconds": 0.0}
+
+
+async def test_request_timing_cancellation_retains_tail_gap(monkeypatch, tmp_path):
+    received, release = asyncio.Event(), asyncio.Event()
+    clock = [0.0]
+    monkeypatch.setattr(streaming, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: clock[0], time=client_module.time.time))
+
+    class WaitingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            clock[0] = 3
+            yield b": heartbeat\n\n"
+            received.set()
+            await release.wait()
+
+    client, audit = model(lambda _: httpx.Response(200, stream=WaitingStream(),
+                                                   headers={"content-type": "text/event-stream"}),
+                          artifacts=CountedArtifacts(tmp_path))
+    async with client:
+        task = asyncio.create_task(client.call("extract", {}))
+        await received.wait()
+        clock[0] = 15
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert audit.events[-1]["activity"] == {"first_raw_seconds": 3.0, "first_data_seconds": 3.0,
+                                            "max_raw_idle_seconds": 12.0, "semaphore_wait_seconds": 0.0}
+
+
+@pytest.mark.parametrize("complete", [True, False])
+async def test_request_timing_excludes_slow_close_after_stream_completion(monkeypatch, tmp_path, complete):
+    body = GOOD if complete else b": heartbeat\n\n"
+    client, audit, clock, source = timed_model(monkeypatch, [(5, body)], artifacts=CountedArtifacts(tmp_path))
+
+    async def slow_close():
+        clock[0] += 40
+        source.closed = True
+
+    source.aclose = slow_close
+    async with client:
+        if complete:
+            assert await client.call("extract", {}) == {"ok": True}
+        else:
+            with pytest.raises(UncertainModelResponse):
+                await client.call("extract", {})
+    assert source.closed and clock[0] >= 45
+    assert audit.events[-1]["activity"]["max_raw_idle_seconds"] == 5
+
+
+@pytest.mark.parametrize("header_delay,body_delay", [(0, 60), (0, 61), (59, 1), (60, 0)])
+async def test_first_body_shares_60_seconds_with_headers(monkeypatch, tmp_path, header_delay, body_delay):
     artifacts = CountedArtifacts(tmp_path)
     client, audit, _, source = timed_model(monkeypatch, [(body_delay, GOOD)],
                                           header_delay=header_delay, artifacts=artifacts)
@@ -67,14 +163,14 @@ async def test_first_body_shares_180_seconds_with_headers(monkeypatch, tmp_path,
     assert audit.events[-1]["error"]["type"] == "first_data_idle_timeout"
     assert audit.events[-1]["usage"] is None
     assert artifacts.writes == 1
-    if header_delay < 180:
+    if header_delay < 60:
         assert source.closed
 
 
 async def test_between_raw_data_idle_preserves_partial_once(monkeypatch, tmp_path):
     artifacts = CountedArtifacts(tmp_path)
     partial = event('{"answer":')
-    client, audit, _, source = timed_model(monkeypatch, [(1, partial), (181, GOOD)], artifacts=artifacts)
+    client, audit, _, source = timed_model(monkeypatch, [(1, partial), (60, GOOD)], artifacts=artifacts)
     async with client:
         with pytest.raises(UncertainModelResponse):
             await client.call("extract", {})
@@ -86,17 +182,17 @@ async def test_between_raw_data_idle_preserves_partial_once(monkeypatch, tmp_pat
     assert saved["activity"]["raw_received_chunks"] == 1
 
 
-async def test_total_duration_has_no_180_second_cap_with_heartbeats_and_thinking(monkeypatch, tmp_path):
+async def test_total_duration_has_no_60_second_cap_with_heartbeats_and_thinking(monkeypatch, tmp_path):
     artifacts = CountedArtifacts(tmp_path)
-    chunks = [(170, b": keep alive\n\n"), (170, b"event: ping\ndata: opaque heartbeat\n\n"),
-              (170, event(delta={"reasoning_content": "considering evidence"})),
-              (170, event('{"ok":')), (170, event('true}')),
-              (170, event(delta={}, finish="stop")),
-              (170, event(usage={"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})), (170, DONE)]
+    chunks = [(59, b": keep alive\n\n"), (59, b"event: ping\ndata: opaque heartbeat\n\n"),
+              (59, event(delta={"reasoning_content": "considering evidence"})),
+              (59, event('{"ok":')), (59, event('true}')),
+              (59, event(delta={}, finish="stop")),
+              (59, event(usage={"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})), (59, DONE)]
     client, audit, clock, source = timed_model(monkeypatch, chunks, artifacts=artifacts)
     async with client:
         assert await client.call("extract", {}) == {"ok": True}
-    assert clock[0] == 1360 and source.closed
+    assert clock[0] == 472 and source.closed
     saved = artifacts.read_json(audit.events[-1]["response_ref"])
     assert saved["activity"]["heartbeat_events"] == 2
     assert saved["activity"]["thinking_deltas"] == 1
@@ -107,11 +203,11 @@ async def test_total_duration_has_no_180_second_cap_with_heartbeats_and_thinking
 
 async def test_incomplete_sse_event_and_utf8_chunks_are_activity(monkeypatch):
     data = event('{"text":"中文"}') + event(delta={}, finish="stop") + DONE
-    chunks = [(170, data[index:index + 1]) for index in range(len(data))]
+    chunks = [(59, data[index:index + 1]) for index in range(len(data))]
     client, audit, clock, _ = timed_model(monkeypatch, chunks)
     async with client:
         assert await client.call("extract", {}) == {"text": "中文"}
-    assert clock[0] > 180
+    assert clock[0] > 60
     assert audit.events[-1]["status"] == "succeeded"
 
 
@@ -119,14 +215,18 @@ async def test_http_compression_buffer_cannot_hide_raw_activity(monkeypatch, tmp
     compressor = zlib.compressobj(wbits=31)
     data = compressor.compress(GOOD) + compressor.flush()
     # Several wire bytes may pass before gzip produces its first decoded byte.
-    chunks = [(170, data[index:index + 1]) for index in range(len(data))]
+    chunks = [(59, data[index:index + 1]) for index in range(len(data))]
     artifacts = CountedArtifacts(tmp_path)
     client, audit, clock, _ = timed_model(monkeypatch, chunks, artifacts=artifacts,
                                          headers={"content-encoding": "gzip"})
     async with client:
         assert await client.call("extract", {}) == {"ok": True}
     saved = artifacts.read_json(audit.events[-1]["response_ref"])
-    assert clock[0] > 180 and saved["activity"]["raw_received_chunks"] > saved["activity"]["received_chunks"]
+    assert clock[0] > 60 and saved["activity"]["raw_received_chunks"] > saved["activity"]["received_chunks"]
+    assert saved["activity"]["first_raw_seconds"] == 59
+    assert saved["activity"]["first_data_seconds"] > saved["activity"]["first_raw_seconds"]
+    assert saved["activity"]["first_content_seconds"] > saved["activity"]["first_data_seconds"]
+    assert saved["activity"]["max_raw_idle_seconds"] == 59
 
 
 @pytest.mark.parametrize("ending", [b"", httpx.ReadError("connection reset")])
@@ -169,14 +269,14 @@ async def test_truncated_json_or_missing_finish_is_never_success(monkeypatch, ta
 
 async def test_tool_parameters_remain_activity_but_cannot_be_business_json(monkeypatch, tmp_path):
     artifacts = CountedArtifacts(tmp_path)
-    chunks = [(170, event(delta={"tool_calls": [{"index": 0, "function": {"arguments": '{"ok":'}}]})),
-              (170, event(delta={"tool_calls": [{"index": 0, "function": {"arguments": 'true}'}}]})),
-              (170, event(delta={}, finish="tool_calls")), (170, DONE)]
+    chunks = [(59, event(delta={"tool_calls": [{"index": 0, "function": {"arguments": '{"ok":'}}]})),
+              (59, event(delta={"tool_calls": [{"index": 0, "function": {"arguments": 'true}'}}]})),
+              (59, event(delta={}, finish="tool_calls")), (59, DONE)]
     client, audit, clock, _ = timed_model(monkeypatch, chunks, artifacts=artifacts)
     async with client:
         with pytest.raises(ModelSemanticError):
             await client.call("extract", {})
-    assert clock[0] == 680
+    assert clock[0] == 236
     saved = artifacts.read_json(audit.events[-1]["response_ref"])
     assert saved["activity"]["tool_deltas"] == 2 and saved["activity"]["content_deltas"] == 0
     assert audit.events[-1]["error"]["type"] == "tool_call_response"
@@ -232,6 +332,39 @@ async def test_complete_response_cache_reused_without_new_request_or_usage(tmp_p
         assert await second.call("extract", {}) == {"result": "ok"}
     assert len(calls) == 1 and artifacts.writes == 1 and len(audit.events) == events
     assert second.usage.snapshot()["requests"] == 0
+
+
+@pytest.mark.parametrize("with_artifact", [False, True])
+@pytest.mark.parametrize("hint,expected", [(45, 45), (None, None), (float("inf"), None), (True, None)])
+async def test_recorded_group_429_replays_safe_retry_hint_without_sending(tmp_path, with_artifact, hint, expected):
+    artifacts, audit, calls = CountedArtifacts(tmp_path), Audit(), []
+    client, _ = model(lambda request: calls.append(request), audit, artifacts=artifacts)
+    saved = {"protocol": "http.rejection.v1", "request_digest": "known-digest",
+             "status_code": 429, "retry_after_seconds": hint}
+    row = {"status": "failed", "error": {"type": "http_429", "retry_after_seconds": hint},
+           "metadata": {"not_before": 123.0}}
+    if with_artifact:
+        # Real HTTP parsing excludes infinity before writing the immutable envelope.
+        if hint == float("inf"):
+            saved["retry_after_seconds"] = "Infinity"
+        row["response_ref"] = artifacts.put_json(saved)
+    with pytest.raises(ModelRateLimitError) as caught:
+        await client._replay_group_failure(row, "known-digest")
+    assert caught.value.retry_after_seconds == expected
+    assert caught.value.not_before == 123.0
+    assert not calls and not audit.events
+
+
+async def test_http_429_persists_safe_retry_hint_in_terminal_error(tmp_path):
+    client, audit = model(lambda _: httpx.Response(429, headers={"retry-after": "45"},
+                                                   json={"error": "capacity"}),
+                          artifacts=CountedArtifacts(tmp_path))
+    async with client:
+        with pytest.raises(ModelRateLimitError):
+            await client.call("extract", {})
+    assert audit.events[-1]["error"]["retry_after_seconds"] == 45
+    assert audit.events[-1]["activity"]["semaphore_wait_seconds"] >= 0
+    assert set(audit.events[-1]["activity"]) == {"semaphore_wait_seconds"}
 
 
 @pytest.mark.parametrize("corruption", ["file", "missing", "wrong_digest", "incomplete_stream", "invalid_json", "no_artifact_store"])

@@ -1916,6 +1916,8 @@ class PDFParser(BaseParser):
         images: dict = {}
         try:
             page_count = len(pdf)
+            from docreader.parser.pdf_symbols import collect_page_symbols, pdf_glyph_bindings
+            font_bindings = pdf_glyph_bindings(content)
 
             # Pass 1: cheap text extraction + image-area classification.
             texts: list = []
@@ -1928,8 +1930,7 @@ class PDFParser(BaseParser):
                 page = pdf[i]
                 try:
                     plain = _extract_page_text(page)
-                    from docreader.parser.pdf_symbols import collect_page_symbols
-                    page_symbols.extend(collect_page_symbols(page, i, pdfium_r, {}))
+                    page_symbols.extend(collect_page_symbols(page, i, pdfium_r, {}, font_bindings=font_bindings))
                     ratio = _page_image_area_ratio(page, pdfium_r)
                     cls = _classify_page(ratio, len(plain.strip()))
                     blank = not plain.strip() and not any(page.get_objects())

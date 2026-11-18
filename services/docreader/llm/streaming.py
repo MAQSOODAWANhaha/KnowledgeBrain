@@ -34,8 +34,8 @@ class IdleDeadline:
 class ActiveResponseStream(httpx.AsyncByteStream):
     """Observe wire chunks before HTTP decompression, line or SDK aggregation."""
 
-    def __init__(self, stream, deadline: IdleDeadline, counts: dict):
-        self.stream, self.deadline, self.counts = stream, deadline, counts
+    def __init__(self, stream, deadline: IdleDeadline, activity):
+        self.stream, self.deadline, self.activity = stream, deadline, activity
 
     async def __aiter__(self):
         iterator = self.stream.__aiter__()
@@ -43,11 +43,14 @@ class ActiveResponseStream(httpx.AsyncByteStream):
             try:
                 chunk = await self.deadline.wait(iterator.__anext__)
             except StopAsyncIteration:
+                self.activity.finish_activity()
                 return
+            except (Exception, asyncio.CancelledError):
+                self.activity.finish_activity()
+                raise
             if chunk:
                 self.deadline.received()
-                self.counts["raw_received_chunks"] += 1
-                self.counts["raw_received_bytes"] += len(chunk)
+                self.activity.received_raw(chunk)
             yield chunk
 
     async def aclose(self):
@@ -64,7 +67,9 @@ class StreamResponse:
     PROTOCOL = "chat.completions.sse.v1"
     _boundary = re.compile(rb"\r\n\r\n|\n\n|\r\r")
 
-    def __init__(self):
+    def __init__(self, started: float | None = None):
+        self.started = self.last_raw_at = started
+        self.activity_finished = False
         self.raw = bytearray()
         self.pending = b""
         self.content = []
@@ -77,6 +82,26 @@ class StreamResponse:
             "raw_received_chunks", "raw_received_bytes", "received_chunks", "received_bytes", "sse_events", "heartbeat_events",
             "content_deltas", "thinking_deltas", "tool_deltas", "usage_events", "done_events",
         )}
+
+    def received_raw(self, chunk: bytes):
+        now = monotonic()
+        if self.started is not None:
+            self._observe_idle(now)
+            self.counts.setdefault("first_raw_seconds", round(now - self.started, 6))
+            self.last_raw_at = now
+        self.counts["raw_received_chunks"] += 1
+        self.counts["raw_received_bytes"] += len(chunk)
+
+    def _observe_idle(self, now):
+        if self.last_raw_at is not None:
+            self.counts["max_raw_idle_seconds"] = max(
+                self.counts.get("max_raw_idle_seconds", 0), round(now - self.last_raw_at, 6),
+            )
+
+    def finish_activity(self):
+        if not self.activity_finished:
+            self._observe_idle(monotonic())
+            self.activity_finished = True
 
     def feed(self, chunk: bytes):
         if not chunk:
@@ -160,6 +185,8 @@ class StreamResponse:
                 if content is not None:
                     if not isinstance(content, str) or self.finish_reason is not None:
                         raise ValueError
+                    if content and self.started is not None:
+                        self.counts.setdefault("first_content_seconds", round(monotonic() - self.started, 6))
                     self.content.append(content)
                     self.counts["content_deltas"] += 1
                 finish = choice.get("finish_reason")

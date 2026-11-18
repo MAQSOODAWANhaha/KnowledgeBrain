@@ -18,6 +18,7 @@ services:
     container_name: kb_caddy
     profiles: ["runtime"]
     restart: unless-stopped
+    init: true
     ports:
       - "${API_HOST_PORT:-28080}:28080"
       - "${ONLYOFFICE_HOST_PORT:-28081}:18081"
@@ -33,7 +34,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "wget -qO- --no-check-certificate https://127.0.0.1:28080/ready >/dev/null",
+          "wget -qO- http://127.0.0.1:8081/ready >/dev/null",
         ]
       interval: 10s
       timeout: 5s

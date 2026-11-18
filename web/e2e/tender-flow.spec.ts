@@ -29,8 +29,8 @@ test("project file upload sends only the file", async ({ page }) => {
   await expect(page.getByLabel("资料用途")).toHaveCount(0);
   await expect(page.getByLabel("文件角色")).toHaveCount(0);
   await expect(page.getByRole("columnheader", { name: "用途" })).toHaveCount(0);
-  await page.locator('input[type="file"]').setInputFiles({ name: "合成企业证明.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic tender source") });
-  await expect(page.getByRole("cell", { name: "合成企业证明.txt" })).toBeVisible();
+  await page.locator('input[type="file"]').setInputFiles({ name: "合成企业证明.pdf", mimeType: "application/pdf", buffer: Buffer.from("synthetic tender source") });
+  await expect(page.getByRole("cell", { name: "合成企业证明.pdf" })).toBeVisible();
   expect(f.state.uploads).toHaveLength(1);
   expect(f.state.uploads[0]).not.toContain('name="kind"');
   expect(f.state.uploads[0]).not.toContain('name="role"');

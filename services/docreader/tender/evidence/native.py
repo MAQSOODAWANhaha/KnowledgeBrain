@@ -159,6 +159,97 @@ def parse_native(file_name: str, content: bytes):
     return document
 
 
+def bind_pdf_literal(raw: dict, literal: dict) -> None:
+    """Index original glyph selections; keep the converter's sections as display data."""
+    from hashlib import sha256
+
+    if literal['source_sha256'] != raw['original_ref']['sha256']:
+        raise ValueError('PDF literal snapshot belongs to another original')
+    rendered = [unit for unit in raw['units'] if unit['kind'] == 'section' and not unit.get('grid')]
+    units = [unit for unit in raw['units'] if unit['kind'] != 'section' or unit.get('grid')]
+    identities = {unit['unit_id']: unit for unit in raw['source_contract']['units']}
+    mapping, dispositions = {}, []
+    for page in literal['pages']:
+        page_number = page['page_ordinal']
+        grids = [unit for unit in units if unit.get('grid')
+                 and unit['locator'].get('page_ordinal') == page_number]
+        lines, selected = [], []
+        def flush():
+            if selected:
+                lines.append(selected.copy())
+                selected.clear()
+        for character in page['characters']:
+            text, box = character['text'], character['bbox']
+            reason = None
+            if not text:
+                reason = 'unreadable_glyph'
+            elif text in ('\r', '\n', '\r\n') or 'line_break' in character['flags']:
+                reason = 'physical_line_separator'
+            else:
+                owners = []
+                if box is not None:
+                    left, bottom, right, top = box
+                    x, y = (left + right) / 2, (bottom + top) / 2
+                    owners = [unit['unit_id'] for unit in grids if all(
+                        unit['locator'].get(field) is not None for field in ('left', 'bottom', 'right', 'top'))
+                        and unit['locator']['left'] <= x <= unit['locator']['right']
+                        and unit['locator']['bottom'] <= y <= unit['locator']['top']]
+                if owners:
+                    # Geometry offers candidates; it does not prove that a
+                    # parsed grid carries this original character.
+                    dispositions.append({'page_ordinal': page_number, 'char_index': character['char_index'],
+                                         'reason': 'native_grid_candidate', 'unit_ids': owners})
+                selected.append(character)
+            if reason:
+                flush()
+                dispositions.append({'page_ordinal': page_number, 'char_index': character['char_index'],
+                                     'reason': reason})
+        flush()
+        for selected in lines:
+            text = ''.join(glyph['text'] for glyph in selected)
+            indices = [glyph['char_index'] for glyph in selected]
+            identity = f"literal:page:{page_number}:" + sha256(json.dumps(indices).encode()).hexdigest()[:20]
+            locator = {'locator_kind': 'page', 'page_ordinal': page_number}
+            boxes = [glyph['bbox'] for glyph in selected if glyph['bbox'] is not None]
+            if boxes:
+                locator.update(left=min(box[0] for box in boxes), bottom=min(box[1] for box in boxes),
+                               right=max(box[2] for box in boxes), top=max(box[3] for box in boxes))
+            unit = {'unit_id': identity, 'kind': 'section', 'text': text, 'locator': locator,
+                    'physical_locator': locator, 'physical_path': f'pdf:page:{page_number}/glyphs:{identity.rsplit(":", 1)[1]}',
+                    'text_basis': 'pdf_literal'}
+            units.append(unit)
+            mapping[identity] = {'page_ordinal': page_number, 'char_indices': indices,
+                                 'text_order': 'pdfium_character_stream',
+                                 'flags': sorted({flag for glyph in selected for flag in glyph['flags']})}
+            identities[identity] = {'unit_id': identity, 'kind': 'section',
+                'text_sha256': sha256(text.encode()).hexdigest(), 'grid_sha256': None,
+                'section_id': f'literal:page:{page_number}', 'parent_section_id': None,
+                'heading_path': '', 'physical_locator': locator, 'physical_path': unit['physical_path'],
+                'completeness': 'complete', 'reasons': []}
+    def position(unit):
+        location = unit.get('physical_locator') or unit['locator']
+        return (location.get('page_ordinal', literal['page_count']),
+                -float(location.get('top') or 0), float(location.get('left') or 0))
+    units.sort(key=position)
+    for ordinal, unit in enumerate(units):
+        unit['ordinal'] = ordinal
+        identities[unit['unit_id']]['ordinal'] = ordinal
+    raw['rendered_sections'] = rendered
+    raw['presentation_tree'], raw['tree'] = raw.get('tree'), None
+    raw['units'], raw['literal_units'] = units, mapping
+    raw['literal_projection_dispositions'] = dispositions
+    raw['source_contract']['units'] = [identities[unit['unit_id']] for unit in units]
+    raw['source_contract']['literal_contract'] = literal['contract']
+    for page in raw['source_contract'].get('page_manifest', []):
+        page['unit_ids'] = [unit['unit_id'] for unit in units
+                            if (unit.get('physical_locator') or unit['locator']).get('page_ordinal') == page['page_ordinal']]
+    issues = raw['metadata'].get('evidence_issues', [])
+    raw['metadata']['presentation_evidence_issues'] = issues
+    raw['metadata']['evidence_issues'] = [issue for issue in issues
+                                        if issue.get('code') != 'pdf_repeating_edge_lines_removed']
+    raw['metadata']['evidence_issues'].extend(literal.get('issues', []))
+
+
 def compact_native_snapshot(raw: dict) -> None:
     """Remove reconstructible display copies; original native grid values remain."""
     tables, grid_values = {}, {}

@@ -66,12 +66,23 @@ def _source_identities(documents):
                   for document in documents)
 
 
+def _native_source_profile():
+    from docreader.parser.source_contract import parser_version
+    from docreader.tender.evidence.references import literal_source_profile
+    from docreader.workflow.source_spec import source_spec
+
+    return {"parser_version": parser_version(), "settings": source_spec(),
+            "literal_source_profile": literal_source_profile()}
+
+
 def _analysis_request(payload):
     if set(payload) - {"action", "project_id", "owner_user_id", "request_key"}:
         raise WebError("INVALID_ANALYSIS_OPTIONS", "开始分析仅接受当前项目资料，请移除不支持的请求字段。")
 
 
 def _outline_request(payload):
+    if 'unplaced_targets' in payload:
+        raise WebError('INVALID_OUTLINE_OPTIONS', '未安排响应快照由服务端从原始来源保留，请仅提交章节编排。')
     if "expected_revision_id" not in payload:
         raise WebError("OUTLINE_BASE_REQUIRED", "保存大纲需要明确当前修订；首次保存请传空修订。")
     expected = _uuid(payload["expected_revision_id"]) if payload["expected_revision_id"] is not None else None
@@ -87,11 +98,22 @@ def _outline_request(payload):
 
 
 def _authoring_request(payload, *, outline_only=False):
-    from docreader.tender.schema import AuthoringReviewRequest
+    from docreader.tender.schema import ArtifactRef, AuthoringReviewRequest
     from docreader.integrations.web_knowledge import normalize_knowledge_selections
 
     request = {"previous_execution_id": payload.get("previous_execution_id"),
                "review_request": payload.get("review_request")}
+    facts_ref = payload.get("reviewed_source_facts_ref")
+    if facts_ref is not None:
+        if not outline_only:
+            raise WebError("INVALID_OUTLINE_OPTIONS", "原件复核事实仅用于生成大纲；正文沿用已保存大纲。")
+        try:
+            facts_ref = ArtifactRef.model_validate(facts_ref).model_dump()
+            if facts_ref['media_type'] != 'application/json':
+                raise ValueError('reviewed source facts must be JSON')
+        except (ValueError, TypeError):
+            raise WebError('INVALID_REVIEWED_SOURCE_FACTS', '原件复核事实的引用无效，请重新读取已核定记录。') from None
+        request['reviewed_source_facts_ref'] = facts_ref
     try:
         selections = normalize_knowledge_selections(payload.get("knowledge_selections", []))
     except ValueError as error:
@@ -107,6 +129,14 @@ def _authoring_request(payload, *, outline_only=False):
         request.update(outline_revision_id=_uuid(revision_id), outline_sha256=outline_sha256)
     if request["review_request"] is not None:
         request["review_request"] = AuthoringReviewRequest.model_validate(request["review_request"]).model_dump()
+    return request
+
+
+def _inherit_reviewed_fact_request(request, previous_request):
+    """A new outline cannot silently forget its explicit predecessor's facts."""
+    previous_ref = previous_request.get('reviewed_source_facts_ref')
+    if request.get('reviewed_source_facts_ref') is None and previous_ref is not None:
+        return {**request, 'reviewed_source_facts_ref': previous_ref}
     return request
 
 
@@ -244,7 +274,9 @@ class WebBridge:
 
         registered = registered if registered is not None else await self.manifest(project_id)
         manifest_ref = await asyncio.to_thread(self.artifacts.put_json, registered)
-        key = "source-only:" + manifest_ref["sha256"]
+        profile = await asyncio.to_thread(_native_source_profile)
+        source_input = {"manifest": manifest_ref, "native_source_profile": profile}
+        key = "source-only:" + _digest(source_input)
         async with self.store.transaction() as conn:
             existing = await (await conn.execute(
                 "SELECT run_id FROM tender_project_analyses WHERE project_id=%s AND request_key=%s", (project_id, key),
@@ -252,7 +284,7 @@ class WebBridge:
         if existing:
             return await self.store.get_run(existing["run_id"])
         frozen_ref = await freeze_sources(registered, self.artifacts, ocr=None, plan=False)
-        run_id = "web-source-" + _digest({"project_id": project_id, "manifest": manifest_ref})
+        run_id = "web-source-" + _digest({"project_id": project_id, **source_input})
         async with self.store.transaction() as conn:
             await conn.execute("INSERT INTO tender_analysis_runs(run_id,request_key) VALUES(%s,%s) ON CONFLICT DO NOTHING",
                                (run_id, run_id))
@@ -267,7 +299,8 @@ class WebBridge:
             await conn.execute(
                 "INSERT INTO tender_analysis_artifacts(run_id,source_version,domain_revision,stage,artifact_ref,epoch,metadata) "
                 "VALUES(%s,1,0,'freeze',%s,0,%s) ON CONFLICT DO NOTHING",
-                (run_id, Jsonb(frozen_ref), Jsonb({"source_only": True, "model_requests": 0})),
+                (run_id, Jsonb(frozen_ref), Jsonb({"source_only": True, "model_requests": 0,
+                                                 "native_source_profile": profile})),
             )
             await conn.execute(
                 "INSERT INTO tender_project_analyses(run_id,project_id,request_key,source_only) VALUES(%s,%s,%s,true) "
@@ -349,7 +382,7 @@ class WebBridge:
 
     async def save_outline(self, payload):
         from docreader.tender.outline_edit import apply_outline_edit
-        from docreader.integrations.web_outline import response_catalog
+        from docreader.integrations.web_outline import response_catalog, _targets
         from docreader.integrations.web_replay import replay_ended
 
         request = _outline_request(payload)
@@ -378,6 +411,10 @@ class WebBridge:
                     source = None
                 catalog = await response_catalog(self, payload["project_id"], base,
                                                   revision=source, execution_id=source_execution)
+                assigned = {target['target_id'] for target in _targets(base['chapters'])}
+                unplaced = [target for target in catalog if target['target_id'] not in assigned]
+                if unplaced or 'unplaced_targets' in base:
+                    base = {**base, 'unplaced_targets': unplaced}
                 outline = await asyncio.to_thread(apply_outline_edit, base, request["chapters"], target_catalog=catalog)
                 reference = await asyncio.to_thread(self.artifacts.put_json, outline)
                 saved = await (await conn.execute("INSERT INTO tender_outline_revisions "
@@ -407,6 +444,10 @@ class WebBridge:
             if error.code != "EXECUTION_NOT_FOUND":
                 raise
         else:
+            if (outline_only and existing['payload']['request'].get('reviewed_source_facts_ref') is not None
+                    and request['previous_execution_id'] is not None):
+                predecessor = await self.job(payload['project_id'], request['previous_execution_id'])
+                request = _inherit_reviewed_fact_request(request, predecessor['payload']['request'])
             if existing["payload"]["request"] != request:
                 raise Conflict("request key already identifies different authoring options")
             return {result_key: await self.authoring_view(existing)}
@@ -438,6 +479,8 @@ class WebBridge:
                 raise WebError("SOURCE_CHANGED_REQUIRES_NEW_DRAFT", "招标资料已更新，请生成新稿；旧执行仍可继续恢复。", 409)
             if outline_ref is None:
                 identity = _identity(run)
+            if outline_only:
+                request = _inherit_reviewed_fact_request(request, previous['payload']['request'])
             if request["review_request"] is not None:
                 # Selection identities belong to this successful document, not
                 # to a newly organized outline or the latest analysis revision.
@@ -452,6 +495,19 @@ class WebBridge:
                     raise WebError("REVIEW_OUTLINE_CHANGED", "定向复核需沿用所选生成稿的大纲，请单独按新大纲生成正文。", 409)
                 outline_ref = document["outline_ref"]
                 identity = _identity(previous_outline["authoring_input"])
+        if outline_only and request.get('reviewed_source_facts_ref') is not None:
+            from docreader.tender.reviewed_source_facts import validate_fact_successor
+            try:
+                manifest = await asyncio.to_thread(self.artifacts.read_json, request['reviewed_source_facts_ref'])
+                if any(manifest['authoring_input'][key] != identity[key]
+                       for key in ('run_id', 'source_version', 'domain_revision')):
+                    raise ValueError('reviewed facts belong to another source snapshot')
+                previous_ref = (previous['payload']['request'].get('reviewed_source_facts_ref')
+                                if request['previous_execution_id'] is not None else None)
+                await asyncio.to_thread(validate_fact_successor, self.artifacts, previous_ref,
+                                        request['reviewed_source_facts_ref'])
+            except (ValueError, OSError, KeyError, TypeError):
+                raise WebError('INVALID_REVIEWED_SOURCE_FACTS', '原件复核事实与当前资料或前版核定不一致，请核对来源后修订。', 409) from None
         data = {"identity": identity, "request": request, "operation": "outline" if outline_only else "document",
                 "owner_user_id": payload["owner_user_id"],
                 "materials": [] if outline_only else await self.materials(payload["project_id"])}
@@ -590,7 +646,7 @@ class WebBridge:
                     stored_coverage = self.artifacts.read_json(document["coverage_ref"])
                 except (OSError, ValueError):
                     stored_coverage = None
-            value["coverage"] = coverage_headline(stored_coverage)
+            value["coverage"] = coverage_headline(stored_coverage, value["outline"])
         else:
             active = next((view for view in views if view["status"] in {AuthoringJobStatus.PENDING, AuthoringJobStatus.PUBLISHED, AuthoringExecutionStatus.RUNNING}), None)
             execution = await self.authoring.get_execution(active["execution_id"], missing_ok=True) if active else None
@@ -754,7 +810,8 @@ async def execute_authoring_job(execution_id, settings):
         await bridge.authorize({"project_id": str(job["project_id"]), "owner_user_id": job["payload"]["owner_user_id"]}, write=True)
         config = ModelConfig.from_env()
         budget = RequestBudget(context_tokens=config.chat.context_tokens, model=config.chat.model,
-                               tokenizer="o200k_base", tokenized_outline_assembly=True, tokenized_authoring=True)
+                               tokenizer="o200k_base", tokenized_outline_assembly=True, tokenized_authoring=True,
+                               reasoning_effort=config.chat.reasoning_effort)
         async def wait_for_cancellation():
             # Cancellation can arrive before execute_document creates its row.
             while True:
@@ -767,8 +824,13 @@ async def execute_authoring_job(execution_id, settings):
                 await asyncio.sleep(0.5)
 
         request = {key: job["payload"]["request"].get(key) for key in ("previous_execution_id", "review_request")}
+        if job['payload']['request'].get('reviewed_source_facts_ref') is not None:
+            request['reviewed_source_facts_ref'] = job['payload']['request']['reviewed_source_facts_ref']
         if _operation(job) == "outline":
             request["outline_only"] = True
+        elif _operation(job) == 'document':
+            from docreader.integrations.web_layout import build_web_layout
+            request['layout_renderer'] = build_web_layout(execution_id=execution_id)
         if job["payload"].get("outline_ref") is not None:
             request["outline_ref"] = job["payload"]["outline_ref"]
         if job["payload"].get("authoring_input_ref") is not None:

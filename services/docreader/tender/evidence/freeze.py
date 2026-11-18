@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import time
+from pathlib import Path
 from typing import Callable
 
 from pydantic import TypeAdapter, ValidationError
@@ -15,9 +16,12 @@ from copy import deepcopy
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.request import ModelCorrectionStalled, ModelSemanticError, ModelWorkUnitExhausted
 from docreader.llm.budget import RequestBudget
+from docreader.parser.parser import detect_effective_file_type
 from docreader.tender.evidence.native import canonical_image_keys, compact_native_snapshot, parse_native
 from docreader.tender.evidence.planner import make_packs
-from docreader.tender.evidence.references import EvidenceRepository as EvidenceRepository, SourceIndex
+from docreader.tender.evidence.references import (
+    EvidenceRepository as EvidenceRepository, SourceIndex, literal_source_profile, validate_literal_source,
+)
 from docreader.tender.evidence.registration import issue
 from docreader.tender.schema import OCRStatus, PackDescriptor, PackPlan, SourceDocument
 
@@ -61,6 +65,10 @@ async def freeze_sources(registration: dict, artifacts: ArtifactStore, ocr: Call
         # Storage corruption/unavailability is a technical failure, not a document defect.
         content = await asyncio.to_thread(artifacts.read_bytes, source["original_ref"])
         try:
+            literal = None
+            if detect_effective_file_type(Path(source['file_name']).suffix, content) == 'pdf':
+                from docreader.tender.evidence.pdf_literal import extract_pdf_literal
+                literal = await asyncio.to_thread(extract_pdf_literal, content)
             # File I/O and all CPU/blocking native parsing stay off the event loop.
             native = await asyncio.to_thread(parse_native, source["file_name"], content)
         except (ValueError, OSError, RuntimeError, KeyError) as exc:
@@ -84,13 +92,19 @@ async def freeze_sources(registration: dict, artifacts: ArtifactStore, ocr: Call
                 "vector_figure_count", "evidence_issues") if key in native.metadata},
             "images": {}, "image_anchors": native.metadata.get("image_anchors", {}), "ocr": {}, "image_reviews": {},
         }
+        if literal is not None:
+            from docreader.tender.evidence.native import bind_pdf_literal
+            raw['literal_source_ref'] = await asyncio.to_thread(artifacts.put_json, literal)
+            await asyncio.to_thread(bind_pdf_literal, raw, literal)
+            raw['source_contract']['literal_source_profile'] = await asyncio.to_thread(literal_source_profile)
+            await asyncio.to_thread(validate_literal_source, raw, literal, source)
         canonical_image_keys(raw)
         for identity in contract.get("units", []):
             for reason in identity.get("reasons", []):
                 problem = issue(reason, source["document_id"], unit_id=identity["unit_id"])
                 summary["issues"].append(problem)
                 problems.append(problem)
-        for problem in native.metadata.get("evidence_issues", []):
+        for problem in raw['metadata'].get("evidence_issues", []):
             problem = {"document_id": source["document_id"], "blocking": True, **problem}
             summary["issues"].append(problem)
             problems.append(problem)

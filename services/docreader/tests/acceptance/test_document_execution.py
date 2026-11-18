@@ -108,7 +108,8 @@ def pipeline(monkeypatch):
                 "outline_assemble" if payload.get("operation") == "assemble" else task
             )
             request = build_request(
-                request_budget.model, request_budget.prompts[prompt], payload, task=task
+                request_budget.model, request_budget.prompts[prompt], payload, task=task,
+                reasoning_effort=request_budget.reasoning_effort,
             )
 
             def validate(value):
@@ -210,6 +211,11 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
         == 2
     )
     assert "fixture-key" not in json.dumps(row["execution_spec"])
+    assert row["execution_spec"]["retry_policy"] == "bounded_work_unit_deadline_v1"
+    assert (
+        row["execution_spec"]["outline_assembly_planning_contract"]
+        == "complete_evidence_scoped_batches_v1"
+    )
     assert (
         row["execution_spec"]["prompts"]["outline_assemble"]
         == hashlib.sha256(
@@ -235,8 +241,32 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
     assert pipeline.saved_plans == [None] and len(pipeline.published_plans) == 1
 
 
+@pytest.mark.parametrize("contract", ["retry_policy", "outline_assembly_planning_contract"])
+async def test_legacy_document_contract_is_rejected_before_reuse_or_send(
+    analysis_runtime, pipeline, contract
+):
+    _, _, settings, _, _ = analysis_runtime
+    execution_id, sent = uuid4().hex, []
+
+    def handler(request):
+        sent.append(request)
+        return response({"value": "accepted"})
+
+    await execute(analysis_runtime, execution_id, handler)
+    store = AuthoringStore(settings.dsn)
+    async with store.transaction() as conn:
+        await conn.execute(
+            "UPDATE tender_authoring_executions SET execution_spec = execution_spec - %s::text "
+            "WHERE execution_id = %s", (contract, execution_id)
+        )
+    with pytest.raises(Conflict):
+        await execute(analysis_runtime, execution_id, handler)
+    assert len(sent) == 2
+
+
+@pytest.mark.parametrize("legacy_planning_contract", [False, True])
 async def test_explicit_predecessor_rebinds_cached_json_without_fabricating_paid_calls(
-    analysis_runtime, pipeline
+    analysis_runtime, pipeline, legacy_planning_contract
 ):
     sent = []
 
@@ -246,6 +276,13 @@ async def test_explicit_predecessor_rebinds_cached_json_without_fabricating_paid
 
     first = uuid4().hex
     await execute(analysis_runtime, first, handler)
+    if legacy_planning_contract:
+        async with AuthoringStore(analysis_runtime[2].dsn).transaction() as conn:
+            await conn.execute(
+                "UPDATE tender_authoring_executions "
+                "SET execution_spec = execution_spec - 'outline_assembly_planning_contract' "
+                "WHERE execution_id = %s", (first,)
+            )
     pipeline.binding = "current-host-identities"
     second = uuid4().hex
     reference = await execute(
@@ -332,14 +369,17 @@ async def test_explicit_assembly_tokenizer_reaches_http_and_correction_without_e
 
 
 @pytest.mark.parametrize("assembly", [False, True])
+@pytest.mark.parametrize("reasoning_effort", [None, "medium"])
 async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruction(
     analysis_runtime,
     pipeline,
     assembly,
+    reasoning_effort,
 ):
     model = ModelConfig(
         ModelEndpoint(
-            "http://fixture.invalid/v1", "fixture-key", "synthetic-outline", 131072
+            "http://fixture.invalid/v1", "fixture-key", "synthetic-outline", 131072,
+            reasoning_effort=reasoning_effort,
         ),
         None,
     )
@@ -352,6 +392,7 @@ async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruc
         tokenizer="o200k_base",
         tokenized_outline_assembly=assembly,
         tokenized_authoring=True,
+        reasoning_effort=reasoning_effort,
     )
     pipeline.outline_payload = {"operation": "source", "text": "服务能力" * 18000}
     pipeline.write_text = "技术响应" * 18000
@@ -374,6 +415,9 @@ async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruc
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
     assert row["status"] == "succeeded" and len(sent) == len(row["requests"]) == 2
     assert row["execution_spec"]["budget"] == request_budget.spec()
+    assert all(request.get("reasoning_effort") == reasoning_effort for request in sent)
+    if reasoning_effort is None:
+        assert all("reasoning_effort" not in request for request in sent)
     for entry in row["requests"]:
         metadata = entry["metadata"]
         assert metadata["method"] == RequestBudget.TOKENIZED_METHOD
@@ -383,6 +427,17 @@ async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruc
             < metadata["effective_input_budget_tokens"]
             == 94208
         )
+    if reasoning_effort == "medium":
+        changed_model = ModelConfig(ModelEndpoint(model.chat.base_url, model.chat.api_key,
+            model.chat.model, model.chat.context_tokens, reasoning_effort="high"), None)
+        changed_budget = RequestBudget(context_tokens=request_budget.context_tokens, model=request_budget.model,
+            prompts=prompts, output_reserve=request_budget.output_reserve, tokenizer=request_budget.tokenizer,
+            tokenized_outline_assembly=assembly, tokenized_authoring=True, reasoning_effort="high")
+        with pytest.raises(Conflict):
+            await document_execution.execute_document(analysis_runtime[0], analysis_runtime[1],
+                changed_model, changed_budget, execution_id=execution_id, **identity(analysis_runtime),
+                transport=httpx.MockTransport(handler))
+        assert len(sent) == 2
 
 
 async def test_revision_reuses_only_requests_with_identical_inputs(

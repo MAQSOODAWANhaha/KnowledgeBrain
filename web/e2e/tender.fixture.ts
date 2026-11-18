@@ -140,7 +140,7 @@ async function fixture(page: Page) {
     }
     if (url.pathname === `${path}/documents` && method === "POST") {
       state.uploads.push(request.postData() ?? "");
-      const document = { id: "company-proof", file_name: "合成企业证明.txt", media_type: "text/plain", byte_length: 30 };
+      const document = { id: "company-proof", file_name: "合成企业证明.pdf", media_type: "application/pdf", byte_length: 30 };
       view.documents.push(document);
       return json(document, 201);
     }
@@ -185,6 +185,8 @@ async function fixture(page: Page) {
       return route.fulfill({ contentType: "application/octet-stream", body: "isolated immutable Word artifact" });
     }
     if (url.pathname.includes("/docx/versions/")) return json(metadata(url.pathname.split("/").at(-1), 2));
+    if (url.pathname.endsWith("/analysis/review") && method === "GET") return json({ review: null });
+    if (url.pathname.endsWith("/analysis/recovery") && method === "GET") return json({ recovery: null });
     return json({ error: { code: "UNEXPECTED_ROUTE", message: url.pathname } }, 404);
   });
   return { view, state, outline, outlineHistory,

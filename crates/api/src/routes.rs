@@ -167,6 +167,7 @@ pub fn build(state: AppState) -> Router {
         .merge(knowledge_routes)
         .merge(crate::tender_routes::router())
         .merge(crate::tender_knowledge::router())
+        .merge(crate::tender_render::router())
         .merge(crate::tender_editor::router())
         .route("/api/v1/files", get_s(global_file))
         .route("/api/v1/system/parser-engines", get_s(list_parser_engines))

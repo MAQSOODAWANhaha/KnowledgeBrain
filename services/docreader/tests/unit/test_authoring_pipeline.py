@@ -75,8 +75,9 @@ async def test_missing_analysis_and_failed_unit_still_produce_a_real_document(tm
             raise ModelWorkUnitExhausted(task)
         return validate({'findings': []})
 
-    snapshot = deepcopy(outline()['authoring_input'])
-    result_ref = await generate_document(artifacts, snapshot, budget, execute, materials=[
+    given = outline()
+    snapshot = deepcopy(given['authoring_input'])
+    result_ref = await generate_document(artifacts, snapshot, budget, execute, outline=given, materials=[
         {'material_id': 'implementation', 'title': '给定实施方法', 'text': '按部署、测试、验收阶段实施。'}])
     result = artifacts.read_json(result_ref)
     assert result['docx_ref'] and result['package_ref']
@@ -163,8 +164,17 @@ async def test_absent_scoped_proof_keeps_position_without_a_model_call(tmp_path)
                 'target_ids': [payload['targets'][0]['target_id']], 'support_ids': ['k1']}]})
         return validate({'findings': []})
 
-    result = artifacts.read_json(await generate_document(artifacts, outline()['authoring_input'],
-        RequestBudget(model='fixture', context_tokens=131072, output_reserve=32768), execute, materials=materials))
+    fixed = deepcopy(outline()['authoring_input'])
+    given = {'schema_version': 2, 'authoring_input': fixed, 'issues': [], 'chapters': [
+        {'chapter_id': 'chapter-1', 'title': '技术方案', 'children': [], 'targets': [
+            {'target_id': 'chapter-1:target-1', 'kind': 'narrative', 'purpose': '具体实施方法',
+             'rule_refs': [], 'source_refs': []}]},
+        {'chapter_id': 'chapter-2', 'title': '资格证明', 'children': [], 'targets': [
+            {'target_id': 'chapter-2:target-1', 'kind': 'attachment', 'purpose': '本标段资格原件',
+             'rule_refs': [], 'source_refs': []}]}]}
+    result = artifacts.read_json(await generate_document(artifacts, fixed,
+        RequestBudget(model='fixture', context_tokens=131072, output_reserve=32768), execute,
+        outline=given, materials=materials))
     units = [artifacts.read_json(ref) for ref in result['unit_refs']]
     assert len(writes) == 1 and units[0]['status'] == 'generated'
     assert units[1]['status'] == 'placeholder' and units[1]['attachments'] == []

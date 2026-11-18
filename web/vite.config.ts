@@ -26,14 +26,14 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      "/api": apiTarget,
-      "/health": apiTarget,
+      "/api": { target: apiTarget, secure: false, changeOrigin: true },
+      "/health": { target: apiTarget, secure: false, changeOrigin: true },
     },
   },
   preview: {
     proxy: {
-      "/api": apiTarget,
-      "/health": apiTarget,
+      "/api": { target: apiTarget, secure: false, changeOrigin: true },
+      "/health": { target: apiTarget, secure: false, changeOrigin: true },
     },
   },
   build: {

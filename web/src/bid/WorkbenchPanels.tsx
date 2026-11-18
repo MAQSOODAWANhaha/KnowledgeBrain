@@ -1,3 +1,6 @@
+import { Button } from "@astryxdesign/core/Button";
+import { Selector } from "@astryxdesign/core/Selector";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { useState, type KeyboardEvent } from "react";
 import { executionError, type TenderChapter, type TenderIssue, type TenderItem, type WorkbenchView } from "./api/workbench";
 import { authoringHref } from "./authoring/routes";
@@ -18,12 +21,12 @@ export function ChapterTree({ chapters, selectedId, gaps, onSelect, onLocate }: 
   const render = (nodes: TenderChapter[], depth: number) => nodes.filter(matches).map(chapter => {
     const count = gaps.filter(gap => gap.chapter_id === chapter.chapter_id).length;
     return <li key={chapter.chapter_id}>
-      <div className="tender-tree-row">{!!chapter.children?.length && <button className="tender-tree-toggle" aria-label={`${collapsed.has(chapter.chapter_id) ? "展开" : "收起"}${chapter.title}`} aria-expanded={!collapsed.has(chapter.chapter_id)} onClick={() => setCollapsed(current => { const next = new Set(current); if (next.has(chapter.chapter_id)) next.delete(chapter.chapter_id); else next.add(chapter.chapter_id); return next; })}>{collapsed.has(chapter.chapter_id) ? "›" : "⌄"}</button>}
-      <button className={selectedId === chapter.chapter_id ? "selected" : ""} style={{ paddingLeft: 12 + depth * 13 }}
-        aria-current={selectedId === chapter.chapter_id ? "location" : undefined} onClick={() => onSelect(chapter)}>
+      <div className="tender-tree-row">{!!chapter.children?.length && <Button className="tender-tree-toggle" aria-label={`${collapsed.has(chapter.chapter_id) ? "展开" : "收起"}${chapter.title}`} aria-expanded={!collapsed.has(chapter.chapter_id)} onClick={() => setCollapsed(current => { const next = new Set(current); if (next.has(chapter.chapter_id)) next.delete(chapter.chapter_id); else next.add(chapter.chapter_id); return next; })} label={collapsed.has(chapter.chapter_id) ? "›" : "⌄"} />}
+      <Button className={selectedId === chapter.chapter_id ? "selected" : ""} style={{ paddingLeft: 12 + depth * 13 }}
+        aria-current={selectedId === chapter.chapter_id ? "location" : undefined} onClick={() => onSelect(chapter)} label={`${chapter.is_volume ? "分册 " : ""}${chapter.title}${chapter.manual ? "，人工新增" : ""}`}>
         <span>{chapter.is_volume ? "▤ " : ""}{chapter.title}{chapter.manual ? " · 人工新增" : ""}</span>{count > 0 && <small title={`${count} 条待补记录`}>{count}</small>}
-      </button></div>
-      {selectedId === chapter.chapter_id && !!chapter.targets?.length && <ul className="tender-tree-targets">{chapter.targets.filter(target => target.kind !== "narrative").map(target => <li key={target.target_id}><button onClick={() => onLocate?.(target.bookmark)}>{target.kind === "form" ? "▦ 表单：" : "▧ 附件："}{target.purpose}</button></li>)}</ul>}
+      </Button></div>
+      {selectedId === chapter.chapter_id && !!chapter.targets?.length && <ul className="tender-tree-targets">{chapter.targets.filter(target => target.kind !== "narrative").map(target => <li key={target.target_id}><Button onClick={() => onLocate?.(target.bookmark)} label={`${target.kind === "form" ? "表单：" : "附件："}${target.purpose}`} /></li>)}</ul>}
       {!!chapter.children?.length && (!collapsed.has(chapter.chapter_id) || !!query.trim()) && <ul>{render(chapter.children, depth + 1)}</ul>}
     </li>;
   });
@@ -37,7 +40,7 @@ export function ChapterTree({ chapters, selectedId, gaps, onSelect, onLocate }: 
     next.focus();
     next.click();
   };
-  return <div className="tender-tree"><label><span className="sr-only">搜索章节</span><input type="search" placeholder="搜索章节…" value={query} onChange={event => setQuery(event.target.value)} /></label>
+  return <div className="tender-tree"><TextInput label="搜索章节" isLabelHidden placeholder="搜索章节…" value={query} onChange={setQuery} />
     {!chapters.length ? <p className="tender-note">尚无可读取的文件结构。</p> : <ul onKeyDown={onTreeKey}>{render(chapters, 0)}</ul>}
     {!!chapters.length && !chapters.some(matches) && <p className="tender-note">没有匹配章节。</p>}
     <p className="tender-note">目录与待补标记用于定位，章节存在不代表要求已经满足。</p>
@@ -71,17 +74,17 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
   const adoptedIds = new Set(units.flatMap(unit => [...unit.attachments.map(item => item.material_id), ...[...unit.blocks, ...unit.cell_fills].flatMap(item => item.material_ids ?? [])]));
   const materials = (view.materials ?? []).filter(material => adoptedIds.has(material.material_id));
   return <div className="tender-context">
-    <nav aria-label="章节信息"><button aria-pressed={tab === "requirements"} onClick={() => setTab("requirements")}>要求</button><button aria-pressed={tab === "supports"} onClick={() => setTab("supports")}>依据</button><button aria-pressed={tab === "gaps"} onClick={() => setTab("gaps")}>待补</button></nav>
+    <nav aria-label="章节信息"><Button aria-pressed={tab === "requirements"} onClick={() => setTab("requirements")} label="要求" /><Button aria-pressed={tab === "supports"} onClick={() => setTab("supports")} label="依据" /><Button aria-pressed={tab === "gaps"} onClick={() => setTab("gaps")} label="待补" /></nav>
     <div className="tender-context-body"><p className="tender-note">当前选定章节：{chapter?.title ?? "尚未选择"}</p>
       {!contextMatches ? <p className="tender-context-warning" role="status">当前业务记录尚未与这份稿件关联，保留 Word 供阅读，请刷新后核对。</p> : !chapter ? <p className="tender-note">选择章节查看相关信息。</p> : <>
         {draftId && <p className="tender-note">以下记录来自本稿的编制快照，后续人工修改仍需核对。</p>}
         {tab === "requirements" && <>{boundRules.length ? boundRules.map((binding, index) => <article className="tender-info-card" key={index}>{binding.rule ? <ItemContent item={binding.rule} /> : <p>关联要求暂不可读取，正式引用仍保留，需核对来源。</p>}{binding.rule_ref.decision_id && <p className="tender-note">显示修订后保留的适用规则。</p>}</article>) : <p className="tender-note">当前没有可读取的关联要求；这不表示本章没有招标要求。</p>}
           {targets.map(target => <article className="tender-info-card" key={target.target_id}><small>{target.kind === "form" ? "规定表单" : target.kind === "attachment" ? "证明附件" : "正文响应"}{target.manual_fill ? " · 人工填写" : ""}</small><p>{target.purpose}</p></article>)}</>}
-        {tab === "supports" && <>{targets.filter(target => target.source_refs?.length).map(target => <article className="tender-info-card" key={target.target_id}><strong>招标来源 · {target.purpose}</strong>{target.source_refs?.map((source, index) => <p key={`${source.unit_id}:${index}`} className="tender-note">来源位置：{source.unit_id}</p>)}</article>)}{materials.map(material => <article className="tender-info-card" key={material.material_id}><strong>采用资料 · {material.title}</strong>{material.text && <details><summary>查看资料原文</summary><p className="tender-material-text">{material.text}</p></details>}{material.original_url && <button onClick={() => void onDownload(material.original_url!, material.title)}>下载证明原件</button>}</article>)}{!materials.length && <p className="tender-note">当前尚无可读取的已采用企业资料，不能据此认定资料不存在。</p>}<p className="tender-note">真实证明须沿用原件。来源引用和检索命中均需核对其适用性。</p></>}
+        {tab === "supports" && <>{targets.filter(target => target.source_refs?.length).map(target => <article className="tender-info-card" key={target.target_id}><strong>招标来源 · {target.purpose}</strong>{target.source_refs?.map((source, index) => <p key={`${source.unit_id}:${index}`} className="tender-note">来源位置：{source.unit_id}</p>)}</article>)}{materials.map(material => <article className="tender-info-card" key={material.material_id}><strong>采用资料 · {material.title}</strong>{material.text && <details><summary>查看资料原文</summary><p className="tender-material-text">{material.text}</p></details>}{material.original_url && <Button onClick={() => void onDownload(material.original_url!, material.title)} label="下载证明原件" />}</article>)}{!materials.length && <p className="tender-note">当前尚无可读取的已采用企业资料，不能据此认定资料不存在。</p>}<p className="tender-note">真实证明须沿用原件。来源引用和检索命中均需核对其适用性。</p></>}
         {tab === "gaps" && <>{gaps.length ? gaps.map((gap, index) => {
           const target = targets.find(item => item.target_id === gap.target_id);
           const sameChapter = gap.chapter_id === chapter.chapter_id || !!target;
-          return <article className="tender-info-card tender-info-gap" key={`${gap.code}:${index}`}><p>{gap.detail}</p>{sameChapter ? <button onClick={() => onLocate(target?.bookmark ?? chapter.bookmark)}>{target?.bookmark ? "定位响应位置" : "定位所属章节"}</button> : gap.chapter_id && <small>原章节位置需要重新关联。</small>}</article>;
+          return <article className="tender-info-card tender-info-gap" key={`${gap.code}:${index}`}><p>{gap.detail}</p>{sameChapter ? <Button onClick={() => onLocate(target?.bookmark ?? chapter.bookmark)} label={target?.bookmark ? "定位响应位置" : "定位所属章节"} /> : gap.chapter_id && <small>原章节位置需要重新关联。</small>}</article>;
         }) : <p className="tender-note">当前没有可读取的待补记录，不代表已经完成内容验收。</p>}<p><a href={`#${authoringHref(view.project.id, "files")}`}>到项目资料补充文件</a></p><p className="tender-note">补充资料后另存新稿。人工写入内容不自动清除原复核意见。</p></>}
       </>}
     </div>
@@ -111,8 +114,8 @@ export function AnalysisPane({ analysis }: { analysis: WorkbenchView["analysis"]
       <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />
       {analysis.sources_current === false && <p className="tender-context-warning" role="status">招标资料已有更新，以下是旧资料的分析结果。可重新分析，也可基于最新资料生成新稿。</p>}
       {executionError(analysis.error) && <p role="alert">{executionError(analysis.error)}</p>}
-      {!!items.length && <div className="tender-filter"><input aria-label="搜索招标事项" type="search" placeholder="搜索事项原文…" value={query} onChange={event => setQuery(event.target.value)} />
-        <select aria-label="事项类型" value={kind} onChange={event => setKind(event.target.value)}><option value="">全部类型</option>{Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => <option key={value} value={value}>{kindLabels[value] ?? value}</option>)}</select></div>}
+      {!!items.length && <div className="tender-filter"><TextInput label="搜索招标事项" placeholder="搜索事项原文…" value={query} onChange={setQuery} />
+        <Selector label="事项类型" value={kind} onChange={setKind} options={[{ value: "", label: "全部类型" }, ...Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => ({ value, label: kindLabels[value] ?? value }))]} /></div>}
       {!items.length ? <p className="tender-empty">当前尚无可读取的事项。分析结束后在这里逐条查看。</p> : !shown.length ? <p>没有匹配事项。</p> : shown.map((item, index) => <article className="tender-analysis-item" key={item.item_id ?? index}><span className="tender-kind">{kindLabels[item.kind ?? ""] ?? item.kind}</span><ItemContent item={item} /></article>)}
       {!!issues.length && <div className="tender-note">{issues.map(([text, count]) => <p key={text}>{count > 1 ? `${count} 个阶段同一情况：` : ""}{text}</p>)}</div>}
     </>}

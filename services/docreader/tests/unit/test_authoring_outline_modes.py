@@ -30,7 +30,8 @@ async def test_outline_only_uses_current_source_and_assembly_without_writing_or_
                                                   outline_only=True, knowledge=Knowledge())
     outline = AuthoringOutline.model_validate(artifacts.read_json(reference))
     assert outline.authoring_input.model_dump() == fixed
-    assert calls == [("outline", None), ("outline", "assemble"), ("authoring_structure", "structure")]
+    assert calls == []
+    assert "outline_directory_rejected" in {issue.code for issue in outline.issues}
     assert "docx_ref" not in artifacts.read_json(reference)
 
 
@@ -40,10 +41,11 @@ async def test_outline_only_preserves_local_failure_gaps_in_its_own_artifact(tmp
     async def execute(*_args):
         raise ModelBudgetError("synthetic oversized indivisible source")
 
-    reference = await pipeline.generate_document(artifacts, snapshot(artifacts), budget(), execute,
-                                                  outline_only=True)
+    reference = await pipeline.generate_document(
+        artifacts, snapshot(artifacts, [{"text": "投标函"}]), budget(), execute, outline_only=True)
     outline = AuthoringOutline.model_validate(artifacts.read_json(reference))
-    assert "outline_batch_unavailable" in {issue.code for issue in outline.issues}
+    failed = [issue for issue in outline.issues if issue.code == "outline_directory_plan_failed"]
+    assert failed and "ModelBudgetError" in failed[0].detail
 
 
 async def test_fixed_outline_skips_organization_and_preserves_identity_order_and_nested_goals(tmp_path):

@@ -116,6 +116,23 @@ def test_generation_is_typed_while_a_bad_extraction_sibling_remains_recoverable(
     assert raw == original
 
 
+def test_extraction_relations_request_semantics_without_host_owned_identity():
+    from docreader.llm.contracts import output_schema, response_model
+    from docreader.tender.schema import Relation
+
+    payload = {'schema_version': 2}
+    schema = output_schema('extract', payload)
+    relation_ref = schema['properties']['relations']['items']['$ref'].split('/')[-1]
+    declaration = schema['$defs'][relation_ref]
+    assert set(declaration['properties']) == {'from_item_id', 'to_item_id', 'relation', 'evidence'}
+    assert set(declaration['required']) == set(declaration['properties'])
+    relation = {'from_item_id': 'w1:i1', 'to_item_id': 'w1:i2', 'relation': '完整适用关系。',
+                'evidence': [{'range_id': 'r1', 'quote': '完整依据'}]}
+    raw = {'schema_version': 2, 'items': [], 'dispositions': [], 'issues': [], 'relations': [relation]}
+    assert response_model('extract', payload).model_validate(raw).relations[0].model_dump() == relation
+    assert 'relation_id' in Relation.model_json_schema()['required']
+
+
 @pytest.mark.parametrize('operation,fields', [
     ('review', {'accepted_decision_ids': [], 'findings': []}),
     ('associate', {'relations': [], 'decisions': [], 'findings': []}),

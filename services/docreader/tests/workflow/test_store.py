@@ -310,6 +310,23 @@ async def test_received_model_response_is_a_single_immutable_file_reference(stor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed", "uncertain"])
+async def test_terminal_request_keeps_safe_timing_observations(store, status):
+    run, command = await submitted(store)
+    lease = await store.acquire(run["run_id"], command["command_id"], 1)
+    metadata = request_metadata("timing")
+    timings = {"first_data_seconds": 1.2, "first_raw_seconds": 0.8,
+               "first_content_seconds": 2.4, "max_raw_idle_seconds": 3,
+               "semaphore_wait_seconds": 0.5}
+    await store.begin_request(lease, "timing", "model", "extract", metadata)
+    await store.finish_request("timing", "sent")
+    await store.finish_request("timing", status, activity={**timings, "raw_body": "private"})
+    row = (await store.get_run(run["run_id"]))["usage"][0]
+    assert row["status"] == status
+    assert row["metadata"] == {**metadata, "command_id": command["command_id"], **timings}
+
+
+@pytest.mark.asyncio
 async def test_uncertain_response_can_be_recovered_but_never_replaced(store):
     run, command = await submitted(store)
     lease = await store.acquire(run["run_id"], command["command_id"], 1)

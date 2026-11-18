@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from ctypes import byref, c_double
 from io import BytesIO
 import json
 import mimetypes
 import re
+from statistics import median
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 from PIL import Image, ImageOps
 
+from docreader.tender.authoring_coverage import pending_outline_issues
 from docreader.tender.authoring_templates import load_template_part, template_part_key
+from docreader.tender.directory_compile import _native_header_count
 from docreader.tender.evidence.references import EvidenceRepository
-from docreader.tender.word_navigation import add_bookmark
+from docreader.tender.schema import SOURCE_BODY_CONTRACT
+from docreader.tender.word_navigation import add_bookmark, bookmark_name
 
 
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -176,11 +182,152 @@ def _body_entries(entries):
             if not any(path[:len(parent)] == parent for parent in notes)]
 
 
+def _carried_source(target):
+    """Directory compilation stores verbatim source in purpose. Internal instructions do not."""
+    text = (target.get("purpose") or "").strip()
+    if text and (target.get('source_body_contract') == SOURCE_BODY_CONTRACT
+                 or target.get("manual_fill") and target.get("support_origins") == ["tender"]):
+        return text
+    return ""
+
+
+def _write_carried_source(document, target, *, keep_with_next=False):
+    text = _carried_source(target)
+    if not text:
+        return False
+    for paragraph in text.split("\n"):
+        if paragraph.strip():
+            added = document.add_paragraph(re.sub(r' {2,}', lambda match: '\u00a0' * len(match.group()), paragraph))
+            if keep_with_next:
+                added.paragraph_format.keep_with_next = True
+    return True
+
+
+def _pdf_row_heights(artifacts, source, locator, row_count):
+    """Use source rules only when they account for every native grid row."""
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    from docreader.parser.pdf_parser import _PDFIUM_LOCK
+    from docreader.parser.pdf_tables import _cluster_positions, collect_rule_lines
+
+    try:
+        top, bottom = locator['top'], locator['bottom']
+        if row_count == 1:
+            return [top - bottom] if top > bottom else None
+        data = artifacts.read_bytes(source['original_ref'])
+        if not data.startswith(b'%PDF'):
+            return None
+        with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
+            horizontal, _vertical = collect_rule_lines(pdf[locator['page_ordinal']], raw)
+        left, right = locator['left'], locator['right']
+        candidates = [line for line in horizontal if bottom - 3.5 <= line[1] <= top + 3.5
+                      and line[0] <= right and line[2] >= left]
+        levels = sorted(_cluster_positions([line[1] for line in candidates], 3.5), reverse=True)
+        if len(levels) != row_count + 1:
+            full = [line for line in candidates if line[2] - line[0] > (right - left) * 0.5]
+            levels = sorted(_cluster_positions([line[1] for line in full], 3.5), reverse=True)
+        if (len(levels) != row_count + 1 or abs(levels[0] - top) > 3.5
+                or abs(levels[-1] - bottom) > 3.5):
+            return None
+        return [upper - lower for upper, lower in zip(levels, levels[1:])]
+    except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError):
+        return None
+
+
+def _single_cell_centering(artifacts, source, locator):
+    """Use original PDF glyph positions to retain a centered single-cell form."""
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    from docreader.parser.pdf_parser import _PDFIUM_LOCK, _page_chars
+
+    try:
+        data = artifacts.read_bytes(source['original_ref'])
+        if not data.startswith(b'%PDF'):
+            return False, False
+        with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
+            page = pdf[locator['page_ordinal']]
+            text = page.get_textpage()
+            try:
+                chars, _width = _page_chars(text, page, raw)
+            finally:
+                text.close()
+        left, right, top, bottom = (locator[k] for k in ('left', 'right', 'top', 'bottom'))
+        chars = [char for char in chars if char['ch'].strip()
+                 and left <= (char['x0'] + char['x1']) / 2 <= right
+                 and bottom <= (char['y0'] + char['y1']) / 2 <= top]
+        if not chars or right <= left or top <= bottom:
+            return False, False
+        center_x = (min(c['x0'] for c in chars) + max(c['x1'] for c in chars)) / 2
+        center_y = (min(c['y0'] for c in chars) + max(c['y1'] for c in chars)) / 2
+        return (abs((center_x - left) / (right - left) - 0.5) <= 0.08,
+                abs((center_y - bottom) / (top - bottom) - 0.5) <= 0.08)
+    except (OSError, ValueError, KeyError, IndexError, pdfium.PdfiumError):
+        return False, False
+
+
+def _pdf_table_typography(artifacts, source, locator, grid, heights):
+    """Recover a uniform source font and measured cell spacing, without changing source text."""
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    from docreader.parser.pdf_parser import _PDFIUM_LOCK
+
+    try:
+        data = artifacts.read_bytes(source['original_ref'])
+        if not data.startswith(b'%PDF') or not heights or not grid.get('widths_mm'):
+            return None
+        left, right, top, bottom = (locator[key] for key in ('left', 'right', 'top', 'bottom'))
+        chars = []
+        with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
+            page = pdf[locator['page_ordinal']]
+            text = page.get_textpage()
+            try:
+                for index in range(text.count_chars()):
+                    ch = text.get_text_range(index, 1)
+                    if not ch.strip():
+                        continue
+                    x0, y0, x1, y1 = text.get_charbox(index)
+                    if left <= (x0 + x1) / 2 <= right and bottom <= (y0 + y1) / 2 <= top:
+                        origin_x, origin_y = c_double(), c_double()
+                        if not raw.FPDFText_GetCharOrigin(text, index, byref(origin_x), byref(origin_y)):
+                            return None
+                        chars.append({'ch': ch, 'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
+                                      'baseline': round(origin_y.value, 2),
+                                      'font': round(raw.FPDFText_GetFontSize(text, index), 2)})
+            finally:
+                text.close()
+        sizes = {char['font'] for char in chars}
+        if len(sizes) != 1 or next(iter(sizes)) <= 0:
+            return None
+        size = next(iter(sizes))
+        xs, ys = [left], [top]
+        for width in grid['widths_mm']:
+            xs.append(xs[-1] + width / sum(grid['widths_mm']) * (right - left))
+        for height in heights:
+            ys.append(ys[-1] - height)
+        gaps, insets = [], []
+        for cell in grid['cells']:
+            row, column = cell['row'], cell['column']
+            x0, x1 = xs[column], xs[column + cell.get('col_span', 1)]
+            y1, y0 = ys[row], ys[row + cell.get('row_span', 1)]
+            selected = [char for char in chars if x0 <= (char['x0'] + char['x1']) / 2 <= x1
+                        and y0 <= (char['y0'] + char['y1']) / 2 <= y1]
+            if selected:
+                insets.extend([max(0, min(char['x0'] for char in selected) - x0),
+                               max(0, x1 - max(char['x1'] for char in selected))])
+                baselines = sorted({char['baseline'] for char in selected}, reverse=True)
+                gaps.extend(upper - lower for upper, lower in zip(baselines, baselines[1:])
+                            if upper - lower >= size * 0.5)
+        return {'font_size': size, 'line_spacing': median(gaps) if gaps else size,
+                'padding': min([5.4, *insets])}
+    except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError):
+        return None
+
+
 def _display_paths(entries):
     paths, identities, counts = {}, {}, defaultdict(int)
     for chapter, path in _body_entries(entries):
         parent = paths.get(path[:-1], ())
-        if chapter.get("presentation_role", "body") == "cover":
+        if chapter.get("presentation_role", "body") in {"cover", "content"}:
             paths[path] = parent
             continue
         counts[parent] += 1
@@ -213,7 +360,38 @@ def _table_layout(document, table, widths=None, header_count=0):
     return widths
 
 
-def _toc(document):
+def _heading_numbering(document, starting_path):
+    numbering = document.part.numbering_part.element
+    abstract_id = max((int(n.get(qn('w:abstractNumId')))
+                       for n in numbering.findall(qn('w:abstractNum'))), default=-1) + 1
+    abstract = OxmlElement('w:abstractNum')
+    abstract.set(qn('w:abstractNumId'), str(abstract_id))
+    kind = OxmlElement('w:multiLevelType')
+    kind.set(qn('w:val'), 'multilevel')
+    abstract.append(kind)
+    for index in range(9):
+        level = OxmlElement('w:lvl')
+        level.set(qn('w:ilvl'), str(index))
+        for tag, value in (('start', '1'), ('numFmt', 'decimal'), ('suff', 'space'),
+                           ('lvlText', '.'.join(map(str, starting_path)) if len(starting_path) > 9 and index == 8
+                            else '.'.join('%' + str(i + 1) for i in range(index + 1))),
+                           ('lvlJc', 'left')):
+            element = OxmlElement('w:' + tag)
+            element.set(qn('w:val'), value)
+            level.append(element)
+        abstract.append(level)
+    first_num = numbering.find(qn('w:num'))
+    if first_num is None:
+        numbering.append(abstract)
+    else:
+        first_num.addprevious(abstract)
+    instance = numbering.add_num(abstract_id)
+    for index, start in enumerate(starting_path[:9]):
+        instance.add_lvlOverride(index).add_startOverride(start)
+    return instance.numId
+
+
+def _toc(document, entries, display_paths):
     document.add_paragraph("目录", style="Title")
     paragraph = document.add_paragraph()
     for kind in ("begin", "instruction", "separate", "end"):
@@ -227,7 +405,34 @@ def _toc(document):
                 element.set(qn("w:dirty"), "true")
         paragraph.add_run()._r.append(element)
         if kind == "separate":
-            paragraph.add_run("请在文字处理软件中更新目录以显示页码。")
+            first = True
+            for chapter, path in entries:
+                if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
+                    continue
+                entry = paragraph if first else document.add_paragraph()
+                first = False
+                entry.paragraph_format.left_indent = Mm(4 * max(0, len(path) - 1))
+                link = OxmlElement('w:hyperlink')
+                link.set(qn('w:anchor'), bookmark_name(chapter['chapter_id']))
+                link.set(qn('w:history'), '1')
+                run, text = OxmlElement('w:r'), OxmlElement('w:t')
+                number = '.'.join(map(str, display_paths[chapter['chapter_id']]))
+                text.text = number + ' ' + _display_title(chapter['title'])
+                run.append(text)
+                link.append(run)
+                entry._p.append(link)
+                entry.paragraph_format.tab_stops.add_tab_stop(
+                    _page_width(document), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+                entry.add_run('\t')
+                field = OxmlElement('w:fldSimple')
+                field.set(qn('w:instr'), f'PAGEREF {bookmark_name(chapter["chapter_id"])} \\h')
+                field.set(qn('w:dirty'), 'true')
+                result, value = OxmlElement('w:r'), OxmlElement('w:t')
+                value.text = '待计算'
+                result.append(value)
+                field.append(result)
+                entry._p.append(field)
+                paragraph = entry
     settings = document.settings.element
     update = settings.find(qn("w:updateFields"))
     if update is None:
@@ -287,6 +492,45 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
                     except (OSError, ValueError, KeyError):
                         lines.extend(["原文暂不可读，来源引用保留在本次大纲中，待人工核对。", ""])
     paths = _display_paths(entries)
+    source_labels = {}
+    if (artifacts is not None and outline.get('authoring_input', {}).get('frozen_ref')
+            and any(target.get('response_form_pending') for chapter, _ in entries for target in chapter.get('targets', []))):
+        try:
+            frozen = artifacts.read_json(outline['authoring_input']['frozen_ref'])
+            source_labels = {record['document_id']: record.get('file_name') or f'已登记来源{number}'
+                             for number, record in enumerate(frozen['documents'], 1)}
+        except (OSError, ValueError, KeyError):
+            pass
+    for chapter, _ in entries:
+        for target in chapter.get('targets', []):
+            pending = target.get('response_form_pending')
+            if not pending:
+                continue
+            lines.extend(['## 原式逐条展开待核：' + chapter['title'], '',
+                          '原表保留，来源条款尚未完整展开；须对照以下已绑定来源核定，不能据此认定已逐条响应。', ''])
+            for key, label in [('mandate_windows', '原式展开依据'), ('source_windows', '完整条款来源范围')]:
+                for window in pending[key]:
+                    name = source_labels.setdefault(window['document_id'], f'已登记来源{len(source_labels) + 1}')
+                    lines.extend([f"- {label}：《{name}》物理第{window['page'] + 1}页，第{window['start_line'] + 1}–{window['end_line'] + 1}行。", ''])
+    if artifacts is not None:
+        from docreader.tender.authoring_excerpts import source_excerpts_text
+        for chapter, _ in entries:
+            for target in chapter.get('targets', []):
+                guidance = (target.get('response_table') or {}).get('source_guidance', [])
+                if not guidance:
+                    continue
+                lines.extend(['## 编制参考：' + chapter['title'], '',
+                              '以下为招标原文中的规则或程序参考；主体与触发条件依原文，不表示投标人已履行或已经满足。', ''])
+                for entry in guidance:
+                    label = '评审规则参考' if entry['kind'] == 'reference' else '评审程序参考（主体依原文）'
+                    lines.extend(['### ' + label, ''])
+                    try:
+                        text = source_excerpts_text(artifacts, entry['source_excerpts'],
+                                                    source_join=entry.get('source_join', 'paragraphs'))
+                    except (OSError, ValueError, KeyError):
+                        lines.extend(['原文暂不可读，精确来源引用保留在本次编制计划，须核对后使用。', ''])
+                    else:
+                        lines.extend(['> ' + text.replace('\n', '\n> '), ''])
     for chapter, _ in entries:
         references = [ref for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])]
         if references:
@@ -304,6 +548,41 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
             if issue.get("detail"):
                 lines.extend(["排除理由：" + issue["detail"], ""])
     append_rules("尚未安排的要求", [row["rule_ref"] for key, row in rules.items() if key not in assigned])
+    decisions = pending_outline_issues(outline)
+    if decisions:
+        lines.extend(["## 适用性与来源待核", "", "由投标编制人员结合原件、企业身份及招标澄清核定，未核定前不视为已满足。", ""])
+        for issue in decisions:
+            lines.extend([issue["detail"], "", "处理结果：________（人工核定）", ""])
+    groups = (
+        ('outline_directory_procedure_requirement', '外部程序待执行', True),
+        ('outline_directory_requirement_not_applicable', '本次不适用依据', False),
+        ('outline_directory_conditional_requirement', '按企业身份或选项填写', True),
+        ('outline_directory_source_decision', '来源核定记录', False),
+        ('outline_directory_response_form_decision', '原式展开依据核定', False),
+        ('outline_directory_response_form_row_roles', '原式行责任核定', False),
+        ('outline_directory_title_mapping', '章节名称与来源对应', False),
+    )
+    separate = {code for code, _, _ in groups}
+    placed_targets = {target['target_id']: target for chapter, _ in entries for target in chapter.get('targets', [])}
+    for code, title, checkbox in groups:
+        selected = [issue for issue in outline.get('issues', []) if issue.get('code') == code]
+        if selected:
+            lines.extend(['## ' + title, ''])
+            for issue in selected:
+                detail = issue['detail']
+                if code == 'outline_directory_response_form_row_roles':
+                    from docreader.tender.directory_response_forms import response_form_role_guide
+
+                    detail = response_form_role_guide(issue, placed_targets.get(issue.get('target_id')))
+                lines.extend([('- [ ] ' if checkbox else '') + detail, ''])
+    directory_issues = [issue for issue in outline.get("issues", [])
+                        if str(issue.get("code", "")).startswith("outline_directory_")
+                        and issue.get('code') not in separate]
+    if directory_issues:
+        lines.extend(["## 目录待确认", ""])
+        for issue in directory_issues:
+            detail = (issue.get("detail") or issue.get("code") or "").replace("\n", "\n  ")
+            lines.extend(["- " + detail, ""])
     lines.extend(["## 人工填写位置", ""])
     for chapter, _ in entries:
         for target in chapter.get("targets", []):
@@ -366,8 +645,10 @@ def _block(document, block, *, width_ratios=None):
 
 
 class _Assembler:
-    def __init__(self, artifacts, writing_units, review_issues, entries=()):
+    def __init__(self, artifacts, writing_units, review_issues, entries=(), *, render_pdf=None, authoring_input=None):
         self.artifacts = artifacts
+        self.authoring_input = authoring_input
+        self.render_pdf, self.layout_reports = render_pdf, []
         body_targets = {target['target_id'] for chapter, _ in _body_entries(entries)
                         for target in chapter.get('targets', [])}
         self.note_targets = {target['target_id'] for chapter, _ in entries
@@ -379,14 +660,15 @@ class _Assembler:
             self.units[unit["chapter_id"]].append(unit)
         self.gaps = list(review_issues or [])
         self.pending_rules = []
+        self.unplaced_targets = []
+        self.pending_reviews = []
         self._running_headers = {}
         self._response_context = None
         self.attachments = {}
         self.template_parts = {}
         self.repository = EvidenceRepository(artifacts)
         self.display_paths = _display_paths(entries)
-        self.locations = {target["target_id"]: " ".join(part for part in (
-            ".".join(map(str, self.display_paths.get(chapter["chapter_id"], ()))), chapter["title"]) if part)
+        self.locations = {target["target_id"]: chapter["title"]
             for chapter, _ in _body_entries(entries) for target in chapter.get("targets", [])}
 
     def _running_header(self, source_ref, text):
@@ -484,7 +766,7 @@ class _Assembler:
 
     def _show_bound_requirements(self, document, target, chapter_id):
         from docreader.tender.authoring_excerpts import load_source_excerpt
-        if (target.get("template_refs") or (target.get("response_table") or {}).get("rows")
+        if (target.get('source_body_contract') == SOURCE_BODY_CONTRACT or target.get("template_refs") or (target.get("response_table") or {}).get("rows")
                 or not target.get("source_excerpts") or not target.get("rule_refs")):
             return False
         shown = False
@@ -532,6 +814,16 @@ class _Assembler:
         self.gap("export_bound_requirement_answer_blank", "已展示绑定的招标要求，企业应答留空。", chapter_id, target["target_id"])
         return True
 
+    def source_context(self, document, target):
+        from docreader.tender.source_body import load_source_context
+        excerpts = target.get('source_context_excerpts', [])
+        if not excerpts:
+            return
+        text = load_source_context(self.artifacts, self.authoring_input, target, repository=self.repository)
+        if text.strip():
+            document.add_paragraph('原文上下文（非企业应答）：', style='Caption')
+            document.add_paragraph(text)
+
     def gap(self, code, detail, chapter_id, target_id=None):
         value = {"code": code, "detail": detail, "chapter_id": chapter_id}
         if target_id is not None:
@@ -561,11 +853,18 @@ class _Assembler:
             if grid:
                 count = part.get("header_row_count")
                 if count is None:
-                    rows = {cell["row"] for cell in unit.get("header_cells", [])}
-                    count = 0
-                    while count in rows:
-                        count += 1
-                self.table(document, grid, fills, chapter_id, target_id, header_count=count)
+                    count = _native_header_count(unit) or 0
+                locator = unit.get('locator') or {}
+                heights = None
+                if locator.get('locator_kind') == 'page_table':
+                    heights = _pdf_row_heights(self.artifacts, loaded['document'], locator, grid['row_count'])
+                centered = (False, False)
+                if heights is not None and grid['row_count'] == 1 and grid['column_count'] == 1:
+                    centered = _single_cell_centering(self.artifacts, loaded['document'], locator)
+                typography = (_pdf_table_typography(self.artifacts, loaded['document'], locator, grid, heights)
+                              if locator.get('locator_kind') == 'page_table' else None)
+                self.table(document, grid, fills, chapter_id, target_id, header_count=count,
+                           row_heights=heights, centered=centered, typography=typography)
             elif loaded.get("image_ref"):
                 _image(document, self.artifacts.read_bytes(loaded["image_ref"]))
                 self.gap("export_template_not_editable", "该原格式以真实图片保留，填写位置仍待补。",
@@ -592,9 +891,16 @@ class _Assembler:
             document.add_paragraph("（原格式待补）")
             self.gap("export_source_unavailable", f"原格式暂不可用：{type(exc).__name__}。", chapter_id, target_id)
 
-    def table(self, document, grid, fills, chapter_id, target_id, *, header_count=0):
+    def table(self, document, grid, fills, chapter_id, target_id, *, header_count=0, row_heights=None,
+              centered=(False, False), typography=None):
         table = document.add_table(rows=grid["row_count"], cols=grid["column_count"])
         table.style = "Table Grid"
+        if row_heights is not None and len(row_heights) == grid['row_count']:
+            section = document.sections[-1]
+            available = (section.page_height - section.top_margin - section.bottom_margin) / 12700
+            for row, height in zip(table.rows, row_heights):
+                row.height = Pt(min(height, available))
+                row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
         widths = _table_layout(document, table,
             [Mm(width) for width in grid["widths_mm"]] if grid.get("widths_mm") else None, header_count)
         choices = defaultdict(set)
@@ -622,6 +928,31 @@ class _Assembler:
             elif values:
                 text = next(iter(values))
             target.text = text
+            if typography:
+                margins = OxmlElement('w:tcMar')
+                for side in ('left', 'right'):
+                    margin = OxmlElement('w:' + side)
+                    margin.set(qn('w:type'), 'dxa')
+                    margin.set(qn('w:w'), str(Pt(typography['padding']).twips))
+                    margins.append(margin)
+                target._tc.get_or_add_tcPr().append(margins)
+                for paragraph in target.paragraphs:
+                    paragraph.paragraph_format.space_before = paragraph.paragraph_format.space_after = Pt(0)
+                    paragraph.paragraph_format.line_spacing = Pt(typography['line_spacing'])
+                    snap = OxmlElement('w:snapToGrid')
+                    snap.set(qn('w:val'), '0')
+                    paragraph._p.get_or_add_pPr().append(snap)
+                    for run in paragraph.runs:
+                        run.font.size = Pt(typography['font_size'])
+            if centered[0]:
+                target.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if centered[1]:
+                target.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        if len(table.rows) > 1:
+            for row in table.rows[:max(1, header_count)]:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        paragraph.paragraph_format.keep_with_next = True
 
     def _native_row(self, excerpt, loaded):
         selected = self._selected_grid(excerpt, loaded)
@@ -657,6 +988,61 @@ class _Assembler:
                      chapter_id, target_id)
             return ""
         return next(iter(values), "")
+
+    def _response_choices(self, target, units, chapter_id):
+        choices = defaultdict(set)
+        row_ids = {row["row_id"] for row in target.get("response_table", {}).get("rows", [])}
+        for unit in units:
+            for fill in unit.get("row_fills", []):
+                if fill["row_id"] not in row_ids:
+                    continue
+                if target.get("manual_fill", False):
+                    self.gap("export_manual_content_omitted", "人工填写响应表未采用自动填值。",
+                             chapter_id, target["target_id"])
+                elif fill.get("text", "").strip() and not fill.get("material_ids"):
+                    self.gap("export_row_fill_unsupported", "该行应答没有知识依据，保留要求和空白响应。",
+                             chapter_id, target["target_id"])
+                else:
+                    choices[fill["row_id"]].add(fill["text"])
+        return choices
+
+    def _prepare_native_response(self, target, parts, chapter_id):
+        from docreader.tender.native_response_table import NativeResponseTableRejected, prepare_native_response_table
+
+        try:
+            return prepare_native_response_table(self.artifacts, target, parts, repository=self.repository)
+        except NativeResponseTableRejected as error:
+            detail = str(error)
+        except (OSError, ValueError, KeyError, TypeError):
+            detail = "来源或布局合同未能验证。"
+        self.gap("export_native_response_table_unconfirmed",
+                 "原式逐条展开待核：" + detail + "已保留原表及空位，请核定来源布局后重新展开。",
+                 chapter_id, target["target_id"])
+        return None
+
+    def native_response_table(self, document, target, units, chapter_id, plan):
+        part, loaded = plan['part'], plan['loaded']
+        original = loaded['unit']['grid']
+        locator = loaded['unit'].get('locator') or {}
+        heights = (_pdf_row_heights(self.artifacts, loaded['document'], locator, original['row_count'])
+                   if locator.get('locator_kind') == 'page_table' else None)
+        typography = (_pdf_table_typography(self.artifacts, loaded['document'], locator, original, heights)
+                      if locator.get('locator_kind') == 'page_table' else None)
+        expanded_heights = ([heights[row] for row in plan['row_origins']]
+                            if heights is not None and len(heights) == original['row_count'] else None)
+        count = part.get('header_row_count')
+        if count is None:
+            count = _native_header_count(loaded['unit']) or 0
+        if plan['context']:
+            document.add_paragraph(plan['context'])
+        choices = self._response_choices(target, units, chapter_id)
+        fills = [{'row': row, 'column': plan['response_column'],
+                  'text': self._row_answer(choices, row_id, chapter_id, target['target_id'])}
+                 for row_id, row in plan['row_positions'].items()]
+        self.table(document, plan['grid'], fills, chapter_id, target['target_id'], header_count=count,
+                   row_heights=expanded_heights, typography=typography)
+        self.gap("export_template_layout_unverified", "已保留原表列、固定文字及来源条款；新增行的分页仍需核对。",
+                 chapter_id, target['target_id'])
 
     def _write_prose_response(self, document, entries):
         table = document.add_table(rows=len(entries) + 1, cols=2)
@@ -707,20 +1093,7 @@ class _Assembler:
         if context_texts:
             self._response_context = list(context_texts)
             document.add_paragraph("\n".join(context_texts))
-        choices = defaultdict(set)
-        row_ids = {row["row_id"] for row in rows}
-        for unit in units:
-            for fill in unit.get("row_fills", []):
-                if fill["row_id"] not in row_ids:
-                    continue
-                if target.get("manual_fill", False):
-                    self.gap("export_manual_content_omitted", "人工填写响应表未采用自动填值。",
-                             chapter_id, target["target_id"])
-                elif fill.get("text", "").strip() and not fill.get("material_ids"):
-                    self.gap("export_row_fill_unsupported", "该行应答没有知识依据，保留要求和空白响应。",
-                             chapter_id, target["target_id"])
-                else:
-                    choices[fill["row_id"]].add(fill["text"])
+        choices = self._response_choices(target, units, chapter_id)
         described = []
         for row in rows:
             parts = []
@@ -847,12 +1220,19 @@ class _Assembler:
             document.add_paragraph("（本部分内容待补）")
             self.gap("export_content_pending", "写作任务尚未形成完整内容，保留当前位置。", chapter_id)
 
-    def chapter(self, document, chapter, path, *, heading=True):
+    def chapter(self, document, chapter, path, *, heading=True, numbering_id=None):
         chapter_id = chapter["chapter_id"]
         chapter_start = len(document.element.body) - 1
         if heading:
             path = self.display_paths.get(chapter_id, path)
-            paragraph = document.add_heading(f"{'.'.join(map(str, path))} {_display_title(chapter['title'])}", level=min(len(path), 9))
+            paragraph = document.add_heading(_display_title(chapter['title']), level=min(max(len(path), 1), 9))
+            if numbering_id is not None:
+                # Word has nine native levels; a private list preserves a deeper host label without advancing level nine.
+                if len(path) > 9:
+                    numbering_id = _heading_numbering(document, path)
+                properties = paragraph._p.get_or_add_pPr().get_or_add_numPr()
+                properties.get_or_add_ilvl().val = min(max(len(path) - 1, 0), 8)
+                properties.get_or_add_numId().val = numbering_id
             add_bookmark(paragraph._p, chapter_id)
         units = self.units.get(chapter_id, [])
         targets = chapter.get("targets", [])
@@ -884,6 +1264,13 @@ class _Assembler:
                 except Exception:
                     # Rendering below records the unavailable part without substituting its whole unit.
                     continue
+        if heading and len(targets) > 1:
+            intro, original = targets[:2]
+            parts = forms.get(original['target_id'], {})
+            if (intro['kind'] == 'form' and _carried_source(intro) and not forms.get(intro['target_id'])
+                    and original['target_id'] in grid_forms & form_ids and parts
+                    and all(part.get('header_row_count') == 0 for part in parts.values())):
+                paragraph.paragraph_format.page_break_before = True
         blocked_forms = (form_ids - grid_forms) | manual_forms
         templated_forms = {identity for identity, parts in forms.items() if parts}
         row_owners = {row["row_id"]: target["target_id"] for target in targets
@@ -901,9 +1288,14 @@ class _Assembler:
         response_tables = {target["target_id"] for target in targets
                            if (target.get("response_table") or {}).get("rows")}
         shown_requirements = set()
-        for target in targets:
+        carried_ids = {target["target_id"] for target in targets
+                       if _carried_source(target) and not forms.get(target["target_id"])}
+        for target_index, target in enumerate(targets):
             start_index = len(document.element.body) - 1
             target_id = target["target_id"]
+            if target.get("subject"):
+                subject = document.add_paragraph(target["subject"], style="Caption")
+                subject.paragraph_format.keep_with_next = True
             if self._show_bound_requirements(document, target, chapter_id):
                 shown_requirements.add(target_id)
             related = []
@@ -916,22 +1308,44 @@ class _Assembler:
             if related:
                 document.add_paragraph("参见 " + "、".join(dict.fromkeys(related)))
             linked = [(ordinal, unit) for ordinal, unit in enumerate(units) if target_id in unit.get("target_ids", [])]
-            if target_id in response_tables:
+            native_requested = (target.get('response_table') or {}).get('native_layout') is not None
+            native_plan = (self._prepare_native_response(target, list(forms.get(target_id, {}).values()), chapter_id)
+                           if native_requested else None)
+            if target_id in response_tables and not native_requested:
                 self.response_table(document, target, [unit for _, unit in linked], chapter_id)
             if target_id in forms:
-                if target["kind"] == "form" and target.get("subject"):
-                    document.add_paragraph(target["subject"], style="Caption")
+                keep_source = (target["kind"] == "form" and not forms[target_id]
+                               and target_index + 1 < len(targets)
+                               and targets[target_index + 1]["target_id"] in grid_forms & form_ids)
+                wrote = (_write_carried_source(document, target, keep_with_next=keep_source)
+                         if not forms[target_id] or _carried_source(target) != chapter['title'] else False)
                 for part in forms[target_id].values():
-                    key = _source_key(part["source_ref"])
-                    fills = [fill for _, unit in linked for fill in unit.get("cell_fills", [])
-                             if target_id in form_ids and _source_key(fill["source_ref"]) == key]
+                    key = _source_key(part['source_ref'])
+                    fills = [fill for _, unit in linked for fill in unit.get('cell_fills', [])
+                             if target_id in form_ids and _source_key(fill['source_ref']) == key]
                     if target_id in manual_forms and fills:
                         fills = []
-                        self.gap("export_manual_content_omitted", "人工填写表格未采用自动填值。", chapter_id, target_id)
+                        self.gap('export_manual_content_omitted', '人工填写表格未采用自动填值。', chapter_id, target_id)
+                    if native_plan is not None and template_part_key(part) == template_part_key(native_plan['part']):
+                        if fills:
+                            self.gap('export_cell_fill_unplaced', '原表格填值未绑定展开后的条款行，未采用。',
+                                     chapter_id, target_id)
+                        self.native_response_table(document, target, [unit for _, unit in linked], chapter_id, native_plan)
+                        continue
                     self.template(document, part, fills, chapter_id, target_id)
-                if target["kind"] == "form" and not forms[target_id] and target_id not in response_tables:
-                    document.add_paragraph("（原格式待补）")
-                    self.gap("export_template_missing", "该填写位置尚无可用原格式。", chapter_id, target_id)
+                if target.get('response_form_pending'):
+                    document.add_paragraph('本原式的逐条条款尚未完整展开，须按编制指南核定来源后填写。')
+                if wrote or forms[target_id]:
+                    shown_requirements.add(target_id)
+                if target["kind"] == "form" and not forms[target_id] and (target_id not in response_tables or native_requested):
+                    if not wrote:
+                        document.add_paragraph("（原格式待补）")
+                        self.gap("export_template_missing", "该填写位置尚无可用原格式。", chapter_id, target_id)
+                    else:
+                        self.gap("export_template_layout_unverified", "已按原文行写出原式，字体和分页仍需核对。", chapter_id, target_id)
+            elif _write_carried_source(document, target):
+                shown_requirements.add(target_id)
+            self.source_context(document, target)
             for ordinal, unit in linked:
                 if ordinal not in rendered:
                     has_content = (any(block.get('text', '').strip() or block.get('headers') or block.get('rows')
@@ -944,12 +1358,13 @@ class _Assembler:
                         continue
                     unit_start = len(document.element.body) - 1
                     self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms,
-                                      response_tables, templated_forms, shown_requirements)
+                                      response_tables, templated_forms, shown_requirements | carried_ids)
                     if len(document.element.body) - 1 > unit_start:
                         unit_anchors[ordinal] = document.element.body[unit_start]
                     rendered.add(ordinal)
             if (not linked and target_id not in reference_only and target_id not in response_tables
-                    and not forms.get(target_id) and target_id not in shown_requirements):
+                    and not forms.get(target_id) and target_id not in shown_requirements
+                    and target_id not in carried_ids):
                 document.add_paragraph("（本部分内容待补）")
                 self.gap("export_content_pending", "响应位置尚无写作内容。", chapter_id, target_id)
             if len(document.element.body) - 1 > start_index:
@@ -998,8 +1413,11 @@ class _Assembler:
             render_covers(scope)
         else:
             document.add_heading(title, 0)
-        _toc(document)
-        document.add_page_break()
+        _toc(document, entries, self.display_paths)
+        starting_path = next((self.display_paths[chapter['chapter_id']] for chapter, _ in entries
+                              if chapter['chapter_id'] in self.display_paths), ())
+        numbering_id = _heading_numbering(document, starting_path)
+        body_start = len(document.element.body) - 1
         for chapter, path in entries:
             if chapter.get("presentation_role", "body") == "cover":
                 continue
@@ -1007,12 +1425,34 @@ class _Assembler:
                 self._response_context = None
             if chapter.get("is_volume") and path != scope:
                 render_covers(path)
-            self.chapter(document, chapter, path)
+            self.chapter(document, chapter, path,
+                         heading=chapter.get("presentation_role", "body") != "content", numbering_id=numbering_id)
+        for element in document.element.body[body_start:-1]:
+            if element.tag == qn('w:p') and next(element.iter(qn('w:t')), None) is not None:
+                element.get_or_add_pPr().get_or_add_pageBreakBefore().val = True
+                break
+            if element.tag == qn('w:tbl'):
+                first = next(element.iter(qn('w:p')), None)
+                if first is not None:
+                    first.get_or_add_pPr().get_or_add_pageBreakBefore().val = True
+                break
         if include_pending and self.pending_rules:
-            document.add_heading("尚未归入响应表", 1)
+            document.add_paragraph("尚未归入响应表", style="Title")
             for pending in self.pending_rules:
                 document.add_paragraph(pending)
                 document.add_paragraph("")
+        if include_pending and self.unplaced_targets:
+            document.add_paragraph("尚未安排的原响应", style="Title")
+            document.add_paragraph("以下原响应已移出正文编排，尚未判定不适用。请在大纲编排的“响应安排”中选择位置后保存；原式及来源引用保留在交付底稿中。")
+            for target in self.unplaced_targets:
+                document.add_paragraph(target["purpose"])
+                document.add_paragraph("安排位置或核定结果：________（人工填写）")
+        if include_pending and self.pending_reviews:
+            document.add_paragraph("适用性与来源待核", style="Title")
+            document.add_paragraph("由投标编制人员结合原件、企业身份及招标澄清核定，未核定前不视为已满足。")
+            for issue in self.pending_reviews:
+                document.add_paragraph(issue["detail"])
+                document.add_paragraph("处理结果：________（人工核定）")
         field = OxmlElement("w:fldSimple")
         field.set(qn("w:instr"), "PAGE")
         # Word rejects a simple field that has no result run.
@@ -1024,15 +1464,54 @@ class _Assembler:
         section.footer.paragraphs[0]._p.append(field)
         output = BytesIO()
         document.save(output)
-        return self.artifacts.put_bytes(output.getvalue(), DOCX_MEDIA_TYPE)
+        raw = output.getvalue()
+        reference = self.artifacts.put_bytes(raw, DOCX_MEDIA_TYPE)
+        if self.render_pdf is None:
+            return reference
+        from docreader.tender.toc_layout import LayoutError, finalize_toc
+        renders = []
+
+        def render_pdf(candidate):
+            candidate_ref = self.artifacts.put_bytes(candidate, DOCX_MEDIA_TYPE)
+            pdf, engine = self.render_pdf(candidate)
+            pdf_ref = self.artifacts.put_bytes(pdf, 'application/pdf')
+            renders.append({'docx_ref': candidate_ref, 'pdf_ref': pdf_ref, 'renderer_identity': engine})
+            return pdf, engine
+
+        try:
+            final, receipt = finalize_toc(raw, render_pdf)
+            delivered = self.artifacts.put_bytes(final, DOCX_MEDIA_TYPE)
+            report = {**receipt, 'title': title, 'source_ref': reference, 'artifact_ref': delivered,
+                      'renders': renders}
+            if renders and receipt.get('pdf_sha256') == renders[-1]['pdf_ref']['sha256']:
+                report['pdf_ref'] = renders[-1]['pdf_ref']
+        except LayoutError as error:
+            candidate = self.artifacts.put_bytes(error.candidate_docx or raw, DOCX_MEDIA_TYPE)
+            delivered = reference
+            report = {**error.receipt, 'status': 'unverified', 'error_code': error.code,
+                      'title': title, 'source_ref': reference, 'artifact_ref': delivered,
+                      'candidate_ref': candidate, 'docx_sha256': delivered['sha256'], 'renders': renders}
+            self.gap('export_layout_unverified',
+                     f'“{title}”目录页码尚未核定；原稿和候选均保留，可重试布局或在Word更新域并确认保存。', None)
+        self.layout_reports.append(report)
+        return delivered
 
 
 def export_authoring_document(artifacts, outline: dict, writing_units: list[dict],
                               review_issues: list[dict] | None = None, *, requirements: dict | None = None,
-                              coverage: dict | None = None) -> dict:
+                              coverage: dict | None = None, render_pdf=None) -> dict:
     """Return immutable DOCX/ZIP references; source and business gaps remain deliverable."""
+    from docreader.tender.source_body import validate_outline_source_bodies
+    validate_outline_source_bodies(artifacts, outline)
     entries = list(_walk(outline.get("chapters", [])))
-    assembler = _Assembler(artifacts, writing_units, review_issues, entries)
+    assembler = _Assembler(artifacts, writing_units, review_issues, entries, render_pdf=render_pdf,
+                           authoring_input=outline.get('authoring_input'))
+    assembler.pending_reviews = pending_outline_issues(outline)
+    assembler.unplaced_targets = outline.get("unplaced_targets", [])
+    for target in assembler.unplaced_targets:
+        assembler.gap("export_target_unassigned", "原响应“" + target["purpose"]
+                      + "”尚未安排到章节；请在大纲编排的响应安排中重新安排或核对，移除不表示本次不适用。",
+                      None, target["target_id"])
     if requirements is not None:
         rules = {_requirement_key(entry["rule_ref"]): entry.get("rule") for entry in requirements.get("rules", [])}
         locations = [(ref, chapter["chapter_id"], target["target_id"]) for chapter, _ in entries
@@ -1064,9 +1543,12 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
                     assembler.pending_rules.append(text)
                 assembler.gap("export_requirement_unassigned", "底稿中有尚未安排正文或交付位置的要求，完整内容保留在底稿中。", None)
     chapter_ids = {chapter["chapter_id"] for chapter, _ in entries}
-    for chapter_id in assembler.units.keys() - chapter_ids:
+    for chapter_id in assembler.units:
+        if chapter_id in chapter_ids:
+            continue
         assembler.gap("export_unassigned_content", "内容的章节已不在当前大纲中，保留在补充内容中。", chapter_id)
         entries.append(({"chapter_id": chapter_id, "title": "补充内容", "targets": []}, (len(entries) + 1,)))
+    assembler.display_paths = _display_paths(entries)
     docx_ref = assembler.render(entries, "投标文件", include_pending=True)
     volumes = []
     publish_volumes = not any(issue.get("code") == "outline_assembly_unavailable"
@@ -1083,9 +1565,22 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
     manifest = {"schema_version": 2, "document": {"artifact_ref": docx_ref, "package_path": "投标文件.docx"},
                 "volumes": volumes, "attachments": attachments}
     requirement_files = []
+    layout_ref = None
+    if assembler.layout_reports:
+        layout_ref = artifacts.put_json({'contract': 'toc_layout_v1',
+            'status': 'unverified' if any(r['status'] == 'unverified' for r in assembler.layout_reports) else 'fixed',
+            'documents': assembler.layout_reports})
+        manifest['layout'] = {'artifact_ref': layout_ref, 'package_path': '版式核对.json'}
+        requirement_files.append(manifest['layout'])
     if requirements is not None:
+        if assembler.unplaced_targets:
+            requirements = {**requirements, "unplaced_targets": assembler.unplaced_targets}
         manifest["requirements"] = {"artifact_ref": artifacts.put_json(requirements), "package_path": "招标要求底稿.json"}
         requirement_files.append(manifest["requirements"])
+    elif assembler.unplaced_targets:
+        manifest["unplaced_targets"] = {"artifact_ref": artifacts.put_json(assembler.unplaced_targets),
+                                        "package_path": "未安排响应.json"}
+        requirement_files.append(manifest["unplaced_targets"])
     notes = artifacts.put_bytes(_submission_notes(outline, requirements, gaps, artifacts).encode(), "text/markdown")
     manifest["submission_notes"] = {"artifact_ref": notes, "package_path": "提交要求与待办.md"}
     coverage_file = None
@@ -1101,5 +1596,6 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         archive.writestr("待补事项.json", json.dumps(gaps, ensure_ascii=False, indent=2))
     return {"docx_ref": docx_ref, "package_ref": artifacts.put_bytes(output.getvalue(), "application/zip"),
+            **({'layout_ref': layout_ref} if layout_ref is not None else {}),
             "attachments": [{key: attachment[key] for key in ("material_id", "title", "artifact_ref")}
                             for attachment in attachments], "gaps": gaps}

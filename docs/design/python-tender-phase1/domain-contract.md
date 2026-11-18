@@ -112,16 +112,30 @@ OCR callback `async(image_ref, source) -> {text,status,issues}`，由 Python 模
 ## 模型层（现行接口）
 
 `ModelConfig.from_env(mapping=None)` 是单一配置解析源。`OpenAIModel(config, store, lease,
-prompts, concurrency=2, timeout_seconds=180).call(task,payload,images=()) -> dict`。
+prompts, concurrency=2, timeout_seconds=60).call(task,payload,images=()) -> dict`。
 images 是 bytes+MIME 或 data URL，只用于实际来源图像，不拉取任意远程 URL。
 类实现 async close/context manager。task 对应版本化领域提示（extract/verify/plan/ocr）。
+默认连续60秒未收到非空原始响应字节则超时；首响应头与首个body共用初始期限，收到
+心跳、推理或其他流字节后重新计时，不限制请求总时长。编制及保存稿复核使用同一默认值。
+timeout及`retry_policy=bounded_work_unit_deadline_v1`属于冻结执行身份；旧执行须沿匹配
+完整身份的冻结runtime恢复。仅显式指定旧180秒不足以兼容新的退避合同，不自动迁移或
+改写已有快照。编制另冻结`outline_source_binding_contract=batch_excerpt_coverage_v1`，
+来源包按实际提供的正文范围校验，在现有并发上限内执行，最终按计划顺序归并。
 
 每次请求唯一 request_id；prepared → sent（发送前持久）→ succeeded/failed/uncertain，
 真实 usage 只取服务端返回。SDK 重试关闭。ModelInfrastructureError 表示可重试网络/429/5xx，
 ModelSemanticError 表示 JSON/拒答/结构错误，ModelConfigurationError 表示配置错误。
-断连/超时或无法确认服务端执行结果必须 uncertain；框架恢复不能承诺模型 exactly-once。
+已收到部分流后的超时或无法确认服务端执行结果记uncertain；首数据超时沿既有策略记failed，
+两者没有供应商用量时均保留未知，不声称未计费。框架恢复不能承诺模型 exactly-once。
 队列与 dispatcher 共用命令基础设施失败计数，最多 4 次后明确 failed；进程失联恢复与语义修复
 不依靠该次数做业务判断。不写输出 token 上限，不将累计 usage 当单次 context 容量。
+
+普通与合批429沿同一30/60/120秒退避，Retry-After在现有120秒上限内参与计算；其它
+失败仍沿原短退避。等待截止`not_before`随失败审计/纠正回执持久保存，恢复只等剩余
+时间，发送仍检查租约、取消和四次额度；旧记录缺字段使用可用的实际失败/提交时间回退。
+首原始字节、首解码块、首非空正文、最大raw静默和模型客户端semaphore排队分别计量；
+未知值保持缺失。请求耗时总和、区间并集、首发至末完成跨度分列，后者包含内部准备/
+退避空档，均不冒充完整任务墙钟；计时与观测不进入模型请求身份。
 
 ## 抽取、验证与计划（现行旧格式）
 

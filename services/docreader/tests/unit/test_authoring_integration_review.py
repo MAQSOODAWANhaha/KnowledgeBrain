@@ -108,8 +108,9 @@ async def test_assembly_preserves_known_row_missing_from_explicit_regrouping(tmp
                 'response_table': {'rows': [{'range_ids': [source['range_id']]} for source in value['sources']]}}]}],
             'findings': []})
 
-    saved = artifacts.read_json(await pipeline.generate_document(
-        artifacts, fixed, budget(), execute, outline_only=True))
+    result = artifacts.read_json(await pipeline.generate_document(
+        artifacts, fixed, budget(), execute))
+    saved = artifacts.read_json(result['outline_ref'])
     rows = [row for chapter in pipeline._flatten(saved['chapters']) for target in chapter['targets']
             for row in (target.get('response_table') or {}).get('rows', [])]
     from docreader.tender.authoring_excerpts import load_source_excerpt

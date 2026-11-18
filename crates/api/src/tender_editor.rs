@@ -439,17 +439,17 @@ async fn select(
         .map(Json)
 }
 
-struct Office {
+pub(crate) struct Office {
     server: Url,
-    command: Url,
-    api: Url,
+    pub(crate) command: Url,
+    pub(crate) api: Url,
     secret: String,
     capability: String,
     ttl: u64,
-    timeout: u64,
+    pub(crate) timeout: u64,
 }
 impl Office {
-    fn load() -> Result<Self, ApiErr> {
+    pub(crate) fn load() -> Result<Self, ApiErr> {
         let origin = |name| -> Result<Url, ApiErr> {
             let url = Url::parse(
                 &std::env::var(name)
@@ -486,7 +486,7 @@ impl Office {
             timeout: number("KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS", 120u64)?,
         })
     }
-    fn sign(&self, value: &impl Serialize, capability: bool) -> Result<String, ApiErr> {
+    pub(crate) fn sign(&self, value: &impl Serialize, capability: bool) -> Result<String, ApiErr> {
         encode(
             &Header::new(Algorithm::HS256),
             value,
@@ -498,14 +498,14 @@ impl Office {
         )
         .map_err(|_| unavailable("Word configuration signing failed"))
     }
-    fn client(&self) -> Result<reqwest::Client, ApiErr> {
+    pub(crate) fn client(&self) -> Result<reqwest::Client, ApiErr> {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| unavailable("Word transport unavailable"))
     }
-    fn download_url(&self, raw: &str) -> Result<Url, ApiErr> {
+    pub(crate) fn download_url(&self, raw: &str) -> Result<Url, ApiErr> {
         let mut url =
             Url::parse(raw).map_err(|_| validation("callback download URL is invalid"))?;
         if !url.username().is_empty()

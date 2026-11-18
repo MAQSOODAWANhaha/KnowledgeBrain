@@ -18,7 +18,7 @@ from docreader.integrations.store import Cancelled, Conflict, StaleExecution
 from docreader.llm.budget import RequestBudget
 from docreader.llm.client import OpenAIModel
 from docreader.llm.config import completions_url
-from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted, build_request
+from docreader.llm.request import MODEL_RETRY_POLICY, ModelBudgetError, ModelConfigurationError, ModelContractError, ModelWorkUnitExhausted, build_request
 from docreader.tender.authoring import _OutlineContext
 from docreader.tender.authoring_pipeline import _batches, _load_task, _parse, plan_writing_tasks
 from docreader.tender.document_execution import _DocumentExecutor, _usage
@@ -145,7 +145,8 @@ async def review_saved_word(artifacts, document, data, budget, execute, *, reaso
                 finding["can_revise"] = False
                 finding["reject_content"] = False
             return value
-        request = build_request(budget.model, PROMPT, payload(batch), task="authoring_review")
+        request = build_request(budget.model, PROMPT, payload(batch), task="authoring_review",
+                                reasoning_effort=budget.reasoning_effort)
         try:
             budget.require_request(request, "authoring_review")
             response = await execute("authoring_review", request, validate)
@@ -161,17 +162,20 @@ async def review_saved_word(artifacts, document, data, budget, execute, *, reaso
 
 async def execute_saved_review(analysis_store, artifacts, config, budget, *, execution_id, snapshot, document_ref,
                                saved_ref, version_id, docx_sha256, reason, transport=None,
-                               lease_seconds=60, heartbeat_seconds=20, timeout_seconds=180):
+                               lease_seconds=60, heartbeat_seconds=20, timeout_seconds=60):
+    if budget.reasoning_effort != getattr(config.chat, "reasoning_effort", None):
+        raise ModelConfigurationError("saved review budget differs from configured reasoning effort")
     store = AuthoringStore(analysis_store.dsn)
     await store.setup()
     admitted = RequestBudget(context_tokens=budget.context_tokens, model=budget.model,
                              prompts={"authoring_review": PROMPT}, output_reserve=budget.output_reserve,
                              correction=budget.limits.correction, tokenizer=budget.tokenizer,
-                             tokenized_authoring=budget.tokenized_authoring)
+                             tokenized_authoring=budget.tokenized_authoring, reasoning_effort=budget.reasoning_effort)
     spec = {"protocol": "tender_saved_word_review_v1", "endpoint": completions_url(config.chat.base_url),
             "model": config.chat.model, "budget": admitted.spec(), "prompt_digest": hashlib.sha256(PROMPT.encode()).hexdigest(),
             "document_ref": document_ref, "saved_ref": saved_ref, "version_id": version_id,
-            "docx_sha256": docx_sha256, "reason": reason, "timeout_seconds": timeout_seconds}
+            "docx_sha256": docx_sha256, "reason": reason, "timeout_seconds": timeout_seconds,
+            "retry_policy": MODEL_RETRY_POLICY}
     await assert_authoring_active(analysis_store, snapshot)
     await store.submit(execution_id, snapshot, spec)
     lease = await store.acquire(execution_id, lease_seconds=lease_seconds)

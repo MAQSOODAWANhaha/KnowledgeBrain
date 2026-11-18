@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass, field
 from collections import Counter
+from datetime import datetime
 import math
 from typing import Any
 
 
-# A first byte this late is still inside the 180s idle deadline, but it is the
-# range worth seeing before the request is failed as a timeout. It does not
-# change admission or retry.
+# First decoded data can lag raw activity (for example, with compression).
+# This observation is independent of the execution's raw-byte idle deadline
+# and does not change admission or retry.
 SLOW_FIRST_DATA_SECONDS = 60
 
 
@@ -26,6 +27,48 @@ def _request_marks(row: dict, usage: dict) -> list[str]:
     if type(first) in {int, float} and not isinstance(first, bool) and first >= SLOW_FIRST_DATA_SECONDS:
         marks.append("slow_first_data")
     return marks
+
+
+def _timing_observation(rows):
+    """Spans include gaps between requests; unions count overlapping intervals once."""
+    result = {}
+    for key in ("first_data_seconds", "first_raw_seconds", "first_content_seconds",
+                "max_raw_idle_seconds", "semaphore_wait_seconds"):
+        values = sorted(value for row in rows
+                        if type(value := (row.get("metadata") or {}).get(key)) in {int, float}
+                        and math.isfinite(value) and value >= 0)
+        result[key] = {"observations": len(values), "missing": len(rows) - len(values),
+                       "max": values[-1] if values else None,
+                       "p50": values[math.ceil(len(values) * .5) - 1] if values else None,
+                       "p95": values[math.ceil(len(values) * .95) - 1] if values else None}
+
+    def timestamp(value):
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        if isinstance(value, datetime) and value.utcoffset() is not None:
+            return value.timestamp()
+        return None
+
+    intervals = []
+    for row in rows:
+        start, end = timestamp(row.get("sent_at")), timestamp(row.get("finished_at"))
+        if start is not None and end is not None and end >= start:
+            intervals.append((start, end))
+    intervals.sort()
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(end, merged[-1][1])
+        else:
+            merged.append([start, end])
+    result.update(completed_intervals=len(intervals), missing_intervals=len(rows) - len(intervals),
+                  request_seconds_sum=round(sum(end - start for start, end in intervals), 6) if intervals else None,
+                  request_interval_union_seconds=round(sum(end - start for start, end in merged), 6) if merged else None,
+                  request_span_seconds=round(merged[-1][1] - merged[0][0], 6) if merged else None)
+    return result
 
 
 def budget_observation(requests: list[dict], plans=()) -> dict:
@@ -70,8 +113,21 @@ def budget_observation(requests: list[dict], plans=()) -> dict:
                       and type(row.get("metadata", {}).get("context_tokens")) is int]
         successful_outputs = sorted(u["completion_tokens"] for row, u in zip(rows, usages, strict=True)
                                     if row["status"] == "succeeded" and "completion_tokens" in u)
+        reasoning = [u["completion_tokens_details"]["reasoning_tokens"] for u in usages
+                     if isinstance(u.get("completion_tokens_details"), dict)
+                     and type(u["completion_tokens_details"].get("reasoning_tokens")) is int]
+        visible = [u["completion_tokens"] - u["completion_tokens_details"]["reasoning_tokens"] for u in usages
+                   if isinstance(u.get("completion_tokens_details"), dict)
+                   and type(u["completion_tokens_details"].get("reasoning_tokens")) is int
+                   and type(u.get("completion_tokens")) is int
+                   and u["completion_tokens"] >= u["completion_tokens_details"]["reasoning_tokens"]]
         summaries[kind][name] = {
             "requests": len(rows), "statuses": dict(Counter(row["status"] for row in rows)),
+            "timing": _timing_observation(rows),
+            "reasoning_tokens": {"observations": len(reasoning), "missing": len(rows) - len(reasoning),
+                                 "total": sum(reasoning) if reasoning else None},
+            "visible_completion_tokens": {"observations": len(visible), "missing": len(rows) - len(visible),
+                                          "total": sum(visible) if visible else None},
             "reported_tokens": {key: sum(u[key] for u in usages if key in u)
                                 for key in fields if any(key in u for u in usages)},
             "missing_token_fields": {key: sum(key not in u for u in usages) for key in fields},
@@ -98,12 +154,14 @@ def budget_observation(requests: list[dict], plans=()) -> dict:
                  if phase not in {plan["phase"] for plan in planned}]
     known_requests = sum(plan["planned_requests"] for plan in planned)
     return {"calibration_status": "observations_only", "requests": len(requests),
-            "deviations": deviations, **summaries,
+            "deviations": deviations, "timing": _timing_observation(requests), **summaries,
             "planning": {"unplanned_phases": unplanned, "known_planned_requests": known_requests,
                          "total_planned_requests": None if unplanned else known_requests},
             "plans": planned, "limits": ["Estimates and reserves are not billed usage or provider output limits.",
                 "Missing usage remains unknown; failed/uncertain attempts remain included.",
                 "Successful completion samples exclude failed/uncertain transfers, not semantic defects; verify output quality separately.",
+                "Request span includes gaps between known sends; interval union covers only known request intervals. Neither is whole-run wall time; missing intervals remain omitted.",
+                "Visible completion is completion minus reported reasoning; missing breakdowns remain unknown.",
                 "Planned request counts exclude OCR, retries and corrections; unplanned downstream calls are unknown, not zero.",
                 "Observed p95 uses nearest rank and is not a capacity guarantee, especially for small samples."]}
 

@@ -98,7 +98,8 @@ def build_ledger(outline, requirements=None):
         seen.add(key)
         if rule_ref is not None:
             placed.add(_canonical(rule_ref))
-        excerpts = (row or target or {}).get("source_excerpts", []) if row or target else []
+        excerpts = ([*(row or target or {}).get("context_source_excerpts", []),
+                     *(row or target or {}).get("source_excerpts", [])] if row or target else [])
         status = "not_required" if resolution in _SETTLED else "unreviewed"
         entries.append({
             "coverage_id": coverage_identity(rule_ref, target_id, row_id),
@@ -108,9 +109,7 @@ def build_ledger(outline, requirements=None):
             "assessment": None, "review_status": status, "gap_codes": [],
         })
 
-    for target, external in _walk(outline.get("chapters", [])):
-        def resolve(reference):
-            return _resolution(reference, target, constraints, excluded_rules, excluded_targets, external)
+    def add_target(target, resolve):
         rows = ((target.get("response_table") or {}).get("rows") or [])
         if rows:
             row_refs = set()
@@ -122,17 +121,22 @@ def build_ledger(outline, requirements=None):
             for ref in target.get("rule_refs", []):
                 if _canonical(ref) not in row_refs:
                     add(ref, target, None, resolve(ref))
-            continue
+            return
         refs = target.get("rule_refs") or []
         if refs:
             for ref in refs:
                 add(ref, target, None, resolve(ref))
-        elif target.get("manual_fill"):
-            add(None, target, None, "manual")
-        elif external:
-            add(None, target, None, "submission")
-        elif "knowledge" in (target.get("support_origins") or ["knowledge"]):
-            add(None, target, None, "content")
+        elif target.get("manual_fill") or resolve(None) in {"pending", "submission"} or "knowledge" in (target.get("support_origins") or ["knowledge"]):
+            add(None, target, None, resolve(None))
+
+    assigned_targets = set()
+    for target, external in _walk(outline.get("chapters", [])):
+        assigned_targets.add(target["target_id"])
+        add_target(target, lambda reference: _resolution(
+            reference, target, constraints, excluded_rules, excluded_targets, external))
+    for target in outline.get("unplaced_targets", []):
+        if target["target_id"] not in assigned_targets:
+            add_target(target, lambda _reference: "pending")
     for ref in outline.get("constraint_rule_refs", []):
         if _canonical(ref) not in placed:
             add(ref, None, None, "constraint")
@@ -170,7 +174,7 @@ def _exact_intents(intents, ranges):
 
 
 def _row_intents(intents, row, context_excerpts=()):
-    selected = {"source_excerpts": [*context_excerpts, *row.get("source_excerpts", [])]}
+    selected = {"source_excerpts": [*context_excerpts, *row.get("context_source_excerpts", []), *row.get("source_excerpts", [])]}
     ranges, sources = _row_ranges(selected), _row_sources(selected)
     if ranges:
         return _exact_intents(intents, ranges)
@@ -197,7 +201,7 @@ def _rule_intents(intents, rule_ref):
 
 def _row_text(row, excerpt_texts, context_excerpts=()):
     parts, seen = [], set()
-    for ref in [*context_excerpts, *row.get("source_excerpts", [])]:
+    for ref in [*context_excerpts, *row.get("context_source_excerpts", []), *row.get("source_excerpts", [])]:
         key = _json(ref)
         if key in seen:
             continue
@@ -632,7 +636,31 @@ def settle_coverage(entries, units, unit_refs, assessments, knowledge_issues=(),
     return settled
 
 
-def coverage_headline(coverage):
+def pending_outline_issues(outline):
+    """Keep explicit unresolved source decisions separate from routine directory notices."""
+    codes = {
+        "outline_directory_applicability_unconfirmed", "outline_directory_conflict",
+        "outline_directory_requirement_unassigned", "outline_directory_partial_table",
+        "outline_directory_table_unbound", "outline_directory_sparse_page",
+        "outline_directory_ocr_unconfirmed", "outline_directory_revision_unreviewed",
+        "outline_directory_material_rejected", "outline_directory_requirement_rejected",
+        "outline_directory_parameter_rejected", "outline_directory_rejected",
+        "outline_directory_name_unconfirmed", "outline_directory_binding_rejected",
+        "outline_directory_extra_unconfirmed",
+        "outline_directory_table_header_unconfirmed",
+        "outline_directory_symbol_unconfirmed",
+        "outline_directory_requirement_overlap_unconfirmed",
+        "outline_directory_response_form_unconfirmed", "outline_directory_response_form_unbound",
+    }
+    found = {}
+    for issue in (outline or {}).get("issues", []):
+        detail = (issue.get("detail") or "").strip()
+        if issue.get("code") in codes and detail:
+            found.setdefault((issue["code"], detail), issue)
+    return list(found.values())
+
+
+def coverage_headline(coverage, outline=None):
     if not isinstance(coverage, dict) or not isinstance(coverage.get("entries"), list):
         return {"state": "unknown", "pending": None, "unreviewed": None, "headline": "覆盖未知"}
     entries = coverage["entries"]
@@ -647,6 +675,7 @@ def coverage_headline(coverage):
         return entry.get("resolution") == "content" and not entry.get("content_refs")
 
     missing = sum(1 for entry in entries if pending(entry))
-    unreviewed = sum(1 for entry in entries if entry.get("review_status") == "unreviewed")
+    unreviewed = (sum(1 for entry in entries if entry.get("review_status") == "unreviewed")
+                  + len(pending_outline_issues(outline)))
     return {"state": "draft", "pending": missing, "unreviewed": unreviewed,
             "headline": f"草稿已生成，{missing}项待补、{unreviewed}项待核"}

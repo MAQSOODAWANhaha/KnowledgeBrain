@@ -13,10 +13,10 @@ from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.evidence.references import SourceIndex
 
 
-def source_ref(artifacts, *, grid=None, text="", document_id="template"):
+def source_ref(artifacts, *, grid=None, text="", document_id="template", locator=None):
     unit = {"unit_id": "unit:0", "kind": "table_region" if grid else "section",
             "ordinal": 0, "text": text, "grid": grid,
-            "locator": {"locator_kind": "document", "section_ordinal": 0}}
+            "locator": locator or {"locator_kind": "document", "section_ordinal": 0}}
     raw = {"schema_version": 2, "units": [unit], "images": {}, "ocr": {},
            "source_contract": {"page_manifest": [], "units": [{
                "unit_id": "unit:0", "section_id": "section:0", "parent_section_id": None,
@@ -71,10 +71,66 @@ def test_docx_keeps_nested_order_and_unfilled_required_positions(tmp_path):
         ])])
     doc = document(artifacts, result)
     headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
-    assert headings == ["1 技术文件", "1.1 实施计划", "1.2 人员"]
+    assert headings == ["技术文件", "实施计划", "人员"]
     assert "按现有需求拟定实施步骤。" in [p.text for p in doc.paragraphs]
     assert [cell.text for cell in doc.tables[0].rows[1].cells] == ["部署", "配置记录"]
     assert any(g.get("target_id") == "staff" for g in result["gaps"])
+
+
+def test_pdf_table_keeps_each_source_row_height(tmp_path, monkeypatch):
+    from docx.enum.table import WD_ROW_HEIGHT_RULE
+    import docreader.tender.authoring_export as export
+
+    monkeypatch.setattr(export, '_pdf_row_heights', lambda *_args: [30.0, 50.0, 70.0])
+    artifacts = ArtifactStore(tmp_path)
+    locator = {'locator_kind': 'page_table', 'page_ordinal': 0, 'table_ordinal': 0,
+               'left': 100.0, 'right': 450.0, 'top': 700.0, 'bottom': 550.0}
+    ref = source_ref(artifacts, grid=grid(), locator=locator)
+    position = target('form', 'form', [ref], templates=[ref])
+    result = export_authoring_document(artifacts, {'chapters': [chapter('a', '原式', [position])]}, [])
+    rows = document(artifacts, result).tables[0].rows
+    assert [row.height.pt for row in rows] == [30, 50, 70]
+    assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in rows)
+
+
+def test_single_row_pdf_form_keeps_the_source_box_height(tmp_path, monkeypatch):
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    import docreader.tender.authoring_export as export
+
+    monkeypatch.setattr(export, '_single_cell_centering', lambda *_args: (True, True))
+
+    artifacts = ArtifactStore(tmp_path)
+    box = {'row_count': 1, 'column_count': 1, 'widths_mm': [120], 'cells': [
+        {'row': 0, 'column': 0, 'row_span': 1, 'col_span': 1, 'text': '银行汇款回单扫描件'}]}
+    locator = {'locator_kind': 'page_table', 'page_ordinal': 0, 'table_ordinal': 0,
+               'left': 100.0, 'right': 450.0, 'top': 700.0, 'bottom': 500.0}
+    ref = source_ref(artifacts, grid=box, locator=locator)
+    position = target('form', 'form', [ref], templates=[ref])
+    result = export_authoring_document(artifacts, {'chapters': [chapter('a', '保证金', [position])]}, [])
+    row = document(artifacts, result).tables[0].rows[0]
+    assert row.height.pt == 200
+    assert row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST
+    assert row.cells[0].text == '银行汇款回单扫描件'
+    assert row.cells[0].vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    assert row.cells[0].paragraphs[0].alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+
+def test_multiple_native_tables_keep_merges_blank_rows_and_fills(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    first = source_ref(artifacts, grid=grid(), document_id='first')
+    second = source_ref(artifacts, grid=grid(), document_id='second')
+    position = target('staff', 'form', [first, second], templates=[first, second])
+    result = export_authoring_document(artifacts, {'chapters': [chapter('a', '人员表', [position])]}, [
+        writing('task', 'a', ['staff'], cell_fills=[
+            {'source_ref': second, 'row': 1, 'column': 1, 'text': '张三'}])])
+    tables = document(artifacts, result).tables
+    assert len(tables) == 2
+    for table in tables:
+        assert len(table.rows) == 3
+        assert table.cell(0, 0)._tc is table.cell(0, 1)._tc
+        assert table.cell(2, 1).text == ''
+    assert tables[1].cell(1, 1).text == '张三'
 
 
 def test_original_table_words_and_merges_are_preserved_and_only_empty_cells_filled(tmp_path):

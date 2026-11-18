@@ -169,6 +169,7 @@ dependencies = [
  "chrono",
  "docparser",
  "dotenvy",
+ "http-body 1.1.0",
  "http-body-util",
  "jsonwebtoken",
  "knowledge",

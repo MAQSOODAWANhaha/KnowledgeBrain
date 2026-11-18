@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 from copy import deepcopy
+from pathlib import Path
 from typing import Iterator
 
 from docreader.integrations.artifacts import ArtifactIntegrityError, ArtifactStore
@@ -43,6 +45,107 @@ def _locator(value):
     # Native cells are retained once in canonical raw, not once per row/request.
     return {key: _locator(item) if isinstance(item, dict) else item
             for key, item in value.items() if key not in {"cells", "cell_refs", "rendered_spans"}}
+
+
+def literal_source_profile():
+    """Version the tender producer independently of knowledge Markdown parsing."""
+    from docreader.tender.evidence.pdf_literal import CONTRACT
+
+    root = Path(__file__).parent
+    return {'contract': CONTRACT, 'sources': {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in ('native.py', 'freeze.py', 'packing.py', 'pdf_literal.py', 'references.py')}}
+
+
+def validate_literal_source(raw, literal, document=None):
+    """Revalidate every projected glyph against its immutable original snapshot."""
+    from docreader.tender.evidence.pdf_literal import CONTRACT
+
+    def require(condition, detail):
+        if not condition:
+            raise ArtifactIntegrityError('invalid PDF literal source: ' + detail)
+
+    try:
+        contract = raw['source_contract']
+        require(literal['contract'] == contract['literal_contract'] == CONTRACT, 'contract')
+        require(literal['source_sha256'] == raw['original_ref']['sha256']
+                == contract['document_revision'], 'original identity')
+        if document is not None:
+            require(all(document[key] == raw[key] for key in
+                        ('document_id', 'document_version', 'original_ref')), 'document identity')
+        require(literal['coordinate_system'] == 'pdf_bottom_left'
+                and literal['text_order'] == 'pdfium_character_stream', 'coordinate or text basis')
+        pages = literal['pages']
+        require(type(literal['page_count']) is int and literal['page_count'] == len(pages), 'page count')
+        glyphs, eligible_unreadable = {}, set()
+        for page_number, page in enumerate(pages):
+            chars = page['characters']
+            require(type(page['page_ordinal']) is int and page['page_ordinal'] == page_number, 'page identity')
+            require(type(page['char_count']) is int and page['char_count'] == len(chars), 'character count')
+            require(all(math.isfinite(page[key]) and page[key] > 0 for key in ('width', 'height')), 'page geometry')
+            unreadable = {item['char_index'] for item in page['issues'] if item['code'] in {
+                'pdf_literal_character_text_empty', 'pdf_literal_character_text_unreadable'}}
+            for index, char in enumerate(chars):
+                require(type(char['char_index']) is int and char['char_index'] == index, 'character identity')
+                require(isinstance(char['text'], str), 'character text')
+                char['text'].encode('utf-8', errors='strict')
+                box = char['bbox']
+                require(box is None or len(box) == 4 and all(math.isfinite(value) for value in box), 'character geometry')
+                glyphs[page_number, index] = char
+                if not char['text'] and index in unreadable:
+                    eligible_unreadable.add((page_number, index))
+            require(page['text_stream'] == ''.join(char['text'] for char in chars), 'text stream')
+        units = {unit['unit_id']: unit for unit in raw['units']}
+        identities = {unit['unit_id']: unit for unit in contract['units']}
+        require(len(units) == len(raw['units']) and len(identities) == len(contract['units'])
+                and units.keys() == identities.keys(), 'unit identities')
+        mappings = raw['literal_units']
+        require(set(mappings) == {key for key, unit in units.items()
+                                 if unit.get('text_basis') == 'pdf_literal'}, 'unit mappings')
+        covered = set()
+        for unit_id, mapping in mappings.items():
+            unit, identity = units[unit_id], identities[unit_id]
+            page_number, indices = mapping['page_ordinal'], mapping['char_indices']
+            require(type(page_number) is int and 0 <= page_number < len(pages), 'mapping page')
+            require(mapping['text_order'] == 'pdfium_character_stream' and indices
+                    and all(type(index) is int for index in indices)
+                    and all(first < second for first, second in zip(indices, indices[1:])), 'mapping order')
+            points = [(page_number, index) for index in indices]
+            require(all(point in glyphs and point not in covered for point in points), 'duplicate or missing glyph')
+            chars = [glyphs[point] for point in points]
+            text = ''.join(char['text'] for char in chars)
+            require(unit['kind'] == identity['kind'] == 'section' and not unit.get('grid')
+                    and text == unit['text'] and identity['text_sha256'] == hashlib.sha256(text.encode()).hexdigest(),
+                    'unit text')
+            location = {'locator_kind': 'page', 'page_ordinal': page_number}
+            boxes = [char['bbox'] for char in chars if char['bbox'] is not None]
+            if boxes:
+                location.update(left=min(box[0] for box in boxes), bottom=min(box[1] for box in boxes),
+                                right=max(box[2] for box in boxes), top=max(box[3] for box in boxes))
+            require(unit['locator'] == unit['physical_locator'] == identity['physical_locator'] == location
+                    and unit['physical_path'] == identity['physical_path'], 'unit location')
+            covered.update(points)
+        dispositions = set()
+        for item in raw['literal_projection_dispositions']:
+            point = (item['page_ordinal'], item['char_index'])
+            require(all(type(value) is int for value in point) and point in glyphs, 'disposition identity')
+            char, reason = glyphs[point], item['reason']
+            if reason == 'native_grid_candidate':
+                # A bounding-box candidate is not proof that the grid carries
+                # this glyph. It does not contribute to source coverage.
+                require(all(identity in units and units[identity].get('grid') for identity in item['unit_ids']),
+                        'grid candidate')
+                continue
+            require(reason == 'physical_line_separator' and (
+                        char['text'] in ('\r', '\n', '\r\n') or char['pdfium_unicode'] in (10, 13))
+                    or reason == 'unreadable_glyph' and point in eligible_unreadable, 'unsupported glyph exclusion')
+            require(point not in dispositions and point not in covered, 'duplicate disposition')
+            dispositions.add(point)
+        require(covered | dispositions == glyphs.keys(), 'unaccounted original glyphs')
+    except (KeyError, TypeError, ValueError, IndexError) as error:
+        if isinstance(error, ArtifactIntegrityError):
+            raise
+        raise ArtifactIntegrityError('invalid PDF literal source structure') from error
 
 
 class SourceIndex:
@@ -104,6 +207,12 @@ class EvidenceRepository:
             if key not in self._sources:
                 descriptor = self.artifacts.read_json(reference)
                 raw = self.artifacts.read_json(descriptor["raw_ref"])
+                if ('literal_source_ref' in raw or 'literal_units' in raw
+                        or raw.get('source_contract', {}).get('literal_contract')):
+                    if not raw.get('literal_source_ref'):
+                        raise ArtifactIntegrityError('PDF literal source reference is missing')
+                    validate_literal_source(raw, self.artifacts.read_json(raw['literal_source_ref']),
+                                            descriptor['document'])
                 source = SourceIndex(descriptor["document"], raw)
                 if source.descriptor(descriptor["raw_ref"])["ranges"] != descriptor["ranges"]:
                     raise ArtifactIntegrityError("source index does not match frozen native content")

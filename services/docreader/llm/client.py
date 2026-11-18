@@ -22,6 +22,7 @@ from docreader.llm.failures import http_failure
 from docreader.llm.config import ModelConfig, ModelEndpoint, completions_url
 from docreader.llm.request import (
     ImageInput,
+    MODEL_RETRY_POLICY,
     ModelConfigurationError,
     ModelCorrectionStalled,
     ModelInfrastructureError,
@@ -30,6 +31,7 @@ from docreader.llm.request import (
     ModelSemanticError,
     UncertainModelResponse,
     request_digest,
+    validate_request_reasoning,
 )
 from docreader.llm.usage import UsageLedger, reported_usage
 from docreader.llm.streaming import (
@@ -53,7 +55,7 @@ class OpenAIModel:
         lease,
         prompts: Mapping[str, str] | None = None,
         concurrency: int = 2,
-        timeout_seconds: float = 180,
+        timeout_seconds: float = 60,
         *,
         artifacts=None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -99,11 +101,14 @@ class OpenAIModel:
         def endpoint_spec(endpoint):
             if endpoint is None:
                 return None
-            return {
+            value = {
                 "endpoint": completions_url(endpoint.base_url),
                 "model": endpoint.model,
                 "context_tokens": endpoint.context_tokens,
             }
+            if endpoint.reasoning_effort is not None:
+                value["reasoning_effort"] = endpoint.reasoning_effort
+            return value
 
         return {
             "workflow_protocol": deepcopy(WORKFLOW_PROTOCOL),
@@ -121,6 +126,7 @@ class OpenAIModel:
             },
             "timeout_seconds": self._timeout,
             "timeout_policy": "raw_response_idle_v1",
+            "retry_policy": MODEL_RETRY_POLICY,
             "concurrency": self._concurrency,
         }
 
@@ -135,6 +141,7 @@ class OpenAIModel:
             prompts=self._prompt_snapshot(),
             correction=correction,
             tokenizer=None if images else "o200k_base",
+            reasoning_effort=endpoint.reasoning_effort,
         )
 
     def _client(self, endpoint: ModelEndpoint) -> AsyncOpenAI:
@@ -201,7 +208,9 @@ class OpenAIModel:
                 endpoint.base_url, budget.request(task, baseline, images)
             )
 
+        queued = time.monotonic()
         async with self._semaphore:
+            context["semaphore_wait_seconds"] = round(time.monotonic() - queued, 6)
             await self.store.pin_execution_spec(self.lease, self.execution_spec())
             if wire.enabled:
                 if self.artifacts is None:
@@ -247,13 +256,20 @@ class OpenAIModel:
             raise ModelConfigurationError(
                 "prepared request model does not match its configured endpoint"
             )
+        if budget.reasoning_effort != endpoint.reasoning_effort:
+            raise ModelConfigurationError("prepared request budget differs from configured reasoning effort")
+        validate_request_reasoning(request, endpoint.reasoning_effort)
+        if logical_request is not None:
+            validate_request_reasoning(logical_request, endpoint.reasoning_effort)
         context = budget.admit_request(request, task)
         digest = request_digest(endpoint.base_url, request)
         logical_digest = request_digest(
             endpoint.base_url,
             logical_request if logical_request is not None else request,
         )
+        queued = time.monotonic()
         async with self._semaphore:
+            context["semaphore_wait_seconds"] = round(time.monotonic() - queued, 6)
             await self.store.pin_execution_spec(self.lease, execution_spec)
             return await self._send_request(
                 endpoint, request, task, context, digest, logical_digest
@@ -284,10 +300,18 @@ class OpenAIModel:
             ModelRequestStatus.UNCERTAIN,
         }:
             await self._replay_group_failure(row, digest)
+        if request_not_before := getattr(self.store, "request_not_before", None):
+            not_before = await request_not_before(
+                self.lease, task, logical_digest,
+                group_work_unit_keys=context.get("group_work_unit_keys"),
+            )
+            if not_before is not None and (remaining := not_before - time.time()) > 0:
+                await asyncio.sleep(remaining)
         # Durable attempt limits and active-send fencing happen before HTTP.
         await self.store.finish_request(request_id, ModelRequestStatus.SENT)
         started = time.monotonic()
-        stream = StreamResponse()
+        stream = StreamResponse(started)
+        stream.counts["semaphore_wait_seconds"] = context["semaphore_wait_seconds"]
         deadline = IdleDeadline(self._timeout)
         raw_response = None
         try:
@@ -297,7 +321,7 @@ class OpenAIModel:
             raw_response = await deadline.wait(manager.__aenter__)
             response = raw_response.http_response
             response.stream = ActiveResponseStream(
-                response.stream, deadline, stream.counts
+                response.stream, deadline, stream
             )
             iterator = raw_response.iter_bytes().__aiter__()
             while not stream.done and stream.provider_error is None:
@@ -313,6 +337,8 @@ class OpenAIModel:
                             time.monotonic() - started, 3
                         )
                     stream.feed(chunk)
+            # Freeze transport timing before JSON validation, close and durable audit.
+            stream.finish_activity()
             if (
                 stream.provider_error is None
                 and response.headers.get("content-type", "").split(";", 1)[0].strip()
@@ -352,6 +378,8 @@ class OpenAIModel:
                 f"http_{status}",
                 started,
                 response_ref,
+                activity=_stream_activity(stream.counts),
+                retry_after_seconds=retry_after_seconds,
             )
             if status == 429:
                 raise ModelRateLimitError(retry_after_seconds) from None
@@ -486,6 +514,10 @@ class OpenAIModel:
 
     async def _replay_group_failure(self, row, digest):
         """A crashed attempt replays its recorded failure; a new reservation may retry it."""
+        recorded_error = row.get("error") or {}
+        rate_limited = recorded_error.get("type") == "http_429"
+        retry_after = recorded_error.get("retry_after_seconds")
+        not_before = _nonnegative_seconds((row.get("metadata") or {}).get("not_before"))
         if self.artifacts is not None and row.get("response_ref") is not None:
             envelope = await asyncio.to_thread(
                 self.artifacts.read_json, row["response_ref"]
@@ -499,17 +531,26 @@ class OpenAIModel:
                 stream.feed(envelope["raw_body"].encode("utf-8"))
                 try:
                     stream.result()
-                except ModelJSONError:
+                except ModelJSONError as error:
+                    error.not_before = not_before
                     raise
                 except (ModelSemanticError, UncertainModelResponse):
                     pass
+            elif envelope.get("protocol") == "http.rejection.v1" and envelope.get("status_code") == 429:
+                rate_limited = True
+                retry_after = envelope.get("retry_after_seconds")
         if row["status"] == ModelRequestStatus.UNCERTAIN:
-            raise UncertainModelResponse(
+            error = UncertainModelResponse(
                 "recorded group attempt has an uncertain provider outcome"
             )
-        raise ModelInfrastructureError(
-            "recorded group attempt failed before a complete response"
-        )
+        elif rate_limited:
+            error = ModelRateLimitError(_nonnegative_seconds(retry_after))
+        else:
+            error = ModelInfrastructureError(
+                "recorded group attempt failed before a complete response"
+            )
+        error.not_before = not_before
+        raise error
 
     async def _cached_response(self, row: dict, digest: str) -> dict:
         # ArtifactStore verifies size, path and SHA256 before decoding. Recovery
@@ -559,6 +600,7 @@ class OpenAIModel:
         self, request_id, status, stream, digest, error_type, started,
         *, transport_diagnostics=None,
     ):
+        stream.finish_activity()
         envelope = stream.audit(digest, error_type or "completed")
         if transport_diagnostics is not None:
             envelope.update(transport_diagnostics)
@@ -571,7 +613,7 @@ class OpenAIModel:
             started,
             response_ref,
             provider_error=stream.provider_error,
-            activity=_first_data_activity(stream.counts),
+            activity=_stream_activity(stream.counts),
             transport_diagnostics=transport_diagnostics,
         )
 
@@ -607,6 +649,7 @@ class OpenAIModel:
         provider_error=None,
         activity=None,
         transport_diagnostics=None,
+        retry_after_seconds=None,
     ):
         error = (
             {
@@ -625,6 +668,8 @@ class OpenAIModel:
             error["provider_error"] = _redact_response(provider_error, secrets)
         if error is not None and transport_diagnostics is not None:
             error.update(transport_diagnostics)
+        if error_type == "http_429" and (retry_after := _nonnegative_seconds(retry_after_seconds)) is not None:
+            error["retry_after_seconds"] = retry_after
         await self.store.finish_request(
             request_id,
             status,
@@ -672,11 +717,17 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
-def _first_data_activity(counts) -> dict | None:
-    value = counts.get("first_data_seconds") if isinstance(counts, dict) else None
-    if type(value) not in {int, float} or isinstance(value, bool) or value < 0:
+def _nonnegative_seconds(value):
+    return value if type(value) in {int, float} and math.isfinite(value) and value >= 0 else None
+
+
+def _stream_activity(counts) -> dict | None:
+    if not isinstance(counts, dict):
         return None
-    return {"first_data_seconds": value}
+    return {key: value for key in (
+        "first_data_seconds", "first_raw_seconds", "first_content_seconds",
+        "max_raw_idle_seconds", "semaphore_wait_seconds",
+    ) if (value := _nonnegative_seconds(counts.get(key))) is not None} or None
 
 
 def _redact_response(value, secrets):

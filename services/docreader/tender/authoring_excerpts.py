@@ -8,7 +8,7 @@ import json
 from docreader.integrations.artifacts import ArtifactIntegrityError
 from docreader.llm.request import ModelContractError
 from docreader.tender.evidence.references import EvidenceRepository, fragment, selector
-from docreader.tender.schema import SourceExcerptRef, SourceUnitRef
+from docreader.tender.schema import NativeResponseLayout, SourceExcerptRef, SourceUnitRef
 
 
 def source_excerpt_key(reference):
@@ -17,10 +17,58 @@ def source_excerpt_key(reference):
             tuple((s['source_range_id'], s['start'], s['end']) for s in value['selectors']))
 
 
-def response_row_id(target_id, excerpts, rule_refs):
+def response_row_id(target_id, excerpts, rule_refs, *, context_source_excerpts=(),
+                    source_join='paragraphs', native_layout=None):
     content = {'sources': [source_excerpt_key(ref) for ref in excerpts], 'rules': rule_refs}
+    if context_source_excerpts or source_join != 'paragraphs' or native_layout is not None:
+        if source_join not in {'paragraphs', 'continuation'}:
+            raise ValueError('unknown response source join')
+        content.update(context=[source_excerpt_key(ref) for ref in context_source_excerpts], source_join=source_join,
+                       native_layout=(NativeResponseLayout.model_validate(native_layout).model_dump()
+                                      if native_layout is not None else None))
     encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return target_id + ':row-' + hashlib.sha256(encoded.encode()).hexdigest()[:24]
+
+
+def response_table_excerpts(table):
+    yield from table.get('context_source_excerpts', [])
+    for row in table.get('rows', []):
+        yield from row.get('context_source_excerpts', [])
+        yield from row.get('source_excerpts', [])
+    for guidance in table.get('source_guidance', []):
+        yield from guidance.get('source_excerpts', [])
+
+
+def source_excerpts_text(artifacts, excerpts, *, source_join='paragraphs', repository=None):
+    """Materialize exact source fragments; native cells never expand back into rows."""
+    if source_join not in {'paragraphs', 'continuation'}:
+        raise ArtifactIntegrityError('unknown response source join')
+    repository = repository if repository is not None else EvidenceRepository(artifacts)
+    texts, previous, source_digest, positions = [], None, None, None
+    for excerpt in excerpts:
+        loaded = load_source_excerpt(artifacts, excerpt, repository=repository)
+        digest = excerpt['source_ref']['source_index_ref']['sha256']
+        if source_join == 'continuation':
+            if source_digest is not None and digest != source_digest:
+                raise ArtifactIntegrityError('source continuation must stay in one frozen document')
+            if positions is None:
+                index = repository.source_index(excerpt['source_ref']['source_index_ref'])
+                positions = {unit['unit_id']: ordinal for ordinal, unit in enumerate(index.raw['units'])}
+            source_digest = digest
+        for selected in loaded['ranges']:
+            if selected.get('text_basis') == 'grid_row':
+                cells = [cell for cell in selected.get('cells', []) if cell['end'] > cell['start']]
+                if (len(cells) != 1 or (selected['start'], selected['end']) !=
+                        (cells[0]['start'], cells[0]['end'])):
+                    raise ArtifactIntegrityError('response source must select one exact native cell fragment')
+            if source_join == 'continuation':
+                position = (positions[excerpt['source_ref']['unit_id']], selected.get('row_start', -1))
+                first, last = (*position, selected['start']), (*position, selected['end'])
+                if previous is not None and first < previous:
+                    raise ArtifactIntegrityError('source continuation must be forward without overlap')
+                previous = last
+            texts.append(selected['text'])
+    return ('\n' if source_join == 'paragraphs' else '').join(texts)
 
 
 def bind_source_excerpts(context, range_ids, *, path=()):

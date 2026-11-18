@@ -1,3 +1,5 @@
+import { Button } from "@astryxdesign/core/Button";
+import { TextArea } from "@astryxdesign/core/TextArea";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
 import { analysisRecoveryApi, type AnalysisRecoveryView, type AnalysisRetry } from "./api/analysisRecovery";
@@ -77,21 +79,21 @@ export function AnalysisRecovery({ projectId, disabled, readOnly = false, onChan
     <h3>继续失败的分析</h3>
     <p className="tender-note">继续原任务和原资料。未完成的模型调用仍可能产生费用。</p>
     {notice && <p role="alert" className="tender-alert">{notice}</p>}
-    <button disabled={saving} onClick={() => void read()}>刷新分析恢复状态</button>
+    <Button isDisabled={saving} onClick={() => void read()} label="刷新分析恢复状态" />
     {base && working && <>
       <p>来源版本 {base.source_version}，分析修订 {base.domain_revision}；已保存成功回包 {base.saved_responses} 份。</p>
       <p className={currentState?.can_retry ? "tender-note" : "tender-alert"}>{currentState?.notice}</p>
       {(changed || conflict) && <div className="tender-alert" role="alert"><p>失败记录或任务状态已有变化，当前恢复理由仍保留。请刷新并核对原任务状态。</p>
         {remote && <p>最新来源版本 {remote.source_version}，分析修订 {remote.domain_revision}。{remote.notice}</p>}
-        <button disabled={saving || !!pending || !remote?.can_retry} onClick={() => {
+        <Button isDisabled={saving || !!pending || !remote?.can_retry} onClick={() => {
           if (remote) { setWorking({ base: remote, reason: working.reason }); setConflict(false); setNotice("已载入最新失败记录，恢复理由保留；请核对后提交。"); }
-        }}>按最新失败记录核对，保留理由</button>
+        }} label="按最新失败记录核对，保留理由" />
       </div>}
-      <label>恢复理由 <textarea aria-label="分析恢复理由" maxLength={4000} disabled={disabled || readOnly || saving || !!pending} value={working.reason} onChange={event => setWorking(current => current && { ...current, reason: event.target.value })} /></label>
-      <button className="tender-primary" disabled={disabled || saving || (!pending && (readOnly || !currentState?.can_retry || !working.reason.trim() || changed || conflict))} onClick={() => void retry()}>{pending ? "确认同一次恢复请求" : "继续原分析任务"}</button>
-      {dirty && !pending && <button disabled={saving} onClick={() => {
+      <TextArea label="分析恢复理由" htmlMaxLength={4000} isDisabled={disabled || readOnly || saving || !!pending} value={working.reason} onChange={reason => setWorking(current => current && { ...current, reason })} />
+      <Button variant="primary" isDisabled={disabled || saving || (!pending && (readOnly || !currentState?.can_retry || !working.reason.trim() || changed || conflict))} onClick={() => void retry()} label={pending ? "确认同一次恢复请求" : "继续原分析任务"} />
+      {dirty && !pending && <Button isDisabled={saving} onClick={() => {
         if (window.confirm("放弃当前未提交的恢复理由？")) { setWorking(remote ? { base: remote, reason: "" } : null); setConflict(false); setNotice(null); }
-      }}>放弃恢复理由</button>}
+      }} label="放弃恢复理由" />}
     </>}
   </section>;
 }

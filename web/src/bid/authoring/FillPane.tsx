@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { Alert } from "../../components/ui/alert";
-import { Button } from "../../components/ui/button";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
 import { docxApi } from "../api/docx";
 import { fillApi } from "../api/fill";
 import { createFillSession, fillProgressText, type FillAttempt } from "./fillSession";
@@ -47,20 +47,13 @@ export function FillPane({ workspaceId, onPublished }: { workspaceId: string; on
     <p role="status" aria-live="polite" className="text-sm" data-testid="docx-fill-progress">
       {state.phase === "loading" ? "正在读取填充状态…" : state.phase === "unchanged" ? "没有待填空章，当前版本未改变" : fillProgressText(state.job, state.stopping)}
     </p>
-    {state.error && <Alert>{state.error}</Alert>}
+    {state.error && <Banner status="error" title={state.error} />}
     {state.phase === "uncertain"
-      ? <Button disabled={false} onClick={() => void session.start()}>确认同一次填充</Button>
-      : <Button disabled={starting || state.phase !== "ready"} onClick={() => void session.start()}>
-        {starting ? "填充进行中…" : "一键填充整份"}
-      </Button>}
+      ? <Button label="确认同一次填充" onClick={() => void session.start()} />
+      : <Button label={starting ? "填充进行中…" : "一键填充整份"} isDisabled={starting || state.phase !== "ready"} onClick={() => void session.start()} />}
     {state.phase === "running"
-      && <Button variant="outline" disabled={state.stopping} data-testid="docx-fill-stop"
-        onClick={() => void session.stop()}>
-        {state.stopping ? "正在停止…" : "停止填充"}
-      </Button>}
+      && <Button variant="secondary" label={state.stopping ? "正在停止…" : "停止填充"} isDisabled={state.stopping} data-testid="docx-fill-stop" onClick={() => void session.stop()} />}
     {(state.phase === "completed" || state.phase === "failed" || state.phase === "blocked")
-      && <Button variant="outline" onClick={() => void session.load(true)}>
-        {state.phase === "completed" ? "继续填充剩余章" : "刷新状态"}
-      </Button>}
+      && <Button variant="secondary" label={state.phase === "completed" ? "继续填充剩余章" : "刷新状态"} onClick={() => void session.load(true)} />}
   </section>;
 }

@@ -101,13 +101,13 @@ async def test_human_outline_projection_exports_its_actual_word_hierarchy_forms_
         if style is not None and style.get(qn("w:val")) in {"Heading1", "Heading2"}:
             text = "".join(part.text or "" for part in paragraph.iter(qn("w:t")))
             headings.append((text, style.get(qn("w:val"))))
-    assert headings == [("1 商务响应篇", "Heading1"), ("1.1 规定人员格式", "Heading2"),
-        ("1.2 实施方案新版", "Heading2"), ("2 用户补充安排", "Heading1"), ("3 留白新章", "Heading1")]
+    assert headings == [("商务响应篇", "Heading1"), ("规定人员格式", "Heading2"),
+        ("实施方案新版", "Heading2"), ("用户补充安排", "Heading1"), ("留白新章", "Heading1")]
     all_text = "\n".join(part.text or "" for part in root.iter(qn("w:t")))
     assert "删除章节" not in all_text and "原技术篇" not in all_text
     assert "用户章节正文：按资料补充交付安排。" in all_text
     assert "保留章节正文：按资料实施。" in all_text
-    assert "参见 1.1 规定人员格式" in all_text
+    assert "参见 规定人员格式" in all_text
 
     assert len(document.tables) == 1
     table = document.tables[0]
@@ -124,12 +124,17 @@ async def test_human_outline_projection_exports_its_actual_word_hierarchy_forms_
         assert bookmarks[bookmark_name(identity, "target")] == 1
     assert bookmarks[bookmark_name("removed")] == bookmarks[bookmark_name("old-root")] == 0
     assert bookmarks[bookmark_name("removed-target", "target")] == 0
-    assert any(anchor.get(qn("w:name")) == bookmark_name("stable-form-target", "target")
-               for anchor in root.find(f"{qn('w:body')}/{qn('w:tbl')}").iter(qn("w:bookmarkStart")))
     empty_heading = next(paragraph for paragraph in body.findall(qn("w:p"))
         if any(anchor.get(qn("w:name")) == bookmark_name(EMPTY_CHAPTER)
                for anchor in paragraph.iter(qn("w:bookmarkStart"))))
-    assert all(node.tag == qn("w:sectPr") for node in list(body)[list(body).index(empty_heading) + 1:])
+    pending_heading = next(paragraph for paragraph in body.findall(qn("w:p"))
+        if "".join(part.text or "" for part in paragraph.iter(qn("w:t"))) == "尚未安排的原响应")
+    assert pending_heading.find(f"{qn('w:pPr')}/{qn('w:pStyle')}").get(qn('w:val')) == 'Title'
+    assert list(body).index(pending_heading) == list(body).index(empty_heading) + 1
+    assert "不再采用的响应位置" in all_text
+    coverage = artifacts.read_json(result["coverage_ref"])
+    removed_entry = next(entry for entry in coverage["entries"] if entry["target_id"] == "removed-target")
+    assert removed_entry["resolution"] == "pending" and "coverage_target_missing" in removed_entry["gap_codes"]
     navigation = read_docx_outline(data, edited["chapters"])
     assert navigation["missing_chapter_ids"] == []
     moved_form = navigation["chapters"][0]["children"][0]

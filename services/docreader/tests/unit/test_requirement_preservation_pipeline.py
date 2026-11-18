@@ -54,6 +54,18 @@ def budget():
     return RequestBudget(model="fixture", context_tokens=131072, output_reserve=16384)
 
 
+def _bound_outline(artifacts, fixed, *, manual=False, text=REQUIREMENT):
+    context = _OutlineContext(artifacts, fixed)
+    chosen = next((context.rules[rule["rule_id"]] for rule in context.payload["rules"]
+                   if (rule.get("item") or rule.get("effective_rule") or {}).get("text") == text), None)
+    return {"schema_version": 2, "authoring_input": fixed, "issues": [], "chapters": [{
+        "chapter_id": "chapter-1", "title": "投标报价" if manual else "技术响应", "children": [],
+        "is_volume": False, "targets": [{
+            "target_id": "chapter-1:target-1", "kind": "narrative",
+            "purpose": "最终报价由人工补充。" if manual else "说明产品功能应答。",
+            "rule_refs": [chosen] if chosen else [], "source_refs": [], "manual_fill": manual}]}]}
+
+
 def payload(request):
     return json.loads(request["messages"][1]["content"][0]["text"])
 
@@ -78,9 +90,9 @@ def executor(mode, calls, *, manual=False, source_only=False):
             return validate(assemble_independent_candidates(value))
         if operation == "structure":
             return validate({"findings": []})
+        if stage in {"outline", "directory_plan"} and mode == "outline_exhausted":
+            raise ModelWorkUnitExhausted(stage)
         if stage == "outline":
-            if mode == "outline_exhausted":
-                raise ModelWorkUnitExhausted(stage)
             selected = [value["rules"][0]["rule_id"]] if value["rules"] else []
             return validate({"schema_version": 2, "chapters": [{
                 "title": "投标报价" if manual else "技术响应", "children": [], "targets": [{
@@ -123,7 +135,7 @@ async def test_requirement_snapshot_and_docx_survive_response_failure_or_rejecti
     materials = [] if mode == "no_material" else [{"material_id": "permissions", "title": "功能说明",
         "text": "本产品支持角色权限管理。"}]
     result = artifacts.read_json(await generate_document(artifacts, fixed, budget(), executor(mode, calls),
-                                                         materials=materials))
+        outline=_bound_outline(artifacts, fixed), materials=materials))
     requirements = preserved(artifacts, result)
     assert requirements["authoring_input"] == fixed
     assert requirements["rule_origin"] == "verified_projection"
@@ -140,7 +152,8 @@ async def test_requirement_snapshot_and_docx_survive_response_failure_or_rejecti
     assert REQUIREMENT in notes and CONDITION in notes and EXCEPTION in notes
     assert INVENTED not in text and "待补" in text and result["package_ref"]
     if mode == "no_material":
-        assert calls == [("outline", False), ("assemble", False), ("structure", False)]
+        assert all(operation not in {"outline", "directory_plan", "authoring_write", "authoring_basis"}
+                   for operation, _ in calls)
     else:
         assert sum(operation == "authoring_write" for operation, _ in calls) == (
             2 if mode == "revision_exhausted" else 1)
@@ -151,7 +164,8 @@ async def test_requirement_snapshot_and_docx_survive_response_failure_or_rejecti
 
 async def test_unassigned_rule_remains_in_requirement_snapshot_without_false_target_mapping(tmp_path):
     artifacts, fixed, expected = await frozen_requirements(tmp_path)
-    result = artifacts.read_json(await generate_document(artifacts, fixed, budget(), executor("no_material", [])))
+    result = artifacts.read_json(await generate_document(
+        artifacts, fixed, budget(), executor("no_material", []), outline=_bound_outline(artifacts, fixed)))
     records = preserved(artifacts, result)["rules"]
     pending = next(record for record in records if record["rule"]["text"] == UNASSIGNED)
     assert pending["rule"] == expected[1] and pending["target_ids"] == []
@@ -181,13 +195,14 @@ async def test_manual_position_keeps_requirements_without_automatic_bidder_respo
     artifacts, fixed, expected = await frozen_requirements(tmp_path, requirement=QUOTE_REQUIREMENT)
     calls = []
     result = artifacts.read_json(await generate_document(artifacts, fixed, budget(),
-                                                         executor("no_material", calls, manual=True)))
+        executor("no_material", calls, manual=True),
+        outline=_bound_outline(artifacts, fixed, manual=True, text=QUOTE_REQUIREMENT)))
     assert [record["rule"] for record in preserved(artifacts, result)["rules"]] == expected
     text = document_text(artifacts, result)
     assert QUOTE_REQUIREMENT not in text and "人工填写" in text and "________" in text
     assert "招标要求依据（企业应答另行填写）" not in text and "分析整理（待确认）" not in text
     assert QUOTE_REQUIREMENT in submission_notes(artifacts, result)
-    assert calls == [("outline", False), ("assemble", False), ("structure", False)]
+    assert all(operation not in {"outline", "directory_plan", "authoring_write"} for operation, _ in calls)
     assert all(not artifacts.read_json(ref)["cell_fills"] for ref in result["unit_refs"])
 
 
@@ -196,7 +211,9 @@ async def test_effective_partial_rule_does_not_restore_old_conditions_from_origi
     retained = [{"text": "一标段应支持独立权限配置。", "scope": "仅一标段",
                  "evidence": original[0]["evidence"]}]
     artifacts, fixed, expected = await frozen_requirements(tmp_path / "retained", retained=retained)
-    result = artifacts.read_json(await generate_document(artifacts, fixed, budget(), executor("no_material", [])))
+    result = artifacts.read_json(await generate_document(
+        artifacts, fixed, budget(), executor("no_material", []),
+        outline=_bound_outline(artifacts, fixed, text=retained[0]["text"])))
     records = preserved(artifacts, result)["rules"]
     assert [record["rule"] for record in records] == expected
     active = next(record for record in records if record["rule"]["text"] == retained[0]["text"])
@@ -214,8 +231,14 @@ async def test_source_only_context_is_retained_as_reference_without_becoming_res
     context_text = "仅供评委内部使用的评审提示，不属于应答正文。"
     fixed = source_snapshot(artifacts, [{"text": context_text}])
     calls = []
+    frozen = artifacts.read_json(fixed["frozen_ref"])
+    given = {"schema_version": 2, "authoring_input": fixed, "issues": [], "chapters": [{
+        "chapter_id": "chapter-1", "title": "评审提示", "children": [], "targets": [{
+            "target_id": "chapter-1:target-1", "kind": "narrative", "purpose": "仅保留来源，不写入应答。",
+            "rule_refs": [], "source_refs": [{
+                "source_index_ref": frozen["documents"][0]["source_index_ref"], "unit_id": "unit:0"}]}]}]}
     result = artifacts.read_json(await generate_document(artifacts, fixed, budget(),
-                                                         executor("no_material", calls, source_only=True)))
+        executor("no_material", calls), outline=given))
     requirements = preserved(artifacts, result)
     assert requirements["rule_origin"] == "source_only" and requirements["rules"] == []
     assert context_text not in document_text(artifacts, result)

@@ -260,3 +260,35 @@ async def test_restart_uses_persisted_feedback_after_receipt_write_ack_is_lost(t
                                 'verify', {}, validate) == {'findings': []}
     assert model.calls[-1]['contract_feedback']['fragments'] == [{'path': ['findings'], 'value': None}]
     assert model.calls[-1]['contract_feedback']['rejection_count'] == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_feedback_fragments_preserve_full_response_and_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr('docreader.llm.recovery.model_retry_delay', lambda *args, **kwargs: 0)
+    store, artifacts = Store(), ArtifactStore(tmp_path)
+    lease = Lease('run', 1, 1, 'command')
+    rejected = {'copied_source': '原文' * 10000}
+    model = Model([rejected, {'findings': []}])
+
+    def controlled(value):
+        if 'findings' not in value:
+            raise ModelContractError([{'path': [], 'code': 'shape', 'detail': 'Return findings.'}],
+                                     feedback_fragments=[])
+        return value
+
+    class StopAfterReceipt(Store):
+        async def commit_artifact(self, *args, **kwargs):
+            await super().commit_artifact(*args, **kwargs)
+            raise ConnectionError('stop after durable rejection')
+
+    store = StopAfterReceipt()
+    with pytest.raises(ConnectionError):
+        await call_validated(model, store, artifacts, lease, 'verify', {}, controlled)
+    saved = artifacts.read_json(next(iter(store.rows.values()))['artifact_ref'])
+    assert artifacts.read_json(saved['response_ref']) == rejected
+    assert saved['feedback']['fragments'] == []
+    resumed = Store()
+    resumed.rows = store.rows
+    assert await call_validated(model, resumed, artifacts, replace(lease, epoch=2),
+                                'verify', {}, controlled) == {'findings': []}
+    assert model.calls[-1]['contract_feedback']['fragments'] == []

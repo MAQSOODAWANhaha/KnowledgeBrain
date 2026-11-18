@@ -3,12 +3,13 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
+import time
 from uuid import uuid4
 
 from docreader.integrations.store import Cancelled, RequestReplayBlocked, StaleExecution
 from docreader.llm.request import (
     ModelContractError, ModelCorrectionStalled, ModelInfrastructureError, ModelJSONError,
-    ModelRateLimitError, ModelSemanticError, ModelWorkUnitExhausted, image_data_url,
+    ModelRateLimitError, ModelSemanticError, ModelWorkUnitExhausted, image_data_url, model_retry_delay,
 )
 
 
@@ -60,6 +61,15 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
     identity = _digest(inputs)
     current = deepcopy(payload)
     sequence = 0
+    restored = None
+
+    async def wait_rejection(deadline, scope):
+        if remaining := max(0, deadline - time.time()):
+            await asyncio.sleep(remaining)
+            # Receipt reads retain the owner's cancellation/epoch fence without
+            # keeping its transaction open while the worker waits.
+            await store.receipt(lease, 'model-rejection', scope, input_digest=identity)
+
     # Recover feedback after a lost worker, without resending accepted requests.
     while True:
         scope = f'{identity}:{sequence}'
@@ -74,8 +84,32 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         feedback = _rejection_feedback(feedback, sequence + 1, rejection.get('response_kind'))
         current = {**deepcopy(payload), 'contract_feedback': feedback}
         sequence += 1
+        restored = row, rejection, scope
 
-    for attempt in range(4):
+    if sequence >= 4:
+        raise ModelWorkUnitExhausted(task)
+    if restored:
+        row, rejection, scope = restored
+        deadline = rejection.get('not_before')
+        if deadline is None:
+            if committed_at := row.get('committed_at'):
+                deadline = committed_at.timestamp() + model_retry_delay(sequence - 1)
+            else:
+                # Old authoring receipts have no timestamp. Record that gap and
+                # anchor one conservative wait now, without extending it again.
+                saved = await store.receipt(lease, 'model-rejection-wait', scope, input_digest=identity)
+                if saved is None:
+                    wait = {'not_before': time.time() + model_retry_delay(sequence - 1),
+                            'timing_origin': 'legacy_unavailable'}
+                    reference = await asyncio.to_thread(artifacts.put_json, wait)
+                    await store.commit_artifact(lease, 'model-rejection-wait', reference,
+                                                scope=scope, input_digest=identity)
+                else:
+                    wait = await asyncio.to_thread(artifacts.read_json, saved['artifact_ref'])
+                deadline = wait['not_before']
+        await wait_rejection(deadline, scope)
+
+    for attempt in range(sequence, 4):
         response_kind = 'parsed'
         try:
             response = await model.call(task, current, images=images) if images else await model.call(task, current)
@@ -86,9 +120,8 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
             # storage OSError through must still retain the paid-call retries.
             if attempt == 3:
                 raise ModelWorkUnitExhausted(task) from error
-            delay = 2 ** attempt
-            if isinstance(error, ModelRateLimitError):
-                delay = min(120, max(30 * delay, error.retry_after_seconds or 0))
+            delay = model_retry_delay(attempt, rate_limited=isinstance(error, ModelRateLimitError),
+                                      retry_after_seconds=getattr(error, "retry_after_seconds", None))
             await asyncio.sleep(delay)
             continue
         except passthrough_exceptions:
@@ -117,7 +150,9 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
             except ModelSemanticError as error:
                 errors = (error.errors if isinstance(error, ModelContractError) else
                           [{'path': [], 'code': 'response_contract', 'detail': str(error)}])
-                feedback = {'errors': errors, 'fragments': _fragments(response, errors)}
+                fragments = error.feedback_fragments if isinstance(error, ModelContractError) else None
+                feedback = {'errors': errors, 'fragments': (deepcopy(fragments) if fragments is not None
+                                                           else _fragments(response, errors))}
             except Exception as error:
                 if attempt == 3:
                     raise ModelWorkUnitExhausted(task) from error
@@ -132,7 +167,8 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         owner = owner_metadata if owner_metadata is not None else {'command_id': lease.command_id, 'epoch': lease.epoch}
         rejection = {'task': task, 'input_digest': identity, 'request_ref': request_ref,
                      'response_ref': response_ref, 'errors': errors, **owner,
-                     'response_kind': response_kind, 'feedback': feedback}
+                     'response_kind': response_kind, 'feedback': feedback,
+                     'not_before': time.time() + model_retry_delay(attempt)}
         ref = await asyncio.to_thread(artifacts.put_json, rejection)
         scope = f'{identity}:{sequence}'
         await store.commit_artifact(lease, 'model-rejection', ref, scope=scope, input_digest=identity)
@@ -140,7 +176,7 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         current = {**deepcopy(payload), 'contract_feedback': feedback}
         if attempt == 3:
             raise ModelWorkUnitExhausted(task)
-        await asyncio.sleep(2 ** attempt)
+        await wait_rejection(rejection['not_before'], scope)
 
 
 async def call_groups_validated(model, store, artifacts, lease, task, payload, validate, *, validate_shared):
@@ -187,14 +223,41 @@ async def call_groups_validated(model, store, artifacts, lease, task, payload, v
                     str(error) if isinstance(error, ModelSemanticError) else "Host validation could not accept this result"}])
         return {"errors": errors, "fragments": _fragments(response, errors)}
 
+    async def retry_state(rows, pending):
+        corrections, counts, not_before = {}, dict.fromkeys(pending, 0), 0
+        for row in rows:
+            if row["stage"] != "model-group-outcome":
+                continue
+            outcome = await read(row)
+            for unit, error in outcome["rejected"].items():
+                if unit not in counts:
+                    continue
+                counts[unit] += 1
+                deadline = outcome.get("not_before")
+                if deadline is None:
+                    committed_at = row.get("committed_at")
+                    deadline = (committed_at.timestamp() if committed_at else time.time()) + model_retry_delay(
+                        counts[unit] - 1, rate_limited=outcome.get("failure_class") == "http_429",
+                        retry_after_seconds=outcome.get("retry_after_seconds"))
+                not_before = max(not_before, deadline)
+                if error is not None:
+                    corrections[unit] = error
+        return corrections, counts, not_before
+
     async def process(attempt, rows):
         attempt_id = attempt["scope"]
         manifest = await read(attempt)
         current = manifest["payload"]
         active = current["target_work_unit_ids"]
+        if "not_before" not in manifest:
+            _, counts, not_before = await retry_state(rows, active)
+            manifest = {**manifest, "not_before": not_before, "retry_attempt": max(counts.values(), default=0)}
         index = {(row["stage"], row["scope"]): row for row in rows}
         response_row = index.get(("model-group-response", attempt_id))
         if response_row is None:
+            if remaining := max(0, manifest.get("not_before", 0) - time.time()):
+                await asyncio.sleep(remaining)
+                await store.assert_fence(lease)
             try:
                 if spec_error is not None:
                     raise spec_error
@@ -211,8 +274,16 @@ async def call_groups_validated(model, store, artifacts, lease, task, payload, v
                     "code": "cached_response_invalid", "detail": "The saved response could not be verified"}], "fragments": []}}
             except Exception as error:
                 received = {"kind": "request_failure", "error_type": type(error).__name__}
+                if isinstance(error, ModelRateLimitError):
+                    received.update(failure_class="http_429", retry_after_seconds=error.retry_after_seconds)
             else:
                 received = {"kind": "parsed", "response": response}
+            if received["kind"] != "parsed" and getattr(model, "supports_group_attempts", False):
+                # The physical audit is authoritative even if this response
+                # journal was lost between the HTTP failure and its commit.
+                received["not_before"] = await store.request_not_before(
+                    lease, task, None, group_work_unit_keys=manifest["group_work_unit_keys"], group_attempt_id=attempt_id)
+            received["completed_at"] = time.time()
             response_row = await commit("model-group-response", attempt_id, received)
         received = await read(response_row)
         rejected = {}
@@ -255,7 +326,19 @@ async def call_groups_validated(model, store, artifacts, lease, task, payload, v
                         await commit("model-group-result", result_scopes[unit],
                                      {**value, "work_unit_id": unit}, work_unit_id=unit,
                                      group_attempt_id=attempt_id)
-        await commit("model-group-outcome", attempt_id, {"rejected": rejected},
+        delay = model_retry_delay(manifest.get("retry_attempt", 0),
+            rate_limited=received.get("failure_class") == "http_429",
+            retry_after_seconds=received.get("retry_after_seconds"))
+        completed_at = received.get("completed_at")
+        if completed_at is None:
+            # Legacy journals predate deadlines; their commit is the first
+            # durable failure timestamp available, never an assumed wait.
+            committed_at = response_row.get("committed_at")
+            completed_at = committed_at.timestamp() if committed_at else time.time()
+        await commit("model-group-outcome", attempt_id, {"rejected": rejected,
+                     "not_before": received.get("not_before") or completed_at + delay,
+                     "failure_class": received.get("failure_class"),
+                     "retry_after_seconds": received.get("retry_after_seconds")},
                      rejected_response=bool(rejected) and received["kind"] != "request_failure")
 
     while True:
@@ -282,24 +365,16 @@ async def call_groups_validated(model, store, artifacts, lease, task, payload, v
                             shared.append(finding)
                             seen.add(digest)
             return {"work_units": [await read(completed[unit]) for unit in targets], "shared_findings": shared}
-        corrections, rejected_counts = {}, dict.fromkeys(pending, 0)
-        for row in rows:
-            if row["stage"] == "model-group-outcome":
-                for unit, error in (await read(row))["rejected"].items():
-                    if unit in rejected_counts:
-                        rejected_counts[unit] += 1
-                        if error is not None:
-                            corrections[unit] = error
+        corrections, rejected_counts, not_before = await retry_state(rows, pending)
         current = {**deepcopy(basis), "target_work_unit_ids": pending}
         if corrections:
             current["contract_feedback"] = {"work_units": [{"work_unit_id": unit,
                 **_rejection_feedback(corrections[unit], rejected_counts[unit], "parsed")}
                 for unit in pending if unit in corrections]}
         attempt_id = uuid4().hex
-        manifest = {"task": task, "payload": current, "group_work_unit_keys": [keys[unit] for unit in pending]}
+        manifest = {"task": task, "payload": current, "group_work_unit_keys": [keys[unit] for unit in pending],
+                    "not_before": not_before, "retry_attempt": max(rejected_counts.values(), default=0)}
         ref = await asyncio.to_thread(artifacts.put_json, manifest)
         await store.reserve_group_attempt(lease, attempt_id, ref, basis_digest, manifest["group_work_unit_keys"])
         # The reservation is durable before local configuration, token admission
         # or transport can fail. Replaying it never reserves a second attempt.
-        if rejected_counts and max(rejected_counts.values()):
-            await asyncio.sleep(2 ** min(max(rejected_counts.values()) - 1, 2))

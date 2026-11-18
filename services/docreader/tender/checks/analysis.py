@@ -854,8 +854,27 @@ class _Analysis:
 
 async def verify_analysis(source_plan, items_index, artifacts, model, budget, *, identity, save) -> dict:
     context = await asyncio.to_thread(_Analysis, source_plan, items_index, artifacts, identity, budget)
-    # Full-source planning can outlast a lease; keep heartbeat I/O schedulable.
-    source_reviews = await asyncio.to_thread(context.review_requests)
+    # Version this pure preparation when its source-view/review planning contract changes.
+    review_inputs = await asyncio.to_thread(_digest, {
+        "planner": "source-review-requests-v1", "source_plan": source_plan, "items_index": items_index,
+        "identity": identity, "budget": budget.spec(),
+    })
+
+    def prepare_reviews():
+        # CAS sorts object fields; retain their original order inside the string
+        # because short-reference traversal and model message text depend on it.
+        return {"requests_json": json.dumps(context.review_requests(), ensure_ascii=False,
+                                            separators=(",", ":"), allow_nan=False)}
+
+    async def prepared_reviews():
+        return await asyncio.to_thread(prepare_reviews)
+
+    prepared_ref = await save("analysis-review-requests", prepared_reviews, scope=review_inputs,
+                              inputs={"planning_digest": review_inputs})
+    prepared = await asyncio.to_thread(artifacts.read_json, prepared_ref)
+    source_reviews = await asyncio.to_thread(json.loads, prepared["requests_json"])
+    if not isinstance(source_reviews, list):
+        raise ValueError("Cached source review requests must be an array")
     review_plan_ref, source_reviewed = await context.execute("review", source_reviews, model, save)
     locate_requests = await asyncio.to_thread(context.locate_requests)
     locate_plan_ref, located = await context.execute("locate", locate_requests, model, save)

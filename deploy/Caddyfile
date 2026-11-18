@@ -3,6 +3,11 @@
 	admin off
 }
 
+# Health check only. Plain HTTP on localhost avoids busybox wget's ssl_client helper.
+http://127.0.0.1:8081 {
+	reverse_proxy {$API_UPSTREAM:api:8080}
+}
+
 # Browser entry. Listen on all interfaces so LAN IPs work, not only 127.0.0.1.
 :28080 {
 	tls /etc/caddy/certs/localhost.crt /etc/caddy/certs/localhost.key

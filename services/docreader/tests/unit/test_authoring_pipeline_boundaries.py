@@ -130,13 +130,8 @@ async def test_empty_outline_retains_a_located_placeholder_instead_of_a_cover_on
     result = artifacts.read_json(
         await generate_document(artifacts, snapshot(artifacts), budget(), execute)
     )
-    assert result["unit_refs"], (
-        "An empty model outline must retain an explicit writing position."
-    )
-    assert all(
-        artifacts.read_json(ref)["status"] == "placeholder"
-        for ref in result["unit_refs"]
-    )
+    assert result["unit_refs"]
+    assert all(artifacts.read_json(ref)["status"] == "placeholder" for ref in result["unit_refs"])
     assert result["gaps"]
     assert artifacts.read_bytes(result["docx_ref"]).startswith(b"PK")
 
@@ -206,9 +201,19 @@ async def test_attachment_selection_cannot_take_proof_from_another_target(tmp_pa
                 return validate({"blocks": [], "gaps": ["本位置证明尚未提供。"]})
         return validate(ordinary_response(task, value))
 
+    fixed = snapshot(artifacts)
+    given = {
+        "schema_version": 2, "authoring_input": fixed, "issues": [], "chapters": [
+            {"chapter_id": "chapter-1", "title": "技术方案", "children": [], "targets": [
+                {"target_id": "chapter-1:target-1", "kind": "narrative", "purpose": "根据给定原文填写本响应位置",
+                 "rule_refs": [], "source_refs": []}]},
+            {"chapter_id": "chapter-2", "title": "证明文件", "children": [], "targets": [
+                {"target_id": "chapter-2:target-1", "kind": "attachment", "purpose": "附上本标段证明原件",
+                 "rule_refs": [], "source_refs": []}]},
+        ]}
     result = artifacts.read_json(
         await generate_document(
-            artifacts, snapshot(artifacts), budget(), execute, materials=materials
+            artifacts, fixed, budget(), execute, outline=given, materials=materials
         )
     )
     first, second = [artifacts.read_json(ref) for ref in result["unit_refs"]]
@@ -305,9 +310,22 @@ async def test_review_receives_cell_and_attachment_content_without_persistent_ca
             return validate({"findings": []})
         return validate(ordinary_response(task, value))
 
+    frozen = artifacts.read_json(fixed["frozen_ref"])
+    given = {
+        "schema_version": 2, "authoring_input": fixed, "issues": [], "chapters": [{
+            "chapter_id": "chapter-1", "title": "人员表", "children": [], "targets": [{
+                "target_id": "chapter-1:target-1", "kind": "form", "purpose": "填写人员表",
+                "rule_refs": [], "source_refs": [], "manual_fill": False,
+                "support_origins": ["knowledge", "tender"],
+                "template_refs": [{"source_ref": {
+                    "source_index_ref": frozen["documents"][0]["source_index_ref"], "unit_id": "unit:0"},
+                    "selectors": []}],
+            }],
+        }],
+    }
     result = artifacts.read_json(
         await generate_document(
-            artifacts, fixed, budget(), execute, materials=materials
+            artifacts, fixed, budget(), execute, outline=given, materials=materials
         )
     )
     assert reviews
@@ -371,13 +389,7 @@ async def test_unknown_outline_references_are_rejected_inside_the_executor_valid
             if location == "constraint":
                 invalid["constraint_rule_ids"] = ["not-supplied"]
             else:
-                invalid["findings"] = [
-                    {
-                        "code": "question",
-                        "detail": "待核对要求",
-                        "rule_ids": ["not-supplied"],
-                    }
-                ]
+                invalid["findings"] = [{"code": "question", "detail": "待核对要求", "rule_ids": ["not-supplied"]}]
             with pytest.raises(ModelContractError) as error:
                 validate(invalid)
             corrections.append(error.value.errors)
@@ -474,12 +486,23 @@ async def test_source_only_tasks_keep_local_analysis_doubts_and_human_opinions_t
                 assert resolutions["resolutions"][0] in unit["issue_resolutions"]
         return validate(ordinary_response(task, value))
 
+    source_ref = {"source_index_ref": frozen["documents"][0]["source_index_ref"],
+                  "unit_id": index.ranges[0]["unit_id"]}
+    given = {
+        "schema_version": 2, "authoring_input": fixed, "issues": [], "chapters": [{
+            "chapter_id": "chapter-1", "title": "项目背景", "children": [], "targets": [{
+                "target_id": "chapter-1:target-1", "kind": "narrative", "purpose": "说明项目背景",
+                "rule_refs": [], "source_refs": [source_ref],
+            }],
+        }],
+    }
     result = artifacts.read_json(
         await generate_document(
             artifacts,
             fixed,
             budget(),
             execute,
+            outline=given,
             materials=[
                 {
                     "material_id": "local-response",
@@ -728,9 +751,24 @@ async def test_manual_quote_keeps_original_price_cells_empty_and_never_enters_au
             )
         return validate({"approach": "按现有技术要求组织实施；最终报价由人工补充。"})
 
+    frozen = artifacts.read_json(fixed["frozen_ref"])
+    index_ref = frozen["documents"][0]["source_index_ref"]
+    given = {
+        "schema_version": 2, "authoring_input": fixed, "issues": [], "chapters": [
+            {"chapter_id": "chapter-1", "title": "报价文件", "children": [], "targets": [{
+                "target_id": "chapter-1:target-1", "kind": "form", "purpose": "报价原格式留空，最终由人工填写。",
+                "manual_fill": True, "rule_refs": [], "source_refs": [],
+                "template_refs": [{"source_ref": {"source_index_ref": index_ref, "unit_id": "unit:0"}, "selectors": []}],
+            }]},
+            {"chapter_id": "chapter-2", "title": "技术方案", "children": [], "targets": [{
+                "target_id": "chapter-2:target-1", "kind": "narrative", "purpose": "说明部署、测试和验收方法。",
+                "rule_refs": [], "source_refs": [],
+            }]},
+        ],
+    }
     result = artifacts.read_json(
         await generate_document(
-            artifacts, fixed, budget(), execute, materials=materials
+            artifacts, fixed, budget(), execute, outline=given, materials=materials
         )
     )
     assert len(writing_calls) == 1 and reviewed_manual_tasks == []

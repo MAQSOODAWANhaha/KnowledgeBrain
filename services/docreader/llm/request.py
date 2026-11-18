@@ -4,12 +4,36 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Literal, Sequence, cast
+
+
+MODEL_RETRY_POLICY = "bounded_work_unit_deadline_v1"
+ReasoningEffort = Literal["low", "medium", "high"]
 
 
 class ModelConfigurationError(ValueError):
     """Deployment/model configuration was rejected; execution retries are bounded."""
+
+
+def normalize_reasoning_effort(value: str | None) -> ReasoningEffort | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ModelConfigurationError("reasoning effort must be low, medium or high")
+    value = value.strip().lower()
+    if not value:
+        return None
+    if value not in {"low", "medium", "high"}:
+        raise ModelConfigurationError("reasoning effort must be low, medium or high")
+    return cast(ReasoningEffort, value)
+
+
+def validate_request_reasoning(request: dict, expected: ReasoningEffort | None) -> None:
+    if (request.get("reasoning_effort") != expected
+            or expected is None and "reasoning_effort" in request):
+        raise ModelConfigurationError("request reasoning effort differs from its configured budget")
 
 
 class ModelSemanticError(ValueError):
@@ -56,8 +80,9 @@ class ModelWorkUnitExhausted(RuntimeError):
 class ModelContractError(ModelSemanticError):
     """Durable feedback for an unaccepted response; details stay out of logs."""
 
-    def __init__(self, errors):
+    def __init__(self, errors, *, feedback_fragments=None):
         self.errors = errors
+        self.feedback_fragments = feedback_fragments
         super().__init__("Model response violated its host contract")
 
 
@@ -79,6 +104,17 @@ class ModelRateLimitError(ModelInfrastructureError):
     def __init__(self, retry_after_seconds=None):
         self.retry_after_seconds = retry_after_seconds
         super().__init__("model endpoint returned HTTP 429")
+
+
+def model_retry_delay(attempt, *, rate_limited=False, retry_after_seconds=None):
+    """One policy for the three automatic retries, including durable replays."""
+    delay = 2 ** min(max(attempt, 0), 2)
+    if not rate_limited:
+        return delay
+    hint = retry_after_seconds
+    if type(hint) not in {int, float} or not math.isfinite(hint) or hint < 0:
+        hint = 0
+    return min(120, max(30 * delay, hint))
 
 
 class UncertainModelResponse(RuntimeError):
@@ -118,12 +154,14 @@ def image_data_url(image: str | ImageInput) -> str:
 
 
 def build_request(model: str, prompt: str, payload: dict,
-                  images: Sequence[str | ImageInput] = (), *, task: str | None = None) -> dict:
+                  images: Sequence[str | ImageInput] = (), *, task: str | None = None,
+                  reasoning_effort: ReasoningEffort | None = None) -> dict:
     """The same complete API body is used for packing probes and sending.
 
     Tender response schemas are part of this actual prompt, so estimates and
     request identity include them. Reserves never become provider output limits.
     """
+    reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     try:
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError):
@@ -134,10 +172,13 @@ def build_request(model: str, prompt: str, payload: dict,
         prompt = schema_prompt(prompt, task, payload)
     content = [{"type": "text", "text": serialized}]
     content.extend({"type": "image_url", "image_url": {"url": image_data_url(image)}} for image in images)
-    return {"model": model,
+    request = {"model": model,
             "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}],
             "response_format": {"type": "json_object"},
             "stream": True, "stream_options": {"include_usage": True}}
+    if reasoning_effort is not None:
+        request["reasoning_effort"] = reasoning_effort
+    return request
 
 
 def request_digest(endpoint_url: str, request: dict) -> str:

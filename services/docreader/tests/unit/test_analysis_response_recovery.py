@@ -215,6 +215,37 @@ async def test_bad_relation_does_not_discard_valid_items():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("declared_id", [None, "!unbound:l24", "p1:l1"])
+async def test_host_assigns_relation_ids_without_changing_or_deduplicating_declarations(declared_id):
+    second = source("r2", "售后响应不超过2小时。")
+    relation = {"from_item_id": "p1:i1", "to_item_id": "p1:i2", "relation": "交付与售后要求共同适用。",
+                "evidence": [{"range_id": "r1", "quote": "交付期限为30天"}]}
+    if declared_id is not None:
+        relation["relation_id"] = declared_id
+    response = result(items=[*result()["items"], {
+        "item_id": "p1:i2", "kind": "obligation", "text": second["text"],
+        "evidence": [{"range_id": "r2", "quote": second["text"]}],
+    }], relations=[deepcopy(relation), deepcopy(relation)])
+    original = deepcopy(response)
+    model = FixedModel(response)
+    extracted = await extract_items(pack([source(), second]), model, identity=IDENTITY)
+    assert extracted["items"] == original["items"]
+    assert extracted["relations"] == [{**relation, "relation_id": f"p1:l{number}"} for number in (1, 2)]
+    assert response == original and len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_host_relation_identity_uses_original_position_after_an_invalid_sibling():
+    relation = {"from_item_id": "p1:i1", "to_item_id": "p1:i1", "relation": "同一来源规则适用。",
+                "evidence": [{"range_id": "r1", "quote": "交付期限为30天"}]}
+    response = result(relations=["invalid declaration", relation])
+    extracted = await extract_items(pack(), FixedModel(response), identity=IDENTITY)
+    assert extracted["items"] == response["items"]
+    assert extracted["relations"] == [{**relation, "relation_id": "p1:l2"}]
+    assert any(problem["code"] == "extraction_relation_unresolved" for problem in extracted["issues"])
+
+
+@pytest.mark.asyncio
 async def test_irrecoverable_envelope_and_duplicate_item_identity_still_fail():
     for response in ({"schema_version": 2}, result(schema_version=1), result(items=[
             *result()["items"], *result()["items"]])):

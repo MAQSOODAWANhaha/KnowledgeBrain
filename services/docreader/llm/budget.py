@@ -10,7 +10,9 @@ from docreader.llm.request import (
     ImageInput,
     ModelBudgetError,
     ModelConfigurationError,
+    ReasoningEffort,
     build_request,
+    normalize_reasoning_effort,
 )
 from docreader.tender.schema import RequestLimits, Task
 from docreader.tender.status import AUTHORING_MODEL_TASKS
@@ -59,6 +61,7 @@ class RequestBudget:
         tokenizer: str | None = None,
         tokenized_outline_assembly: bool = False,
         tokenized_authoring: bool = False,
+        reasoning_effort: ReasoningEffort | None = None,
     ):
         if context_tokens is not None and (
             type(context_tokens) is not int or context_tokens <= 0
@@ -90,6 +93,7 @@ class RequestBudget:
             raise ModelConfigurationError(
                 "tokenized authoring requires the verified o200k_base tokenizer"
             )
+        self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self.tokenizer = tokenizer
         self.tokenized_outline_assembly = tokenized_outline_assembly
         self.tokenized_authoring = tokenized_authoring
@@ -161,6 +165,8 @@ class RequestBudget:
             "minimum": self.ANALYSIS_BATCH_OUTPUT_MINIMUM,
             "per_target": self.ANALYSIS_BATCH_OUTPUT_PER_TARGET,
         }
+        if self.reasoning_effort is not None:
+            spec["reasoning_effort"] = self.reasoning_effort
         if self.tokenizer is not None:
             tasks = self.TOKENIZED_TASKS | (
                 self.TOKENIZED_AUTHORING_TASKS
@@ -192,7 +198,8 @@ class RequestBudget:
         from docreader.llm.wire import WirePayload
 
         return build_request(
-            self.model, prompt, WirePayload(task, payload).payload, images, task=task
+            self.model, prompt, WirePayload(task, payload).payload, images, task=task,
+            reasoning_effort=self.reasoning_effort,
         )
 
     def measure(

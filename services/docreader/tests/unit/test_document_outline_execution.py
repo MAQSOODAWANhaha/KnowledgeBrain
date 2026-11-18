@@ -93,6 +93,15 @@ async def test_outline_execution_returns_outline_and_reuses_completed_mode(runti
         await runtime.execute()
 
 
+async def test_fixed_outline_preview_does_not_start_source_resolution(runtime):
+    runtime.snapshot['frozen_ref'] = runtime.artifacts.put_json({'documents': []})
+    runtime.outline['authoring_input'] = deepcopy(runtime.snapshot)
+    reference = runtime.artifacts.put_json(runtime.outline)
+    await runtime.execute(outline_only=True, outline_ref=reference)
+    assert 'native_body_contract' not in runtime.observed[0][1]
+    assert 'directory_native_body_contract' not in runtime.rows['execution']['execution_spec']
+
+
 async def test_fixed_outline_pins_its_original_snapshot_without_reading_new_analysis(runtime):
     runtime.read_current.side_effect = AssertionError("A later analysis root must not replace the fixed outline input.")
     reference = await runtime.execute(outline_ref=runtime.outline_ref)

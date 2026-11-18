@@ -76,7 +76,7 @@
 | `item_id` | 模型使用 `<work_unit_id>:i1` 等格式，正整数后缀不要求连续；宿主检查当前台账内唯一 |
 | `ItemRef` | `{artifact_ref, item_id}`，持久引用不可变事项；同名 ID 不代表跨修订语义相同 |
 | `Relation` | `{relation_id, from_item_id, to_item_id, relation, evidence}`；relation 为非空的来源关系说明，evidence 为非空 Evidence[] |
-| `relation_id` | `<work_unit_id>:l1` 等台账内唯一身份；端点必须是实际提供的事项 ID，不能从标题编造 |
+| `relation_id` | `<work_unit_id>:l1` 等台账内唯一身份；抽取由宿主按原关系数组位置派生，模型只输出端点、relation和evidence；后续关联/联合协议不变。端点必须是实际提供的事项 ID，不能从标题编造 |
 | `Issue` | 模型公共问题结构 `{code: 非空string, detail: 非空string, blocking: bool}`，按实际定位可附 `range_id: 非空string`、非空 `item_ids: string[]`；新协议可附 `related_issue_ids`、`needs_source`，语义见下文；抽取 issues 与核验 findings 使用同一类型 |
 | `issue_id` | 宿主为已持久化问题赋予的具体身份；解决问题须绑定它及当前版本，不能仅按 code 清除 |
 | 未解析引用 | 使用 Issue，必须以 range_id 定位引用处，detail 保留原文引用及未决原因；目标未知时不填虚假 item_id，不新增引用状态机 |
@@ -86,6 +86,9 @@
 
 关联只表达源文事实，例如评分作用对象、证明文件对应义务、否决触发条件或补遗修改对象。
 抽取先记录本包已知关联；后续补读形成独立不可变的关联决议并接受核验，不改写已保存回包。
+抽取接收不按文本去重关系，也不推断重复事项身份或未知端点。宿主编号保留原数组位置，
+无效关系的待核出口不变，原始模型回包保持只读。抽取专用无ID输出Schema与Prompt一起
+进入冻结身份；人工纠错的持久Relation仍提交完整relation_id，不热替换旧运行合同。
 跨包持久选择通过 ItemRef；核验请求中的 item_id/relation_id 均须从实际装载的当前台账取得。
 Decision 中的事项选择同样由宿主持久绑定 ItemRef；问题身份绑定其原始产物，不按 code、
 相同文字或同名 ID 猜测目标。最低阻断策略沿用宿主规则，模型不得把正确性或未知问题降为提示。
@@ -615,7 +618,8 @@ Store在转sent的同一事务检查已发送意图次数，最多4次；缓存�
 {"item_id":"p1:i1","kind":"obligation","text":"保修期为三年。","evidence":[{"range_id":"r1","quote":"保修期为三年"}]}
 ```
 
-复合来源 r2 为“负责人须持A证；持B证加2分；未附A证复印件则否决投标。”，同段四类事项共享来源：
+复合来源 r2 为“负责人须持A证；持B证加2分；未附A证复印件则否决投标。”，同段四类事项共享来源。
+下例为宿主规范化后的结果，含宿主派生的relation_id；抽取模型输出不包含该字段：
 
 ```json
 {
@@ -1888,6 +1892,9 @@ WritingUnit的placeholder只表示没有生成正文/填值，不表示原格式
 | --- | --- |
 | SourceExcerptRef | `{source_ref:SourceUnitRef,selectors:RangeSelector[]}`；selectors非空且每项属于该冻结unit，按原文顺序保存。复用现有selector/materialize，不让模型计算offset。与TemplatePartRef共享选择器结构，但本引用不授予原表插入权限，也不调用原网格裁剪路径 |
 | ResponseTarget.source_excerpts | 可选有序精确来源，默认空，提供本目标共同理解依据，不机械复制全部表行。新来源短range选择由宿主绑定；相应source_refs是unit索引投影，不再重复加载整unit。明确需要整个unit时绑定其全部原生范围；旧目标无精确引用仍按原whole-unit读取，不由代码猜删上下文 |
+| ResponseTarget.source_body_contract | 可选`source_bound_native_body_v1`，缺省省略。显式启用须有source_body_ref，purpose由宿主精确物化；source_excerpts是组合中native部分的完整有序投影，纯layout续表时可为空。来源角色与manual_fill/support_origins分开，不与template_refs/response_table混用，不授予整行/整表扩大权限；旧目标缺省行为保持 |
+| ResponseTarget.source_body_ref | 可选ArtifactRef，只有显式source_body_contract使用。宿主不可变组合记录绑定AuthoringInput、target_id/kind/subject、精确native片段或冻结阅读投影字符区间、段落/续接及独立context。发布、写作、结构和Word消费前重物化并逐字核purpose及全部公开引用，错源/错版本/丢binding不能静默通过。全源阅读投影每源共享一次、不建全文atom；同页native/layout没有物理顺序证明时不授权续接，保源进入具名来源核定出口 |
+| ResponseTarget.source_context_excerpts | 可选有序`SourceExcerptRef[]=[]`，空值省略，只有显式source_body_contract时使用。保存正文以外本职责实际需要的同原格/来源上下文，与正文区间不交叠；原生文本range可能跨多个段落、独立事项或原式，其全部余文不能自动作为本target上下文。结构核对以独立source_context_support_ids读取，Word在正文后、企业应答前单独显示“原文上下文（非企业应答）”，不新增应答位，不以context抵销独立正文。来源不可读时导出不能静默省略；原式格网/merge/空位仍由template_refs负责 |
 | ResponseTarget.response_table | 可选`{rows:ResponseTableRow[]}`，缺省无业务响应表；不是按kind/domain/标题推导。表达由模型基于本项目要求确定的逐行应答位置，与规定原表template_refs分开。非空行由宿主实际生成“招标要求/投标响应”表，共同条件显示于表前，无资料时仅应答格留空；不能仅因template_refs为空判定没有输出表或追加原格式待补。原文明示必须使用的原生可填写格式仍须另外核对 |
 | ResponseTableRow | `{row_id:Identity,source_excerpts:SourceExcerptRef[],rule_refs:EffectiveItemRef[]}`；来源非空，rule_refs可空以容纳尚未成为事项的原要求。宿主在冻结大纲中生成行身份，逻辑行可含有序跨页片段，分片及恢复不重编号；不复制摘要、数字、评分或原文正文 |
 | ResponseTableResponse.context_range_ids | 可选`Identity[]=[]`，来源S选择本批实际阅读的r引用，组装A选择共享精确来源x引用。仅表示适用于整张业务表的原表头、单位、条件或必要引导；只适用部分行的条件仍随相应行选择，不扩大适用范围 |
@@ -2104,3 +2111,156 @@ Q为实际不同scope的查询操作数，D/K为原件元数据/下载操作数�
 不可在序列化时降回模型回包合同。原W请求可重建且原始成功JSON存在时，在显式后继执行
 重验重绑，不改旧CAS/回执。新R映射改变实际请求，不能追认旧判定具有新范围语义。
 本轮B1—B25验收与调用/容量/修订成本见[评审修复方案](../../../tasks/plan.md#评审修复方案)。
+
+### 目录独立计划与固定修订（BUG-145）
+
+| 边界 | 约束 |
+| --- | --- |
+| directory_plan.plan_slot | 请求输入中的固定整数 1 或 2，表示两次独立读取；属于实际请求摘要，不要求模型回抄。两槽分别保存及重放，同槽恢复不新增发送；不得用随机数绕开正常缓存 |
+| execution_spec.directory_planning_contract | 用于有冻结来源的 outline_only 执行，当前值见下节显式正文范围合同；旧执行缺少或不同合同不能由新代码原地续跑，保留旧回执，通过新执行处理 |
+| 计划内部章节身份 | 单份计划的 id 仅在该份内唯一。合并第二份新增章时，宿主分配不冲突身份并同步其父引用；共享来源父章使用第一份身份，不按标题合并 |
+| 目录到编制 | 目录产物按现有 AuthoringOutline 保存；网页按 revision_id 与 SHA 读取固定 outline_ref 继续编制。原文/人工位置维持 manual_fill，已有显式 knowledge 写作目标继续沿原检索、写作和复核链，不把目录原式当企业证据 |
+
+调用、最坏容量、未决出口和修订重跑边界见[BUG-145](bug-fix.md#bug-145目录独立计划被回放合并跨计划局部章号覆盖正文)。
+
+### 显式目录正文范围（BUG-149）
+
+当前目录模型合同为 `source_roles_continuations_headers_v5`，保留两次固定计划槽位、现有组成条目和分组字段。
+`DirectoryNode.body_windows` 是必填的逐页 `DirectoryWindow[]`，同现有窗口包含
+document_id/page/start_line/end_line；空列表明确该节点没有搬运正文。组成/导航标题可作为
+名称和父子锚点，但不能由宿主推成标题之后的连续正文。窗口可以跨多个文件的独立页引用，
+每个窗口都验证真实坐标，按来源顺序复制，重复坐标仅复制一次；不按文字相似度去重。
+
+`heading/content_start` 保持名称及既有标题前内容定位含义，不能代替正文结束边界。
+`scope.title` 引用原文明示的组成分组，不固定要求所有项目恰有三册。父章窗口只描述父章
+自身正文，子节点通过各自窗口承载；原生表只有所有已定位来源行都在该章窗口内才整表绑定，
+半表保留文字及待核，不通过词面相似补整表。参数子范围不得越出父章已经选中的来源坐标。
+
+新请求通过 DirectoryPlan Schema 拒收缺失/空值 body_windows，沿现有四次额度纠正；
+旧原始计划仅在显式离线回放中保留缺字段的旧边界解释，不允许新在线回包默默走旧路径。
+同源表承担不同提交实例时不能全局删除，重复所有权必须结合组成、主体和用途核对；
+评审工作表不作为投标格式搬运，其评分/实质性要求仍由章节要求环节及独立验收查漏。
+
+实际调用/容量和修订边界见[BUG-149](bug-fix.md#bug-149独立目录计划同时遗漏分册并把组成说明当作模板正文)。
+
+引用型原式（BUG-150）：format_bindings 说明响应数据可共用，不隐含可删除原件给定的
+表框/固定参见文字。已有引用原式仍由 body_windows 明确选择；clause 只保留额外说明。
+显式正文节点中，clause 按已承载的同一来源坐标求差集，不删除不同来源的同文或不同实例。
+不能把 binding.source（关系依据）自动解释为正文范围；原始旧计划回放不改。
+
+响应职责与主体（BUG-151）：`DirectoryNode.response_kind` 是新在线合同的必填字段，沿用
+目标 `form/narrative/attachment`；分别表示保留原式、保留原要求及人工应答、保留待附真实
+材料的位置。`subjects` 默认为空，每项为 `{source: DirectoryWindow, role: Text}`；role 必须
+是该来源窗口中的原文角色片段，不能填写虚构公司名。不同角色在同一章节分别保留正文和
+原式目标并写入现有 `ResponseTarget.subject`，公共条件及独立归入的要求不随之扩大。
+显式旧 raw 计划缺职责时仍按旧 form 解释，不默改历史执行。已采用空叶由既有源标题保留
+人工填写位置，纯父容器不增加响应。参数请求只处理需叙述应答的长叶章；原表字段不拆章。
+要求分块额外收到已经编译的排除依据与适用条件，不能把专用不适用的通用义务转挂到别项；
+共享要求进入实际指定章节的目标，仍保留共享关系及待核问题。
+
+新合同调用数、最坏输入输出、问题出口、修订成本及机械复制边界见[BUG-151](bug-fix.md#bug-151原要求已保全但缺少填写出口适用性与多主体实例未落实)。
+
+材料表头（BUG-152）：既有 `directory_material` 输入新增 `table_header_catalog`，仅包含已采用
+章节绑定且表头未知的唯一原生表，按源索引 SHA 与 unit_id 派生稳定 table_id，提供 document_id/page/unit_id
+及完整无损 grid；不因判断表头采用评审表或未归属表。`MaterialPlan.table_headers` 缺省为空以保留
+旧 raw，每项 `{table_id: Identity, count: NonnegativeInt | null}` 中 count 必填；0 明确不重复，
+null/漏选保留未确认。正数必须小于完整行数，且边界不能切断跨行合并；未知身份、非法值及
+同表矛盾在成功回执前拒收，沿原四次额度纠正。宿主将明确 count 写入所有正文/材料部件的
+`TemplatePartRef.header_row_count`，后续主体副本继承，不改原格、原文、合并或空白。
+已有明确计数（含 0）不送模型、不覆盖，同源未知副本继承；原生 header_cells 只有覆盖完整
+连续首行且不切合并时保留为已知计数，空元数据不推为 0。
+漏选、null、请求耗尽/超预算及本轮新归入而未提供判断的表保留原表，产生含文件/页/表身份的
+`outline_directory_table_header_unconfirmed`，在 Word 的“适用性与来源待核”提示确认重复标题行、
+保存并填写处理结果。调用数仍 `4+B+P`，新增输入随已绑定唯一表的完整网格线性增长，
+输出只返表身份和计数；不截表、不扩预算，最坏容量及修订重跑边界见 [BUG-152](bug-fix.md#bug-152实际保存word的目录未更新跨页表格表头与列宽不可用)。
+
+原件封面（BUG-153）：采用项的 `presentation:cover` 与 `depth:self` 直接映射已有
+`OutlineChapter.presentation_role=cover`。封面正文仍只能取body_windows，不把默认文档标题
+当原式，也不推造企业事实。共用整稿封面可独立scope，只有明确来源要求才分别用于分册。
+尚待身份、选项或澄清的采用边界用已有 `condition` 选择源条件，不能仅在clause放两段
+原文就宣称已有待核决定。两计划的条件或补充义务不同保留首份，明确两份差异待核。
+
+
+跨页完整参数（BUG-154）：`ParameterItem` 的既有 `document_id/page/start_line/end_line/content_start_line`
+描述首段，新增 `continuation_windows: DirectoryWindow[]` 描述同一条款的续段，缺省为空以保留
+旧同页raw回放。每个续窗同文件且严格前向，首段/续段都必须在显式父正文内；不同参数目标
+不得重复拥有来源行。分页、字词换页或替代方案续句不构成新的应答项；同行承载相邻条件时
+保留完整原段为联合应答，不复制该行或截掉条件。宿主复制全部坐标并保持原父表，不补写
+断句或企业事实。新在线接收在成功回执前执行同一参数编译校验，未知父章、逆序、越界与
+重复走已有首次加三次纠正；耗尽保留父正文及具体待核。逻辑调用仍`4+B+P`，P不随分页
+增加，参数输出只增加续窗位置、随原父章规模线性增长；不提高请求预算，相关参数Prompt/
+Schema修订仅使实际受影响请求及后续失效。完整条款语义仍需独立原件验收，不以坐标合法
+代替语义完整。
+
+跨页完整章节要求（BUG-163）：`RequirementAssignment` 的首窗仍为
+`document_id/page/start_line/end_line`，可选 `continuation_windows: DirectoryWindow[]` 默认空。
+同一assignment的全部窗口共用scope和chapter_ids，同文件、前向、无重叠且必须全部在本次
+要求请求的可见block内；宿主在成功回执前校验，窗口错误沿已有有限纠正。完整多窗条款仅有
+部分原文已在原式时，仍保全整条应答依据，全部已承载才省略。旧同页回包仍沿原去重规则。
+同一义务的条件、例外与共同后果不按物理页拆成多次应答；块外或语义不完整沿既有unassigned
+待核与人工Word补正出口，不猜续文。此能力自`source_roles_requirement_continuations_v7`引入，
+调用数仍`4+B+P`；要求Schema/Prompt变动使B个请求重新核算，其他仅精确摘要重验复用。
+
+组成命名锚点（BUG-164）：有来源node时，entry.name只提供chapter.entry、listed_title及
+命名对应；它的一行不自动成为完整补充义务，正文外义务只来自显式clause。无node的既有
+条款提交出口单独保留；完整原式、条件和独立章节要求不因命名映射被删去。
+
+章节材料职责上下文（BUG-165）：要求请求独立的chapters目录，在form/attachment项提供
+完整已选原件`source_body`，各章有显式补充义务时提供`source_obligations`。它们是来源职责，
+不是企业事实或模型摘要；已有条件仍用applicability，长narrative父正文不在每个要求块重放。
+材料请求沿原chapters目录，避免影响已验证表头；模型须据职责、主体和时点归属，不能凭
+附件号或相邻位置猜。无法证实的归属仍unassigned待核，新上下文本身不授予语义通过。
+职责上下文自`source_roles_requirement_duties_v8`引入；单请求须完整核算新职责文本、Prompt和
+Schema，沿原预算准入、不截原式、不提高上限。公式及重跑边界见BUG-165。
+
+同章义务所有权（BUG-166）：宿主只为最终实际采用且形成独立narrative应答的clause维护内部
+`obligation_lines`源坐标，未采用计划的clause不算已承载；该内部字段不进入模型Schema或
+新产品字段。要求来源全集已在本章显式义务时不再建立第二应答，多章逐章判定，不用
+他章所有权抹除本章职责，也不按相等文本删除不同坐标来源。部分重叠保留完整新条款，
+以具名待核及Word/ZIP人工处理栏提供合并出口；原式、独立条件、全局及unassigned保留。
+宿主合同为`source_roles_same_chapter_ownership_v9`，Prompt/Schema/payload及预算不变；
+已有有效回包只在实际摘要一致且重验通过后复用，新派生稿不覆盖旧人工版本。
+
+### 来源闭合、业务名称与无损行表示（BUG-167至172）
+
+新目录编制合同为`source_closure_business_titles_v10`，仍使用`4+B+P`个逻辑调用。
+材料读取先裁定目录候选，再分块收集要求，已有全源classification读取在B之后闭合未归属
+来源，不新增模型阶段。每阶段沿实际请求摘要及当前校验恢复；旧raw缺省可读不等于满足
+新正式回执，企业身份、资料、响应和外部履行状态均不能从来源取舍推出。
+
+- `MaterialPlan.directory_adjudications: DirectoryAdjudication[]`默认空。每项为
+  `{case_id,action,basis_windows=[],chapter_ids=[]}`；新正式回执必须恰覆盖全部给定case。
+  action为`current/alternative/reference/not_applicable_reference/container/conditional/unresolved`。
+  unresolved之外必须有非空原件依据；reference必须在整批选择后的实际响应中完整覆盖且
+  主体/角色一致。not_applicable_reference仅保留明确本次不提交的独立参考候选，不能冒充
+  已承载或已履行。container只保既有父来源标题，子项必须完整承载原文。
+- `ClassificationPlan.requirement_adjudications: RequirementAdjudication[]`默认空。每项为
+  `{item_ids,scope,chapter_ids=[],basis_windows=[]}`，item_ids引用宿主给定的稳定来源case；
+  scope为`chapter/chapters/document/procedure/not_applicable/unassigned`。全部case必须
+  恰覆盖一次，可将同一跨块条款按完整来源窗归并；单条或合并仍未决都保留完整原文。
+  chapter(s)不能借封面目标转成全局指南，封面填写义务使用document出口。procedure明确
+  待执行且不等于已完成，not_applicable必须有非空原件依据及独立语义核验。
+- `MaterialPlan.chapter_titles: DirectoryChapterTitle[]`默认空。每项为`{title_id,title}`；
+  title_id绑定本次`chapter_title_catalog`中的来源标题锚或分组身份，不使用可变显示名或
+  两槽局部node id作为来源身份。新正式回执必须覆盖全部最终采用节点与分组；未知、重复、
+  漏名、源编号或格式定位号不能被旧首行标题静默替代。显示名为短业务名，不修改原文；
+  来源名/编号/坐标留在映射。不同源锚同名group保持独立。
+- `ParameterItem.title: Text | None`默认None兼容旧raw；新正式参数回执每个item都需短业务名，
+  原完整首段/续窗、主体、条件和证据义务保持。名称的语法校验不能证明语义正确，须对真实
+  回包独立核源。Word正文使用宿主原生层级编号，TOC和分册共享路径，封面不占正文编号。
+- 材料输入`source_line_format=numbered_line_pairs_v1`时，`documents[].pages[].lines[]`
+  是`[零基行号,完整原文]`，包含全部行和空行；它是宿主已知编号行的无损表示，不是截断、
+  摘要或新增分块。文件/物理页身份和返回的DirectoryWindow坐标结构不变。其他阶段已有
+  阅读格式保持；最终完整Prompt/Schema/payload及输出预留仍逐请求按原预算准入。
+- 已决定来源的完整原文、位置、动作和依据通过`outline_directory_source_decision`保留在
+  公开大纲及指南“来源核定记录”；`outline_directory_title_mapping`保留章节名称对应。
+  企业条件未知另用`outline_directory_conditional_requirement`保留未确认填写出口，未决case
+  保留原问题，不能把记录分组变化当成业务通过。
+- `applicability.source_reference_exclusions`按需提供`case_id/body_windows/basis_windows/basis_text`，
+  仅传递已核定本次不提交的参考正文边界，body_windows来自实际正文坐标，不另把heading
+  当正文。宿主拒绝最终已选正文、后补材料或chapter(s)要求又拥有同一源行；不同源坐标
+  的投标承诺保留，document/unassigned/procedure仍按各自职责判断，不从不提交擅推后期
+  永不执行。要求裁定的case/归并关系、源窗、scope和依据窗同样进入公开来源核定记录。
+- `AuthoringOutline.unplaced_targets: ResponseTarget[]`默认空。服务端保存同源完整候选快照，
+  删除原式仍计pending分母，连续保存不丢失，重新安排后移出；不重建用户删除树、不信任
+  客户端伪造快照、不把删除/自由文字理由当成不适用。原式引用保留于Word说明及ZIP底稿。

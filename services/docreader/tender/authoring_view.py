@@ -93,6 +93,9 @@ def slim_revision_payload(payload, previous, findings):
                 keep_excerpts.update(table.get('context_range_ids') or [])
                 for row in table.get('rows') or []:
                     keep_excerpts.update(row.get('range_ids') or [])
+                    keep_excerpts.update(row.get('context_range_ids') or [])
+                for guidance in table.get('source_guidance') or []:
+                    keep_excerpts.update(guidance.get('range_ids') or [])
             walk(chapter.get('children'))
     walk(previous)
     for rule in payload.get('unassigned_rules') or []:

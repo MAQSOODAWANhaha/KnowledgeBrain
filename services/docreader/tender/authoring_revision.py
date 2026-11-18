@@ -152,7 +152,8 @@ async def revise_units(artifacts, budget, execute, tasks, units, findings, make_
                                             if key in finding} for finding in relevant]}
             prompt = budget.prompts.get("authoring_write") or files("docreader.tender.prompts").joinpath(
                 "authoring_write.md").read_text("utf-8")
-            request = build_request(budget.model, prompt, content, task="authoring_write")
+            request = build_request(budget.model, prompt, content, task="authoring_write",
+                                    reasoning_effort=budget.reasoning_effort)
             from docreader.tender.authoring_pipeline import _replay
             validate = lambda raw: bind_response(task, raw)
             hit, replacement = await _replay(execute, "authoring_write", request, validate)

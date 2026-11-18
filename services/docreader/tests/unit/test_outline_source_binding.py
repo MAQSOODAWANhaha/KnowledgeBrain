@@ -54,6 +54,31 @@ def form_response(ctx, range_ids, template_part_ids=()):
                      "template_part_ids": list(template_part_ids)}]}], "findings": []}
 
 
+@pytest.mark.parametrize("selected,read,unread", [
+    ("first", ["second"], True),
+    ("first", ["first"], False),
+    ("first", ["whole"], False),
+    ("whole", ["first"], True),
+    ("whole", ["first", "second"], False),
+    ("whole", [], True),
+])
+def test_batch_source_readability_uses_exact_excerpt_coverage(tmp_path, selected, read, unread):
+    artifacts = ArtifactStore(tmp_path)
+    native = source([{"text": "完整第一片段完整第二片段"}])
+    index = SourceIndex({**native.document, "original_ref": artifacts.put_bytes(b"synthetic original")}, native.raw)
+    whole = index.ranges[0]
+    first = fragment(whole, whole["start"], whole["start"] + 6)
+    second = fragment(whole, first["end"], whole["end"])
+    ctx, source_ref = outline_context(artifacts, index, body=[first, second], evidence_source=first)
+    ids = {name: row["range_id"] for name, row in (("whole", whole), ("first", first), ("second", second))}
+    # Prior batches reading this native unit must not change the current batch.
+    before = set(ctx.read_units)
+    assert (source_ref["sha256"], whole["unit_id"]) in before
+    result = ctx.validate(form_response(ctx, [ids[selected]]), read_source_ids={ids[name] for name in read})
+    assert any(issue["code"] == "outline_source_not_read" for issue in result["issues"]) is unread
+    assert ctx.read_units == before
+
+
 def spreadsheet(artifacts, table_count):
     """Rows reference shared cells; only grid units retain the complete table."""
     tables, rows, cells = [], [], {}

@@ -66,7 +66,10 @@ def apply_outline_edit(base, chapters, *, target_catalog=()):
     originals = list(_flatten(base['chapters']))
     known = {chapter['chapter_id']: chapter for chapter in originals}
     original_targets = {target['target_id']: target for chapter in originals for target in chapter['targets']}
-    available = {target['target_id']: deepcopy(target) for target in target_catalog}
+    source_targets = {target['target_id']: deepcopy(target) for target in base.get('unplaced_targets', [])}
+    source_targets.update(original_targets)
+    available = deepcopy(source_targets)
+    available.update((target['target_id'], deepcopy(target)) for target in target_catalog)
     available.update(original_targets)
     sources = [*base.get('submission_refs', []),
                *(ref for target in available.values() for ref in target['source_refs'])]
@@ -124,10 +127,12 @@ def apply_outline_edit(base, chapters, *, target_catalog=()):
     if len(remaining) != sum(len(chapter['targets']) for chapter in _flatten(base['chapters'])):
         raise ValueError('响应位置标识重复，请重新选择章节标识。')
     base['issues'] = [issue for issue in base['issues']
-                      if issue['code'] != 'outline_edit_reference_unbound'
-                      and (issue['code'] != 'outline_edit_target_removed' or issue.get('target_id') not in remaining)]
-    for identity in original_targets.keys() - remaining.keys():
-        target = original_targets[identity]
+                      if issue['code'] not in {'outline_edit_reference_unbound', 'outline_edit_target_removed'}]
+    unplaced = [target for identity, target in source_targets.items() if identity not in remaining]
+    if unplaced or 'unplaced_targets' in base:
+        base['unplaced_targets'] = unplaced
+    for target in unplaced:
+        identity = target['target_id']
         base['issues'].append({'code': 'outline_edit_target_removed', 'target_id': identity,
             'detail': '大纲编排已移出响应位置“' + target['purpose'] + '”；原要求和来源仍保留，须重新安排或核对。',
             'rule_refs': deepcopy(target['rule_refs'])})

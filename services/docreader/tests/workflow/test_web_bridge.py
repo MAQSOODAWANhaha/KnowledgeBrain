@@ -371,6 +371,47 @@ async def test_outline_predecessor_is_persisted_and_forwarded_to_the_worker(runt
     assert "outline_ref" not in observed[0] and observed[0]["review_request"] is None
 
 
+async def test_reviewed_fact_ref_is_frozen_in_the_job_inherited_and_forwarded(runtime, monkeypatch):
+    from docreader.tender import document_execution
+    from docreader.tender.directory_compile import documents_from_frozen
+    from docreader.tender.directory_sources import SourceRefs
+
+    await upload(runtime)
+    previous, _, outline = await finish_outline(runtime, monkeypatch)
+    snapshot = outline['authoring_input']
+    documents = documents_from_frozen(runtime.bridge.artifacts, runtime.bridge.artifacts.read_json(snapshot['frozen_ref']))
+    manifest = {'schema_version': 1, 'contract': 'reviewed_source_facts_v1', 'authoring_input': snapshot,
+                'source_projection_digest': SourceRefs(documents).digest, 'facts': []}
+    reference = runtime.bridge.artifacts.put_json(manifest)
+    first_request = payload(runtime, request_key='reviewed-facts-first', previous_execution_id=previous,
+                            reviewed_source_facts_ref=reference)
+    first = await runtime.bridge.start_outline(first_request)
+    assert await runtime.bridge.start_outline(first_request) == first
+    inherited_request = payload(runtime, request_key='reviewed-facts-inherited',
+                                previous_execution_id=first['generation']['execution_id'])
+    inherited = await runtime.bridge.start_outline(inherited_request)
+    assert await runtime.bridge.start_outline(inherited_request) == inherited
+    job = await runtime.bridge.job(runtime.project, inherited['generation']['execution_id'])
+    assert job['payload']['request']['reviewed_source_facts_ref'] == reference
+    config = ModelConfig(ModelEndpoint('http://fixture.invalid', 'test-only', 'fixture', 131072), None)
+    monkeypatch.setattr(ModelConfig, 'from_env', classmethod(lambda cls: config))
+    seen = []
+
+    async def capture(*_args, **kwargs):
+        seen.append(kwargs)
+        raise RuntimeError('offline worker boundary')
+
+    monkeypatch.setattr(document_execution, 'execute_document', capture)
+    await execute_authoring_job(job['execution_id'], runtime.settings)
+    assert seen[0]['reviewed_source_facts_ref'] == reference
+    wrong_snapshot = {**snapshot, 'run_id': 'another-source-run'}
+    wrong_ref = runtime.bridge.artifacts.put_json({**manifest, 'authoring_input': wrong_snapshot})
+    with pytest.raises(WebError) as error:
+        await runtime.bridge.start_outline(payload(runtime, request_key='reviewed-facts-wrong-source',
+            previous_execution_id=previous, reviewed_source_facts_ref=wrong_ref))
+    assert error.value.code == 'INVALID_REVIEWED_SOURCE_FACTS'
+
+
 @pytest.mark.parametrize("options", [
     {"review_request": {"target_ids": ["target"], "reason": "核对"}},
     {"outline_revision_id": str(uuid4()), "outline_sha256": "a" * 64},

@@ -1,20 +1,12 @@
+import { Badge } from "@astryxdesign/core/Badge";
+import { FileInput } from "@astryxdesign/core/FileInput";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
+import { Table } from "@astryxdesign/core/Table";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { IconCloudUpload } from "@tabler/icons-react";
 import { toast } from "sonner";
-import { Alert } from "../components/ui/alert";
-import { Badge } from "../components/ui/badge";
-import { Button } from "../components/ui/button";
-import { Dialog, DialogContent } from "../components/ui/dialog";
-import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "../components/ui/table";
 import {
   type Doc,
   type Product,
@@ -371,13 +363,9 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
       title={title}
       extra={
         route.kind === "doc" ? undefined : route.kind === "version" || (route.kind === "folder" && version) ? (
-          <Button type="button" onClick={() => document.getElementById("asset-file")?.click()}>
-            上传
-          </Button>
+          <FileInput label="上传" isMultiple value={null} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list).catch((error) => notify(error instanceof Error ? error.message : "上传失败", true)); }} />
         ) : (
-          <Button type="button" onClick={openCreateFromSelection}>
-            {createHint}
-          </Button>
+          <Button type="button" label={createHint} variant="primary" onClick={openCreateFromSelection} />
         )
       }
       tree={
@@ -480,12 +468,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     >
       <div className="wrap stack">
         {err && (
-          <Alert>
-            {err}
-            <Button size="sm" className="mt-2" onClick={() => void reloadTree()}>
-              重试
-            </Button>
-          </Alert>
+          <div role="alert"><Banner status="error" title={err} endContent={<Button size="sm" label="重试" onClick={() => void reloadTree()} />} /></div>
         )}
         {route.kind === "company" && (
           <Pane empty={folders.length === 0} emptyTitle="还没有分类">
@@ -545,36 +528,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
         ) : null}
         {(route.kind === "version" || (route.kind === "folder" && Boolean(version))) && (
           <>
-            <div
-              id="asset-drop"
-              className="drop"
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                void upload(Array.from(e.dataTransfer.files)).catch((err) =>
-                  notify(err instanceof Error ? err.message : "上传失败", true),
-                );
-              }}
-              onClick={() => document.getElementById("asset-file")?.click()}
-            >
-              <div className={docs.length === 0 ? "flex items-center justify-center gap-3 py-7" : "flex items-center justify-center gap-3 py-2"}>
-                <span className="grid h-10 w-10 place-items-center rounded-md bg-sky-wash text-sky">
-                  <IconCloudUpload size={22} />
-                </span>
-                <div className="font-semibold">把文件拖到这里</div>
-              </div>
-              <input
-                id="asset-file"
-                type="file"
-                multiple
-                hidden
-                onChange={(e) => {
-                  const list = e.target.files;
-                  if (list?.length) void upload(Array.from(list)).catch((err) => notify(err instanceof Error ? err.message : "上传失败", true));
-                  e.target.value = "";
-                }}
-              />
-            </div>
+            <FileInput label="把文件拖到这里" mode="dropzone" isMultiple value={null} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list).catch((error) => notify(error instanceof Error ? error.message : "上传失败", true)); }} />
             <div className="panel">
               {docs.length === 0 ? (
                 <div className="empty">
@@ -600,39 +554,20 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
           </>
         )}
       </div>
-      <Dialog open={!!create} onOpenChange={(open) => { if (!open) setCreate(null); }}>
-        <DialogContent
-          title={
-            create?.kind === "folder"
-              ? "新建分类"
-              : create?.kind === "line"
-                ? "新建产品线"
-                : create?.kind === "product"
-                  ? "新建产品"
-                  : "新建版本"
-          }
-        >
+      <Dialog isOpen={!!create} onOpenChange={(open) => { if (!open) setCreate(null); }}>
+        <DialogHeader title={create?.kind === "folder" ? "新建分类" : create?.kind === "line" ? "新建产品线" : create?.kind === "product" ? "新建产品" : "新建版本"} onOpenChange={(open) => { if (!open) setCreate(null); }} />
           <form
             onSubmit={(e) => {
               e.preventDefault();
               void submitCreate();
             }}
           >
-            <Label htmlFor="asset-name">名称</Label>
-            <Input
-              id="asset-name"
-              value={name}
-              onChange={(e) => setName(e.currentTarget.value)}
-              autoFocus
-            />
+            <TextInput id="asset-name" label="名称" value={name} onChange={setName} hasAutoFocus />
             <div className="mt-5 flex justify-end gap-2">
-              <Button variant="outline" type="button" onClick={() => setCreate(null)}>
-                取消
-              </Button>
-              <Button type="submit">建立</Button>
+              <Button variant="secondary" type="button" label="取消" onClick={() => setCreate(null)} />
+              <Button type="submit" variant="primary" label="建立" />
             </div>
           </form>
-        </DialogContent>
       </Dialog>
     </Shell>
   );
@@ -667,33 +602,11 @@ function NameTable({
   nameHeader: string;
   rows: { key: string; href?: string; name: string; desc?: string; badge: string; badgeColor?: "sky" | "gray" | "go" | "wait" | "stop" }[];
 }) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>{nameHeader}</TableHead>
-          <TableHead className="w-[88px]">状态</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => (
-          <TableRow
-            key={row.key}
-            className={row.href ? "cursor-pointer" : undefined}
-            onClick={row.href ? () => go(row.href as string) : undefined}
-          >
-            <TableCell>
-              <div className="font-semibold">{row.name}</div>
-              {row.desc ? <div className="text-sm text-quiet">{row.desc}</div> : null}
-            </TableCell>
-            <TableCell>
-              <Badge tone={row.badgeColor ?? "gray"}>{row.badge}</Badge>
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
+  return <Table hasHover data={rows} columns={[
+    { key: "name", header: nameHeader, renderCell: (row) => <div>{row.href ? <a href={`#${row.href}`}>{row.name}</a> : <strong>{row.name}</strong>}{row.desc ? <div>{row.desc}</div> : null}</div> },
+    { key: "badge", header: "状态", renderCell: (row) => <Badge label={row.badge} /> },
+  ]} />;
+
 }
 
 function TreeRow({
@@ -724,10 +637,10 @@ function TreeRow({
       {leaf ? (
         <span className="tree-leaf" />
       ) : (
-        <button
-          className={`tree-chev ${expanded ? "open" : ""}`}
+        <Button className={`tree-chev ${expanded ? "open" : ""}`}
           type="button"
           aria-label={expanded ? "收起" : "展开"}
+          label={expanded ? "收起" : "展开"}
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -737,25 +650,18 @@ function TreeRow({
           <svg viewBox="0 0 24 24">
             <path d="M9 6l6 6-6 6" />
           </svg>
-        </button>
+        </Button>
       )}
       <a href={`#${href}`}>
         <em>{label}</em>
         {count ? <span>{count}</span> : null}
       </a>
       {onAdd && (
-        <button
-          className="tree-add"
+        <Button className="tree-add"
           type="button"
-          title={addTitle}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onAdd();
-          }}
-        >
-          +
-        </button>
+          aria-label={addTitle ?? "添加"}
+          label="添加"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onAdd(); }} />
       )}
     </div>
   );

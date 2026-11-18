@@ -57,8 +57,8 @@ def test_shared_narrative_and_placeholder_have_all_anchors_in_main_and_volume(tm
         texts = Counter(paragraph.text for paragraph in document.paragraphs)
         assert all(texts[block["text"]] == 1 for block in blocks)
         assert texts["（本部分内容待补）"] == (0 if blocks else 1)
-        # Only the existing page break is empty; no anchor-only visible paragraph.
-        assert texts[""] == 1
+        # The body now starts via pageBreakBefore; no floating break or anchor-only paragraph.
+        assert texts[""] == 0
 
 
 def test_later_target_reuses_its_own_shared_unit_not_the_chapters_first_unit(tmp_path):
@@ -90,5 +90,5 @@ def test_own_template_and_cross_reference_take_priority_over_a_shared_unit_ancho
         assert paragraph_text(first) == "给定共享功能说明"
         assert len(document.tables) == 1
         assert target_paragraph(document, "form") is document.tables[0].cell(0, 0)._tc.find(qn("w:p"))
-        assert paragraph_text(target_paragraph(document, "reference")) == "参见 1 技术响应"
+        assert paragraph_text(target_paragraph(document, "reference")) == "参见 技术响应"
         assert sum(paragraph.text == "给定共享功能说明" for paragraph in document.paragraphs) == 1

@@ -1,3 +1,6 @@
+import { Button } from "@astryxdesign/core/Button";
+import { Selector } from "@astryxdesign/core/Selector";
+import { TextArea } from "@astryxdesign/core/TextArea";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
 import { analysisReviewApi, type AnalysisBusinessFields, type AnalysisConfirmation, type AnalysisCorrection, type AnalysisReviewView, type HumanVerdict } from "./api/analysisReview";
@@ -111,12 +114,12 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
     <h3>人工复核与事项纠正</h3>
     {loading && <p role="status">正在读取复核清单…</p>}
     {notice && <p className="tender-alert" role="alert">{notice}</p>}
-    <button disabled={saving} onClick={() => void read()}>刷新复核状态</button>
-    {dirty && !pending && <button disabled={saving} onClick={() => {
+    <Button isDisabled={saving} onClick={() => void read()} label="刷新复核状态" />
+    {dirty && !pending && <Button isDisabled={saving} onClick={() => {
       if (window.confirm("放弃当前尚未提交的人工判定和事项纠正？")) {
         setWorking(remote ? fresh(remote) : base ? fresh(base) : null); setConflict(false); setNotice(null);
       }
-    }}>放弃未提交输入</button>}
+    }} label="放弃未提交输入" />}
     {!loading && !base && <p className="tender-note">完成招标分析后，可在这里处理待确认问题、纠正事项业务字段。</p>}
     {base && working && <>
       <p className="tender-note">当前核对：来源版本 {base.source_version}，分析修订 {base.domain_revision}。{dirty ? "当前输入尚未提交。" : ""}</p>
@@ -128,11 +131,11 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
           {remote.issues.map((issue, index) => <p key={index}>{issue.detail}</p>)}
           {remote.correction?.items.map(entry => <div key={itemKey(entry.pack_id, entry.item.item_id)}><p>{entry.item.text}</p><ItemFacts item={entry.item} /></div>)}
         </details>}
-        <button disabled={saving || !!pending || !remote} onClick={() => {
+        <Button isDisabled={saving || !!pending || !remote} onClick={() => {
           if (remote && (!dirty || window.confirm("放弃当前未提交的复核输入，载入最新分析？"))) {
             setWorking(fresh(remote)); setConflict(false); setNotice(null);
           }
-        }}>载入最新分析重新核对</button>
+        }} label="载入最新分析重新核对" />
       </div>}
       {currentState?.hard_blocking && <p className="tender-alert">存在来源、覆盖或执行问题，人工判定不能解除。请按问题提示补充来源、使用完整纠正流程或联系管理员处理后重新分析。</p>}
       {base.human_issue_ids.map((id, index) => {
@@ -142,16 +145,14 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
           decisions: { ...current.decisions, [id]: { ...value, ...patch } } });
         return <fieldset key={id} disabled={locked}><legend>问题 {index + 1}</legend>
           <p>{issue?.detail ?? "此问题需要人工核对来源并记录判定。"}</p>
-          <label>人工判定 <select aria-label={`问题 ${index + 1} 人工判定`} value={value.verdict} onChange={event => change({ verdict: event.target.value as Decision["verdict"] })}>
-            <option value="">请选择判定</option><option value="acknowledged">保留为已知问题</option><option value="dismissed">核对后排除此问题</option>
-          </select></label>
-          <label>判定理由 <textarea aria-label={`问题 ${index + 1} 判定理由`} value={value.reason} maxLength={4000} onChange={event => change({ reason: event.target.value })} /></label>
+          <Selector label={`问题 ${index + 1} 人工判定`} isDisabled={locked} value={value.verdict} onChange={verdict => change({ verdict: verdict as Decision["verdict"] })} options={[{ value: "", label: "请选择判定" }, { value: "acknowledged", label: "保留为已知问题" }, { value: "dismissed", label: "核对后排除此问题" }]} />
+          <TextArea label={`问题 ${index + 1} 判定理由`} htmlMaxLength={4000} isDisabled={locked} value={value.reason} onChange={reason => change({ reason })} />
         </fieldset>;
       })}
       {!base.human_issue_ids.length && !base.correction?.items.length && <p className="tender-note">当前没有待核对的问题。</p>}
       {!!base.human_issue_ids.length && <h4>待确认问题（{base.human_issue_ids.length}）</h4>}
       {base.issues.filter(issue => !base.human_issue_ids.includes(issue.issue_id ?? "")).map((issue, index) => <p key={index} className="tender-note">{issue.detail}</p>)}
-      <button className="tender-primary" disabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")}>{pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"}</button>
+      <Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")} label={pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"} />
       {!!corrections.length && <p className="tender-note">已修改事项字段，请先提交事项纠正，等待重新审核后的确认清单。</p>}
       {corrections.some(value => !validFields(value)) && <p className="tender-alert">请补齐已添加的业务字段和数值原文片段；不需要的字段可清空或删除，最高分须大于等于零。</p>}
       {!!base.correction?.items.length && <><h4>事项业务字段</h4>
@@ -174,8 +175,8 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
           }} />
         </details>;
       })}
-      <label>纠正理由 <textarea aria-label="事项纠正理由" disabled={locked} maxLength={4000} value={working.reason} onChange={event => setWorking(current => current && { ...current, reason: event.target.value })} /></label>
-      <button disabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")}>{pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"}</button></>}
+      <TextArea label="事项纠正理由" htmlMaxLength={4000} isDisabled={locked} value={working.reason} onChange={reason => setWorking(current => current && { ...current, reason })} />
+      <Button isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")} label={pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"} /></>}
     </>}
   </section>;
 }

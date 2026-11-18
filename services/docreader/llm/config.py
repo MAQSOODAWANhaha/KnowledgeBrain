@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-from docreader.llm.request import ModelConfigurationError
+from docreader.llm.request import ModelConfigurationError, ReasoningEffort, normalize_reasoning_effort
 
 
 def _setting(values: Mapping[str, str], *keys: str, secret: bool = False) -> str:
@@ -57,6 +57,10 @@ class ModelEndpoint:
     api_key: str = field(repr=False)
     model: str
     context_tokens: int | None
+    reasoning_effort: ReasoningEffort | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "reasoning_effort", normalize_reasoning_effort(self.reasoning_effort))
 
     @property
     def sdk_base_url(self) -> str:
@@ -84,7 +88,8 @@ class ModelConfig:
             context = 0
         if not raw_context.isascii() or not raw_context.isdecimal() or not 1 <= context <= 4_194_304:
             raise ModelConfigurationError("KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS must be an integer between 1 and 4194304")
-        chat = ModelEndpoint(base_url, key, model, context)
+        chat = ModelEndpoint(base_url, key, model, context,
+                             reasoning_effort=_setting(values, "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT") or None)
         try:
             vision = _vision(values, chat)
         except ModelConfigurationError as error:

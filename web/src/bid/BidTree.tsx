@@ -1,19 +1,15 @@
-import {
-  IconDownload,
-  IconFileText,
-  IconFolder,
-  IconPencil,
-  IconListDetails,
-} from "@tabler/icons-react";
 import { cn } from "../lib/utils";
 import type { BidProjectView } from "./api";
 import { AUTHORING_STEPS, authoringHref, type AuthoringStep } from "./authoring/routes";
 
-const STEP_ICON = {
-  files: IconFileText,
-  analysis: IconListDetails,
-  authoring: IconPencil,
-  export: IconDownload,
+function StrokeIcon({ d }: { d: string }) {
+  return <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d={d} stroke="currentColor" strokeWidth="1.7" fill="none" /></svg>;
+}
+const STEP_PATH = {
+  files: "M7 3h7l5 5v13H7zM14 3v5h5",
+  analysis: "M8 7h8M8 12h8M8 17h5",
+  authoring: "M4 20l4-1 10-10-3-3L5 16z",
+  export: "M12 4v10M8 10l4 4 4-4M5 20h14",
 } as const;
 
 export function ProjectNav({ projectId, currentStep, title }: { projectId: string; currentStep: AuthoringStep; title: string }) {
@@ -21,15 +17,14 @@ export function ProjectNav({ projectId, currentStep, title }: { projectId: strin
     <a className="mb-1 px-2.5 py-2 text-[12px] text-quiet hover:text-ink" href="#/">返回项目列表</a>
     <div className="mb-2 truncate px-2.5 text-[13px] font-semibold text-ink" title={title}>{title}</div>
     {AUTHORING_STEPS.map((step) => {
-      const Icon = STEP_ICON[step.key];
       const on = currentStep === step.key;
       return <a key={step.key}
         href={`#${authoringHref(projectId, step.key)}`}
         aria-current={on ? "page" : undefined}
         data-testid={`wizard-${step.key}`}
-        className={cn("flex min-h-9 items-center gap-2 border-l-2 px-2.5 text-[14px]",
-          on ? "border-sky font-semibold text-ink" : "border-transparent font-medium text-quiet hover:text-ink")}>
-        <Icon size={18} stroke={1.7} aria-hidden />
+        className={cn("flex min-h-10 items-center gap-2 rounded-md px-3 text-[14px]",
+          on ? "bg-sky font-semibold text-white" : "font-medium text-quiet hover:bg-sky-wash hover:text-ink")}>
+        <StrokeIcon d={STEP_PATH[step.key]} />
         {step.label}
       </a>;
     })}
@@ -64,7 +59,6 @@ export function BidTree({
           {currentStep && (
             <div className="flex flex-col gap-0.5">
               {AUTHORING_STEPS.map((step) => {
-                const Icon = STEP_ICON[step.key];
                 const on = currentStep === step.key;
                 return (
                   <a
@@ -78,7 +72,7 @@ export function BidTree({
                     )}
                     data-testid={`wizard-${step.key}`}
                   >
-                    <Icon size={18} stroke={1.7} aria-hidden />
+                    <StrokeIcon d={STEP_PATH[step.key]} />
                     {step.label}
                   </a>
                 );
@@ -96,7 +90,7 @@ export function BidTree({
           className="mx-1 flex min-h-8 items-center gap-2 rounded-[6px] px-2.5 text-[13px] text-ink hover:bg-canvas"
           href={`#${authoringHref(p.id, "files")}`}
         >
-          <IconFolder size={16} stroke={1.6} aria-hidden />
+          <StrokeIcon d="M3 7h6l2 2h10v10H3z" />
           <span className="min-w-0 flex-1 truncate">{p.title}</span>
           {p.status === "ended" && <em className="text-[12px] not-italic text-quiet">已结束</em>}
         </a>

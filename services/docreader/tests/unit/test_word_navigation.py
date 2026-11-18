@@ -104,7 +104,7 @@ def test_submission_note_subtree_is_not_a_missing_word_chapter_or_an_orphan_body
     assert actual["missing_chapter_ids"] == ["deleted"]
     document = Document(BytesIO(data))
     text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
-    assert '1 正式正文' in text
+    assert '正式正文' in text
     assert '历史操作不能回流正文' not in text and '外部子操作' not in text
     with ZipFile(store.path(result["package_ref"])) as archive:
         assert not any(name.startswith('volumes/') for name in archive.namelist())

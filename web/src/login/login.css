@@ -1,0 +1,49 @@
+.login-field {
+  animation: login-rise 420ms ease both;
+}
+
+.login-field-late {
+  animation-delay: 80ms;
+}
+
+.login-field-last {
+  animation: login-rise 420ms ease both;
+  animation-delay: 140ms;
+}
+
+.login-line::after {
+  content: "";
+  display: block;
+  height: 2px;
+  margin-top: 0.25rem;
+  background: var(--iris);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 180ms ease;
+}
+
+.login-line:focus-within::after {
+  transform: scaleX(1);
+}
+
+@keyframes login-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-field,
+  .login-field-last {
+    animation: none;
+  }
+
+  .login-line::after {
+    transition: none;
+  }
+}

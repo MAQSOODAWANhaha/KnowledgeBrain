@@ -19,6 +19,9 @@ from docreader.tender.schema import (
 )
 
 
+OUTLINE_SOURCE_BINDING_CONTRACT = "batch_excerpt_coverage_v1"
+
+
 def load_outline_source(artifacts, reference: dict, *, repository=None) -> dict:
     """Load the unchanged native unit and its frozen OCR/image/cell dependencies."""
     value = SourceUnitRef.model_validate(reference).model_dump()
@@ -302,7 +305,7 @@ class _OutlineContext:
         self.payload["issues"] = [*self.payload["issues"],
                                  *(i for i in self.availability_issues if i not in self.payload["issues"])]
 
-    def validate(self, response: dict, *, template_part_ids=None) -> dict:
+    def validate(self, response: dict, *, template_part_ids=None, read_source_ids=None) -> dict:
         from docreader.tender.authoring_templates import expand_template_spans, ordered_template_part_ids
         try:
             parsed = OutlineResponse.model_validate(response).model_dump()
@@ -311,6 +314,36 @@ class _OutlineContext:
                                       for e in error.errors(include_input=False)]) from None
         issues = [{**issue, "rule_refs": []} for issue in self.availability_issues]
         assigned = set()
+        read_intervals = {}
+        for identity in read_source_ids or ():
+            for excerpt in self.excerpts.get(identity, []):
+                ref = excerpt["source_ref"]
+                for selected in excerpt["selectors"]:
+                    key = (ref["source_index_ref"]["sha256"], ref["unit_id"], selected["source_range_id"])
+                    read_intervals.setdefault(key, []).append((selected["start"], selected["end"]))
+        read_intervals = {key: sorted(intervals) for key, intervals in read_intervals.items()}
+
+        def source_is_read(identity):
+            if read_source_ids is None:
+                return all((ref["source_index_ref"]["sha256"], ref["unit_id"]) in self.read_units
+                           for ref in self.sources.get(identity, []))
+            if identity in read_source_ids:
+                return True
+            for excerpt in self.excerpts.get(identity, []):
+                ref = excerpt["source_ref"]
+                for selected in excerpt["selectors"]:
+                    key = (ref["source_index_ref"]["sha256"], ref["unit_id"], selected["source_range_id"])
+                    cursor, covered = selected["start"], False
+                    for start, end in read_intervals.get(key, []):
+                        if start > cursor:
+                            break
+                        cursor = max(cursor, end)
+                        if cursor >= selected["end"]:
+                            covered = True
+                            break
+                    if not covered:
+                        return False
+            return bool(self.excerpts.get(identity))
 
         def references(identities, mapping, path):
             _check_reference_ids(identities, mapping, path)
@@ -365,8 +398,7 @@ class _OutlineContext:
                         problem("outline_target_unbound", "该响应位置尚无规则、来源或原格式依据，需核对其用途。", [], target_id)
                     if target["kind"] == "form" and not templates and not rows:
                         problem("outline_template_missing", "规定格式/表格尚未定位源模板，需补充来源。", refs, target_id)
-                    mapped = [ref for identity in target["range_ids"] for ref in self.sources.get(identity, [])]
-                    if any((s["source_index_ref"]["sha256"], s["unit_id"]) not in self.read_units for s in mapped):
+                    if any(not source_is_read(identity) for identity in target["range_ids"]):
                         problem("outline_source_not_read", "已定位目录来源，但模型尚未阅读正文，生成前须装载核对。", refs, target_id)
                     targets.append({"target_id": target_id, "kind": target["kind"], "purpose": target["purpose"],
                                     **({"subject": target["subject"]} if target["subject"] else {}),

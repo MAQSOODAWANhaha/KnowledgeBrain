@@ -84,8 +84,8 @@ async def test_allowed_renames_update_main_and_volume_word_but_preserve_native_c
     for data in documents:
         document = Document(BytesIO(data))
         headings = [p.text for p in document.paragraphs if p.style.name.startswith("Heading")]
-        assert any(text.endswith(" 商务部分摘要") for text in headings)
-        assert any(text.endswith(" 投标函") for text in headings)
+        assert "商务部分摘要" in headings
+        assert "投标函" in headings
         assert all("8A" not in text and "附件1" not in text for text in headings)
         visible = [p.text for p in document.paragraphs]
         assert all(visible.count(text) == 1 for text in NATIVE_TEXTS)

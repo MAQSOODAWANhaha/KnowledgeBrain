@@ -63,8 +63,8 @@ async def test_automatic_outline_is_reviewed_and_repaired_before_publication(tmp
         published.append(artifacts.read_json(reference))
 
     reference = await pipeline.generate_document(artifacts, snapshot(artifacts), budget(), execute,
-        outline_only=True, on_outline=publish)
-    final = artifacts.read_json(reference)
+        on_outline=publish)
+    final = artifacts.read_json(artifacts.read_json(reference)['outline_ref'])
     assert final['chapters'][0]['title'] == '修正后的正式组成'
     assert published == [final]
     assert [t for t, _ in calls] == [
@@ -117,9 +117,9 @@ async def test_structure_feedback_can_address_a_host_preserved_candidate(tmp_pat
                 'related_target_ids': [candidate['target_id']]}]}]})
         return validate(ordinary_response(task, value))
 
-    saved = artifacts.read_json(await pipeline.generate_document(
-        artifacts, snapshot(artifacts, [{'text': '须保留实际技术要求。'}]), budget(), execute,
-        outline_only=True))
+    result = artifacts.read_json(await pipeline.generate_document(
+        artifacts, snapshot(artifacts, [{'text': '须保留实际技术要求。'}]), budget(), execute))
+    saved = artifacts.read_json(result['outline_ref'])
     assert len(revisions) == 1
     reference, pending = [c['targets'][0] for c in saved['chapters']]
     assert reference['related_target_ids'] == [pending['target_id']]

@@ -26,13 +26,23 @@ from docreader.llm.client import OpenAIModel
 from docreader.llm.config import completions_url
 from docreader.llm.recovery import call_validated
 from docreader.llm.request import (
+    MODEL_RETRY_POLICY,
     ModelConfigurationError,
     ModelSemanticError,
+    ModelWorkUnitExhausted,
     request_digest,
 )
 from docreader.llm.usage import reported_usage
 from docreader.tender.authoring_execution import _OutlineModel
+from docreader.tender.authoring import OUTLINE_SOURCE_BINDING_CONTRACT
 from docreader.tender.authoring_pipeline import generate_document
+from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
+from docreader.tender.directory_material_ids import MATERIAL_IDENTITY_CONTRACT
+from docreader.tender.directory_compile import PARAMETER_SOURCE_CONTRACT
+from docreader.tender.directory_response_forms import RESPONSE_FORM_ROLE_CONTRACT
+from docreader.tender.directory_source_groups import SOURCE_GROUP_CONTRACT
+from docreader.tender.directory_material_closure import SOURCE_CARRIER_CONTRACT
+from docreader.tender.native_body_selection import CONTRACT as NATIVE_BODY_CONTRACT
 from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY,
     AUTHORING_UNIT_BINDING_CONTRACT,
@@ -47,17 +57,34 @@ from docreader.tender.schema import (
     SourceUnitRef,
     WritingUnit,
 )
-from docreader.tender.status import AUTHORING_MODEL_TASKS, AuthoringExecutionStatus
+from docreader.tender.status import AUTHORING_MODEL_TASKS, AuthoringExecutionStatus, AuthoringPrompt
 
 
 _TASKS = AUTHORING_MODEL_TASKS
 _PROMPT_FILES = {
-    "outline": "outline.md",
-    "authoring_basis": "authoring_basis.md",
-    "authoring_write": "authoring_write.md",
-    "authoring_review": "authoring_review.md",
-    "authoring_structure": "authoring_structure.md",
-    "outline_assemble": "outline_assemble.md",
+    AuthoringPrompt.OUTLINE: "outline.md",
+    AuthoringPrompt.BASIS: "authoring_basis.md",
+    AuthoringPrompt.WRITE: "authoring_write.md",
+    AuthoringPrompt.REVIEW: "authoring_review.md",
+    AuthoringPrompt.STRUCTURE: "authoring_structure.md",
+    AuthoringPrompt.ASSEMBLE: "outline_assemble.md",
+    AuthoringPrompt.DIRECTORY_PLAN: "directory_plan.md",
+    AuthoringPrompt.DIRECTORY_REF_PLAN: "directory_ref_plan.md",
+    AuthoringPrompt.DIRECTORY_REF_PLAN_V2: "directory_ref_plan_v2.md",
+    AuthoringPrompt.DIRECTORY_REQUIREMENT: "directory_requirement.md",
+    AuthoringPrompt.DIRECTORY_REQUIREMENT_NATIVE: "directory_requirement_native.md",
+    AuthoringPrompt.DIRECTORY_CLASSIFICATION_NATIVE: "directory_classification_native.md",
+    AuthoringPrompt.DIRECTORY_CLASSIFICATION_REVIEWED_FACTS: "directory_classification_reviewed_facts.md",
+    AuthoringPrompt.DIRECTORY_MATERIAL: "directory_material.md",
+    AuthoringPrompt.DIRECTORY_MATERIAL_RESPONSE_FORMS: "directory_material_response_forms.md",
+    AuthoringPrompt.DIRECTORY_MATERIAL_SOURCE_GROUPS: "directory_material_source_groups.md",
+    AuthoringPrompt.DIRECTORY_MATERIAL_CLOSURE: "directory_material_closure.md",
+    AuthoringPrompt.DIRECTORY_CLASSIFICATION: "directory_classification.md",
+    AuthoringPrompt.DIRECTORY_PARAMETER: "directory_parameter.md",
+    AuthoringPrompt.DIRECTORY_NATIVE_BODY: "directory_native_body.md",
+    AuthoringPrompt.DIRECTORY_RESPONSE_FORM: "directory_response_form.md",
+    AuthoringPrompt.DIRECTORY_RESPONSE_FORM_V2: "directory_response_form_v2.md",
+    AuthoringPrompt.DIRECTORY_RESPONSE_FORM_V3: "directory_response_form_v3.md",
 }
 _PROMPTS = tuple(_PROMPT_FILES)
 _PROTOCOL = "tender_document_execution_v1"
@@ -81,6 +108,22 @@ def _digest(value):
             allow_nan=False,
         ).encode()
     ).hexdigest()
+
+
+class SourceOutlineUnavailable(ModelWorkUnitExhausted):
+    """Automatic source reading produced diagnostics without a usable response."""
+
+
+def _has_outline_responses(chapters):
+    for chapter in chapters:
+        role = chapter.get("presentation_role", "body")
+        if role == "submission_note":
+            continue
+        if role not in {"cover", "content"} and chapter["targets"]:
+            return True
+        if _has_outline_responses(chapter["children"]):
+            return True
+    return False
 
 
 def _usage(requests):
@@ -136,9 +179,18 @@ class _DocumentExecutor:
         self.budget, self.spec, self.previous = budget, spec, previous
         self._request_locks = {}
 
+    def _check_reasoning(self, request):
+        from docreader.llm.request import validate_request_reasoning
+
+        expected = getattr(self.client.config.chat, "reasoning_effort", None)
+        if self.budget.reasoning_effort != expected:
+            raise ModelConfigurationError("document budget differs from configured reasoning effort")
+        validate_request_reasoning(request, expected)
+
     async def __call__(self, task, request, validate):
         if task not in _TASKS:
             raise ModelConfigurationError("unsupported document model task")
+        self._check_reasoning(request)
         digest = request_digest(self.client.config.chat.base_url, request)
         lock = self._request_locks.setdefault((task, digest), asyncio.Lock())
         async with lock:
@@ -148,6 +200,7 @@ class _DocumentExecutor:
         """Revalidate an exact accepted response without admitting or sending HTTP."""
         if task not in _TASKS:
             raise ModelConfigurationError("unsupported document model task")
+        self._check_reasoning(request)
         digest = request_digest(self.client.config.chat.base_url, request)
         lock = self._request_locks.setdefault((task, digest), asyncio.Lock())
         async with lock:
@@ -454,10 +507,12 @@ async def execute_document(
     outline_only: bool = False,
     outline_ref=None,
     authoring_input_ref=None,
+    reviewed_source_facts_ref=None,
+    layout_renderer=None,
     concurrency: int = 2,
     lease_seconds: float = 60,
     heartbeat_seconds: float = 20,
-    timeout_seconds: float = 180,
+    timeout_seconds: float = 60,
 ) -> dict:
     """Run or resume compilation without changing the analysis run or its lease.
 
@@ -484,13 +539,22 @@ async def execute_document(
     if (
         budget.model != config.chat.model
         or budget.context_tokens != config.chat.context_tokens
+        or budget.reasoning_effort != getattr(config.chat, "reasoning_effort", None)
         or budget.output_reserve <= 0
     ):
         raise ModelConfigurationError(
-            "document requires its configured Chat model, window and positive output reserve"
+            "document requires its configured Chat model, window, reasoning effort and positive output reserve"
         )
     if previous_execution_id == execution_id:
         raise Conflict("a document execution cannot inherit from itself")
+    if reviewed_source_facts_ref is not None:
+        if not outline_only:
+            raise ModelConfigurationError('reviewed source facts belong to outline generation')
+        reviewed_source_facts_ref = ArtifactRef.model_validate(reviewed_source_facts_ref).model_dump()
+        if reviewed_source_facts_ref['media_type'] != 'application/json':
+            raise ModelConfigurationError('reviewed source facts require a JSON artifact')
+    if layout_renderer is not None and outline_only:
+        raise ModelConfigurationError('document layout belongs to fixed document generation')
     if review_request is not None:
         review_request = AuthoringReviewRequest.model_validate(
             review_request
@@ -583,6 +647,7 @@ async def execute_document(
         tokenizer=budget.tokenizer,
         tokenized_outline_assembly=budget.tokenized_outline_assembly,
         tokenized_authoring=budget.tokenized_authoring,
+        reasoning_effort=budget.reasoning_effort,
     )
     knowledge_spec = None
     if knowledge is not None:
@@ -605,17 +670,36 @@ async def execute_document(
         "concurrency": concurrency,
         "timeout_seconds": float(timeout_seconds),
         "timeout_policy": "raw_response_idle_v1",
+        "retry_policy": MODEL_RETRY_POLICY,
+        "outline_source_binding_contract": OUTLINE_SOURCE_BINDING_CONTRACT,
+        "outline_assembly_planning_contract": "complete_evidence_scoped_batches_v1",
     }
     # Keep legacy default execution identities unchanged. Non-default planning
     # and fixed-outline inputs are immutable parts of the new execution spec.
     if outline_only or outline_ref is not None:
         spec.update(outline_only=outline_only, outline_ref=outline_ref)
+    if outline_only and snapshot.get("frozen_ref"):
+        spec["directory_planning_contract"] = DIRECTORY_REF_CONTRACT
+        if existing is None:
+            spec["directory_material_identity_contract"] = MATERIAL_IDENTITY_CONTRACT
+        elif "directory_material_identity_contract" in existing["execution_spec"]:
+            spec["directory_material_identity_contract"] = existing["execution_spec"]["directory_material_identity_contract"]
+        spec["directory_parameter_source_contract"] = PARAMETER_SOURCE_CONTRACT
+        spec["directory_response_form_contract"] = RESPONSE_FORM_ROLE_CONTRACT
+        if existing is None and outline_ref is None:
+            spec['directory_native_body_contract'] = NATIVE_BODY_CONTRACT
+        elif existing is not None and 'directory_native_body_contract' in existing['execution_spec']:
+            spec['directory_native_body_contract'] = existing['execution_spec']['directory_native_body_contract']
+        spec["directory_source_group_contract"] = SOURCE_GROUP_CONTRACT
+        spec["directory_source_carrier_contract"] = SOURCE_CARRIER_CONTRACT
     if authoring_input_ref is not None:
         spec["authoring_input_ref"] = authoring_input_ref
     if review_request is not None:
         spec["review_request"] = review_request
     if submission_sources:
         spec["submission_sources"] = submission_sources
+    if layout_renderer is not None:
+        spec['document_layout'] = layout_renderer.spec()
     previous = None
     if previous_execution_id is not None:
         previous = await store.get_execution(previous_execution_id)
@@ -627,6 +711,23 @@ async def execute_document(
             raise Conflict(
                 "document predecessor must belong to the same analysis run, protocol and operation"
             )
+        if outline_only and reviewed_source_facts_ref is None:
+            reviewed_source_facts_ref = previous['execution_spec'].get('reviewed_source_facts_ref')
+    if reviewed_source_facts_ref is not None:
+        from docreader.tender.reviewed_source_facts import (
+            REVIEWED_FACTS_CONTRACT, REVIEWED_BODY_ENTRY_CONTRACT, validate_fact_successor,
+        )
+
+        previous_facts_ref = previous['execution_spec'].get('reviewed_source_facts_ref') if previous else None
+        await asyncio.to_thread(validate_fact_successor, artifacts, previous_facts_ref, reviewed_source_facts_ref)
+        spec.update(reviewed_source_facts_ref=reviewed_source_facts_ref,
+                    reviewed_source_facts_contract=REVIEWED_FACTS_CONTRACT)
+        if outline_ref is None and snapshot.get('frozen_ref') is not None:
+            if existing is None:
+                spec['reviewed_body_entry_contract'] = REVIEWED_BODY_ENTRY_CONTRACT
+            elif 'reviewed_body_entry_contract' in existing['execution_spec']:
+                spec['reviewed_body_entry_contract'] = existing['execution_spec']['reviewed_body_entry_contract']
+    automatic_source_outline = outline_only and outline_ref is None and snapshot.get("frozen_ref") is not None
     await store.submit(execution_id, snapshot, spec)
     lease = await store.acquire(execution_id, lease_seconds=lease_seconds)
     if lease is None:
@@ -641,6 +742,8 @@ async def execute_document(
             raise ArtifactIntegrityError(
                 "stored document does not refer to its fixed input snapshot"
             )
+        if automatic_source_outline and not _has_outline_responses(value["chapters"]):
+            raise SourceOutlineUnavailable("directory_plan")
         await assert_authoring_active(analysis_store, snapshot)
         return saved["result_ref"]
 
@@ -677,6 +780,24 @@ async def execute_document(
                 review_options["submission_sources"] = submission_sources
             if outline_only:
                 review_options["outline_only"] = True
+            if "native_requirement_contract" in spec:
+                review_options["native_requirement_contract"] = spec["native_requirement_contract"]
+            if "directory_planning_contract" in spec:
+                review_options["directory_contract"] = spec["directory_planning_contract"]
+            if "directory_parameter_source_contract" in spec:
+                review_options["parameter_source_contract"] = spec["directory_parameter_source_contract"]
+            if "directory_response_form_contract" in spec:
+                review_options["response_form_contract"] = spec["directory_response_form_contract"]
+            if "directory_source_group_contract" in spec:
+                review_options["source_group_contract"] = spec["directory_source_group_contract"]
+            if "directory_source_carrier_contract" in spec:
+                review_options["source_carrier_contract"] = spec["directory_source_carrier_contract"]
+            if 'reviewed_source_facts_ref' in spec:
+                review_options['reviewed_source_facts_ref'] = spec['reviewed_source_facts_ref']
+            if 'reviewed_body_entry_contract' in spec:
+                review_options['reviewed_body_entry_contract'] = spec['reviewed_body_entry_contract']
+            if 'directory_native_body_contract' in spec:
+                review_options['native_body_contract'] = spec['directory_native_body_contract']
             if outline is not None:
                 review_options["outline"] = outline
 
@@ -685,7 +806,71 @@ async def execute_document(
                     lease, "document-outline", reference, input_digest=_digest(snapshot)
                 )
 
+            async def publish_source_closure(records):
+                identity = {'authoring_input': snapshot,
+                            'contract': spec['directory_source_carrier_contract'],
+                            'reviewed_source_facts_ref': spec.get('reviewed_source_facts_ref')}
+                reference = await asyncio.to_thread(artifacts.put_json, {**identity, 'records': records})
+                await store.commit_artifact(lease, 'directory-material-closure', reference,
+                                            input_digest=_digest(identity))
+
+            if 'directory_source_carrier_contract' in spec:
+                review_options['on_source_closure'] = publish_source_closure
+
+            async def publish_reviewed_facts(outline_reference, records):
+                identity = {'contract': 'reviewed_source_fact_applications_v1',
+                            'authoring_input': snapshot,
+                            'reviewed_source_facts_ref': spec['reviewed_source_facts_ref'],
+                            'outline_ref': outline_reference}
+                if 'reviewed_body_entry_contract' in spec:
+                    identity['entry_contract'] = spec['reviewed_body_entry_contract']
+                reference = await asyncio.to_thread(artifacts.put_json, {**identity, 'records': records})
+                await store.commit_artifact(lease, 'directory-reviewed-source-facts', reference,
+                                            input_digest=_digest(identity))
+
+            if 'reviewed_source_facts_ref' in spec:
+                review_options['on_reviewed_facts'] = publish_reviewed_facts
+
+            async def publish_source_bodies(reference):
+                receipt = await asyncio.to_thread(artifacts.read_json, reference)
+                if receipt['contract'] != spec['directory_native_body_contract'] or receipt['authoring_input'] != snapshot:
+                    raise ArtifactIntegrityError('source body receipt changed its immutable execution input')
+                identity = {'authoring_input': snapshot, 'contract': receipt['contract'],
+                            'outline_ref': receipt['outline_ref'], 'scope_binding': receipt['scope_binding']}
+                await store.commit_artifact(lease, 'directory-native-body-sources', reference,
+                    scope=receipt['outline_ref']['sha256'], input_digest=_digest(identity),
+                    metadata={'complete': receipt['complete'], 'pending_count': len(receipt['pending'])})
+
+            if 'directory_native_body_contract' in spec:
+                review_options['on_source_bodies'] = publish_source_bodies
+
+            async def publish_layout(bindings):
+                identity = {'contract': 'document_layout_receipt_v1', 'authoring_input': snapshot,
+                            'layout_spec': spec['document_layout'], **bindings}
+                reference = await asyncio.to_thread(artifacts.put_json, identity)
+                report = await asyncio.to_thread(artifacts.read_json, bindings['layout_ref'])
+                verified = report.get('status') == 'fixed'
+                await store.commit_artifact(lease, 'document-layout' if verified else 'document-layout-attempt',
+                    reference, scope=bindings['export_input_digest'] if verified else reference['sha256'],
+                    input_digest=_digest(identity))
+
+            if layout_renderer is not None:
+                review_options['render_pdf'] = lambda blob: layout_renderer.render(blob, epoch=lease.epoch)
+                review_options['on_layout'] = publish_layout
+
             stored = await store.get_execution(execution_id)
+            if layout_renderer is not None:
+                saved_exports = {}
+                for receipt in stored.get('receipts') or []:
+                    if receipt.get('stage') != 'document-layout':
+                        continue
+                    saved = await asyncio.to_thread(artifacts.read_json, receipt['artifact_ref'])
+                    if (saved['authoring_input'] != snapshot or saved['layout_spec'] != spec['document_layout']
+                            or saved['export_input_digest'] != receipt['scope']):
+                        raise ArtifactIntegrityError('stored layout receipt does not match its execution inputs')
+                    saved_exports[saved['export_input_digest']] = saved['export_result_ref']
+                if saved_exports:
+                    review_options['saved_layout_exports'] = saved_exports
             plan_receipt = next((r for r in stored.get("receipts") or []
                                  if r.get("stage") == "document-plan" and r.get("scope") == ""), None)
             saved_plan = (await asyncio.to_thread(artifacts.read_json, plan_receipt["artifact_ref"])
@@ -740,6 +925,13 @@ async def execute_document(
                     raise ArtifactIntegrityError(
                         "generated outline changed the fixed input snapshot"
                     )
+                if automatic_source_outline and not _has_outline_responses(value["chapters"]):
+                    await store.commit_artifact(
+                        lease, "directory-outline-unavailable", reference,
+                        scope=reference["sha256"], input_digest=_digest(snapshot),
+                        metadata={"code": "outline_empty", "error_type": "SourceOutlineUnavailable"},
+                    )
+                    raise SourceOutlineUnavailable("directory_plan")
                 return await asyncio.to_thread(artifacts.put_json, value)
             execution = await store.get_execution(execution_id)
             value["usage"] = _usage(execution["requests"])

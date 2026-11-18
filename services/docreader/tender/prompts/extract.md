@@ -95,8 +95,8 @@ blocking issue; do not also emit a disposition for that range. unresolved means 
 item was established. Use a concise source-specific reason. Supporting alone receives no
 disposition.
 
-Relations use <work_unit_id>:l1 etc and exactly
-{relation_id,from_item_id,to_item_id,relation,evidence}. Endpoints must be actual items in
+Relations declare exactly {from_item_id,to_item_id,relation,evidence}.
+The host assigns relation_id; do not emit it. Endpoints must be actual items in
 this output; relation explains a source-supported connection, with nonempty evidence.
 Preserve score hierarchy, proof/qualification links and scoped rejection triggers.
 
@@ -118,7 +118,7 @@ the bounded independent verification stage. Clear issues are [].
 ## Request references and contract feedback
 
 Structured IDs are request-local short references. Copy only IDs supplied for the
-relevant field; use <work_unit_id>:i1/:l1/:c1/:d1 for new declarations as specified above.
+relevant field; use <work_unit_id>:i1, :i2, etc. for new items as specified above.
 request_ref is host correlation metadata and must not be returned. Physical parent
 locators and character offsets remain with the host; all visible text/cells are literal.
 If contract_feedback is present, its errors and fragments describe the previous rejected

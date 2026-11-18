@@ -99,7 +99,7 @@ def test_formal_letter_starts_with_its_template_without_analysis_tables_in_main_
             assert_no_analysis_preamble(document)
             assert not document.tables
             paragraphs = [p.text for p in document.paragraphs]
-            assert paragraphs[paragraphs.index("1 投标函") + 1] == letter_text
+            assert paragraphs[paragraphs.index(letter_text) - 1] == "投标函"
             names = [b.get(qn("w:name")) for b in document.element.body.iter(qn("w:bookmarkStart"))]
             assert len(names) == len(set(names)) == 2
 
@@ -117,7 +117,7 @@ def test_resolved_reference_only_displays_actual_location_without_pending_prose(
     result = export_authoring_document(artifacts, outline, units)
 
     paragraphs = [p.text for p in word(artifacts, result).paragraphs]
-    assert "参见 1 内容" in paragraphs
+    assert "参见 内容" in paragraphs
     assert not any("待补" in p for p in paragraphs)
     assert not any(g['code'] == 'export_content_pending' for g in result['gaps'])
     if legacy_unit:
@@ -263,7 +263,7 @@ def test_generated_response_and_volume_do_not_include_requirement_analysis_table
             assert not document.tables
             assert_no_analysis_preamble(document)
             paragraphs = [p.text for p in document.paragraphs]
-            assert paragraphs[paragraphs.index("1 技术") + 1] == "有依据的企业应答。"
+            assert paragraphs[paragraphs.index("有依据的企业应答。") - 1] == "技术"
         notes = archive.read("提交要求与待办.md").decode()
         assert "技术" in notes and "设备应支持原文规定的功能。" in notes
 

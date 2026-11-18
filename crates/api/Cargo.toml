@@ -18,6 +18,7 @@ reqwest.workspace = true
 dotenvy.workspace = true
 docparser = { path = "../docparser" }
 http-body-util.workspace = true
+http-body.workspace = true
 knowledge = { path = "../knowledge" }
 oxana-web.workspace = true
 platform = { path = "../platform" }

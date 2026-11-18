@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { createMutationAttempt } from "../../api";
-import { Button } from "../../components/ui/button";
+import { Button } from "@astryxdesign/core/Button";
 import { createBidV2Client } from "../api/client";
 import type {
   OutlineNode,
@@ -150,8 +150,8 @@ export function AnalysisProgress({
       {error && <p role="alert">暂时无法更新进度，正在重试。</p>}
       {job?.status === "failed" && <p role="alert">{job.error_code ?? "分析失败"}</p>}
       {startError && <p role="alert">{startError}</p>}
-      {showResume && <Button disabled={busy} onClick={() => void resume()}>继续生成大纲</Button>}
-      {showStart && <Button disabled={busy || !parsed(docs)} onClick={() => void start()}>生成章节大纲</Button>}
+      {showResume && <Button label="继续生成大纲" isDisabled={busy} onClick={() => void resume()} />}
+      {showStart && <Button label="生成章节大纲" isDisabled={busy || !parsed(docs)} onClick={() => void start()} />}
     </section>
     {loaded && <section className="card stack" data-testid="tender-outline">
       <h2 className="h3">章节大纲</h2>

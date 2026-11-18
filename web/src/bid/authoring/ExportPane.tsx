@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { Button } from "../../components/ui/button";
-import { Alert } from "../../components/ui/alert";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
 import { guardHashNavigation } from "../../hash";
 import { docxApi } from "../api/docx";
 import { downloadExport, downloadExportReport, exportsApi } from "../api/exports";
@@ -61,12 +61,10 @@ export function ExportPane({ workspaceId, ended, onUnsafeChange }: {
     {state.phase === "loading" && <p role="status">正在读取稿件和导出记录…</p>}
     {state.phase === "sending" && <p role="status">正在提交导出请求…</p>}
     {state.phase === "running" && <div role="status"><p>正在转换 PDF 并整理导出文件…</p><p>任务在后台继续执行，可离开后返回查看。</p></div>}
-    {state.error && <Alert>{state.error}</Alert>}
+    {state.error && <Banner status="error" title={state.error} />}
     {state.input && <p className="break-all text-sm text-muted-foreground">{state.phase === "ready" ? "待导出版本" : "本次请求版本"}：{state.input.version_id}</p>}
-    {(state.phase === "ready" || state.phase === "uncertain") && <Button onClick={() => void session.start()}>
-      {state.phase === "uncertain" ? "确认本次导出请求" : "生成导出文件"}</Button>}
-    {(state.phase === "blocked" || state.phase === "failed" || state.phase === "completed") && <Button variant="outline" onClick={() => void session.load(true)}>
-      {state.phase === "failed" || state.phase === "completed" ? "刷新稿件并重新确认" : "刷新状态"}</Button>}
+    {(state.phase === "ready" || state.phase === "uncertain") && <Button label={state.phase === "uncertain" ? "确认本次导出请求" : "生成导出文件"} onClick={() => void session.start()} />}
+    {(state.phase === "blocked" || state.phase === "failed" || state.phase === "completed") && <Button variant="secondary" label={state.phase === "failed" || state.phase === "completed" ? "刷新稿件并重新确认" : "刷新状态"} onClick={() => void session.load(true)} />}
     {result && <div className="stack">
       <h3>已生成的导出文件</h3>
       <p className="break-all">文件对应保存版本：{result.source.version_id}</p>
@@ -74,12 +72,12 @@ export function ExportPane({ workspaceId, ended, onUnsafeChange }: {
         && <p>此文件固定对应上述版本；请刷新稿件状态，确认是否包含最新修改。</p>}
       <p>校核报告为待复核状态，尚不能证明内容、附表对应关系和版式已经通过验收。</p>
       <div className="flex flex-wrap gap-2">
-        <Button disabled={downloading} onClick={() => void download("docx")}>下载 DOCX</Button>
-        <Button disabled={downloading} onClick={() => void download("pdf")}>下载 PDF</Button>
-        <Button variant="outline" disabled={downloading} onClick={() => void download("report")}>下载校核报告</Button>
+        <Button label="下载 DOCX" isDisabled={downloading} onClick={() => void download("docx")} />
+        <Button label="下载 PDF" isDisabled={downloading} onClick={() => void download("pdf")} />
+        <Button variant="secondary" label="下载校核报告" isDisabled={downloading} onClick={() => void download("report")} />
       </div>
       {downloading && <p role="status">正在下载…</p>}
-      {downloadError === result.manifest_id && <Alert>下载失败，请重试。</Alert>}
+      {downloadError === result.manifest_id && <Banner status="error" title="下载失败，请重试。" />}
     </div>}
   </section>;
 }

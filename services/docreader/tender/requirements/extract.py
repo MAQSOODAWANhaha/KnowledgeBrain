@@ -378,19 +378,18 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
         items.append(value)
 
     known_items = {value["item_id"] for value in items}
-    relations, relation_ids = [], set()
+    relations = []
     for number, original in enumerate(response["relations"]):
         path = f"relations[{number}]"
+        # Extraction has no consumers of model-declared relation identities.
+        # Keep original positions, including rejected siblings, for stable host IDs.
+        declaration = ({**original, "relation_id": f"{pack['pack_id']}:l{number + 1}"}
+                       if isinstance(original, dict) else original)
         try:
-            value = Relation.model_validate(original).model_dump(exclude_unset=True)
+            value = Relation.model_validate(declaration).model_dump(exclude_unset=True)
         except ValidationError:
             pending("extraction_relation_unresolved", path, original, "关联声明不完整，须独立核对业务关系。")
             continue
-        if value["relation_id"] in relation_ids or re.fullmatch(re.escape(pack["pack_id"]) + r":l[1-9][0-9]*", value["relation_id"]) is None:
-            raise ModelContractError([{"path": ["relations", number, "relation_id"],
-                "code": "invalid_or_duplicate_relation_identity",
-                "detail": "Use unique relation identities in this work unit namespace"}])
-        relation_ids.add(value["relation_id"])
         if not {value["from_item_id"], value["to_item_id"]} <= known_items:
             pending("extraction_relation_unresolved", path, value, "关联端点未形成有效事项，不能推断或补造关系。")
             continue

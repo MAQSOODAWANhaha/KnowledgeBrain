@@ -202,8 +202,13 @@ async def test_decoding_uncertainty_survives_audit_failure_and_recovery(store, m
             assert recovered == original
         else:
             assert recovered["error"]["type"] == "executor_lost"
-            for field in ("request_id", "sent_at", "response_ref", "metadata", "usage"):
+            for field in ("request_id", "sent_at", "response_ref", "usage"):
                 assert recovered[field] == original[field]
+            added = {"not_before", "retry_deadline_origin"}
+            assert recovered["metadata"].keys() - original["metadata"].keys() == added
+            assert {key: value for key, value in recovered["metadata"].items() if key not in added} == original["metadata"]
+            assert recovered["metadata"]["retry_deadline_origin"] == "legacy_failure_time"
+            assert recovered["metadata"]["not_before"] - recovered["finished_at"].timestamp() == pytest.approx(1, abs=1e-6)
     for request in sent[initial_calls:]:
         saved = store.test_artifacts.read_json(request["response_ref"])
         assert saved["raw_body"] == partial.decode() and saved["done"] is False

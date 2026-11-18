@@ -117,7 +117,13 @@ async def test_contract_feedback_preserves_schema_and_original_payload_with_four
             raise ModelContractError([{"path": ["blocks"], "code": "list_type", "detail": "Return an array"}])
         return value
 
-    sleep = AsyncMock()
+    now = [1000.0]
+
+    def advance(seconds):
+        now[0] += seconds
+
+    sleep = AsyncMock(side_effect=advance)
+    monkeypatch.setattr("docreader.llm.recovery.time.time", lambda: now[0])
     monkeypatch.setattr("docreader.llm.recovery.asyncio.sleep", sleep)
     artifacts = CountedArtifacts(tmp_path)
     client, _ = model(handler, audit, artifacts=artifacts)

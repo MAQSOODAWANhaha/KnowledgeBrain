@@ -8,6 +8,7 @@ from typing import Any
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.evidence.native import canonical_image_keys
+from docreader.tender.status import DocumentRole
 
 
 def issue(code: str, document_id: str = "", detail: str = "", **extra: Any) -> dict:
@@ -25,7 +26,7 @@ def register_manifest(manifest: dict, artifacts: ArtifactStore) -> dict:
         document_id = str(entry.get("document_id", ""))
         record = {
             "document_id": document_id,
-            "role": entry.get("role", "main"),
+            "role": entry.get("role", DocumentRole.MAIN),
             "document_version": str(entry.get("document_version", "")),
             "replaces": entry.get("replaces"),
             "modification_scope": entry.get("modification_scope", entry.get("scope")),
@@ -35,7 +36,7 @@ def register_manifest(manifest: dict, artifacts: ArtifactStore) -> dict:
         if not document_id or document_id in seen_ids:
             record["issues"].append(issue("duplicate_document_id" if document_id else "missing_document_id", document_id))
         seen_ids.add(document_id)
-        if record["role"] not in {"main", "attachment", "clarification", "amendment"}:
+        if record["role"] not in [role.value for role in DocumentRole]:
             record["issues"].append(issue("invalid_document_role", document_id))
         if not record["document_version"]:
             record["issues"].append(issue("missing_document_version", document_id))

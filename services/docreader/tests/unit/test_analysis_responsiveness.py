@@ -74,4 +74,7 @@ async def test_planning_keeps_loop_responsive_and_preserves_request_receipts(tmp
     before_calls, before_responses = len(model.calls), len(responses)
     assert await run(fresh, model, admission) == actual
     assert len(model.calls) == before_calls
-    assert len(responses) > before_responses
+    if planning_step == "review_requests":
+        assert len(responses) == before_responses  # Pure preparation is already durable.
+    else:
+        assert len(responses) > before_responses

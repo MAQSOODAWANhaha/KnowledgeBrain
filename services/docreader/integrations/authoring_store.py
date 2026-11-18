@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import math
 import re
+import time
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -18,6 +19,8 @@ from docreader.integrations.store import (
     StaleExecution,
     StoreError,
     _recorded_first_data,
+    _request_deadline,
+    _request_retry_delay,
     _safe_metadata,
 )
 from docreader.llm.request import ModelWorkUnitExhausted
@@ -374,6 +377,27 @@ class AuthoringStore:
                 ModelRequestStatus,
             )
 
+    async def request_not_before(self, lease, task, logical_digest, *, group_work_unit_keys=None):
+        async with self.transaction() as conn:
+            await self.assert_fence(lease, conn)
+            rows = await (await conn.execute(
+                "SELECT * FROM tender_authoring_model_requests WHERE execution_id = %s AND task = %s "
+                "AND metadata->>'logical_request_digest' = %s AND sent_at IS NOT NULL ORDER BY created_at, request_id",
+                (lease.execution_id, task, logical_digest),
+            )).fetchall()
+            deadlines = []
+            for attempt, row in enumerate(rows):
+                if row["status"] not in {"failed", "uncertain"}:
+                    continue
+                deadline = _request_deadline(row, attempt)
+                if row["metadata"].get("not_before") != deadline:
+                    await conn.execute(
+                        "UPDATE tender_authoring_model_requests SET metadata = metadata || %s WHERE request_id = %s",
+                        (Jsonb({"not_before": deadline, "retry_deadline_origin": "legacy_failure_time"}), row["request_id"]),
+                    )
+                deadlines.append(deadline)
+            return max(deadlines, default=None)
+
     async def finish_request(
         self,
         request_id,
@@ -467,6 +491,16 @@ class AuthoringStore:
                 ModelRequestStatus.SUCCEEDED,
                 ModelRequestStatus.FAILED,
             }
+            observed = _recorded_first_data(activity) or {}
+            if (not terminal and row["sent_at"] is not None
+                    and status in {ModelRequestStatus.FAILED, ModelRequestStatus.UNCERTAIN}
+                    and "not_before" not in row["metadata"]):
+                count = (await (await conn.execute(
+                    "SELECT count(*) AS count FROM tender_authoring_model_requests WHERE execution_id = %s "
+                    "AND task = %s AND metadata->>'logical_request_digest' = %s AND sent_at IS NOT NULL",
+                    (row["execution_id"], row["task"], row["metadata"]["logical_request_digest"]),
+                )).fetchone())["count"]
+                observed["not_before"] = time.time() + _request_retry_delay(error, count - 1)
             await conn.execute(
                 "UPDATE tender_authoring_model_requests SET status = %s, usage = COALESCE(usage, %s), "
                 "response_ref = COALESCE(response_ref, %s), error = %s, metadata = metadata || %s, "
@@ -478,7 +512,7 @@ class AuthoringStore:
                     Jsonb(usage) if usage is not None else None,
                     Jsonb(response_ref) if response_ref is not None else None,
                     Jsonb(row["error"] if terminal else _safe_metadata(error)),
-                    Jsonb(_recorded_first_data(activity) or {}),
+                    Jsonb(observed),
                     status,
                     status,
                     request_id,

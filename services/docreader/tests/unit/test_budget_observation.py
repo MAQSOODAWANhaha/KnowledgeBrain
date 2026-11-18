@@ -81,3 +81,56 @@ def test_deviation_marks_keep_expected_overestimates_and_fast_first_bytes_quiet(
     ]
     marks = {item["request_id"]: item["marks"] for item in usage.budget_observation(rows)["deviations"]}
     assert marks == {"under": ["estimate_below_prompt"], "slow": ["slow_first_data"]}
+
+
+def test_timing_report_separates_parallel_request_time_from_elapsed_span():
+    rows = [
+        {"task": "verify", "status": "succeeded", "sent_at": "2026-11-04T00:00:00+00:00",
+         "finished_at": "2026-11-04T00:00:10+00:00",
+         "metadata": {"first_raw_seconds": 2, "first_content_seconds": 4,
+                      "max_raw_idle_seconds": 3, "semaphore_wait_seconds": 0}},
+        {"task": "verify", "status": "failed", "sent_at": "2026-11-04T00:00:05+00:00",
+         "finished_at": "2026-11-04T00:00:15+00:00",
+         "metadata": {"max_raw_idle_seconds": 10, "semaphore_wait_seconds": 2},
+         "error": {"type": "first_data_idle_timeout"}},
+        {"task": "verify", "status": "succeeded", "sent_at": "2026-11-04T00:00:20+00:00",
+         "finished_at": "2026-11-04T00:00:25+00:00", "metadata": {}},
+        {"task": "verify", "status": "uncertain", "sent_at": "2026-11-04T00:00:30+00:00",
+         "finished_at": None, "metadata": {"first_raw_seconds": None}},
+    ]
+    before = deepcopy(rows)
+    report = usage.budget_observation(rows)
+    timing = report["timing"]
+    assert timing["completed_intervals"] == 3 and timing["missing_intervals"] == 1
+    assert timing["request_seconds_sum"] == 25
+    assert timing["request_interval_union_seconds"] == 20
+    assert timing["request_span_seconds"] == 25
+    assert timing["first_raw_seconds"] == {"observations": 1, "missing": 3, "max": 2, "p50": 2, "p95": 2}
+    assert timing["max_raw_idle_seconds"]["max"] == 10
+    assert report["tasks"]["verify"]["timing"] == timing
+    assert rows == before
+
+
+def test_invalid_and_missing_timings_remain_unknown():
+    rows = [{"task": "extract", "status": "failed", "sent_at": "invalid",
+             "finished_at": "2026-11-04T00:00:00+00:00",
+             "metadata": {"first_raw_seconds": float("nan"), "first_content_seconds": True,
+                          "max_raw_idle_seconds": -1, "semaphore_wait_seconds": float("inf")}}]
+    timing = usage.budget_observation(rows)["timing"]
+    assert timing["completed_intervals"] == 0 and timing["missing_intervals"] == 1
+    assert timing["request_seconds_sum"] is None
+    assert timing["request_interval_union_seconds"] is None
+    assert timing["request_span_seconds"] is None
+    assert timing["max_raw_idle_seconds"] == {"observations": 0, "missing": 1, "max": None, "p50": None, "p95": None}
+
+
+def test_reasoning_and_visible_output_do_not_treat_unknown_usage_as_zero():
+    rows = [
+        {"task": "extract", "status": "succeeded", "usage": {
+            "completion_tokens": 100, "completion_tokens_details": {"reasoning_tokens": 20}}},
+        {"task": "extract", "status": "failed", "usage": {"completion_tokens": 50}},
+        {"task": "extract", "status": "uncertain", "usage": None},
+    ]
+    result = usage.budget_observation(rows)["tasks"]["extract"]
+    assert result["reasoning_tokens"] == {"observations": 1, "missing": 2, "total": 20}
+    assert result["visible_completion_tokens"] == {"observations": 1, "missing": 2, "total": 80}

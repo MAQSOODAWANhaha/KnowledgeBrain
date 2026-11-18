@@ -1,3 +1,8 @@
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { FileInput } from "@astryxdesign/core/FileInput";
+import { Heading } from "@astryxdesign/core/Heading";
+import { Text } from "@astryxdesign/core/Text";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { guardHashNavigation } from "../../hash";
 import { docxApi } from "../api/docx";
@@ -30,25 +35,23 @@ export function DocxRound({ workspaceId, onCancel, onPublished, onUnsafeChange }
     return () => { unguard(); window.removeEventListener("beforeunload", unload); document.removeEventListener("click", click, true); };
   }, [round]);
   return <section data-testid="docx-round">
-    <h2>从 DOCX 创建新轮</h2>
-    <p>选择已准备好的投标初稿或指定模板。发布后以所选文件开始编制，旧轮保存稿保留，旧轮编辑会话失效。</p>
-    {state.input && <p>{state.input.expected ? "本次将替换当前编制轮次。" : "本次将创建首份 DOCX 投标稿。"}</p>}
-    <label className="btn ghost">选择 DOCX<input type="file" hidden accept=".docx"
-      disabled={round.unsafe() || state.phase === "published"}
-      onChange={event => round.select(event.target.files?.[0] ?? null)} /></label>
-    {state.file && <p>已选择：{state.file.name}</p>}
-    {state.phase === "loading" && <p role="status">正在核对新轮依据…</p>}
-    {state.phase === "sending" && <p role="status">正在发布，请等待结果确认…</p>}
-    {state.error && <p role="alert">{state.error}</p>}
+    <Heading level={2}>从 DOCX 创建新轮</Heading>
+    <Text>选择已准备好的投标初稿或指定模板。发布后以所选文件开始编制，旧轮保存稿保留，旧轮编辑会话失效。</Text>
+    {state.input && <Text>{state.input.expected ? "本次将替换当前编制轮次。" : "本次将创建首份 DOCX 投标稿。"}</Text>}
+    <FileInput label="选择 DOCX" accept=".docx" value={state.file} isDisabled={round.unsafe() || state.phase === "published"} onChange={(file) => round.select(Array.isArray(file) ? file[0] ?? null : file)} />
+    {state.file && <Text>已选择：{state.file.name}</Text>}
+    {state.phase === "loading" && <Text role="status">正在核对新轮依据…</Text>}
+    {state.phase === "sending" && <Text role="status">正在发布，请等待结果确认…</Text>}
+    {state.error && <Banner status="error" role="alert" title={state.error} />}
     {state.phase === "published" ? <>
-      <p role="status">第 {state.receipt?.round_revision} 轮已发布。</p>
-      <button className="btn pri" onClick={onPublished}>进入当前稿件</button>
+      <Text role="status">第 {state.receipt?.round_revision} 轮已发布。</Text>
+      <Button variant="primary" onClick={onPublished} label="进入当前稿件" />
     </> : <>
-      <button className="btn pri" disabled={state.phase !== "uncertain" && (state.phase !== "ready" || !state.file)}
-        onClick={() => void round.publish()}>{state.phase === "uncertain" ? "确认发布结果" : "确认创建新轮"}</button>
-      <button className="btn ghost" disabled={round.unsafe() || state.phase === "loading"}
-        onClick={() => void round.load()}>刷新依据</button>
-      <button className="btn ghost" disabled={round.unsafe()} onClick={onCancel}>取消</button>
+      <Button variant="primary" isDisabled={state.phase !== "uncertain" && (state.phase !== "ready" || !state.file)}
+        onClick={() => void round.publish()} label={state.phase === "uncertain" ? "确认发布结果" : "确认创建新轮"} />
+      <Button variant="secondary" isDisabled={round.unsafe() || state.phase === "loading"}
+        onClick={() => void round.load()} label="刷新依据" />
+      <Button variant="secondary" isDisabled={round.unsafe()} onClick={onCancel} label="取消" />
     </>}
   </section>;
 }

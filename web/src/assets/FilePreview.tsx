@@ -1,3 +1,4 @@
+import { Table } from "@astryxdesign/core/Table";
 import { useEffect, useRef, useState } from "react";
 import { token } from "../api";
 
@@ -181,17 +182,7 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
           {sheets.map((sheet) => (
             <div key={sheet.name} className="excel-sheet">
               {sheets.length > 1 ? <div className="excel-sheet-name">{sheet.name}</div> : null}
-              <table className="grid">
-                <tbody>
-                  {sheet.rows.map((row, i) => (
-                    <tr key={i}>
-                      {row.map((cell, j) => (
-                        <td key={j}>{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <Table data={sheet.rows.map((row, index) => ({ id: String(index), cells: row }))} columns={Array.from({ length: Math.max(1, ...sheet.rows.map(row => row.length)) }, (_, column) => ({ key: String(column), header: String(column + 1), renderCell: (row: { cells: string[] }) => row.cells[column] ?? "" }))} />
             </div>
           ))}
         </div>

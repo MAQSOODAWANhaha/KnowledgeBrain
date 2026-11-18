@@ -75,7 +75,7 @@ def test_explicit_cover_precedes_directory_without_chapter_number_or_title_guess
     text = [p.text for p in document.paragraphs]
     assert text.index("实际封面内容，企业名称____。") < text.index("目录")
     headings = [p.text for p in document.paragraphs if p.style.name.startswith("Heading")]
-    assert headings == ["1 封面", "2 技术应答"]
+    assert headings == ["封面", "技术应答"]
     assert text.count("实际封面内容，企业名称____。") == 1
     assert outline == original
 
@@ -95,9 +95,10 @@ def test_each_volume_keeps_its_own_cover_and_formal_cross_references(tmp_path):
     document = word(artifacts, result)
     text = [p.text for p in document.paragraphs]
     assert text.index("整稿原封面") < text.index("目录") < text.index("商务原封面")
-    assert text.index("商务原封面") < text.index("1 商务文件") < text.index("报价原封面")
-    assert "参见 2.1 分项报价" in text
-    assert text.count("参见 2.1 分项报价") == 1
+    body_text = [p.text for p in document.paragraphs if not p._p.xpath('./w:hyperlink')]
+    assert body_text.index("商务原封面") < body_text.index("商务文件") < body_text.index("报价原封面")
+    assert "参见 分项报价" in text
+    assert text.count("参见 分项报价") == 1
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
         commercial = Document(BytesIO(package.read("volumes/001.docx")))
         pricing = Document(BytesIO(package.read("volumes/002.docx")))
@@ -105,7 +106,7 @@ def test_each_volume_keeps_its_own_cover_and_formal_cross_references(tmp_path):
     assert commercial_text.index("商务原封面") < commercial_text.index("目录")
     assert pricing_text.index("报价原封面") < pricing_text.index("目录")
     assert "报价原封面" not in commercial_text and "商务原封面" not in pricing_text
-    assert "参见 2.1 分项报价" in commercial_text
+    assert "参见 分项报价" in commercial_text
 
 
 def test_directory_has_updatable_toc_field_and_existing_page_field(tmp_path):
@@ -125,7 +126,10 @@ def test_directory_has_updatable_toc_field_and_existing_page_field(tmp_path):
         assert 'w:instr="PAGE"' in footer
         footer_xml = etree.fromstring(archive.read("word/footer1.xml"))
         assert footer_xml.xpath("//w:fldSimple/w:r", namespaces=namespaces)
-    assert [p.text for p in word(artifacts, result).paragraphs].count("1 正文") == 1
+    paragraphs = word(artifacts, result).paragraphs
+    assert [p.text for p in paragraphs if p.style.name.startswith('Heading')].count("正文") == 1
+    assert ["".join(text.text or "" for text in link.iter(qn('w:t')))
+            for paragraph in paragraphs for link in paragraph._p.xpath('./w:hyperlink')].count("1 正文") == 1
 
 
 def test_cover_marked_as_volume_does_not_silently_drop_its_source_content(tmp_path):
@@ -136,7 +140,7 @@ def test_cover_marked_as_volume_does_not_silently_drop_its_source_content(tmp_pa
         [writing("cover-content", "cover-volume", [], "必须保留的原封面。")])
     text = [paragraph.text for paragraph in word(artifacts, result).paragraphs]
     assert text.count("必须保留的原封面。") == 1
-    assert text.index("必须保留的原封面。") < text.index("目录") < text.index("1 响应正文")
+    assert text.index("必须保留的原封面。") < text.index("目录") < text.index("响应正文")
 
 
 @pytest.mark.parametrize(("native_headers", "explicit_count", "expected"), [
@@ -183,6 +187,58 @@ def test_analysis_requirements_do_not_insert_tables_or_change_native_response_la
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
         notes = package.read("提交要求与待办.md").decode()
     assert "service" in notes and "至少提供三年售后服务。" in notes
+
+
+@pytest.mark.parametrize(("kind", "same_chapter", "expected"), [
+    ("form", True, True), ("narrative", True, False), ("form", False, False)])
+def test_source_form_preamble_stays_with_its_following_native_table(
+        tmp_path, kind, same_chapter, expected):
+    artifacts = ArtifactStore(tmp_path)
+    part, _ = native_part(artifacts, count=1)
+    preamble = {**target("preamble", manual=True), "kind": kind,
+                "purpose": "原式表名\n表号 Q\n单位：元人民币", "support_origins": ["tender"]}
+    form = target("original-table", templates=[part], manual=True)
+    form["subject"] = "原式填写主体"
+    children = ([chapter("form", targets=[preamble, form])] if same_chapter else
+                [chapter("preamble", targets=[preamble]), chapter("form", targets=[form])])
+    result = export_authoring_document(artifacts, {"chapters": [
+        chapter("volume", volume=True, children=children)]}, [])
+    documents = [word(artifacts, result)]
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
+        documents.append(Document(BytesIO(package.read("volumes/001.docx"))))
+    for document in documents:
+        paragraphs = [p for p in document.paragraphs if p.text in {"原式表名", "表号 Q", "单位：元人民币"}]
+        assert [p.text for p in paragraphs] == ["原式表名", "表号 Q", "单位：元人民币"]
+        assert all(bool(p.paragraph_format.keep_with_next) is expected for p in paragraphs)
+        assert next(p for p in document.paragraphs if p.text == "原式填写主体").paragraph_format.keep_with_next
+        table = document.tables[0]
+        assert header_rows(table) == [0]
+        assert table.cell(0, 0)._tc is table.cell(0, 1)._tc
+        assert table.cell(1, 0).text == "功能要求" and table.cell(1, 1).text == ""
+        assert table.cell(2, 0).text == "最终报价" and table.cell(2, 1).text == ""
+        assert not table.cell(1, 0).paragraphs[0].paragraph_format.keep_with_next
+
+
+@pytest.mark.parametrize(("count", "kind", "expected"), [
+    (0, "form", True), (1, "form", False), (None, "form", False), (0, "narrative", False)])
+def test_original_form_without_a_common_repeating_header_starts_its_chapter_on_a_new_page(
+        tmp_path, count, kind, expected):
+    artifacts = ArtifactStore(tmp_path)
+    part, _ = native_part(artifacts, count=count)
+    preamble = {**target("intro", manual=True), "kind": kind,
+                "purpose": "原式说明与表名", "support_origins": ["tender"]}
+    outline = {"chapters": [chapter("volume", volume=True, children=[
+        chapter("original", title="主原式", targets=[
+            preamble, target("grid", templates=[part], manual=True)])])]}
+    result = export_authoring_document(artifacts, outline, [])
+    documents = [word(artifacts, result)]
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
+        documents.append(Document(BytesIO(package.read("volumes/001.docx"))))
+    for document in documents:
+        heading = next(p for p in document.paragraphs if p.text == "主原式" and p.style.name.startswith("Heading"))
+        assert bool(heading.paragraph_format.page_break_before) is expected
+        assert header_rows(document.tables[0]) == ([0] if count == 1 else [])
+        assert document.tables[0].cell(1, 1).text == ""
 
 
 def test_package_submission_notes_keep_constraints_unassigned_rules_and_review_opinions(tmp_path):

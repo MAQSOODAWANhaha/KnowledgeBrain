@@ -57,7 +57,7 @@ async def test_final_automatic_review_moves_the_subtree_without_a_second_assembl
     assert len(result['unit_refs']) == 2
     doc = Document(BytesIO(artifacts.read_bytes(result['docx_ref'])))
     headings = [p.text for p in doc.paragraphs if p.style.name.startswith('Heading')]
-    assert '1.1 ' + titles[1] in headings
+    assert titles[1] in headings
     assert '2 ' + titles[1] not in headings
     assert calls.count('outline') == 3
     assert calls.count('authoring_structure') == 2

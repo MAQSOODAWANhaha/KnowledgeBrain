@@ -15,9 +15,9 @@ from pydantic import (
     StrictFloat, StrictInt, StrictStr, field_validator, model_validator,
 )
 from pydantic.json_schema import SkipJsonSchema
+from docreader.tender.status import CommandStatus, ModelRequestStatus, RunStatus  # noqa: F401
 
 
-from docreader.tender.status import CommandStatus, ModelRequestStatus, RunStatus
 
 
 Identity = Annotated[StrictStr, Field(min_length=1)]
@@ -31,6 +31,7 @@ DispositionStatus = Literal["requirements", "non_requirement", "unresolved"]
 DocumentStatus = Literal["complete", "partial", "unresolved"]
 AUTHORING_GROUNDING_POLICY = "knowledge_required_v2"
 AUTHORING_UNIT_BINDING_CONTRACT = "ordered_task_supports_v1"
+SOURCE_BODY_CONTRACT = "source_bound_native_body_v1"
 
 
 class Model(Protocol):
@@ -337,7 +338,7 @@ class TemplatePartRef(Contract):
 
 
 ResponseTargetKind = Literal["narrative", "form", "attachment"]
-ChapterPresentationRole = Literal["body", "cover", "submission_note"]
+ChapterPresentationRole = Literal["body", "cover", "submission_note", "content"]
 SupportOrigins = Annotated[list[Literal["tender", "knowledge"]], Field(min_length=1, max_length=2),
                            AfterValidator(lambda values: list(dict.fromkeys(values)))]
 SearchQuery = Annotated[Text, Field(max_length=256)]
@@ -526,15 +527,60 @@ class OutlineAssemblyResponse(Contract):
     search_intents: list[SearchIntentResponse] = Field(default_factory=list)
 
 
+class NativeResponseLayout(Contract):
+    source_ref: SourceUnitRef
+    repeat_start_row: NonnegativeInt
+    repeat_end_row: NonnegativeInt
+    sequence_column: NonnegativeInt
+    source_column: NonnegativeInt
+    response_column: NonnegativeInt
+    proof_column: NonnegativeInt
+
+
 class ResponseTableRow(Contract):
     row_id: Identity
     source_excerpts: list[SourceExcerptRef] = Field(min_length=1)
     rule_refs: list[EffectiveItemRef] = Field(default_factory=list)
+    context_source_excerpts: list[SourceExcerptRef] = Field(default_factory=list, exclude_if=lambda value: not value)
+    source_join: Literal["paragraphs", "continuation"] = Field(
+        default="paragraphs", exclude_if=lambda value: value == "paragraphs")
+
+
+class ResponseSourceGuidance(Contract):
+    kind: Literal["reference", "procedure"]
+    source_excerpts: list[SourceExcerptRef] = Field(min_length=1)
+    source_join: Literal["paragraphs", "continuation"] = Field(
+        default="paragraphs", exclude_if=lambda value: value == "paragraphs")
+
+
+class ResponseFormWindow(Contract):
+    source_index_ref: ArtifactRef
+    document_id: Identity
+    page: NonnegativeInt
+    start_line: NonnegativeInt
+    end_line: NonnegativeInt
+
+
+class ResponseFormPending(Contract):
+    source_binding: Digest
+    table_source_ref: SourceUnitRef
+    mandate_windows: list[ResponseFormWindow] = Field(min_length=1)
+    source_windows: list[ResponseFormWindow] = Field(min_length=1)
+    reason: Literal["source_unavailable", "selection_incomplete"]
 
 
 class ResponseTable(Contract):
     context_source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
     rows: list[ResponseTableRow] = Field(min_length=1)
+    native_layout: NativeResponseLayout | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_guidance: list[ResponseSourceGuidance] = Field(default_factory=list, exclude_if=lambda value: not value)
+
+    @model_validator(mode="after")
+    def native_row_options(self):
+        if self.native_layout is None and any(row.context_source_excerpts or row.source_join != "paragraphs"
+                                              for row in self.rows):
+            raise ValueError("row context and continuation require native_layout")
+        return self
 
 
 class ResponseTarget(Contract):
@@ -544,12 +590,38 @@ class ResponseTarget(Contract):
     rule_refs: list[EffectiveItemRef]
     source_refs: list[SourceUnitRef]
     source_excerpts: list[SourceExcerptRef] = Field(default_factory=list)
+    source_body_contract: Literal["source_bound_native_body_v1"] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
+    source_body_ref: ArtifactRef | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_context_excerpts: list[SourceExcerptRef] = Field(
+        default_factory=list, exclude_if=lambda value: not value)
     template_refs: list[TemplatePartRef] = Field(default_factory=list)
     subject: Text | None = None
     response_table: ResponseTable | None = None
+    response_form_pending: ResponseFormPending | None = Field(default=None, exclude_if=lambda value: value is None)
     manual_fill: StrictBool = False
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
     related_target_ids: list[Identity] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def explicit_native_body(self):
+        if self.source_body_contract is None:
+            if self.source_context_excerpts or self.source_body_ref is not None:
+                raise ValueError("source context requires an explicit source body contract")
+            return self
+        if self.source_body_ref is None or self.template_refs or self.response_table is not None:
+            raise ValueError("native source body requires its immutable binding separate from original forms and response tables")
+        body = {}
+        for excerpt in self.source_excerpts:
+            for selected in excerpt.selectors:
+                key = (excerpt.source_ref.source_index_ref.sha256, excerpt.source_ref.unit_id, selected.source_range_id)
+                body.setdefault(key, []).append((selected.start, selected.end))
+        for excerpt in self.source_context_excerpts:
+            for selected in excerpt.selectors:
+                key = (excerpt.source_ref.source_index_ref.sha256, excerpt.source_ref.unit_id, selected.source_range_id)
+                if any(first < selected.end and selected.start < last for first, last in body.get(key, [])):
+                    raise ValueError("native body and source context must select disjoint source intervals")
+        return self
 
 
 class OutlineChapter(Contract):
@@ -583,6 +655,7 @@ class AuthoringOutline(Contract):
     constraint_rule_refs: list[EffectiveItemRef] = Field(default_factory=list)
     submission_refs: list[SourceUnitRef] = Field(default_factory=list)
     search_intents: list[SearchIntent] = Field(default_factory=list)
+    unplaced_targets: list[ResponseTarget] = Field(default_factory=list)
 
 
 class KnowledgeMaterial(Contract):
@@ -1053,6 +1126,7 @@ class AuthoringRequirements(Contract):
     rule_origin: Literal["extraction", "verified_projection", "source_only"]
     rules: list[AuthoringRequirement]
     issues: list[AuthoringInputIssue] = Field(default_factory=list)
+    unplaced_targets: list[ResponseTarget] = Field(default_factory=list)
 
 
 class AmendmentEffect(_AnalysisContract):

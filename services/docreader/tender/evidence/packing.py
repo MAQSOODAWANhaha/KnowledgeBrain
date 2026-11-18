@@ -193,7 +193,8 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
                    **({"empty": True, "non_requirement_reason": "reviewed_decorative_image", "image_disposition": disposition}
                       if disposition else {}))
         else:
-            append(unit, unit.get("text", ""))
+            append(unit, unit.get("text", ""), **({'text_basis': unit['text_basis']}
+                                                  if unit.get('text_basis') else {}))
 
     # Empty worksheet grid rows are not emitted by the original row parser.
     # Keep their identities explicitly while omitting their whitespace payload.

@@ -33,7 +33,8 @@ async function reviewFixture(page: Page) {
     await expect(page.getByText("请核对服务响应范围。", { exact: true })).toBeVisible();
   };
   const decide = async () => {
-    await page.getByLabel("问题 1 人工判定").selectOption("acknowledged");
+    await page.getByRole("combobox", { name: "问题 1 人工判定", exact: true }).click();
+    await page.getByRole("option", { name: "保留为已知问题", exact: true }).click();
     await page.getByLabel("问题 1 判定理由").fill("已人工核对招标原件，保留待业务落实事项。");
   };
   const edit = async () => {
@@ -48,7 +49,8 @@ test("human confirmation requires an explicit verdict and reason for each issue"
   const f = await reviewFixture(page); await f.open();
   const submit = page.getByRole("button", { name: "提交人工确认", exact: true });
   await expect(submit).toBeDisabled();
-  await page.getByLabel("问题 1 人工判定").selectOption("dismissed");
+  await page.getByRole("combobox", { name: "问题 1 人工判定", exact: true }).click();
+  await page.getByRole("option", { name: "核对后排除此问题", exact: true }).click();
   await expect(submit).toBeDisabled();
   await page.getByLabel("问题 1 判定理由").fill("人工核对后排除本例歧义。");
   await submit.click();
@@ -126,7 +128,7 @@ test("local human input can be explicitly discarded without sending a request", 
   await expect(page.getByRole("button", { name: "放弃未提交输入", exact: true })).toBeVisible();
   page.once("dialog", dialog => void dialog.accept());
   await page.getByRole("button", { name: "放弃未提交输入", exact: true }).click();
-  await expect(page.getByLabel("问题 1 人工判定")).toHaveValue("");
+  await expect(page.getByRole("combobox", { name: "问题 1 人工判定", exact: true })).toContainText("请选择判定");
   await expect(page.getByLabel("问题 1 判定理由")).toHaveValue("");
   await expect(page.getByLabel("事项 1 纠正文案")).toHaveValue("服务响应不超过2小时");
   await expect(page.getByLabel("事项纠正理由")).toHaveValue("");

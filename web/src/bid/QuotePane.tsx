@@ -1,7 +1,20 @@
+import { Button } from "@astryxdesign/core/Button";
+import { Table } from "@astryxdesign/core/Table";
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
+import { Selector } from "@astryxdesign/core/Selector";
+import { TextInput } from "@astryxdesign/core/TextInput";
+import { useEffect, useState } from "react";
 import type { QuoteLine, QuoteState } from "../api";
-import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
+
+function CommitField({ label, testId, value, disabled, hideLabel = false, onCommit }: {
+  label: string; testId?: string; value: string; disabled?: boolean; hideLabel?: boolean; onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return <div onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null) && draft !== value) onCommit(draft); }}>
+    <TextInput label={label} isLabelHidden={hideLabel} data-testid={testId} value={draft} isDisabled={disabled} onChange={setDraft} />
+  </div>;
+}
 
 function NativeSelect({
   value,
@@ -16,21 +29,8 @@ function NativeSelect({
   options: { value: string; label: string }[];
   testId?: string;
 }) {
-  return (
-    <select
-      data-testid={testId}
-      className="flex h-9 w-full rounded-[6px] border border-input-line bg-white px-2 text-sm text-ink disabled:opacity-50"
-      value={value}
-      disabled={disabled}
-      onChange={(e) => onChange(e.currentTarget.value)}
-    >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
-  );
+  return <Selector data-testid={testId} label={testId ?? "选项"} isLabelHidden value={value} isDisabled={disabled} onChange={onChange} options={options} />;
+
 }
 
 export function QuotePane({
@@ -70,9 +70,7 @@ export function QuotePane({
     return (
       <div className="card">
         <h3 className="h3">还没有报价草稿</h3>
-        <Button data-testid="quote-create" className="mt-4" disabled={ended || saving} onClick={onCreate}>
-          创建报价草稿
-        </Button>
+        <Button data-testid="quote-create" label="创建报价草稿" variant="primary" isDisabled={ended || saving} onClick={onCreate} />
       </div>
     );
   }
@@ -87,20 +85,9 @@ export function QuotePane({
         </p>
         {draft && (
           <div className="stack mt-3">
+            <CommitField key={quote.edit_version} label="标题" testId="quote-title" value={quote.title ?? ""} disabled={saving} onCommit={(value) => onPatch(value, quote.tax_mode || "tax_exclusive", quote.notes || "")} />
             <div>
-              <Label>标题</Label>
-              <Input
-                data-testid="quote-title"
-                defaultValue={quote.title ?? ""}
-                key={quote.edit_version}
-                disabled={saving}
-                onBlur={(e) =>
-                  onPatch(e.currentTarget.value, quote.tax_mode || "tax_exclusive", quote.notes || "")
-                }
-              />
-            </div>
-            <div>
-              <Label>税模式</Label>
+              <span>税模式</span>
               <NativeSelect
                 value={quote.tax_mode || "tax_exclusive"}
                 disabled={saving}
@@ -120,35 +107,16 @@ export function QuotePane({
         )}
         {!project.ceiling_price && draft && (
           <div className="inner mt-3">
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                data-testid="no-ceiling-review"
-                type="checkbox"
-                checked={noCeiling}
-                disabled={saving}
-                onChange={(e) => onNoCeiling(e.currentTarget.checked, noCeilingReason)}
-              />
-              招标未设最高限价，已人工复核
-            </label>
-            <Input
-              className="mt-2"
-              value={noCeilingReason}
-              disabled={saving}
-              onChange={(e) => onNoCeiling(noCeiling, e.currentTarget.value)}
-              placeholder="复核原因"
-            />
+            <CheckboxInput data-testid="no-ceiling-review" label="招标未设最高限价，已人工复核" value={noCeiling} isDisabled={saving} onChange={checked => onNoCeiling(checked, noCeilingReason)} />
+            <TextInput label="复核原因" isLabelHidden value={noCeilingReason} isDisabled={saving} placeholder="复核原因" onChange={(value) => onNoCeiling(noCeiling, value)} />
           </div>
         )}
         <div className="row mt-4">
           {draft && (
-            <Button data-testid="quote-finalize" disabled={ended || saving} onClick={onFinalize}>
-              定稿
-            </Button>
+            <Button data-testid="quote-finalize" label="定稿" variant="primary" isDisabled={ended || saving} onClick={onFinalize} />
           )}
           {!draft && quote.snapshot_id && (
-            <Button data-testid="quote-reopen" variant="outline" disabled={ended || saving} onClick={onReopen}>
-              重开
-            </Button>
+            <Button data-testid="quote-reopen" label="重开" variant="secondary" isDisabled={ended || saving} onClick={onReopen} />
           )}
         </div>
       </div>
@@ -156,166 +124,19 @@ export function QuotePane({
         <div className="card pad-0">
           <div className="toolbar">
             <span>行</span>
-            <Button data-testid="quote-add-line" size="sm" disabled={ended || saving} onClick={onAddLine}>
-              增行
-            </Button>
+            <Button data-testid="quote-add-line" label="增行" size="sm" isDisabled={ended || saving} onClick={onAddLine} />
           </div>
-          <div className="w-full overflow-auto"><table className="grid min-w-[1120px]">
-            <thead>
-              <tr>
-                <th>说明</th>
-                <th>方式</th>
-                <th>数量</th>
-                <th>单位</th>
-                <th>单价</th>
-                <th>总价</th>
-                <th>税率</th>
-                <th>确认</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {(quote.lines ?? []).map((line) => (
-                <tr key={line.id} data-testid={`quote-line-${line.id}`}>
-                  <td>
-                    <Input
-                      data-testid={`quote-line-description-${line.id}`}
-                      key={`description-${quote.edit_version}-${line.description}`}
-                      defaultValue={line.description}
-                      disabled={saving}
-                      onBlur={(e) => {
-                        const description = e.currentTarget.value;
-                        if (description !== line.description)
-                          onUpdateLine(line, { description, user_confirmed: false });
-                      }}
-                    />
-                  </td>
-                  <td>
-                    <NativeSelect
-                      testId={`quote-line-pricing-mode-${line.id}`}
-                      value={line.pricing_mode}
-                      disabled={saving}
-                      options={[
-                        { value: "lump_sum", label: "总价计价" },
-                        { value: "unit_price", label: "单价计价" },
-                      ]}
-                      onChange={(value) => {
-                        if (!value || value === line.pricing_mode) return;
-                        onUpdateLine(
-                          line,
-                          value === "lump_sum"
-                            ? {
-                                pricing_mode: value,
-                                quantity: null,
-                                unit: null,
-                                unit_price: null,
-                                user_confirmed: false,
-                              }
-                            : { pricing_mode: value, entered_amount: null, user_confirmed: false },
-                        );
-                      }}
-                    />
-                  </td>
-                  <td>
-                    {line.pricing_mode === "unit_price" ? (
-                      <Input
-                        data-testid={`quote-line-quantity-${line.id}`}
-                        key={`quantity-${quote.edit_version}-${line.quantity ?? ""}`}
-                        defaultValue={line.quantity ?? ""}
-                        disabled={saving}
-                        onBlur={(e) => {
-                          const quantity = nullable(e.currentTarget.value);
-                          if (quantity !== line.quantity)
-                            onUpdateLine(line, { quantity, user_confirmed: false });
-                        }}
-                      />
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    {line.pricing_mode === "unit_price" ? (
-                      <Input
-                        data-testid={`quote-line-unit-${line.id}`}
-                        key={`unit-${quote.edit_version}-${line.unit ?? ""}`}
-                        defaultValue={line.unit ?? ""}
-                        disabled={saving}
-                        onBlur={(e) => {
-                          const unit = nullable(e.currentTarget.value);
-                          if (unit !== line.unit) onUpdateLine(line, { unit, user_confirmed: false });
-                        }}
-                      />
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    {line.pricing_mode === "unit_price" ? (
-                      <Input
-                        data-testid={`quote-line-unit-price-${line.id}`}
-                        key={`unit-price-${quote.edit_version}-${line.unit_price ?? ""}`}
-                        defaultValue={line.unit_price ?? ""}
-                        disabled={saving}
-                        onBlur={(e) => {
-                          const unitPrice = nullable(e.currentTarget.value);
-                          if (unitPrice !== line.unit_price)
-                            onUpdateLine(line, { unit_price: unitPrice, user_confirmed: false });
-                        }}
-                      />
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    {line.pricing_mode === "lump_sum" ? (
-                      <Input
-                        data-testid={`quote-line-entered-amount-${line.id}`}
-                        key={`entered-amount-${quote.edit_version}-${line.entered_amount ?? ""}`}
-                        defaultValue={line.entered_amount ?? ""}
-                        disabled={saving}
-                        onBlur={(e) => {
-                          const enteredAmount = nullable(e.currentTarget.value);
-                          if (enteredAmount !== line.entered_amount) {
-                            onUpdateLine(line, { entered_amount: enteredAmount, user_confirmed: false });
-                          }
-                        }}
-                      />
-                    ) : (
-                      <span className="muted">{line.gross_amount || "—"}</span>
-                    )}
-                  </td>
-                  <td>
-                    <Input
-                      data-testid={`quote-line-tax-rate-${line.id}`}
-                      key={`tax-rate-${quote.edit_version}-${line.tax_rate}`}
-                      defaultValue={line.tax_rate}
-                      disabled={saving}
-                      onBlur={(e) => {
-                        const taxRate = e.currentTarget.value.trim();
-                        if (taxRate !== line.tax_rate)
-                          onUpdateLine(line, { tax_rate: taxRate, user_confirmed: false });
-                      }}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      data-testid={`quote-line-confirmed-${line.id}`}
-                      type="checkbox"
-                      checked={line.user_confirmed}
-                      disabled={saving}
-                      onChange={(e) => onUpdateLine(line, { user_confirmed: e.currentTarget.checked })}
-                    />
-                  </td>
-                  <td>
-                    <Button size="sm" variant="destructive" disabled={saving} onClick={() => onDeleteLine(line)}>
-                      删
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
+          <Table data={quote.lines ?? []} columns={[
+            { key: "description", header: "说明", renderCell: (line) => <span data-testid={`quote-line-${line.id}`}><CommitField hideLabel label="说明" testId={`quote-line-description-${line.id}`} value={line.description} disabled={saving} onCommit={(description) => { if (description !== line.description) onUpdateLine(line, { description, user_confirmed: false }); }} /></span> },
+            { key: "pricing_mode", header: "方式", renderCell: (line) => <NativeSelect testId={`quote-line-pricing-mode-${line.id}`} value={line.pricing_mode} disabled={saving} options={[{ value: "lump_sum", label: "总价计价" }, { value: "unit_price", label: "单价计价" }]} onChange={(value) => { if (!value || value === line.pricing_mode) return; onUpdateLine(line, value === "lump_sum" ? { pricing_mode: value, quantity: null, unit: null, unit_price: null, user_confirmed: false } : { pricing_mode: value, entered_amount: null, user_confirmed: false }); }} /> },
+            { key: "quantity", header: "数量", renderCell: (line) => line.pricing_mode === "unit_price" ? <CommitField hideLabel label="数量" testId={`quote-line-quantity-${line.id}`} value={line.quantity ?? ""} disabled={saving} onCommit={(raw) => { const quantity = nullable(raw); if (quantity !== line.quantity) onUpdateLine(line, { quantity, user_confirmed: false }); }} /> : "—" },
+            { key: "unit", header: "单位", renderCell: (line) => line.pricing_mode === "unit_price" ? <CommitField hideLabel label="单位" testId={`quote-line-unit-${line.id}`} value={line.unit ?? ""} disabled={saving} onCommit={(raw) => { const unit = nullable(raw); if (unit !== line.unit) onUpdateLine(line, { unit, user_confirmed: false }); }} /> : "—" },
+            { key: "unit_price", header: "单价", renderCell: (line) => line.pricing_mode === "unit_price" ? <CommitField hideLabel label="单价" testId={`quote-line-unit-price-${line.id}`} value={line.unit_price ?? ""} disabled={saving} onCommit={(raw) => { const unitPrice = nullable(raw); if (unitPrice !== line.unit_price) onUpdateLine(line, { unit_price: unitPrice, user_confirmed: false }); }} /> : "—" },
+            { key: "entered_amount", header: "总价", renderCell: (line) => line.pricing_mode === "lump_sum" ? <CommitField hideLabel label="总价" testId={`quote-line-entered-amount-${line.id}`} value={line.entered_amount ?? ""} disabled={saving} onCommit={(raw) => { const enteredAmount = nullable(raw); if (enteredAmount !== line.entered_amount) onUpdateLine(line, { entered_amount: enteredAmount, user_confirmed: false }); }} /> : line.gross_amount || "—" },
+            { key: "tax_rate", header: "税率", renderCell: (line) => <CommitField hideLabel label="税率" testId={`quote-line-tax-rate-${line.id}`} value={line.tax_rate} disabled={saving} onCommit={(raw) => { const taxRate = raw.trim(); if (taxRate !== line.tax_rate) onUpdateLine(line, { tax_rate: taxRate, user_confirmed: false }); }} /> },
+            { key: "user_confirmed", header: "确认", renderCell: (line) => <CheckboxInput data-testid={`quote-line-confirmed-${line.id}`} label="确认" isLabelHidden value={line.user_confirmed} isDisabled={saving} onChange={checked => onUpdateLine(line, { user_confirmed: checked })} /> },
+            { key: "id", header: "操作", renderCell: (line) => <Button size="sm" variant="secondary" label="删" isDisabled={saving} onClick={() => onDeleteLine(line)} /> },
+          ]} />
         </div>
       )}
     </div>

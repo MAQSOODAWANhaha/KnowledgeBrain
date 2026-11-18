@@ -1,7 +1,1663 @@
 # Python 招标第一期交接
 
+## 方案已获确认，正在实施原件来源纠偏（本段优先，2026-11-18 UTC）
+
+- 用户后继要求“先提交当前所有改动的代码”，本轮先保存整个工作区阶段改动，随后继续原四源目标。Python最新稳定全量回归为3831 passed，530个源码/Prompt文件无漂移，证据`unit-gate-20261118T015611Z-c2a534b8/`。此前外置pytest启动脚本缺少multiprocessing主入口保护导致子进程重入的尝试已停止、保留且不算通过；最终通过用的是已加主入口保护的脚本。
+- 提交前前端`npm run build`与80项测试通过。Rust版式响应deadline边界已按BUG231作最小修复，六项相关非环境用例通过、两项既有环境用例ignored；API整个lib回归为34 passed、11 ignored，环境用例未伪称执行。变更Rust文件格式及git diff检查通过；全仓cargo fmt仍指出HEAD中未修改的`tender_routes.rs:532`既有格式问题，不修改相邻代码掩盖。
+- 用户已明确答复“确认方案，开始修改与四源验证”，解除此前只读范围。继续四份无企业资料模板的完整性、一致性、正确性、高效性目标；最终成品仍0/4。新执行沿用用户选定low与当前`deploy/.env`，源env SHA仍`d595fa7e3c90729431702383d88d81952d45e5152d87510267863751f37ba4b5`，没有修改endpoint、窗口、输出帽或网络。
+- 外置基线为`/opt/workspace/kb-tender-evidence/2026-11-17-source-contract-realignment/baseline-20261118T004404.856235Z/`：695个代码/配置/文档before副本及SHA；共享脏树不回滚、不暂存、不提交。BUG228记录来源纠偏及五问，BUG229记录首次原生选择到Word的绑定缺口。
+- `pdf_literal.py`在通用转换前保存原字、char_index、坐标及独立符号证据；新freeze/SourceIndex逐字、位置及完整覆盖重验，新profile包含五个实际来源模块指纹。bbox仅登记`native_grid_candidate`，不吞字符。新的24项、旧兼容33项、grid六例分别已收终态，证据在上述目录`literal-extract/`与`grid-green-20261118T010831Z-1ca94f3c/`；这些范围有重叠，不能相加冒充全量测试。
+- 首次原生B/C的已有正文/context选择现在可直接物化BodyBinding，不再只写purpose和issue JSON；上下文分组的continuation保留，Word消费同一绑定。生产`outline_from_compiled`传入ArtifactStore，纯编译接口仍可不带存储。相关93项回归终态通过：`native-bind-green-v3.log`；不是四份完整成品验收。
+- 两个被重启取消的任务已恢复并完成，无其pytest在途：literal_source_extract完成加载校验/profile四文件；review_literal_freeze完成helper网格候选修复与新六例。不得因重复重启通知再次启动相同任务。
+- 四份真实新freeze已在外置独立CAS完成，非生产CAS：`four-source-freeze-20261118T011840Z-0c7f5c3e/result.json`。402页/253715原字符通过索引重载及全覆盖重验；原件SHA均未变。源冻结仍partial：Bidding98、安服93、111两、222三处图像为`ocr_provider_unavailable`；111另两内嵌名称未提取。这些图像/附件未决在旧v36同样存在，不能略过或当无内容。
+- 已只读核111的两内嵌名称指向同一256844字节DOCX（SHA `b861ccbd313b2250f9c64bd0351d1726892043957ec3fe252c8b548c63dd55d1`）。需按同内容别名保来源、只解析一次；不能把DOCX逻辑位置假装PDF物理页，也不能未核适用关系就覆盖PDF。
+- 已用有主入口保护的独立脚本读取该真实DOCX：311个section、17张原生表、2个图像、631个逻辑来源range，证据`embedded-docx-20261118T015919Z-a2fd3779/result.json`。其另一个OLE部件是XML明示的`Equation.3`内嵌公式，不能误当缺少一份独立招标文件；相关原式/来源关系仍待正式接线及核验。未加主入口保护时产生的多个外置探测目录不作为一次解析的有效证据。
+- 尚未完成：新literal正文的首次语义选择及完整原件独立核验、原式/文表混排、真实特殊符号显示、局部待核的实际核定入口、全文件预算、新镜像部署与四份最终Word/PDF/分册验收。旧R只保兼容方向未完全接线，真实`#`及物理换行不能进入旧ATX/单行exact捷径；当前不得把新来源层局部绿部署成全流程已收敛。
+- 重启后运行态改变：2026-11-18约01:25 UTC只读核，旧docreader退出143、Redis/MinIO退出0、旧worker/dispatcher不健康。root仅在确认Postgres已退出后启动独立`kb_isolated_postgres`，随后它与旧API健康；未启动新模型任务、未部署候选，旧Redis/MinIO/docreader尚未恢复。后继先查实际状态与队列/租约，不重复未知动作；不用旧v36健康记录当实时状态。
+
+## 用户最新明确选择：本轮low
+
+用户已明确答复“本轮使用 low（推荐）”，覆盖下文“仅root可撤回默认”的后继运行含义；旧v36状态/证据的user_selected_option=false是历史事实，不回写。新决策记录`performance-default-v35/user-selected-low-20261117T225203Z.json`，后继v37引用此记录并标user_selected_option=true。root于22:52:03 UTC只读查当前独立环境：effective reasoning_effort=low/context131072，四个v36任务均succeeded、无live lease，reserved/sent请求0；无需停止任何当前请求，也未重新发模型。`deploy/.env` SHA仍d595fa7e…，不改源env、endpoint/窗口/输出帽/网络或质量验收标准。继续原四源完整性/一致性/正确性/高效性目标，不能因用户答复替换为单独配置任务。
+
+## 新事实已追加独立CAS：47 blob，禁止重复apply
+
+root已完成最终70facts的最小追加导入。新计划`shared-native-body-authority/remaining-source-decorations/additive-import-root-v2/import-plan.json` SHA`bd400d86a55e5402a72056d2d8f9f6b4039e9b7fdf0cbc183dede8dcdb587906`；实际`apply-audit.json` passed：47新blob/264127字节、47已有逐字一致，94最终manifest可达依赖全重核，零覆盖。`apply-start.json`和逐节点fsync journal已存在，不重复apply；如恢复先读audit。目标卷已验证只属于kb-isolated docreader挂载的`kb-isolated_python-tender-artifacts`。最新manifest为Bidding10/安服51/111六/222三，引用见apply-audit.manifest_refs。
+
+旧计划ready=false/旧阻断和所有旧事实/IDs/supersedes/p82审批原样保持；新计划以BUG219完整退役审计及新49回执/13退役联合证据关闭旧阻断，不把纯装饰当企业职责恢复。仅CAS追加，四份state和源env SHA前后相同；未写DB、未启动模型/新execution、未部署或生成正式Word，业务验收仍0/4。下文“CAS仍未导入/本轮无CAS写”均是此前历史，不作为当前状态。
+
+## 后继修复进行中：BUG223/225/226/227，尚未冻结或部署
+
+- v3原生文本范围扩域已实现并验证，原13个完整范围（含一项既有装饰投影）可直绑，300个唯一文本范围候选交同R选择；17个exact bindings实际内存bind/load成功，12条已核context保全。完整Prompt/Schema/2304纠正空间/输出双预算9包（2/2/4/1），不是业务通过。完整材料`shared-native-body-authority/bug223-native-prose-v1/`。
+- 最新51/6装饰事实与BUG217/219/222编译/投影组合已固定零模型重放四源49接受/60lookup，公共候选授权差异与完整原行/原格/主体/13退役全审。规范入口`shared-native-body-authority/approved-facts-current-compiled-v1/SCOPE-INPUTS.json`，聚合`diagnostic-v2/four-source-current-compiled.private.json`约29.6MB；最终863target/7134原行/147grid/70facts。不要重跑已完成组合或读取旧摘要代替完整compiled。
+- 新组合初始v3 pending121（45/44/18/14），原生R657、17exact；其中11个旧orphan审计与4个mixed footer问题已精确关闭。仅为修前来源域分母，后继BUG225已改变。
+- BUG225独审发现完整文本范围扩大可重开其它target已核页眉。已修全局原件/页/字符hash守卫、唯一layout/PDF原字符映射及严格prefix/suffix裁片，原Index/原行不改；118相关测试通过、3真实Bidding prefix[0,30)新源码回放通过。5边缘clip/264disjoint/46无法证明（315候选），新pending165=64/65/21/15，R613=grid357+prose256；17exact和9包仍全部机械准入。报告`shared-native-body-authority/bug225-global-native-decorations-v1/REPORT.md`及`final-v3-snapshot/`，保留修前红；不把新增46说成业务字丢失。
+- BUG227现已核46根因：DocReader在unit.text冻结了结构ATX `#`语法（source parser指纹一致），不是PDF字面原文。46个target/32range/17页，#仅2–6字符起始语法、标题与unit/contract/tree一致、原PDF各页#字形0；引用旧Index精确suffix全46可读且layout唯一，45也PDF流唯一。原Index/旧49请求无须重建。必须保suffix起点边界false、不回补到context、不全局删#。独审`bug223-native-prose-v1/native-text-authority-review/REPORT.md`；core将在BUG226后实现窄投影，尚未源修/在线验证。
+- BUG226正在改v4：文本range可能跨下一独立事项/银行保函，不能自动把全部未选余文当context。prose新增显式context三元组最多2/岛，body/context不交叠，旧native anchor非空字符须被两角色覆盖；grid规则保持，未选新余文不自动入Word，原源仍完整。root已更新专用Prompt及新PG fixture的anchor/context字段；core持selection/scope/prose和专测，子代理只写test_native_body_v4_anchor.py。尚未混合或多range扩域；完整请求/JSON输出界须重测。v37门禁未冻结文件已对齐v4，不保留v3发布断言。
+- 2项真实独立PG诊断通过（v3生产帧，合成scope、真实pipeline/flow/executor/SQL、mock HTTP）：lost-ack后重试复用R接受结果、原成功请求行不变，body receipt先于outline且幂等；source pending保存诊断而failed、无outline发布。2passed/0skip/无source drift、专属容器和临时凭据清理。新模块`tests/acceptance/test_native_body_execution.py`，最终PG要`--additional-pg-file`纳入。报告`bug220-native-body-persistence-v1/REPORT.md`；后续v4 fixture已变，不能拿v3结果当v4全PG通过。首tmpfs检查夹具0tests失败保留，v2按HostConfig.Tmpfs真实形态核验后通过。
+- 121封存未决研究已完成，根目录`shared-native-body-authority/remaining-layout-domains-v1/`，权威`physical-order-v3/originalchars-physical-v3/native-absence-substudy`：59候选全域装饰可证、16确认交集、18未证、6跨页多义/不足、7同页多range不足、7短句多义、8mixed。93唯一range域仅定位候选，不自动正文；326nongrid ranges物理bbox全空，rawordinal观察同向不能当物理证明。8mixed的48行/14块原PDF锚唯一，14转换旧片段物理证据=9上方/1下方/4跨页，不能据此替扩展整range排序。将来扩多range/mixed先核真实范围/次序/尾句，不猜join。
+- v37私有candidate已由root准备（不是部署）：`deploy-final/candidate-review.json`，SHA`55b2b3ed6a06d1834c5cd76b798abc47be740a2be8b1808c61003aa9be0cc48d`；仅4个Python image改为独立v37标签、13服务roundtrip/源env保持、user_selected_option=true。不要重复prepare_candidate。script-review/source-stop授权/selection/freeze尚未创建，未collect正式门禁/build/deploy；仍v36 image a59…运行。后继代码收口并停写后依`deployment-v37/PLAN.md`准备新完整freeze，含全部旧3611 unit/142 PG身份及新用例。临时证据容器会结束，部署前若保护基线有合法临时资源消失，须具名审查记录，不能盲重放或抹掉原拒绝。
+
+当前无付费模型请求、无生产CAS/DB/state写；goal active、四份最终验收0/4。当前active工作为core的BUG226→BUG227实现；所有只读研究和联合回放已完成。root不要因用户low答复或单元/PG诊断通过结束原四源目标。
+
+## 最新恢复进展：3740单元全过，R正式接线候选已写，v36运行/最终验收仍0/4
+
+本段覆盖下方在途描述。未部署、未新发付费模型、未写生产CAS/DB/state，旧四个v36 execution均已终态，不重复启动。当前源码已继续变化，旧v36 freeze及本段3740测试快照都不能直接当新最终发布快照。
+
+- 完整单元诊断：`recovery-full-unit-v37/`，3740 passed/0skip，327.29秒；517个docreader源码文件前后无drift。此为诊断不是正式release gate。之后root已补固定大纲预览不启R、native物理页优先读取physical_locator、结构提示不再发送宿主已知body_ref；64相关回归通过。后继BUG223尚在实现，须新冻结全量/真PG/镜像门禁。
+- BUG217七行编译修复及BUG219纯装饰完整退役审计已完成。安服240原目标=238应答+2纯装饰退役，111285投影前=277应答+8既有退役；所有原对象/位置/完整来源/覆盖facts审计保全。安服12/11115接受回执完整零模型回放，公共候选/所有原请求字节保持。装饰51/6facts的47新/47已有CAS计划仍仅准备、未导入，旧ready=false历史不改。
+- BUG218正文强绑定已接发布、写作、结构、Word消费者：`source_body_ref`绑定当前AuthoringInput/目标/精确来源/上下文/连接，缺源/改purpose/换版本均拒绝；共享projection每次消费只读一次。四源8个真实反例（Bidding2/1113/2222/安服1）、48篡改探针及8真实_load_task角色检查全部通过，四份诊断Word/ZIP；严格属于其冻结10模块快照，不是正式R或交付。报告`bug218-native-body-context/real-four-source-bindings-v1/REPORT.md`，后继两文件diff已具名封存。
+- BUG220有限R核心/全purpose scope/runner/pipeline候选已写：新自动原件outline execution在spec固定directory_native_body_contract；R沿既有directory_parameter持久执行器、专用operation/Prompt/完整动态Schema，原P请求不变。scope枚举全部865个v36 final target；精确native/context分离，global receipt绑定最终outline_ref且先于on_outline保存，pending抛SourceBodyResolutionPending保原源、不能发布技术成功。仅完整native/existing显式来源选择可绑，不让模型抄原字。当前未实发R或部署。
+- BUG221已修：R错误用受控detail和空feedback_fragments，不将整包坏回包复制入纠正，原回包仍完整持久保留；旧ModelContractError缺省None行为保持。分包额外核initial_input+2304纠正保守上界，不改窗口/预留/输出硬帽。63相关回归全过；独审实际_DocumentModel/_OutlineModel的12组离线wire均fit，原8192边界案例转具名manual pending且来源不裁。证据`shared-native-body-authority/r-flow-review-v1/bug221-recheck/REPORT.md`。
+- BUG222三处真实标题fallback加已有generated标记（compile SHA`0b3c3c28…`），69个原表标题来源缺口精确关闭。四源immutable v36+唯一compile覆层回放13/12/15/9共49接受回执、所有lookup/digest/full body逐字对照，四公开候选仍同v36，模型0。新scope pending126/165/87/74，nativegrid R域51/59/182/65；该scope不是最终原生prose扩域。报告`shared-native-body-authority/native-body-scope-v1/bug222-generated-template-labels/implementation-v1/REPORT.md`。
+- BUG223进行中：PDF line_units只登记grid，426个layout_pending不等于无native正文。独立nongrid审查最窄12个完整native range逐字相同可直绑（3/2/2/5）；复用已有批准装饰投影另222一例可成为第13，需逐对象证明。135个substring只有定位证据，其中61后面仍有原字，不可直接当完整正文；另仅空白差异167保原文。正扩同一R的native_prose类型（无伪表格几何），给完整唯一同页原生range让模型选句段/补尾句，跨页/混型/重复仍保pending，合同将升v3，包数必须用正式完整Prompt+2304纠正界重测。`implement_r_finite_core`当前只写scope/selection/prose helper及聚焦测试；root持有flow/pipeline/spec/Prompt，避免冲突。
+- 111唯一legacy excerpt mismatch已定位：chapter-10:target-5是两格66+42字的明确续接；原body_bound事实`reviewed-fact-e89ed390610bd7ffe99f97e00cfc0da5c2276d4b4f946d243b9820bf79359958`已存source_join=continuation及exact refs/hash/context。scope将只在回执全部严格一致时复用，不按去空白相似猜连接。BUG218已补。
+- Bidding p59L6签章续行whole-word唯一exact-cover已证35行/50word/676glyph一次恰覆盖。258点注册grid外几何均已核，但不等于prose或可删除；未注册续句和三个target身份仍保全。同页native/layout缺物理顺序证明时不授权续接，当前prose薄片不吞mixed域。
+- `review_r_flow`另在准备仓库外`deployment-v37/`最终unit/真隔离PG/镜像审计/独立部署脚本：仅准备，尚未freeze/collect/build/deploy，root以后显式冻结才运行。不要沿用旧v36 runner的旧freeze。当前无shell门禁在途（30561/75888/9169等已收终态）；只有上述BUG223实现和v37准备agent仍在工作。
+
+实际源env在`deploy/.env`，不是仓库根.env，SHA仍`d595fa7e3c90729431702383d88d81952d45e5152d87510267863751f37ba4b5`；不打印值、不改。low仍为root已有可撤回验收默认，不是用户显式选择；131072/32768/4096和60秒raw-idle保持。最终35项原件/正式Word/ZIP/分册/同版PDF及独立语义验收标准保持，当前仍0/4，goal active。
+
+## 恢复后新增：BUG217/218/219/220局部修复中，仍运行v36，验收0/4
+
+本段覆盖下方“所有源码保持冻结/两个准备任务在途”的旧状态。v36四任务已终态，不重复启动；本轮没有新模型发送、生产CAS/DB/state写入或部署。宿主源码已有后续增量，不能再沿用v36 freeze部署。
+
+- BUG217七行编译修正已完成，71相关测试通过；真实安服零模型回放12/12接受回执及全部请求轨迹保持，仅两处purpose排除p71已核页脚，完整原行/16原表保持。外置`bug217-parameter-presentation/`及`online-four-projects-v36/anfu/page071-footer-fact-v3-bug217/`。
+- BUG218公共正文/context承载第一片86相关测试通过；随后复现6项真实行为红：篡改purpose、破坏正文selector、换frozen来源时，Word/结构仍接受。现补`source_body_ref`不可变宿主组合绑定与消费前逐字重物化，支持native和未注册续表冻结layout来源，29项聚焦已通过，仍在审查/回归，未接正式R。
+- 装饰packet准备委派`b084b15d-84ff-42d5-9aa3-ffe6cd849e52`已完成。安服51facts/111六facts完整admit、12/15接受回执零模型回放；47新/47已有CAS节点，仅准备未导入。报告`shared-native-body-authority/remaining-source-decorations/final-packets-v1/preparation-20261117T213313Z/REPORT.md`。原守卫因安服两个target退役保红；root复核二者仅页码/编号且无任何职责引用，正确出口为纯装饰退役并完整审计，不能恢复伪填写位。BUG219正做严格职责/双向关联保护和完整旧target/位置回执；旧红历史保持。
+- 全四源追加native到原A/M路线已被真实容量反证。R只做共同最终来源字段的有限选择，调用公式`N_base+R(U)`，旧U子集51/61/182/65及六包实验不是全部范围或最终上界。BUG220独立有限选择/完整I-O双预算纯函数正落实，尚未接Prompt/生产；原流程、旧额度和完整原回包保持。
+- Bidding p59L6“公章）”已补整页唯一exact-cover：35行/50whole words/676glyph恰覆盖一次，唯一对应C0，属于未注册续表的grid外续句，必须保留。旧未决证据不改；补证`shared-native-body-authority/unowned-source-geometry/p59-whole-word-exact-cover-20261117T220038Z/REPORT.md`。因此258点几何已全部核为registered grid外；不等于prose/可删除，也不证明职责覆盖闭合。
+- 111原table0是采购技术续表，public kind=form来自parameter_parent适配，不能据此新添必交原格式；独立未知样本鉴定尾句遗漏及跨列仍真实红。131未完成整行绑定/395重复匹配装饰候选均保留，不批准删除。
+
+下一步：完成当前小片独审/回归及冻结真实回放，闭合R全部来源域与可表达边界→正式有界选择/持久回执→新冻结门禁/独立部署→按四原件逐份正式Word/ZIP/分册/同版PDF验收。最终仍0/4，goal active，不调用create/complete/paused。
+
+## 最新：v36四份真实候选均已终态，源审未过，最终验收0/4
+
+本段覆盖下方所有在途记录。最核心根因已由四原件实证：A正文/clause、M材料、B要求、P子项共用layout阅读行字符串作为正文权威；行号/Schema/缓存匹配不证明正确列、完整格和完整独立条目。原生cell内容可得且正确，错误在选择和物化。已核CPU/96字等少数native facts修复不覆盖普通来源出口。未采用四份红候选、未生成本轮新Word，旧revision和旧Word实物保持。
+
+- 当前独立环境仍v36：Python image `sha256:a59a39d8e7bffb1b0fe5eca9870d21cfaeb20ab01b51c746bb306a946cfe5b34`，API `sha256:54ed8dd17da94540fc045febc40892a23d8fe706cd14d96002bd38e77ff42f14`。source freeze `f0e2c7d3789ead7a5af144c433ad0357c809371aa915e160f9ecc78b00a0a8cd`：510文件、3611唯一unit/142真隔离PG全绿、零skip，旧3515/140身份保全，507镜像源码/依赖/Poppler22.12一致。真实部署attempt `deployment-v36/deploy-final/attempt-20261117T200314Z-612b0438/`及canonical summary保留，不重复deploy。
+- 源`.env` SHA `d595fa7e3c90729431702383d88d81952d45e5152d87510267863751f37ba4b5`未改；low是root可撤回的验收默认，记录`performance-default-v35/operator-default-decision-v36.json`，不是用户答复或源env设置，后续用户显式偏好优先。60秒仍是连续无原始数据空闲超时，不是总时限，不加输出硬帽。
+- 四份v36均已terminal succeeded，但全部technical_success_source_review_failed，无在途模型/lease，禁止重复start或换key刷新额度。Bidding `046accb4…`、安服 `ccf6695c…`、111 `e4892248…`、222 `efd7dfc4…`，完整ID见各state。8A实际精确复用v34；完整v35事实10/3/3/9及supersedes保全。所有原始请求/回包/失败费用/未知usage均保留。
+- Bidding：620.2秒，11实发/496494已知tokens/未知0，复用2A+1P。3卷/27原表/财务双主体原表/3.5.1与3.5.5独立正文/报价顺序均在。硬红：继承P的地址转换正文夹“规格/配置/规格”、HTTP正文夹邻列“护”；不是本轮模型重写，回放延续旧source物化缺陷。
+- 安服：695.3秒，11实发/482113已知tokens/1笔provider api_error用量未知，复用2A。2卷/16原表/5服务表/28服务及无关联/投标书13→14→15/资格脚注/团队条件均在。硬红：普通B团队要求夹入评分列“13/项目经理要求/1”；P子章及父方案还含原p71L58页脚71，bbox已证。当前页脚fact仅p17/p30，未覆盖p71，不能误称已核fact路由失效。5服务表重复表头仍须最终实物核。
+- 111：850秒，11实发/466355已知/未知0，复用2A+3P。32原条/B05实际入表、CPU native/context、财务双独立空位与同时约束双方共同说明、基本表单份均具备；F另第33行是原件要求的价格评审程序，不能按33≠32假报。硬红：普通A/B/P跨列，且独立“未知样本代理鉴定”缺native格末句“件进行鉴定。”；原A/P包络截掉L4，B在别处出现不抵该独立响应完整性。q8仅form/attachment类型分歧，不是缺企业资料或两份材料，最终财务共同说明可合法共用，不机械复制463字。
+- 222：690秒，10实发/299912已知/2笔未知，复用2A。双签单份、96字native在chapter-15:target-6、本次实际章名“集成建设方案”、8原表/15组成及售后均具备。硬红：普通chapter15/16/17正文夹评审标签与分值，已追溯到两A合并的clause_windows→obligations；本轮无P，不能只修P。
+- 四份完整报告在`online-four-projects-v36/<key>/stage-final-source-review.json`及`TERMINAL-REPORT.md`或`HANDOFF.md`。共性新问题已记BUG216，脚注/财务诊断补记BUG206/205。全部模型/runner已终态，后继先核事实，不等待旧在途任务。
+
+下一片先验证统一原生正文方案，再写代码：独立只读方案与五问在`shared-native-body-authority/independent-reviewed-entry-agent/proposal.md`，现有SourceIndex/excerpt已能准确物化明确选择的cell/span，但不能从旧页/行/unit自动猜正文列或一律扩整格。需要正文/context/部分格与续句的明确有界选择，保原表/merge/空位，不按关键词、最长列、纯数字删字，不建全文atom/ledger。真实最大A/M及完整纠正容量尚未验证，不能沿用单P样本估计。
+
+目前仅两个外置准备任务：`root_cause_explanation_check`只读测四源native选择方案真实容量/输出上界（`shared-native-body-authority/capacity-feasibility/`）；`v36_runtime_preparation`仅准备安服p71已核页脚的新事实与零模型回放/additive计划，不导入、不改源码、不启执行。所有源码保持冻结；下一轮实现前先收方案反例/预算结果。goal仍active，0/4，不调用complete/paused/create_goal。
+
+部署运行保护基线曾因一个无关临时容器消失而只读拒绝；原快照/拒绝及root刷新记录保留，后续“protected未变”指刷新后基线，见`deployment-v36/deploy-final/runtime-baseline-refresh-root.json`。
+
+证据根：`/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/pending-closure-v1/`。最终35项独立清单/Word/ZIP/正式layout回执同版PDF验收口径继续保持，不用机械绿替业务绿。
+
+## 当前恢复核查：v35最终门禁已启动，运行环境仍v34，最终验收0/4
+
+用户追问根因后的独立复核确认：原方案缺少“原件应交付职责→合法且足量的承载→最终实物”闭合；旧F把原文入表与应答责任合成一维；完整阅读源转正式purpose时丢失呈现映射；链接/出件及局部测试不足以证明最终语义与版式。全atom/native替代路线的规模假设已被真实73/55包与合法超限输出反证，继续撤默认，不另建同类框架。
+
+- 安服受限页眉审批后仍未决已定位并修复：旧obligations逐窗strip，私有rows却仅平铺。现在只在该既有路径保私有render_start/render_end/rendered；完整原行、坐标、窗口、模型文本不变，按真实切片校验purpose后排除已核片段。有效红回归1失败/3通过；修复后含条款/完整行/非法切片保护42/42通过。最初缺role的夹具红不是行为红证据，后续有效红另存。
+- 新独立只读复核499文件前后全同；50完整请求摘要及原接受标志不变，47有精确成功回执，安服旧C/2F的3项仍未接受；私有切片未进wire，12旧业务事实ID不变。真实安服11行切片重建279字purpose，raw flat仍312字，差33全部为窗口边界空白。证据`source-hygiene-design/implementation/render-slices-recheck-20261117T170138Z/`。不将其当完整页眉投影或业务完成。
+- 当前目录布局核心、Python HTTP/export/executor及Rust受限renderer均已接候选代码。最新Bidding89项目录真实固定点回放2次转换通过；Rust6纯用例及两项真隔离PG/HTTP（含真实OnlyOffice）通过，专用资源清理。root已补PDF实际显示/目的坐标区域、完整HTTP绝对期限、响应body配额/期限及layout回执宕机恢复，原独审红与修复证据保留。
+- API最终镜像`kb-isolated:runtime-render-v35-final`已构建，独立审计17/17；image54ed8dd1…，167源码冻结匹配，原7层/其他二进制/UI保持、仅新增API二进制，Bookworm链接正常。未部署，禁止误用资源修复前旧候选`runtime-render-v35`。证据`deployment-v35/api-final-audit/`。
+- Python最终门禁新冻结503文件，保全部旧3311单元身份；实收3515 unit、140真隔离PG（含layout提交后失租两分支）。当前已启动各一次，不能重复；门禁`deployment-v35/python-final-gates-v1/`，PG专属plan在其persistence-plan.json，freeze SHA`4fdd9d31427fbb46b12e276a436f33fe02fa59da227abaf02784124f686e4e64`。仍须收结果、按身份清理专属PG，然后build/image审计。
+- 完整装饰审批包与overlay仍外置，入口`complete-source-decorations/approved-manifest-index.json`；四源当前新代码回放在`final-window-slices-v1/`执行，不复写旧130项红。58物理片段及25事实只是已审分母，不能冒充四原件全部语义完整。
+
+恢复补充（以下覆盖上方在途描述）：
+
+- v1已终态：unit3515中3508通过/7失败/0skip，503源码全稳；真PG140/140通过并按ID清理。7失败均是新增私有来源输出与旧整体相等断言冲突，独立归因后仅更新3指定测试，保全部旧状态深比较并精确核新增映射；33focused全过，11坏映射/旧状态负控均被拒。源码生产部分未改，原红完整保留，不能将v1称全绿。
+- 新v2冻结503文件，3515测试身份与v1完全相同，仅3测试文件变更；freeze SHA`1553222c722320a583bb167ac74223a86f008902b037a0eddfd940b58a063f34`，`deployment-v35/python-final-gates-v2/`。已各启动一次unit52349、真PG35995；build44202已exit0，image`sha256:251adbe0e0e28000188829a79e0e2ec0cd32259893c26af72897446eed1fcdd0`；image审计91156已500/500逐字节通过、parser版本保持，不重跑已终态build/audit。
+- 四源完整装饰/Word反事实在当前生产源码上198/198通过，58/58精确片段排除、64原表与全部团队条件/签章保全。743映射中737为逐字来源、6为已有宿主整体响应且rows为空。最终四manifest refs未变，见`complete-source-decorations/final-window-slices-v1/IMPORT-HANDOFF.md`。
+- root已审实际隔离挂载并追加导入CAS：最终计划SHA`75f42cb10fb40fca55bfe43fcf8a0b5135069f2e4d05517174efba6d7f9588f7`，23新增blob/434855字节、24已有一致，零覆盖/DB/模型。audit`apply-audit-3d8a283f74bb4e9983c14d8f00d6ec08.json`在该目录的`additive-cas-plan-v1/`。此前旧计划SHA变更在首个只读SHA检查即拒、未发生写入；最终计划封稳后才成功导入，不能重复apply或沿用旧e4fcc88…SHA。
+- `deployment-v35/deploy-final/`最新.env私有Compose/部署脚本已独立准备，16只读反例通过，尚未执行部署。仅接受最终v2全部门禁，保旧人工稿与受保护容器/隔离连接；按最新.env的effort空值，去除旧诊断low覆盖，不能承诺50旧请求全部可复用。部署summary在新attempt目录，root需成功后写规范根summary供v35 runner身份门禁。
+- `online-four-projects-v35/{bidding,111,222,anfu}/state.json`已只读准备，新request_keys空，无新execution/revision/adopt_input；完整manifest输入/当前draft/本机及API原件/当前机器Word字节一致，企业资料空、分析未确认、无编辑/待保存。outline前驱用各最新v34（安服cancelled），document前驱前三v34/安服v33。新`run_four_projects_v35.py`会传真实reviewed_source_facts_ref，`select_v35_generated.py`按实际新execution显式选择。尚未发任何v35模型任务。
+
+旧API build46657、context负例61572、BiddingTOC36181、v1unit81424/PG98467均已收终态，禁止重启。当前运行仍v34，业务验收0/4；下一步收v2两项门禁、清PG→显式check/deploy→规范部署summary→新四源真实流程→实际新Word/PDF/分册逐原件验收。
+
+## 最新接线：v35候选源码已冻结，尚未部署，最终验收仍0/4
+
+本轮继续完成BUG205/207/208的最小生产接线，当前运行环境仍为下方v34；未新发付费模型请求、未导入事实包到生产CAS、未改旧人工稿。所有v34任务仍已终态，不重复提交。
+
+- M加入`source_carriers_closed_v1`候选原表差集处置；已核原表不能普通exclude，物理载体存在仍不代表主体或语义完整。
+- F加入`source_bound_response_forms_v3`，拆开原文入表与criterion/reference/procedure责任，企业列继续空白；导出指南复验最终target/row绑定。
+- 新`reviewed_source_facts_v1`固定完整输入、来源投影与审计证据，支持原表、主体、分册和独立正文事实；前驱继承及更正需保留或有新证据supersedes。只有独立正文事实启用新C；form章可承载同entry/subjects的独立narrative目标，原式不变。
+- 独立审发现并已补两个接线缺口：最终事实应用记录曾只在内存，现单独持久化绑定实际outline的私有回执，保存失败不发布；同来源/主体/entry的重复正文事实可改label绕过，现以规范源覆盖与role/entry拒重复，保不同真实实例。最终窄独审无剩余必修项，不等于四源语义全部通过。
+- root固定快照聚焦单元160/160；代理相关回归234/234与root用例有交集，不能相加。最终冻结源码在v34镜像只读、无网络回放84/84，含222的96字精确正文、Bidding两项资格附证职责及27原表保护、安服5表及分组反事实。完整M/C及代表纠正最大91073/94208输入；不是最坏输出证明或真实新回包。
+- 首轮真隔离PG138中137通过，唯一失败是root新增worker测试的ModelConfig夹具前置错误，已按相邻worker测试补显式fixture配置、保全部断言；旧红证据和专属资源清理回执保留。最终稳定快照真隔离PG138/138通过、零skip/failure/error，492文件运行前后SHA一致，零真实模型调用、未用项目数据库。最终结果路径`root-integration/persistence-v35-46bea3714ea84163/run/result.json`，该轮已终态，不重复启动。
+
+主要证据：`reviewed-source-facts-v1/REPORT.md`、`source-freeze-final.json`、`final-v5/full-probe-results.json`、`reviewed-facts-narrow-review/CANONICAL-FINAL-REVIEW.md`、`final-reviewed-fact-receipts/integrated-final.xml`。module SHA为`7750851163c955bfbb56da19789393b5989febdfe8e68a584249ff4fbcdfbbd9`；PG完整492文件冻结SHA为`0ba0c4a8f11d1bb0a6b28417d914ac1811a0ca6e81234e999847d6a5851c7634`。
+
+事实包仍全部外置，见`source-closure-next-slice/reviewed-fact-packets/HANDOFF.md`：安服v3七项、222v3两项、111v2一项及Bidding v4两项草稿。Bidding新guard/实物反事实已过，但当前索引仍标draft，待root最终准入；111必须使用v34固定Poppler投影，不能重签宿主漂移投影。
+
+后继仍需完成最终Word目录缓存正式转换接线、源页眉页码/普通章节native污染修复，随后完整unit/真PG/build/镜像与最新.env门禁、独立部署、受影响真实请求与最终Word/PDF/分册验收。TOC外置89项固定点证明不是产品接线；4份仍0/4，不能因本段任何局部绿项授予通过。
+
+源页眉页码至少一条确定路径已查清：Bidding财务`chapter-2.5.4:target-3/-9`及报价`chapter-4.2:target-3`来自两A显式`body_windows`的非grid源片段；`directory_compile._body`显式分支全拷，绕过另一旧范围分支已有装饰过滤，后经manual source purpose原样写Word。不是这些原生表格内部损坏。尚未修；不能把`line_units=null`或纯数字直接等同页装饰，需物理源证据保护参数、分值、表单字段和签章。
+
+该只读独审已完成停止，报告`source-decoration-root-cause/REPORT.md`及`source-to-word-proof.json`：三样本逐字链与原件bbox均已核，页码y45.15–51.30/页眉y772.36–780.82/页高841.95；三负控证明纯数字正文80、原表固定数量80、混合页眉与公章/签字/日期的section均不可整行按数字或整unit盲删。最终三个form target没有source refs/excerpts/template refs，混合段落的行坐标在purpose物化时丢失；既有整部件装饰排除出口不适用。后继需精确来源角色/片段核定及物化前保源应用，不把这一A窗口根因推广到全部20组或111/安服的其他污染。若新增角色写入documents会改变SourceRefs digest及事实包/请求，不得假称零重跑；独立位置排除记录且阅读源不变时才可精确复用旧模型回执。
+
+## 当前：v34三份新Word仍红、安服无效分支已取消，最终模板验收0/4
+
+### 最新实物结论（v34已收口，仍0/4，先看本段）
+
+四份v34均已终态，**没有需要继续等待/重复提交的v34模型任务**：Bidding/111/222均已
+adopt→document→显式select→下载及源审；安服因新M仍同错，仅支持cancel了本次outline，
+未adopt/未document。不得按下方较早“在跑”文字重复动作。完整报告分别在
+`online-four-projects-v34/<key>/two-delivery-review/`。
+
+| 文件 | 当前新机器稿 | 确认绿 / 未通过 |
+| --- | --- | --- |
+| Bidding | version cd1aed91-b40e-4f0c-b7e4-be95d6a61d42，Word SHA81e652ba… | 3卷、27原格、分册/总稿target区一致、严格企业空位及12负控绿；同版85页PDF的89目录缓存仍待计算、20组源页眉/页码红；24旧target的长行差异待原件职责复核 |
+| 111 | version a64ad987-0c83-483e-b112-1a24764949b9，Word SHA75e61b1d… | 强制原四列表已实际31行且31/32正文/上下文精确、企业空格/省略行绿；B05程序条款只在guidance未入表（BUG207）；普通章节旧native污染未关；财务分别主体空位回退，原句仍在；基本表单份绿 |
+| 222 | version61bbef71-5b01-4fd7-b257-66bfeb4ec670，Word SHA076c13c6… | 8原表/严格企业空位及12负控绿；双签原函仍2份；已在v30正文的保密方案退尾部待核；售后承诺实在chapter-18:target-1，旧标题检查误报保留纠正 |
+| 安服 | 仍v33 version6fba270e… / SHA2f22df78… | v34新M仍q11=current仅说明1行、assignments=[]、source_groups=[]；9次发送后支持cancel，已知332567tokens且1未知，旧稿/元数据不变；未作无效新Word |
+
+本轮Bidding12次/549998tokens、11116次/663083、22211次/421853，各完整费用/继承/来源见
+实际报告，不编币种金额。新Word DB/CAS/API/ZIP绑定均通过；Bidding仅view转换PDF未
+执行Office保存，111/222尚未Office/PDF视觉，不能以出件给最终通过。
+
+新方案评审已明确：全量native候选73/55包及C超限，稀疏168行外置原型14项机械保护
+及CPU两B→明确C/Word同源绿，但其合法最大fanout实际49k/45k/73k输出仍超32768；错误
+单列语义声明closed也可能机械通过。**不接默认、不调预算、不再堆同类全量框架**。
+证据`bug190-bounded-alternative-review/sparse-prototype/REPORT.md`。
+
+root已汇总方案根因到`root-cause-and-closure-review.md`：缺原件交付事实/候选载体差集闭合、
+缺已核定事实修订保护、双A共漏、宿主错误位置代理及最终Word/PDF门禁不足。
+source_closure_next_slice代理已完成并停止，报告`source-closure-next-slice/REPORT.md`、
+`probe-results.json`最终36/36、`closure_core.py`100行仅外置；零模型/DB/repo写，未接生产。
+最小下一片方案：同一M明确candidate carrier
+差集处置、已核源事实复用到既有C，不强制保所有候选/不按标题猜组。特别222旧保密target
+没有source_refs/excerpts，不能把历史available_targets直接当绿事实；独立源窗可从真实
+SourceIndex精确绑定该行，再核既有C complete_basis出口。未有生产接线，后继必须先读
+它的报告/反例再决定。注意首版主体并集被反例否证并撤回；物理table_id出现不等于财务
+两主体实例完整。两种安服合法修复出口（既有alternative或assignments/source_owner）及
+222用同源review fact进入既有C后恢复独立正文均仅反事实，不是真实模型成功回执。
+本轮所有代理均已完成，无在途模型任务/后台控制进程需等，不要重启旧任务。
+F角色BUG207、Word目录/源装饰BUG206均先记bug，尚待新实现；最小生产接线、明确五问/
+新合同冻结/真正受影响请求复验尚待继续，绝不标goal complete。
+
+
+以下是较早的v34启动记录，终态/新Word以顶部“最新实物结论”为准。
+
+v34已全部门禁通过并部署，四份真实outline已启动时的状态：481源码文件，冻结SHA
+`2bd56d86a0160d54dafb502e12af4f97395d567ed7013e95aff65b08f4c9f811`，收集3311唯一unit、
+135唯一真PG均全过、零失败/错误/跳过，478镜像文件逐SHA一致。专用PG资源已按身份清理。
+tag `kb-docreader:review-20261117-source-closure-v34`，image
+`sha256:39c5373cf5d34ce7071b17e9f7b94565966916870b46d979ca51dccec21df0aa`；五角色healthy、
+init 0，最新.env SHA仍d595fa7e…、受保护容器/旧人工Word字节不变。部署证据`deployment-v34/`。
+四份state已准备最新实际rev/SHA/机器Word作前驱，新的request_keys，不覆盖旧执行/旧文件。
+已启动任务：111 `web-outline-fa044617f2d66f88cf57a353924b9e3a4e91f6705382c8a853b46c7be860a266`；
+222 `web-outline-8d8ce67dda7dc1ac0895e5682824667a6ddbbad78f6e360458841fa318d4a96c`；
+Bidding `web-outline-4a345c485c752d224d357029b4ccc7acf4797e41a84bd16d7fa43669338e509e`；
+安服 `web-outline-2a2418baddbb510304dbd8116478236bdbd13cbcfc28e6aee8e9b117dd3920aa`。
+**不得重复outline_start**。使用`run_four_projects_v34.py`、`select_v34_generated.py`、
+`audit_v34_live.py`；state在`online-four-projects-v34/<key>/state.json`。
+代理v34_bidding_anfu_delivery拥有Bidding/安服的status→adopt→document_start→select→download；
+v34_111_222_delivery拥有111/222同流程，root勿重复动作。初次报告Bidding/安服A各两槽接受、
+M各一次sent无拒；111一A接受、另一在途，222首拒一次正在有限纠正，尚无新Word。
+API当前authoring的succeeded仍可能是v33/v30前驱，必须按state当前execution判身份。
+v34仅默认启用refs v12、新M来源分组/材料owner、F v2完整依据决议及精确来源分册修复。
+native joint B/C候选已撤默认spec启用：完整真实容量Bidding73包/安服55包，C全未决容量亦
+超94208/32768，不能当高效修复上线（BUG204）。候选/helper/124相关回归与原容量红保留，
+bounded_native_design_review正在外置只读核更小方案；源码冻结期间不编辑repo。
+BUG200决议完整mandate/真实target已进入全/compact/实际结构审核，独立68项过、P1关闭；
+BUG201来源卷10新定点、新M组20新定点及235相关回归过，旧29合同不变。Bidding离线
+反事实恢复3卷、230 target区与27原格保全，未代替线上新Word验收。BUG203已新M gate接线。
+
+
+当前独立环境实际为`kb-docreader:review-20261117-native-forms-v33`，image
+`sha256:a432c4b42f784d053dd569ab0b31dac1d1b6c404852cff80774d77dcac796c03`，465文件冻结SHA
+`ab986955b38d1ce3f672277a62789cc41d2853054811aaffed24e6c6b7fb867c`。3170唯一unit、134唯一
+真实隔离PG全部通过、零失败/错误/跳过，462镜像文件逐SHA一致；专用PG资源已清理。
+最新deploy/.env仍SHA d595fa7e3c90729431702383d88d81952d45e5152d87510267863751f37ba4b5，
+Grok/131072及既定私有low覆盖生效。五持续角色healthy，其他容器/原人工稿未动。
+
+四份v33状态在外置`online-four-projects-v33/<key>/state.json`，不得重复提交已有任务：
+
+| 文件 | 最新实际结果 | 尚未通过 |
+| --- | --- | --- |
+| 111 | outline c3d75983…，0个A接受、同错误6次后支持cancel，cancelled | BUG199协议修复后真实v2重跑；逐条原式扩行、BUG190/191等实物复验 |
+| 222 | outline d66fac8c…，0个A接受、同错误5次后支持cancel，cancelled | BUG199协议修复后真实v2重跑；双签授权函重复等实物复验 |
+| Bidding | outline b63aa991…、document b0effe4b…均succeeded；新version 3c6f7b46-3141-447e-a696-e5bbe898e5b7 / Word SHA 5544ecdda91b730f996d4ceeb5c67c4296854e85a92316b3c436df827f872d83 | 三组is_volume=false、ZIP零分册（BUG201）；27/27原格及总稿三部分/报价顺序已核绿 |
+| 安服 | outline f9211338…、document 904c8e4f…均succeeded；新version 6fba270e-4eff-41d3-9945-1d6b5a8dc347 / Word SHA 2f22df780abadc5fe439ea58f62fa9c6ac2c977631ed03a506ad51867a0d3ed2 | 0分册；11/16原格、S10三片全缺；26/28独立服务位；F两表complete=false未落展开（BUG200/201/202） |
+
+两份均经既有幂等runner采用、生成、显式选中新机器Word并下载，新旧版本DB/CAS/API
+字节一致且无编辑/待保存，旧人工稿未动。冻结容器相关提取已全部完成，后继只读审计
+不再依赖v33。两份完整身份/成本/证据索引分别见`two-delivery-review/delivery-summary.json`，
+源与Word独审见同目录`source-word-review.json`。Bidding本轮17发送/3重试/873200tokens，
+安服18发送/4重试/1005431tokens，本轮usage全已知；旧链费用/未知项另存，未编币种费用。
+严格无企业资料审计分别230/208单元、165/176规范空位及12负控通过。安服原书13→14→15、
+无关联承诺完整正文/签章绿；原服务检查器18/28保留，更正8项同源父标题前缀判据后26/28，
+S07/S08同target仅一组空位仍红，6负控全拒。Office保存/PDF视觉/最终四源一致性尚未验。
+
+当前源码已超过v33，**尚未冻结或部署v34**：BUG199新增v12阅读锚点operation/Schema/补充
+Prompt及pipeline/spec接线，54项focused通过；旧v11 Schema保持，只有精确旧成功回执才
+可无发送重验复用，不能升级旧错source_only回包。BUG190第一片native source ledger/helper
+已40新+79旧回归通过，第二片B/C生产接线由native_requirement_finish_design继续，不能把
+helper绿当线上已修。source_volume_restore正核BUG201来源分组物化；root负责BUG200职责
+及BUG202实审跟进，勿并行编辑各自函数。所有问题先记录bug-fix，后继全门禁须新快照。
+
+以下为较早轮次记录，版本/任务进展以本节及外置state为准。
+
+## 较早：v31安服与v32候选记录
+
+后继v32冻结/门禁已跑完但**未部署**：464文件冻结SHA
+`70b2671a3293c9d0a738782a262b0f6b25607f26cb4dc6897368362cca6c4ca8`，
+3161唯一unit为3159过/2红（均严格预算spec任务期望未加F，零错误/跳过），134唯一真PG
+零失败/错误/跳过（含新增F持久化、恢复及前驱精确复用零重发），461镜像文件逐SHA通过。
+专用PG容器/卷/密钥已按身份清理，source freeze各gate期间未漂移。v32镜像独立标签
+`kb-docreader:review-20261117-native-forms-v32`、image `sha256:4c38966cb4ab155729d0cb36c719df71eedff72870fd67119ce367d15cf21b3f`，
+不因镜像/PG通过而部署红unit。独立review另发现BUG197：native row join/context-body及
+guidance join实际输出变而结构review payload同，需修。证据`deployment-v32/`（含
+independent-review/review.md、source-join-structure-probe.json），BUG198为预算期望同步。
+freeze已解除：root已只补预算显式F期望，34项focused全过，不削弱整体相等/计量保护；
+assessment_response_design已通过followup_task重新启动，正在修BUG197，先红再绿，旧
+非native视图字节不变。它完成并明确停止前不要新冻结或部署。v33 helpers已准备但
+`prepare_v33.py`尚未执行；须等源码稳定后新unit/PG/build/SHA全gate，不覆盖v32原失败。
+
+v32四项目state已准备在`online-four-projects-v32/<key>/state.json`，均**未启动任何新
+outline/document**，仅固定此前真实rev/机器稿作为前驱；不要误把prepared当running。
+v33尚无state。`run_four_projects_v33.py/select_v33_generated.py/audit_v33_live.py`已准备，
+实际运行须v33 deployment-summary正确绑定。全部证据外置；原人工Word未动、未提交推送。
+
+几何/P/F post-ID hook已由恢复代理独立复核收尾、停止编辑：compile SHA
+`e699b7fd3c27c54090f07e8dacc7f8679445dc2046798603a32268f01e09fcde`（未纳BUG197修订），
+187相关unit全过；新几何只新增6条null→owner，未撤旧合法owner。离线新Word SHA455bee4f…
+父16表/28项局部应答保全，S10列碎片0、引用父target6/8/10，原三片无长文/应答夹入，仍有
+真实源页码/编号，不能称已清全部装饰。新SourceRefs摘要变，真实两槽A必须新发。
+BUG188完整M/F代码已168项相关回归、完整111 F输入15405/最坏结构输出14551/代表纠正
+输入26804准入；都未有真实M/F成功回执，人工32行oracle不变产品规则。BUG197修订仍待。
+BUG190 B-native设计已落`bug190-native-requirement-design-v1/recovery/design.md`，
+新代理native_requirement_finish_design正在**仅外置**implementation-draft写下一片helper/测试，
+尚未改仓库/接pipeline，不影响本轮冻结；root需在后继真实四源运行时继续此未完成项。
+
+效率只读工具`audit_generation_efficiency.py --round vNN`已在v31实读核验，按实际请求记录
+区分发送/重试/继承、区间求和/并集/生命周期及当前明确前驱链累计；usage未知保持未知，
+没有币种价格就不编费用。性能结论仍须质量相同后再比较，不能拿当前未验收稿宣称高效通过。
+
+安服v31实跑已完成：outline `web-outline-9496bb8597557fba86cd66aba621032ae10bd68a8bf6d8064558a009b7494d9b`，
+新rev `03822587-3718-4b22-9f6a-de13a603caaa` / SHA `36e8522c87fd24d0bb7d3f843866ede84592c33bf6bc81ea4ea589d1f6d2c586`，
+document `web-document-f2e2913eb5c395a8b829b55c0eb9d73dd2afa2031482da1bb6446224280420e3`，
+version `31fb04f1-84b2-42e3-a937-eddf4fc2526c`，Word SHA
+`7d063aac37c891827f04095d71e476138bc7ee00142395d08e0a3638e0fdb64c`。Word/ZIP已显式选中新
+机器版本、DB/CAS/API绑定下载，旧机器稿/旧人工稿字节不变。10次新outline调用零重试
+（A两槽精确继承，M1/B7/C1/P1真实发送）及1次文档结构核对；全部usage已知。
+独立28服务分母以完整源窗/实际接受P/Word target书签核28/28局部应答，v29同审计0/28；
+7类删除应答/证明/源字/重复应答/错误书签负控全拒，另4项确认其他全局应答仍在以防假绿。
+独立复核同时确认16/16原格/空白/merge、两卷真实子树一致、固定投标书13→14→15及独立
+合格性交付保留。严格无企业资料审计277单元/239空位及12类负控全通过。证据
+`online-four-projects-v31/anfu/`与`source-layout-integrity-design-v1/v31-word-review/review-final.json`。
+尚未通过：第三片续表仍后置、P S10重平铺原表碎片（BUG195）、两A共同漏无关联承诺使
+B/C改为unassigned（BUG196）；纯源装饰target在v31为form且实际没有应答，不再沿用v29
+“有应答”的旧事实。两卷初审尾比较false已保留，实为总稿4段pending附录，不是技术子树
+不一致。局部28/28不能覆盖上述新缺陷或整体模板验收。
+
+后继尚未部署源码：主体`subjects_alternative`已22新项/332相关回归及真实来源5/0，保完整
+正文/原格/条件仅选择主体布局；原式native_layout扩行已24新项/156相关回归，真实111
+人工oracle可生成一份四列表/32源条款且企业列空，但非模型选择/生产验收。M新variant及
+F来源选择正在接入，合同`source_bound_response_forms_v1`；P原表精确引用合同
+`source_bound_parameter_tables_v1`及保守bbox修复正在收尾。两合同已加入新的outline
+execution spec及逐键review_options传参，旧v31 spec实查均无新字段未改；最终新真PG须
+验执行恢复/CAS。A职责Prompt已通用修订，试验19项通过但另有clause/condition风险，窄化
+生产版未真实重跑；后继A摘要确变须新发，不以新ID抹Bidding旧失败额度。未构建v32。
+
+本轮两个原代理因sealed task服务错误中止后，已确认无其测试/探针进程、保留源码/证据，
+新代理geometry_completion_review复审几何/P及F最终编号hook、native_requirement_finish_design
+恢复BUG190只读设计；assessment_response_design仍接F。不要重复已终态两次诊断请求。
+
+v31于2026-11-17 09:58:57Z部署到独立环境，tag `kb-docreader:review-20261117-source-response-v31`，
+image `sha256:4a0a392f4e61a5c972e2fdb7d9a5f89cd05da046b26f1a3d0b8851e43e86ef15`。
+454文件冻结SHA `023e1f42b1a743083b2a9d742e3abb7e3e43d56785d32b25de7d0b026b2a2f4c`；3055
+唯一unit结果以“v30其余文件不变+本轮6个确切SHA+新收集3055身份完全相同”绑定复用，
+没有伪造一次新的测试执行。新133真PG零失败/错误/跳过、451镜像文件逐SHA通过，专用PG
+容器/卷/生成密钥已按身份清理，五持续角色healthy、init退出0。原.env、其他受保护容器及
+旧人工Word不变。证据在`deployment-v31/`及其`persistence-plan.json`指定的真实PG目录。
+
+安服v31 outline已启动，execution
+`web-outline-9496bb8597557fba86cd66aba621032ae10bd68a8bf6d8064558a009b7494d9b`，
+state为`online-four-projects-v31/anfu/state.json`；**不要重复POST**。已精确继承两个A成功
+回执，M首请求完整输入估算91164<94208并已发送。其前驱是v29，v30实际修改了M/C提示，
+所以M/C不满足精确复用条件，必须按真实摘要新跑，不能声称本轮只有一次P调用。B/P是否
+发送及费用按真实回执核，不从公式假定。v31尚无新Word，旧v29机器稿仍保留；后继
+`run_four_projects_v31.py --project anfu --action status|adopt|document_start|download`，选择
+新Word用`select_v31_generated.py`（已准备并固定旧机器稿身份）。只读`audit_v31_live.py`
+会导出各实际接受P的完整源视图/回包，供28项独立分母核验，不能拿P接受代替充分。
+
+本轮已部署两项源码修复：BUG189按同源组锚点恢复连续分册顺序，并一次反馈本阶段
+全部正文冲突对；BUG193不再因叙述章已有子章就跳过其自身长正文的逐项展开。前者9项
+定点/431项目录回归通过、真实四次拒收回包复核10/0；后者先2红1保护、后与跨页/原式
+回归21通过。新源码没有改变A/M/B/C阶段或额度，P仍每个既有长叙述章最多一次（不递归）；
+已部署，但安服新Word及Bidding旧Word仍待实物复验。加入BUG193后的最终全unit3055唯一
+用例全部通过，零失败/错误/跳过，耗时290.98秒，v31持久化/镜像门禁见顶部；没有沿用v30
+旧镜像的3045/133结果。两项实现前的成本/风险/修订五问及当前验证状态均记入bug-fix.md，
+证据分别`bug189-compiler-fix/`与`bug193-nonleaf/`，最终源码SHA/审查见后者`code-review.json`。
+部署前实查独立环境无活动authoring lease，原.env SHA仍d595fa7e…；旧人工Word仍为
+17f90/982b且无编辑或待保存。当前有3个并行任务：主体布局精确出口、评审原表扩行设计、
+来源几何/原式完整性核定；v31镜像已独立，后继源码修改不会热改该运行Spec。未提交/暂存/推送。
+
+2026-11-17 09:27Z续跑实查：111/222的v30 Word/ZIP均已真实生成、显式选中正确新机器版本并
+下载；生成各1次结构调用、零重试。旧机器版本与新版本DB/CAS/API字节在选择前后不变，
+无编辑会话/待保存，未操作旧人工项目。111 execution `web-document-e80df532aba4a40e02e472498c5f3a377ed30e226d898ec87c128595a7675957`，
+version `986d6119-7504-4b9f-8ea8-042025b24a10`，SHA `19b36e9ffdf019ef9eee300cecee94ad64e8ecdf634a0e67c8817142efeba381`；
+222 execution `web-document-97997fd715d4db54e6815a9693737daa36acde5a35ddd71b115725621182fa15`，
+version `954aef20-31fd-44e1-8b77-cad6566bfdf6`，SHA `294425afc670ac356385e625ad576e445d74e3ff368b19020af8dcce61a84cfe`。
+实物原件回归：111为5通过/1失败，基本表实际仅一份且财务两主体保留，但指定评审响应表
+仍没有原文条款；222为30通过/1失败，保密方案已落现有建设方案章，双签授权函仍重复。
+这些定点回归不覆盖BUG190/191等全部缺陷，不授予最终验收。两份严格计划绑定无企业资料
+审计分别316/108单元、268/80固定空位通过，12类负控全部拒收；粗下载审计“有blocks即
+编造”的误报仍原样保留。证据在`online-four-projects-v30/<key>/authoritative-audit/`、
+`source-reproduction-v30.json`、`strict-no-enterprise-audit.json`及`explicit-word-selection.json`。
+
+本轮已实际完成四份来源解析/材料阶段，四份新候选Word/ZIP均已下载并绑定版本；安服v29
+精确复用两槽目录成功回执，9次新outline调用零重试，另1次结构复核后Word出件。111/222
+现有v28实物仍有缺口，正在用v30修主体/方案归属。不能把出件或阶段成功计为最终通过。
+
+| 文件 | 当前实际产物 | 已确认尚存问题 |
+| --- | --- | --- |
+| BiddingFile | v28新Word/ZIP，27表；文档执行bd21286a… | 原件分册/报价相对顺序仍反；第二A槽4次拒收，未成功 |
+| 111 | v30新Word/ZIP，18表；文档执行e80df532… | 基本表重复已修；强制逐条响应表、版式污染与空栏目仍未关闭 |
+| 222 | v30新Word/ZIP，8表；文档执行97997fd7… | 保密方案已落章；一份双盖章授权函仍被错误复制两份 |
+| 安服 | v31新Word/ZIP，16表；文档执行f2e2913e… | 28项应答和原书14已修；第三片后置/P列碎片/无关联承诺回归仍未关闭 |
+
+前三份绑定与原字节见`online-four-projects-v28/<key>/authoritative-audit/`及同目录
+`template.docx/template.zip`。222新版本`402db1ff-aa65-4e75-8f48-5be5e4b0f613`已通过支持的
+API显式选为该验收项目当前机器稿，SHA`c66656d32fa57ed98315e8160d2031668effbaf44c8d8bdd3ad1673cd24e3a17`；
+旧v27生成稿仍逐字节可下载，旧人工项目17f90/982b未操作。111新Word SHA
+`a8a7a24f4f09e5d20cc9cd3d565a50814aea27ebdc1e6d68052b8d91fa19e0b7`，Bidding新Word SHA
+`169022769b0868db780f84a7c8f357b6c12960f0008baac068f139eb6db154b9`。
+
+v29历史镜像为`kb-docreader:review-20261117-material-coordinates-v29`，image
+`sha256:93b8650fb346b96366e48d6d45e6da0092f438322a1664c9097fe54c21332ad8`；冻结453文件，SHA
+`2379be099b523732c6e9e12258712acd2d26f260b13c1caeb627facba1220545`。3045唯一unit、133唯一
+隔离真PG全过、零失败/错误/跳过，450镜像文件逐SHA一致，4种新内存变异全检出，专用
+PG容器/卷/生成密钥均按身份清理。最新deploy/.env不变（d595fa7e…）、Grok/131072与既定
+私有low覆盖生效，源parser指纹仍7feba070…；独立服务健康，受保护容器及人工Word不变。
+
+安服v28已知不完整候选在记录96014>94208后经支持的cancel API停止，成功回执/历史保留；
+新v29已绑定execution
+`web-outline-b933d0f709d9fd39a62ec2518bda36a81bd3904f7abd9bfde0bfdcb6349e96ef`，不要重复POST。
+该outline现已succeeded，并已采用rev `a1a4b5f4-baa1-42a0-8877-585f35bd2404`；document
+execution为`web-document-7ad5c73f09a028a71f01254efd09665366bc3e4cda4fdb4498769da47c1dc9c0`，
+生成版本`e4e3062c-b5ba-497d-bba2-4204e12d6b3c`，Word SHA
+`28b0369cfb3946ed3f2a9d6dc7cf02ef47e1f6c5fa8e3a626651be5b7ff58db0`；
+`online-four-projects-v29/anfu/`有实际Word/ZIP及authoritative-audit。196单元/167固定空位
+严格计划绑定无企业资料审计通过，12类负控全拒；不关闭后述原式连续性和应答粒度缺口。
+实际M采用坐标数组输入、
+对象Schema输出，完整输入估算90966，真实prompt88270/completion8404、零重试接受；此前
+两份A只精确继承成功回执，没有重新付费发送。后续修订仍须按真实摘要继承，不热改Spec/重置额度。
+
+新增实证在BUG186–189及外置原件核验：222原有两组成漏项和非报价10章整表错挂已修；
+31项核验v27为21/10，v28为29/2，剩保密及授权重复。检查器已按真实报价根/子章和Word
+书签排除误报，保留旧非报价10章反例。111独立源审已完成21原式、基本表重复及
+逐条响应表红基线（3失败/3保护通过），目录`bug186-111-source-review/`，含完整评审分母；
+不以自审意见直接授予通过。
+Bidding独立原表审计确认固定文字/格/合并/空白完整，无规定原表缺失、无评标工作表当form；
+旧基线不认识两个有源锚的业务短名产生volume=null假错。已另建只增加两名称映射的基线
+变体，原基线保留；真实分册/报价顺序BUG189仍未关闭，不能借名称修正掩盖。
+
+v30仅改M/C两个提示：核双签/附证主体与独立整表实例、让完整技术方案子要求按真实职责
+落已有方案章，保财务明确双主体及完整保密义务。仍4+B+P，Schema/阶段/额度不增；只从
+既有来源候选选择，不做全局去重或强挂其他资料。当前真实Word实效见顶部；111强制逐条响应表
+BUG188还未设计/实现，不能声称这两个Prompt已解决它或全部质量缺口。
+
+v30已冻结453文件，SHA`ef2d138db0475bfd366f2633f45590249eb52692c8884109671017c549449c62`，
+检查日志/结果在`deployment-v30/`；
+PG运行身份由该目录`persistence-plan.json`指向，检查已全部通过且本轮专用PG资源/密钥已清理；
+3045唯一unit、133真PG零失败/错误/跳过，450镜像文件逐SHA一致，gate期间源码未变。
+v30已在2026-11-17 08:23:48Z部署，当前tag `kb-docreader:review-20261117-subject-scope-v30`，
+image `sha256:f2c59f4244e4d4e59be9737e59558317e21a32de4e887bc226962ea7e3578afc`，五个持续角色healthy，
+原.env、受保护容器及旧人工Word不变。后继M/C须真实新跑，
+A body没变时只精确继承成功回执；失败A槽不得靠新ID隐去失败费用或重置同逻辑额度。
+
+仅111/222有v30新outline启动回执，现均succeeded，不要重复POST：
+
+| 文件 | v30 outline execution |
+| --- | --- |
+| 111 | web-outline-13a71c9fe7d9a22e0851aa8b9bd5ebe51883c07204d258cc4fa7cd3c4617b0a1 |
+| 222 | web-outline-0dacff4c91f64910fd31443371d9d0e8e365a0611ae31574efd67b330cb4328b |
+
+两文件均已精确继承两槽A、M首轮接受；111为12次新调用/零重试，222为7次/零重试，用量
+全部已知。v30新Word已生成/选择/下载，绑定与复核见顶部。新candidate已核：111基本表仅一份（财务主体位置仍两份），
+222保密义务已落建设方案评价，但授权函仍为投标人/制造商两份。因此M/C提示修改有部分
+实效，却没有消除222主体误拆，不得再把通用提示更长或accepted当最终修复。下一步需先
+验证更聚焦的实例核定/明确源审决议出口，不能无依据继续重复全文件M或全局去重。
+入口`run_four_projects_v30.py --project 111|222 --action status`；
+对应state已记录v28前驱execution、document和当前draft rev/SHA，以CAS保旧稿。后续采用新
+outline后再生成，显式选择属于新execution的机器Word（当前可能仍指旧v28），确认无编辑/待保存
+且旧版本字节不变，再下载和重新源审，不能把旧current_docx当新结果。
+
+只读`audit_v29_live.py`首次读取继承A时因当前execution没有该旧model-request回执KeyError，
+不是业务失败。已保旧脚本/错误，沿同run/protocol/operation的明确前驱链只读查原请求体，
+验证摘要和source_projection后导出；v29重跑通过，v30 helper也沿用此修正，无模型/付费记录修改。
+
+新质量问题已记录BUG190–193：111兼容评分CPU词被源页脚/左栏残片打断；空“补充要求”
+源栏目不应成为独立应答章；安服表3三片断序/中插应答、28项独立服务部分共用一个空位。
+安服独立源审已完成34原式及28项工作，证据在`anfu-source-review/`；12项真实回归6失败/
+6保护通过，固定输入摘要全程不变。新增BUG194为原投标书第14项被迁走（独立交付仍有），
+不能混称材料漏交。16原表及商务/技术两卷与总稿同源一致、数值1/4/12小时保留、实际投标
+无关联承诺保留、企业回答/报价/外部动作未确认，均属通过的保护边界。以源原文/实际Word
+定位判断，不用P=0或表数计数直接判充分。源码的逐条响应表/原生逻辑续表/来源版式处理尚未
+修复，先看BUG188/190/192/193及该源审报告，实施前补五问，不能用全局去数字/去重或隐藏未决。
+
+BUG189外置核定已完成：`bug189-source-order/review.json`、排序RED 13通过/7失败、
+`rejection-diagnostics-red.json` 9通过/1失败。拒收第三回包同时有三组非法重叠（2065/2088、
+3120/3137、3120/3147），当次只反馈一组；最后额度才反馈此前已知技术重叠。完整原回包/拒收
+在`rejected-slot2/attempt-1..4-*`，源compiler仍拒收全部、额度/epoch/digest未重置。下一版可
+按同一authority且无priority_basis的连续有标题scope做机械源序（保cover/无标题屏障/子items），
+报价内部仍须A正确entry_ref971/972，不能把任意clause当排序；同阶段可一次报告全部已知重叠，
+保原拒收条件和合法独立实例。尚未修改源码或A Prompt，不得把外置可行性当实际修复。
+
+下一步：先冻结/验证/部署本轮BUG189/193新候选，精确复用A/M/B/C成功回执，让安服真实长
+父章进入一次P并核28项实际空位，生成新Word再独审；不能重跑新ID重置Bidding失败A额度。
+111/222的v30新Word已生成/选择/下载并复验部分实效，保旧稿；针对仍错的主体用最小完整
+源样本验证专职核定可行性，再按五问实施，不继续盲加M提示。并逐项关闭逐条响应表、
+Bidding顺序/完整冲突反馈、原生续表/后补服务响应、版式污染/空栏目及原书完整性。生成
+同版本新Word，完成Office保存/同SHA PDF/分册实物审查与重新生成一致性、调用/用量/耗时。
+仍未完成最终验收，不提交/暂存/推送，不借其他项目材料或编造企业事实。
+
+## v28部署及v29形成过程（历史）
+
+重启后的实际状态已重新读取。v27四个outline均已结束且无在途请求，但仅222获得材料
+接受回执：BiddingFile的材料四次纠正均被源校验拒收，111和安服的材料完整输入分别
+98989/110605超94208，零材料发送。不能把四个succeeded当作四份目录语义通过。
+222已采用大纲并生成Word，保留在`online-four-projects-v27/222/template.docx`及同目录ZIP；
+它是该独立验收项目的新生成稿，未操作旧人工稿17f90/982b。
+
+| 文件 | v27模型请求/重试 | 实际尚存差距 |
+| --- | --- | --- |
+| BiddingFile | outline 16/3 | 材料无接受回执，表头/来源取舍待修复 |
+| 111 | outline 14/1 | 材料超限未发，尚无Word |
+| 222 | outline 9/0，document 1/0 | Word已生成；两项真实组成漏独立响应，评分表错挂，未验收 |
+| 安服 | outline 19/0 | 材料超限未发，尚无Word |
+
+BUG185短ID已接入真实M发送入口，先重验精确旧成功回执，再尝试短ID回执；所有身份
+按命名空间恢复后走原Schema/原式/选择校验，映射摘要绑定请求，新合同写入execution_spec。
+12项新回归先红10项后全绿，132项相关回归全过；其中8项首次失败为旧mock仍用永久ID，
+已仅调整wire fixture并保留全部原表/拒收/Word出口断言。四源实际完整投影输入分别
+76808/83499/45521/92528，全部准入，逐原文/空白/grid及全payload往返完全相同。
+这些是本地验证，还不能替代新真实回包。
+
+BUG186独立核原件：222物理48页L42/L44的“建设方案评价”“产品源代码、知识转移方案”
+均被两槽共同漏建，composition误用格式标题/全书目录；物理33页整张评分889字被复制到
+10个非报价章。另一方面物理76页技术服务原式应保留，短业务名无需回退原名；不能照自审
+建议删真原式。A及章节要求Prompt已作针对职责的补充，仍4+B+P，必须以新实际回包复核。
+
+v28冻结453文件，freeze SHA
+`00791da65675d12d77bd1cdedbaa83317c6174c8228cc7a6cbc6c7742dd4b46b`；3042唯一unit和
+133唯一隔离真PG全部通过，零失败/错误/跳过，运行前后源码完全一致。本轮专用PG容器、
+卷及生成密钥已核身份清理，证据在`deployment-v28/persistence-plan.json`指向的run目录。
+候选镜像已构建
+`kb-docreader:review-20261117-material-closure-v28`，image
+`sha256:c023198b5755401da569ec0dfafbdbf916c363c72797159aa97c6f82269e02c0`；450包内文件与
+冻结逐SHA一致、parser指纹仍7feba070…，不重复套用旧unit/PG门禁。镜像检查不是业务验收。
+v28于2026-11-17 07:03:07Z部署完成，五个持续角色healthy、init退出0；受保护容器及旧人工
+Word身份/字节不变。新配置由最新deploy/.env生成，原.env未改，保持既定私有low覆盖。
+另用内存变异独立反证未知命名空间放行、映射绑定丢失、原表身份字段改写三种错误均被
+新回归捕获，未修改冻结源码；`deployment-v28/code-review.json`记录本轮范围复审。
+
+`online-four-projects-v28/*/state.json`已准备：复用同项目/同source绑定，新增请求幂等身份，
+明确前驱v27 execution。222同时保留既有draft rev/SHA及document前驱；其他项目无人工大纲。
+四个v28 outline均已有独立启动回执，真实状态为running；不要重复POST：
+
+| 文件 | v28 outline execution |
+| --- | --- |
+| BiddingFile | web-outline-6ddf72e681a6bbcbf8a588ccfeba590aed71ad002bf554cdd97152f8fb5d3a1e |
+| 111 | web-outline-b582b3e7e04690ba509c234557893aaf4e6c98ee4d200fe2bc0b84c10c48de56 |
+| 222 | web-outline-6cba260e232af7a9bf6f9240e86c5469de9768c26ca610cc5b0ff678c2249cf5 |
+| 安服 | web-outline-099a1f168032d7a873b2e3d20e367c9efde0897b14440aa02e4d86c350b9f4b1 |
+
+首轮实际wire审计确认每份请求发送完整106/101/77/118页、3622/3623/2801/4003源行，
+新A Prompt和low/Grok/131072配置均真实生效，材料身份合同已固定在各execution_spec。
+安服第一槽已接受并开始第二槽，其余第一槽仍在途；这是某时点快照，须先用
+`run_four_projects_v28.py --project ... --action status`及`audit_v28_live.py`核当前状态。
+新material尚无接受证据，不能把离线容量通过当线上材料通过。222当前显示的候选及Word
+仍可能属于v27，任何采用/下载须核execution等于对应v28绑定，不能沿用旧成品称新通过。
+
+222旧稿的严格计划绑定无企业资料审计为164任务/164单元/137固定空位、12种负控全拒，
+证明旧download脚本“有blocks即编造”的判据过粗；不关闭BUG186组成和错挂问题。
+其独立原件/实际Word红基线为20通过/10失败，实际只对应两个缺陷在多层的断言；
+`bug186-source-review/reproduction.py`可对新slots、workbench及DOCX复验，不强求长原名、
+不把正常勾选选项当源冲突。222两份外部引用沿既有来源盘点的具名待核边界处理。
+
+后续等待上述任务、核实际材料输入/回包/组成与评分归属，再逐项目采用/生成/保存与实物验收。
+旧v27 state和所有历史
+Word/ZIP不覆盖，旧人工项目和受保护容器不动。不提交、不暂存、不推送。
+
+## v27部署与启动事实（历史）
+
+v27已经完成新冻结/构建/部署：451源文件，freeze SHA
+`456f95b2f15eda0dbd09fd7121661b44d9f9daffa8e3ed4f772b42f43afc9b40`；
+3030唯一unit、133唯一真实PG全部通过，零失败/错误/跳过，运行前后源码完全一致。
+专用PG容器/卷/生成密钥已按身份清理。镜像448文件逐SHA与冻结一致，Python3.11.18；
+tag `kb-docreader:review-20261117-source-refs-glyphs-v27`，image
+`sha256:dcccb54a06217eb8c8044bc81f1807712359353573ed872dfa403e29299eebc8`。
+v26的18个PG失败仅由目录专用参数无条件透传None引起；v27将其限定在实际目录合同，
+非目录路径不收新参数。没有删断言/跳过测试或把v26旧通过结果冒作v27。
+
+独立5个持续角色healthy、init退出0，zhaobiao及其他受保护容器身份、Office/存储不变，
+旧manual17f90/982b当前版本与字节不变。部署证据`deployment-v27/deployment-summary.json`。
+实际使用最新deploy/.env（SHA d595fa7e…）的Grok4.7/131072/知识开关true，私有独立候选
+对未显式配置的reasoning_effort补low；原.env未改，显式用户值始终优先。此覆盖已提前告知。
+目录合同为实际接线的`source_refs_compact_plan_v11`，仍4+B+P；没有部署大型新分包框架。
+
+为避免替换旧人工稿，新建独立v27验收项目，原四项目及旧取消执行均保留。每项目仅上传
+其自身原PDF、SHA和物理页数均与原件核定一致，不借用其他项目或企业资料：
+
+| 文件 | 新project_id | 当前outline execution |
+| --- | --- | --- |
+| BiddingFile.pdf | 606d94ac-406f-5144-ab6e-e01dc1bdee59 | web-outline-5242d7aef1b486f0deba1347bce3359adf9d9f06b0dc59ddc57d7b6bd9ffc09c |
+| 111.pdf | d74deca4-8b03-5f40-97c3-95af3728f028 | web-outline-601ee5b943901e8043dec208c4478e516bfaf7de37a4fcfb80d412a4ea0f2325 |
+| 222.pdf | 650f789d-9c46-5975-9b64-24a644a0898a | web-outline-fae6d666eee6ad813a71cc5025e63ec272ab23922447ee2c86b6db207abfa4c7 |
+| 安服.pdf | 65331b39-2db3-5cfd-ab0a-3da57158c16b | web-outline-3c3aae31676c63dfc8620cdbe658c26bdf37201df7a1a95f065650e13cee7c70 |
+
+启动请求已回执并写入`online-four-projects-v27/<key>/state.json`，不要重复POST；先用
+`run_four_projects_v27.py --project bidding|111|222|anfu --action status`读取真实状态。
+首轮只读状态已确认Bidding/222运行，222第一槽已接受、零重试；111/安服也已成功提交。
+`audit_v27_live.py`是只读配置/新冻结/实际发送body摘要核对，首次查询含不存在的artifact
+created_at排序导致审计未完成，已去掉无关排序重跑；该脚本故障不是业务执行失败。
+后续若状态仍运行则等待既有任务，不能热改运行Spec或重置每逻辑四次额度。
+
+四份原件当前解析器指纹7feba070…的两次native解析每轮402页完全一致、PUA未核0，
+不等于目录、要求、Word/PDF及无企业资料模板的最终语义通过。当前真实新成品仍**0/4**，
+尚未采用新大纲、生成新Word或打开Office保存会话。下一步等四个正式outline完成，核
+actual body/条件/短业务名/组成顺序/参数/源要求，再逐项目采用→生成→保存Word/PDF/分册验收。
+任何发现继续记bug-fix并修复，不以大量待核、空Word或结构通过授予验收。没有提交/暂存/推送。
+
+## v25重启恢复与v26/v27形成过程（历史）
+
+### 重启恢复后的执行边界（2026-11-17）
+
+宿主04:00:42Z重启后，已检查原进程和持久化回执；独立`kb_isolated_*`服务已恢复且healthy，
+线上仍v25，没有重建或操作zhaobiao环境。BiddingFile、222、安服三轮v25执行已取消，
+无活动prepared/sent请求；111尚未启动正式模型流程。下文的“正在等待/尚未启动安服”是
+重启前历史状态，不应据此重复启动。四份新模板成品验收仍**0/4**。
+
+旧诊断4/5的脚本已落盘，但无preflight/结果目录；历史发送、远端受理/执行/计费均unknown。
+已确认旧客户端不再存活，未重放它们。新诊断6有不同的轻锚协议，保持完整106页3622行，
+只发现候选/组成/分册坐标与源块路由，发送前保存nonce、请求摘要、完整请求和send-intent，
+20秒持久化进度；沿最新env、原Grok/131072，零自动重试、360秒绝对截止。它只是可行性
+诊断，不能当正式目录或四源通过；结果见`live-model-diagnosis/anchor-only-probe6/`。
+
+当前源码另含尚未部署的BUG177 reasoning选项透传、BUG178精确字体数学符号及全源编号行对。
+恢复定向验证分别33项和23项通过；当前源码439文件固定快照的隔离真PG新62项全部通过，
+零失败/错误/跳过，证据在`root-integration/persistence-reasoning-19567b72f103e58f3e08/`。
+当前源码未全量unit冻结/构建/部署，
+不得套用下文v25旧gate。真实env未设置reasoning_effort，不能称medium已配置或已解决大请求。
+无损全源medium诊断3在360秒内仍0业务JSON，故仅压元数据未证明可用。
+
+有界目录方案在仓库外`bounded-directory-design/proposal.md`和`design-summary.json`；先验证
+全源轻锚，再决定局部明细或完整页块首次发现。材料包必须包含残余源块的遗漏发现、整批
+原子校验和跨包修复出口；全局版本变更最坏仍全链失效。没有新增正式Word、采用或保存操作。
+
+恢复后新的真实证据：默认强度全源轻锚6、全源短引用10均360秒仍0业务JSON；完整18页
+局部轻锚7在213.83秒返回27候选，短引用单职责8在89.32秒返回23候选；同请求显式low
+对照9为25.10秒，23个ref及顺序与8完全一致。全106页短引用low对照11为76.48秒，
+68候选/19组成候选/6组标题候选，均只证明坐标有效，不是最终必交或目录。真实.env未改。
+现有完整DirectoryPlan在low下12/13/14分别168.94/151.97/128.28秒返回完整JSON和usage，
+依次被原Schema、组成覆盖、正文重复所有权拒收；没有手改回包授予通过。原逻辑首次加
+三次额度由12–15共同遵守，15是最后一次原协议纠正；16是另一短引用Schema实验，单独
+记账，不重置旧额度。当前目标仍先验证可用最小路径，不先部署大型分包重写。
+
+BUG181已汇总一轮内全部未决组成名称，77项相关回归通过；BUG180新增parser_version及
+实际source_spec绑定source-only身份，真实PG先红2项后3项全绿，专用容器/卷/密钥已清理，
+证据`bug180-source-profile/`。当前PG仍非最终全量；新来源profile会生成新run，新一轮不能
+携带旧source-only run的outline/document前驱，旧manual及历史大纲继续保留。
+
+四源已按最新env分别做两次新原生解析，每轮402页，逐文件原文/原生单元/源合同摘要相同、
+PDF字节不变。发现111的16个F06C黑圆点后，BUG179经独立字体/视觉证据和失败回归修复，
+49项含真实原页/数学符号回归通过。后继`native-four-parse-v26/`中111不再有未核私用符号；
+安服仍有52个F06C及1个F0D8、12个source unit未核，记BUG182。该字体无cmap，不能套111
+程序或按PUA猜字形；正在核实际PDF Encoding/ToUnicode/CIDToGIDMap并建立反例。
+上述解析通过均不代替原式/要求/标题及真实保存Word验收，当前新成品仍0/4、未部署。
+
+### v26完整检查与后继修正（未部署）
+
+当前完整短引用合同`source_refs_compact_plan_v11`已真正接入Schema/Prompt/两槽、旧计划
+编译及恢复验证，仍4+B+P，无新分包层。原协议12–15四次合计约534秒才过源校验；
+短引用16首次137.37秒即过，实际total69700 token，对照原四次305967。独立原件审查另证
+附件7漏跨页签字/阶段混并（BUG183）和最终nest报价顺序颠倒（BUG184），故没有授予通过。
+后继集成17在208.10秒通过，已分开承诺/银行原式并选回物理88页签字；条件仍只选孤立
+勾选值，Prompt已补完整主体/时点/义务上下文约束，须在正式新双槽继续核验，不冒称已闭。
+
+BUG182已按精确字体程序+PDF Encoding/CIDMap/ToUnicode SHA修复；同字体交换编码、
+交换CID流及竞争资源均保未知，76项符号/来源绑定回归通过，独立source hash变异被测试
+捕获且生产文件未改。`native-four-parse-v26-final/result.json`证明当前解析器指纹
+`docreader-source-v2/7feba07058d2227c532598c2170dc4b9e1b8fe95745c7f00ef94e4db4dec2d13`，
+四源每轮402页、两轮native文本/单元/合同摘要完全相同、未核私用字符均0，原PDF不变。
+各文件单次约2.93/1.81/3.01/13.37秒；这是native解析证据，不是LLM或Word性能。
+
+v26冻结451文件，SHA`466655008f710ec62b0f5213575a70d758667f5992ca3f0d6f85e39f05f8c20e`。
+3030唯一unit全过、0跳过，镜像448文件逐SHA一致，Python3.11.18，镜像
+`sha256:f297a41f394ed2ab2010b446720488bd86084a0d86364891b3b6dd65ee16ff81`。133项真PG中
+18项失败：17项同一无关正文分支收到directory_contract=None的参数兼容问题，另1项由
+该问题导致等待超时；115项通过、无错误/跳过，不能当最终通过。已按仅目录合同存在
+才传该参数修正，需新冻结/完整unit及PG后继；v26专用PG资源已清理。
+
+Ruff新增/相关18文件通过；pdf_parser.py原有reading_order_text未用导入在HEAD与当前
+相同，已保存baseline对照，不删除无关旧代码，也不声称该旧诊断不存在。证据`deployment-v26/`。
+最新env SHA仍d595fa7e…，私有候选基于它、额外显式low、用户若显式设置effort则优先；
+原.env未改。当前运行仍v25、没有正式四源新Word或保存动作，后继须用新source profile，
+不携带旧source-only run的执行前驱，但采用时保留旧大纲rev的CAS及人工稿。
+
+### v25冻结及重启前记录
+
+用户明确要求`testdata/bid`四个项目全部满足完整性、一致性、正确性和效率，不能只用
+BiddingFile样本代表整体。四个PDF分别106/101/77/118页，总402页，项目身份和SHA已逐一
+绑定；111内嵌两个附件名称实际指向同一DOCX原稿，已提取核读并继续逐段/逻辑表核对。
+八个外部引用按投标/签约/后续执行职责分别处理，不以未定位引用自动阻断已提供正文解析。
+尤其BiddingFile不要求实际担保、111要求合同额5%，不得跨项目套用裁定。
+
+最终候选v25已冻结435文件，2876唯一unit、60隔离真PG全过，零失败/错误/跳过；
+v24首次全量被中断且发现旧TOC无编号断言，后继仅更新该断言保留全部链接/目的页检查。
+v25冻结SHA`a38354c900a7d4fdde80a423e6af96a63f3e34645fa003a6503ec90dd788d191`，
+镜像`sha256:c9894b37337e0570a76363a637d58b63f9a002a885f51c0f258ae1d6055b33e5`；
+432包内源码与冻结逐SHA一致，3份根SQL由PG gate锁定。专用PG资源与生成密钥已按身份清理。
+独立审查发现的BUG173非法源窗先成功、BUG174深层编号/辅助目录/孤儿顺序、BUG175参考
+范本不提交却仍在正文的组合矛盾均先红后绿；源要求裁定的case/合并/坐标/依据已进入交付追溯。
+
+独立栈已部署`kb-docreader:review-20261116-directory-integration-v25`及最新`deploy/.env`，
+Chat/VLM实际均`grok/grok-4.7@500k`，显式context为131072；知识库开关按文件真实值true。
+env SHA`d595fa7e3c90729431702383d88d81952d45e5152d87510267863751f37ba4b5`；候选配置
+清除宿主同名旧变量覆盖，保独立存储与Office配对设置。五个持续角色healthy，init退出0；
+所有zhaobiao容器及独立Office/存储容器身份保持，旧manual17f90/982b及历史包字节不变。
+env RERANK三字段当前仓库未透传，不据此宣称知识检索通过。
+
+四项目已实际注册：BiddingFile沿用`2e41e3da-d217-5d5b-8690-9d08ab4b2506`，111为
+`881eaa0f-434a-53b5-88ff-57120a83470e`，222为`c87888fc-0332-5749-b66f-32cd610b7174`，
+安服为`4db4e009-98bf-5b36-a97c-2911041775e0`。当前BiddingFile与222的新outline已启动；
+实际请求台账确认使用新Grok，首个请求仍在等待完整回包，usage未返回，尚无新Word。
+111/安服尚待正式新流程；旧直接目录调用和离线回放不能作新v10+新模型完整验收。
+
+四份新模板的真实成品验收为**0/4，持续执行中**。旧o200k预检峰值87365只是估算，
+须用新provider实际usage、重试、整份耗时及新回包再核；不调高.env上下文，不以请求已发送
+或基础设施healthy当业务成功。源目录、代码/gate/部署及真实运行证据均在仓库外
+`pending-closure-v1/`，动态状态仅本交接维护；不提交、不暂存、不推送。
+
+## v23 / v14验收继续：用户未接受最终通过（历史）
+
+用户明确“没通过还需要继续持续修复”，整体目标重新打开。上轮结构、保存链、
+Word/PDF/目录及交付包字节校验是已完成的技术证据，不能据此结束来源归属与适用性验收。
+当前50项待核已重建：18项计划冲突、5项适用性、4项候选未并入、23项要求未归属；
+此外还有未计入该50项的requirement_missing与authoring_input_missing，正在核定真伪。
+已证新问题包括电子签章/扫描原件条款在两请求块边界断成两项、已有专用不适用依据的
+条款仍未归属，以及无效子节点group差异形成的假冲突。真实企业未知继续留空，
+不能通过隐藏警告、改计数或将未归属全部改成全局要求来宣称解决。
+
+运行版本仍v23，实际保存稿17f90/982b及既有原始包、审查包保持字节不变；
+没有重新部署或打开编辑会话。新证据置于仓库外`pending-closure-v1/`，逐项源审后
+再记录修复方案、调用增长与实际验收。当前整体验收状态为**未通过、持续修复中**。
+
+### 当前修复快照：标题、来源闭合与容量（尚未部署）
+
+用户截图指出的长句/残句/裸附件编号标题记为BUG170；业务显示名已与原名/来源锚分离，
+材料现有读取统一命名，参数现有请求补短业务名，原文/原表不改，来源名称对应写入指南。
+正文使用原生Word层级编号，主件与分册共享宿主路径，可编辑标题不含宿主数字。
+348项目录回归零失败；50项导出/删除原式/覆盖/版式邻接回归通过，彼此有重叠不加总。
+新材料正式入口拒绝漏名、附件定位号及来源格式号；未知取舍和企业身份不伪称已满足。
+
+编号合成实物已在一次性、无网络、字体缓存只读的隔离Office更新目录并输出PDF：
+主件和第二分册均实际显示2/2.1/2.1.1，原可编辑标题、正文/书签/原表校验通过；
+这只是编号运行证据，不能替代106页真实原件的新名称和最终Word验收。
+证据在`pending-closure-v1/root-integration/native-numbering/numbering-runtime-audit.json`。
+
+BUG167来源闭合已接material目录取舍和B之后全源classification要求裁定，不新增模型阶段；
+跨块完整条款、外部待执行、本次不适用、企业条件待确认分别保留。公开指南保留完整
+参考范本、所选来源、原文及裁定依据。BUG168关闭5项确定假冲突；BUG169删除原式仍保分母。
+22个新目录case人工独审中20个有可验证来源选择、2个仍未决；这不是模型回包或正式关闭。
+67项旧50清单之外的源审已完成，63条missing对应64叶章：55有源载体、8引用待绑定、
+1空标题叶章；4条旧链input提示另列。6份第四章协议正文不在当前冻源及2类引用细节
+未定位记BUG171，没有批量清警告或编造来源。
+
+BUG172容量预检最初发现材料99504>94208，不能以其他请求继续运行冒充全量准入。
+材料全源行表示改为无损[行号,完整原文]后，完整13请求容量预检峰值87272，
+均在既有94208输入上限内，输出fixture峰值9071<32768；131072上下文/4096安全量未改。
+预检使用真实冻源、旧坐标及40字合成标题上界，未调用模型、未采用这些合成标题，
+不证明所有候选分支或后续实际请求；正式新材料取舍后必须按实际payload再量测。
+证据`pending-closure-v1/root-integration/capacity-v10-v3/report.json`。
+
+全量unit、真实隔离PG、独立代码审查和新实际模型/保存Word/PDF/三分册仍需完成。
+独立环境运行仍v23；本轮新增模型发送0，未部署、不提交、不暂存、不推送，旧17f90保存稿
+及既有包不改。新候选协议为`source_closure_business_titles_v10`，不能套用上轮测试通过结论。
+
+## v23 / v14上轮交接记录（历史，已被当前用户验收结论取代）
+
+本轮无企业资料模板及最终交付包独立验收全部通过：
+`overall_final_template_acceptance=true`、`final_delivery_package_acceptance=true`；
+`enterprise_business_acceptance=false`。50项待核（含2项重点unassigned）均保持未确认，
+人工处理出口保留；企业资料匹配、企业应答及这些人工决定不计为已完成。
+
+当前实际保存稿为manual `17f90e56-ff4c-4750-b99a-bb92384ee27a` rev9，115759字节，SHA
+`982b2c830f35a772b902db0f91305cfd1570da11d3c40468c089382a0ca84c6e`，直接parent为
+`ff54c637-bb71-4cd8-832a-e85f28c1ff9e`。同manual PDF90页，SHA
+`be8ea862277ef10a76b803d81eb73a6cbc5f54a78583d2e2634554a85ebe3a9d`；三份新分册商务35/
+技术36/报价11页，合计172页，179条目录目的页、27个原表实例及35参数均完成独立验收。
+v23实际运行源码417份逐SHA一致，2746唯一unit、真实PG58全过且零跳过。
+
+- [最终验收包](/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/reviewed-delivery-v14/无企业资料投标模板验收包.zip)：12193531字节，SHA
+  `2f624471ebd2983ef2134e898cf8cf5beda72718f1ed038a592c954d2b949dcd`。
+- [验收报告](/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/reviewed-delivery-v14/验收报告.md) ·
+  [最终回执](/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/reviewed-delivery-v14/final-acceptance.json) ·
+  [独立最终门](/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/independent-semantic-review/v14-Word-review/final-package-and-overall-template-acceptance.json)。
+
+包内及外部manifest SHA均为 `b8a0f9453689da594f92c06b02cf1025644a60171e28b75d77689cadcd45aa02`；
+独立最终门SHA为 `332c073f8e0088ef50897e55d020fe036e9c6ef0e5baecb8cf429367edc67e0b`。
+原7331a ZIP、a636生成稿及旧manual全部保留，当前17f90无editor/pending/未关闭session。
+v22冻结已作废，1056例中断不算全量通过，其build/PG仅保留历史证据且从未部署；最终通过
+依据v23/v14新证据。不提交、暂存或推送。
+
+## 历史过程快照
+
+以下v11/v19至v23/v14中间保存点保留当时事实，其中“待终审”“未关闭”等均为历史状态；
+当前结论与未确认边界以上方最终交接及最终回执为准。
+
+独立栈当前Python已部署v23，镜像
+`sha256:b2a24c0e71487278e3c68b4c98cecf60f47bbf89d16a7e01fc0b543e3bbefafb`。
+2746唯一unit、真实PG58全部通过，零失败/错误/跳过；417冻结文件与包内及运行中源码逐SHA一致。
+实际init退出0、三个持续Python角色healthy，Office/API及旧栈容器未变。最新只读实查
+当前为v14真实Office更新整目录后应用保存的manual
+`17f90e56-ff4c-4750-b99a-bb92384ee27a` rev9，SHA
+`982b2c830f35a772b902db0f91305cfd1570da11d3c40468c089382a0ca84c6e`，115759字节；
+直接parent为原generated ff54c637。真实callback/DB/UI与API下载一致，当前无editor、
+pending或未关闭session。原gen a636/105455字节、原ZIP7331a及旧e03ac人工稿均保留；
+正常同manual PDF90页，strict目录及raw→manual保全已过，视觉/分册/审定包尚待完成。
+
+v11目录 `web-outline-b55c1f60bb6a0e135d8923801cc3e9e47b3d950a2bf9e1e60a68d18a5adde02a`
+已成功，13逻辑回执均按实际摘要匹配后重验复用，新增模型发送0。候选SHA
+`ed62015f837386d7f3862ff7dbc32ccf4d26957fc913fda1516802731620b65d` 与独立四次回放
+严格相同，已采用修订 `63e0b729-7a1c-4034-81c4-4fe7243db864`。文档执行
+`web-document-d07d1a251bd113ead315b1a68c4c26aab9c0584a48782d7743ed5963880d5216`
+成功，1次structure、0retry/unknown，64742输入/1054输出/65796总Token。
+
+- 原generated `fd5f6501-0100-43f5-84e3-3707e73a905f` rev6，SHA
+  `b68c424b9fce18416546f9e0585487efbabd6369eac6066ff1f9548df5fb40b9`，107624字节；
+  raw DOCX/原ZIP/authority已保全，ZIP SHA
+  `a5d61d81c10c63913b7a9cfd5185a52d66dd6fdcd7a771641e7f77364350fa2c`。BUG-159原件
+  锚定封面门及ZIPnotes保全已过，不再出现原评分要求及应答空位污染封面。
+- v11经明确授权，真实UI更新全目录并应用保存；已保留manual
+  `e03ac0cd-bfaf-4284-82b9-e5934e92ed94` rev7，SHA
+  `01d70b010ec3ba3876ecab25caf07e4e014dd8bf2008ab6a45b632beebf752da`，118170字节，
+  直接parent为fd5f。实际callback/DB/下载一致，原gen及ZIP、v10坏raw和旧e5f3人工稿
+  字节不变。正常同保存版PDF95页；主TOC90条及三卷22+64+3条均按严格PAGEREF与
+  完整Dest实际页逐条匹配，无需二次刷新。长标题多annotation不按同页号误合并。
+- 完整来源/格文/合并/表头/kb锚点/media保全技术门已过，仍在实物终审发现三Required：
+  **BUG-160** 商务8D标题、主体标签与首表分页保留链断开；**BUG-161** 履约义务的
+  clause与目录entry同坐标机械重复；**BUG-162** 父级物理原文切片仍继承narrative应答
+  职责，在完整跨页原句中插入应答空位。根因及修复边界已记问题记录；三项均未关闭，
+  不以保存、目录页码或保全测试通过代替新实际Word及各分册验收。
+- 原保存流程8条console error已无dirty重现：read/edit各缺两份插件静态翻译资源，
+  各有SSL脚本获取及ServiceWorker注册错误；发生在载入而非关闭。真实保存/下载成功，
+  但不称全UI干净；来源分类证据保留，不为消日志改Word、证书或运行配置。
+- v19修复源码已按根任务明确指令冻结413文件，相对v18仅export、directory_compile及
+  三个新增unit文件变化；Prompt/Schema/spec及依赖不变。**2718唯一unit、真实PG58全过，
+  零失败/错误/跳过**，前后源码无漂移；候选镜像
+  `sha256:30ece39fa70ce79d4d39b71cae123b3433d3d7da3deb00ced37e19ef29c33200`
+  构建成功且413文件与冻结清单逐SHA一致。专用PG及凭据已按身份清理，全部验证进程结束。
+  独立复核另发现**BUG-163**：商务1.10.2同一原句在“中标人应”与后页“当就分包项目”
+  之间被响应空位截断。已确认requirement assignment单物理页窗口及Prompt同页约束
+  无法表达完整跨页条款，不是参数父载体问题。**v19明确不部署**，技术绿色证据完整保留；
+  根任务已明确解除源码freeze，仅继续BUG-163最小修复，后继须新冻结候选及实际Word/
+  分册验证。v19快照未启动新模型或任务、未获部署放行，禁止部署的结论保持。
+- v20已补BUG-163及**BUG-164**：已有来源node时，组成entry.name仅为命名点，不再
+  自动追加为独立义务；显式clause、原式、元数据和无node出口保持。真实新稿尚未验证。
+  已按根任务明确指令重新冻结415文件，目录合同升为
+  `source_roles_requirement_continuations_v7`，候选Dockerfile检查RequirementAssignment
+  的continuation_windows及v7。2736唯一unit及真实PG58均零失败/错误/跳过，源码前后
+  无漂移；build及415文件包内逐SHA一致通过，专用PG与凭据已按身份清理。独立160–164
+  源码评审无Required、完整技术门齐后，根任务明确授权并已精确部署四Python角色。
+  init真实容器复查退出0，三持续角色healthy；只改四image字段，Office/API/旧栈身份
+  不变。**这些是技术与部署通过，尚未授予新实际模板验收**。
+  v12 state以成功v11目录为前驱，修订父63e0b729、Word前驱d07d1；13响应仅在实际摘要
+  相同且重验有效时复用。v12目录
+  `web-outline-8396ccd3fb70eba4e632ffaae5a1c84f715c8b8bba7c532f72aeedb46cf14bd8`
+  已取得7个要求块新回包，实际物理sent8、retry1、unknown_usage1；未知用量不写成0，
+  不冒充完整总用量。来源独立门发现4组认证/检测/荣誉要求误挂8H失信截图，**源门不通过**。
+  根任务已hold，**未采用v12候选、不生成v12 Word**，不能以目录执行成功代替职责正确。
+  BUG-165最小修复现已落实：仅requirements目录为form/attachment附完整source_body、
+  为显式义务附source_obligations，material目录不变；这是payload上下文，不新增模型
+  Schema字段，不截正文、不让模型另写职责摘要。合同升为
+  `source_roles_requirement_duties_v8`，原4组误挂及其它目标仍须新实际回包逐源复核。
+  根任务已明确冻结v21共416文件，相对v20仅pipeline、requirement Prompt、execution、
+  acceptance断言及1个新unit文件变化；global Schema、要求response Schema、依赖及
+  material Prompt逐SHA不变。**2738唯一unit、真实PG58全部通过，零失败/错误/跳过**，
+  前后源码无漂移；候选镜像
+  `sha256:adfc91ac688b784e8c0fae9f970a2eeb682572616dbdccbe0228da2707929afa`
+  构建成功，416文件包内逐SHA一致，职责payload/Prompt/v8导入门实际通过；专用PG及
+  凭据已按身份清理，全部验证进程结束。根任务已逐SHA核定独立160–165源码及容量门，
+  无Required后明确放行，v21已实际精确部署四Python角色；init实际容器38400ae0退出0、
+  三持续角色healthy、416文件运行中逐SHA一致，Office/API/旧栈容器身份后验不变。
+  **实际新回包/归属/Word尚未验收，不以技术与部署通过授予模板通过**。
+  v13 outline前驱为成功v12 8396，因v12未采用，修订父仍
+  v11 63e0/ed620，Word前驱仍d07d1；预计7要求块真发，其余仅精确摘要匹配且重验后
+  复用。根任务已通过API启动
+  `web-outline-40878f2b18a03e14a1cef1838c62f636e02d131919650425e5d40a4036988334`，
+  平台子线程不重复启动或打开编辑器；仅准备v13专用路径及UI保护flag，不写旧轮文件。
+  v13新回包已正向修复原8H职责错挂，但源门新增**BUG-166**：跨阶段产生同源、同章的
+  机械响应重复；其它全来源审查仍收尾。**v13继续hold、未采用、不生成Word，尚未验收**。
+  BUG-166已先记录五问并完成宿主修复：绑定实际clause来源，逐章按来源subset去机械重复；
+  部分重叠仍保完整原文及具名待核，新issue接入既有Word/ZIP处理栏，不用全局同文删重。
+  根任务已明确冻结v22共417文件；相对v21仅directory_compile、authoring_coverage、
+  document_execution、PG合同断言及1个新增6例unit文件变化。Prompt/Schema/payload/
+  context及依赖保持，目录合同升为 `source_roles_same_chapter_ownership_v9`。
+  v22独立评审确认职责边界过宽：仅form原文载体及未实际生成common narrative的
+  obligation==body也登记为响应owner，可能吞掉合法独立应答。**v22 freeze已作废，
+  绝不能部署**；根任务拟撤_adopt_clause collector，仅为实际common narrative登记
+  ownerrefs，后继使用v23新冻结证据，不把旧候选绿色转记到新代码。
+  已按明确指令停止本轮fullunit：SIGINT优雅退出、exit2，执行1056唯一用例但整套未完，
+  **不算fullunit通过**。此前build完成，镜像
+  `sha256:18fc9924ce8b0d2f0fad9f075c249e1154e5e1bd80a5eebc899d858c758bf713`
+  及日志保留；真实PG58已通过，专用PG/凭据按完整身份核查后清理。全部验证进程结束，
+  live v21容器ID/镜像不变；新源码仅在这些进程结束后由根任务修订，平台不另启验证。
+  v23现已完成收紧：撤no-node collector，仅当obligations与body不同、确实生成common
+  narrative时保存ownerrefs；新增两个真实反例先红后绿，ownership共8例。已按根任务
+  明确指令重新冻结417文件，相对live v21仍5路径、相对作废v22仅compiler及ownership
+  unit变化；Prompt/Schema/payload/budget及v9保持。**2746唯一unit、真实PG58全过，
+  零失败/错误/跳过**，417文件前后/包内/运行中逐SHA一致，专用PG与凭据已清理。
+  独审角色边界及实际处理出口通过，实际13回执两seed×两时序四重回放仅删1机械重复，
+  新golden为 `ed86fd2ee15d9c91ad9cf0909b78090b7aaf2fe3bcf8200890fff5e73a021814`。
+  根任务逐SHA核门并明确放行后，v23已精确升级四Python角色；init实际容器018d2262
+  退出0、三持续角色healthy，Office/API/旧栈后验ID不变。v22作废证据原名保留不变。
+  v14以前驱成功v13 40878启动outline20ca1331，实际候选严格匹配该golden并通过正式
+  source gate，已采用 `c0b16446-652b-4ed1-82a3-a8c752f1afd9`/ed86，Word前驱仍d07d1。
+  文档执行 `web-document-f71b4d084f0ef93adb4cbc6ab8e892dd86274fc736c7feae1cc0fc2a027e3e27`
+  已成功，1structure、0retry/unknown，61680输入/1502输出/63182总Token；无writer/retrieval。
+  平台只读解析唯一gen ff54c637，成功job固定修订/执行outline_ref、DB版、实际CAS与API
+  下载逐SHA/字节一致后按既有API显式选择，receipt在v14目录；未等待人工誊UUID，未直接写SQL。
+  e03ac旧人工稿、fd5父稿及旧e5f3实际前后下载字节不变。根任务确认raw DOCX/原ZIP/
+  authority及cover/source/noenterprise必要门全部齐后，已明确放行真实原生UI；平台执行
+  更新整个目录及应用保存，发布唯一manual17f90，实际signed callback/DB新child/UI和
+  API下载逐SHA一致，另文件保存，ff54原稿与原execution result_ref不变。
+  正常converter仅取该manual，输出90页PDF SHA
+  `be8ea862277ef10a76b803d81eb73a6cbc5f54a78583d2e2634554a85ebe3a9d`；自身edit/view
+  全闭，Office容器/image/WQY字体及三个cache逐SHA不变，不使用liveDocBuilder。
+  独立strictv2核90 PAGEREF/92物理annotation→90 fullDest逻辑项，实际目的页0错，
+  raw→manual正文/27表合并/表头/书签/media完整，无需二次保存。90页同版图像及5概览
+  已齐，供独立关键图审；各分册实物独立验收及审定包仍待完成。
+  本次UI8console error实际归类为langs.json/zh-CN.json各2次静态翻译404，加4条SSL/
+  ServiceWorker载入错误，pageerror0，非关闭会话失败；不以保存成功声称全UI干净。
+
+证据根为 `/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/`。
+v20见 `deployment-v20/`（deployment/validation/init receipts）；v11保存链、源审计、PDF
+和console分类见 `online-template-v11/`；
+严格目录/原文独审见 `independent-semantic-review/v11-Word-review/`。v19技术证据见
+`deployment-v19/validation-summary.json`；v12实际身份见 `online-template-v12/state.json`。
+v21实际部署与后验见 `deployment-v21/validation-summary.json`、`init-receipt.json`及
+`runtime-source-verification.json`；v13实际身份及平台阶段边界见
+`online-template-v13/state.json` 与 `platform-phase-preparation.json`。
+v22作废与安全停止见 `deployment-v22/freeze-invalidated-stop-receipt.json`；v23实际部署及
+后验见 `deployment-v23/validation-summary.json`、`init-receipt.json`、`runtime-source-verification.json`。
+v14见 `online-template-v14/state.json`、`explicit-word-selection.json`及`platform-phase-preparation.json`。
+实际保存链见v14 `office-saved-{bindings,version,callback,chain}.json`，最终状态见
+`platform-final-saved-state-v1.json`；同manual PDF、renderer/字体绑定及90页图像见
+`office-saved-layout-v1/`。
+整体无企业资料模板验收未关闭；不提交/暂存/推送，保留共享工作区其它改动。
+
+## v17运行 / v18封面出口修复待部署（2026-11-16，历史快照）
+
+独立栈当前Python为v17，镜像
+`sha256:8beaf6ddadeb8226ba369c2f68752cb5882c3adac1fef81011cce6d8a54a8869`。
+2693唯一unit/真实PG58均通过、零跳过，410源码与包内逐SHA一致；init0、持续三角色
+healthy，Office/API/旧栈未动。实际v10目录零新模型请求并精确匹配六次真实回放golden
+`4e889e7799314b998c99ac286ca2550caa0c631af05e5816244f4dc7f676cb03`，37源义门通过。
+
+当前Word为已显式选中的generated v10 `8b03a257-c07c-4a4c-a2de-15e9984d8f51`，SHA
+`661b907a1950f287f166acad1ef174065d1220da275a9cf6981e6ae4d27350a6`，107885字节。
+raw DOCX/原ZIP、authoritative提取已完成且身份一致；**未编辑/更新目录/保存，仍hold**。
+独立实际Word发现封面评分原文/响应空位污染（BUG-159），不能用之前源门通过覆盖；
+旧manual e5f3字节不变。坏稿与原ZIP完整保留在 `online-template-v10/`。
+
+- BUG-159已先记录五问，再按明确COVER角色转要求为现有全局编制说明；8C关联/全部
+  ID校验/未知待核/普通同名section保持，原cover form不改，COVER不假报缺章内要求。
+  有效v17基线3红/3绿，修复后128相关通过；含实际DOCX前目录纯原式、ZIP notes原文
+  完整及混合企业章要求保全。最初缺snapshot字段的测试日志保留，不冒充业务红。
+- v18已冻结并行构建/unit/PG58，Prompt d548、Schema/spec/模型payload未变。构建及
+  PG58已通过，fullunit与source-bound COVER最终独立复验待齐；部署硬gate未打开。
+  current门检预期8b03/661b907…且无editor/pending，只升级独立四Python角色。
+- 新v11 state已准备，目录前驱为成功v10，预期修订父a94c25d5，Word前驱91a6，
+  尚未启动新模型或任务。正式新候选及新Word/Office保存、同版PDF和三个分册仍待验收。
+
+证据根不变。代码/测试 `bug159-cover-requirements/`，实物反例
+`independent-semantic-review/v10-cover-review/`，候选 `deployment-v18/`。
+整体无企业资料模板验收未关闭；不提交/暂存/推送，保留共享工作区其它改动。
+
+## v15 / v9 整框表头语义后继（2026-11-16，历史快照）
+
+独立栈已部署 `kb-docreader:review-20261116-directory-integration-v15`，镜像
+`sha256:cbb32ccc071ccc23e94d9fb0312d9ce24659ab69ee152e26972b1b1ee9618dba`。
+**2688个唯一unit通过，0失败/错误/跳过，281.26秒；真实PG58通过，0失败/错误/跳过，
+57.49秒**。410源码前后与包内逐SHA一致，相对v14仅材料Prompt新增一段，SHA
+`d548a9d409ecc3c3968fef0f40dd77363489a4ca4a11f0e8736de39b31d1cdb3`。
+Python逻辑/Schema/spec均未变，init0及三个持续Python角色healthy；Office/API/旧栈保护。
+
+- 新规则要求重复表头适用于整个grid；隔有数据/填写行的不同分块表头不能把首组当
+  整框公共头，保留真正公共起始头、连续多级公共头及0/null出口。不加词面或行相似度
+  启发式；Prompt独立复读无Required，但仍须看真实回包，不以写了规则授予通过。
+- v8最终候选SHA `e7aea0edda1e8f7eff6dacd3a778683c4912654b9be56b4976cfcd338c243ab3`
+  已完成37源门，除8E-1错误count1外无新Required；BUG-157修复正向确认，原式59/
+  叙述169/附证3均manual，35参数完整且前向无重叠。该候选未采用、未生成Word。
+- v9目录 `web-outline-5dc4f18e2cee1a23daa4b01cada4edc807fc9c24223227b7235be1787b57693a`
+  已通过API启动，显式前驱为成功v8，源/来源版本不变，实际摘要一致且重验有效才复用。
+  还没有采用、成稿或最终验收结论；当前Word仍为历史v6 manual e5f3版本，历史字节保留。
+- v9后续succeeded：13逻辑仅1材料真发，12按精确摘要重验复用，0重试/未知；83050输入/
+  453输出/83503总Token。23源表头回到正确0×5/1×15/2×3，27实例0×5/1×19/2×3，
+  37源义门全部通过。候选SHA `bebb1938ff87b6424ff5fd945c999714775144be1433450658e86e9f178671fa`。
+- 继续一致性对照发现BUG-158：五章25个要求槽位只重排、内容未增减，由并行one按完成
+  时序立即apply造成。已记录后以事件先2例失败，改为并行收计划、按blocks顺序应用，
+  分类也固定相位应用；保留sem2，中块/分类失败均有原块号出口。相关142通过，最终7
+  integration/调度组合通过；真实13回执两返回顺序完整canonical相同。
+- 跨hash seed又定位仅六条conflict顺序来自_choose的shared set，章节/目标/表格不变。
+  已补一行sorted(text_diffs)，源键顺序回归在seed33先失败后修复。v16中间快照unit2692/
+  PG58均通过且source-after无变，但不含该最后一行，保留不部署。新v17准备，部署前
+  需真实13回执在3种hash seed及两返回时序完整canonical一致。v10 state已建，前驱为
+  成功v9，尚未发新任务；目前没有采用新候选、没有生成新Word，整体验收尚未关闭。
+- v17随后正式部署：2693唯一unit全过/0skip、PG58全过/0skip，410源码与包内逐SHA一致；
+  独立6次真实13回执全canonical同SHA `4e889e7799314b998c99ac286ca2550caa0c631af05e5816244f4dc7f676cb03`。
+  v10正式目录 `web-outline-9995fcb3f2abca6669762c6324ccd2f7eea8640d53ebf2cbd200995dd89d2d71`
+  succeeded，0真实模型发送/13精确摘要重验复用，实际候选严格匹配该golden。
+  固定修订 `a94c25d5-4a4c-44f4-b09a-6919fbc41cb9` 已采用。
+- v10 Word执行 `web-document-91a6deaff5f46385eccd321c08830aa6e3b5813f713723090c5cf44e5520569f`
+  succeeded，1结构请求/0retry/0unknown，64872输入/1367输出/66239总Token。新生成版
+  `8b03a257-c07c-4a4c-a2de-15e9984d8f51` rev5已按API显式选中，SHA
+  `661b907a1950f287f166acad1ef174065d1220da275a9cf6981e6ae4d27350a6`、107885bytes；
+  原ZIP SHA `e59185c4772b15a7dafd26ea08dc2733db9c09965030962edc42dbc130063343`。
+  raw下载/ZIP主稿/CAS/DB一致，1606段/27表/569空格；authoritative提取完成。旧manual
+  e5f3实际下载及SHA保持；未打开编辑、更新目录或保存该新稿。
+- 实际Word/ZIP审查确认BUG-159：源评分要求被分配cover+8C，真实封面/目录前出现评分
+  原文及应答空位。37源门只查原封面存在，漏检额外污染，故未授予Word通过；平台hold。
+  已先记录并按明确COVER角色把要求转全局编制依据、保8C与所有ID校验，原form不改。
+  初测试fixture合同已纠正，真实v17基线用有效tests红=3失败3通过，当前128相关通过
+  （含实际DOCX前目录无评分/应答、原封面字段及ZIPnotes原文）。新v18准备/复核中，
+  新v11 state前驱为成功v10，预期修订父为a94c25d5、Word前驱91a6，尚未启动。
+
+证据根不变，新轮 `online-template-v9/`，冻结/部署 `deployment-v15/`，独占PG
+`bug149-tests/persistence-v15-platform-20261116/`；原件复核 `independent-semantic-review/v8-final-review/`。
+整体无企业资料模板验收仍未关闭，不提交/暂存/推送。
+
+## v14 / v8 条件保全后继验收（2026-11-16，历史快照）
+
+独立栈Python已部署 `kb-docreader:review-20261116-directory-integration-v14`，镜像ID
+`sha256:a3f1cbed4471016886d1d7b3a758e66a489a6e5951335a0b54608dd23f5219bc`。
+**2688个唯一unit通过，0失败/错误/跳过，282.96秒；真实PG58通过，0失败/错误/跳过，
+58.77秒**。410源码前后及包内逐SHA一致；init退出0、三个持续Python角色healthy，
+只切独立Compose四image字段，Office/API及旧栈容器ID不变。测试PG/凭据已按身份清理。
+证据为 `deployment-v14/`、`bug149-tests/persistence-v14-platform-20261116/`。
+
+- BUG-157新增9反例、独立23相关回归及真实两计划离线回放通过；52章位置/正文/原表/
+  主体均不变，只补原厂授权的明确源条件，附件10不同条件保先值且完整具名待核。
+  Prompt/Schema/spec不变，不改旧回执。BUG-156源字体投影、683行几何owner保全及
+  BUG-152的caption/8E新页规则仍在同一冻结候选。
+- v7已成功但未采用、未出Word；最终API/CAS候选SHA
+  `cfa6259a285148dfcd00b5b7b95a5f021a177c706ad53f8afbce8509d727fe6e`。
+  独立37源范围审查除BUG-157外无新增Required；27原表、双财务角色、165叙述/3附证
+  填写出口及35参数（8通用+27硬件）均完整，六评审表排除，跨页完整且同父无重叠。
+- 新v8目录 `web-outline-316cf53f67c80e54216af5550b31614c8475276c9bf6feb054daba81cf35cade`
+  已由API启动，显式前驱为成功v7；同一106页原件/source-only run、source_version与
+  domain_revision均1。实际摘要相同且重验有效才复用，条件上下文变化的材料/要求真发。
+- 当前Word仍为历史v6 manual `e5f3f789-5715-4c60-9284-06e57cb623f7`，SHA
+  `561d1cc2bcd2d25eaea42377b86d4b92d63dcbe479971847a92f625b69402eff`。
+  未用新候选覆盖该稿，所有历史生成包不变。v8的最终采用、真实成稿、Office保存/同版
+  PDF及三个分册实物审计仍待完成，**整体模板验收尚未关闭**。
+- v8后续已succeeded：13逻辑单元中8真实发送、5按精确摘要复用，0重试/未知，
+  204322输入/10414输出/214736总Token。auth条件及附件10双来源具名待核已在新执行
+  正向确认。但新材料回包把8E-1两组不同列名原框误判count1（原v7为0），源网格/
+  模型可见输入完整、原始response本身错误；此候选不采用、不生成Word。
+- 已先在BUG-152记录新反例与五问。下一候选v15仅补材料Prompt的整grid适用边界，
+  区分隔有数据/填写行的不同分块标题与连续多级公共表头；0/null出口保留，不引入
+  词面或行相似度启发式。v9 state准备，前驱为成功v8，尚未发模型；正式新发/复用
+  仍按实际摘要与回执重验，不因预期只改1调用而降低准入。
+
+证据根不变，新轮 `online-template-v8/`；独立源审查 `independent-semantic-review/v7-final-review/`，
+条件回放 `bug157-review/`。不提交/暂存/推送，保持共享工作区修改。
+
+## v13 与 v7 后继真实验收（2026-11-16，历史快照）
+
+无企业资料模板目标不变，尚未授予整体通过。独立栈已部署
+`kb-docreader:review-20261116-directory-integration-v13`，镜像
+`sha256:fba3850f7ee2b594c6550163d85fad196daa5774ce152795400866311c91c8f2`。
+410个冻结源码文件前后及包内逐SHA一致，**2679个唯一unit通过/0失败/错误/跳过**，
+300.72秒；真实PG **58通过/0失败/错误/跳过**，60.12秒。init实际退出0、持续三Python
+角色healthy；只改独立Compose四Python image字段，Office、API及旧栈容器身份不变。
+证据 `deployment-v13/` 与 `bug149-tests/persistence-v13-platform-20261116/`。
+
+- BUG-156最终先绑定原版式几何，再作有源字形投影：真实原件106页的行号/字符位置不变，
+  16处F052→☑、1处F0A3→□，683条native表行owner全部保留，原PDF/raw/index不覆盖。
+  未证实/冲突/重复/计数或类型异常均保原字，具名待核有Word人工处理出口。
+- BUG-152原式说明/主体接到后继原表；8E-1两组列名不能重复统一首头，额外keepNext
+  实验无效不入产品。本章起始纯源form文字→明确count0原表才给既有heading新页，
+  独立4反例通过且真实v6仅8E命中，隔离实物无新增空白页。新项目实物仍待复验。
+- v7新目录 `web-outline-be847cac72c4d7e714081a60cec306568f4756cc6ea73be145abe0a3e97e869f`
+  已通过API启动，沿同一source-only run、106页原件、source_version/domain_revision1，
+  显式目录前驱为v6；合同 `source_roles_continuations_headers_symbols_v6`。真实已发送
+  第一slot的持久model-request/CAS已读核：payload私用字0，☑16、□18；不是仅从代码
+  重建Prompt。摘要变化请求真实重发，相同且重验有效的后续才能复用。
+- 当前主稿仍为v6的manual版本 `e5f3f789-5715-4c60-9284-06e57cb623f7`，SHA
+  `561d1cc2bcd2d25eaea42377b86d4b92d63dcbe479971847a92f625b69402eff`，旧生成稿/ZIP
+  不变且无编辑或待保存。v7尚未采用/成稿，新模型可见来源正确仍不等于模板最终验收。
+- v7后续已succeeded：13逻辑单元/13真实发送/0重试/0未知，450108输入、33407输出、
+  483515总Token。三分册/必需原表及评分表排除前置通过，但独立原件复核确认BUG-157：
+  两槽都有原厂授权条件，祖先subtree先收子节点后seen去重丢了明确条件；候选不采用。
+- BUG-157先记录后新增6反例（5失败/1通过），宿主仅补空条件、保先非空值并明列冲突，
+  新clause校验后只待核保全不自动合义务；116相关通过，补齐无选择不清除/同值幂等/
+  已承载clause不造冲突后15条件回归通过。新v14快照准备，尚未部署；新v8 state已建，
+  前驱为成功v7，正式请求只按实际摘要复用，条件上下文改变的材料/要求需真实新发。
+
+证据根仍为 `/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/`，
+新轮 `online-template-v7/`。源字形/owner复核 `independent-semantic-review/bug156-*`，
+分页实验 `credit-grid-isolated-pagination/`。没有提交、暂存或推送代码。
+
+## v11 / v6 与真实 Office 保存版验收（2026-11-16，历史快照）
+
+本轮仍只验收无企业资料模板，用户已授权持续验证修复。以下旧节保留对应历史快照，
+不作为当前运行状态；最终整体结论需同时覆盖实际保存主稿及三个独立分册。
+
+- 独立 Compose 项目 `kb-isolated` 的11个持续服务健康。Python四角色为
+  `kb-docreader:review-20261116-directory-integration-v11`，镜像ID
+  `sha256:317799b57f92f7b8628dec58dda99d83b28bf480adf0ebb9cc6d7d7a1a4109ea`；
+  Rust/Web仍为 `kb-isolated:runtime-20261116`。没有操作属于zhaobiao的同名旧栈。
+- v11完整unit **2652通过，0失败/错误/跳过**，411个冻结输入无漂移；独立真实PG
+  **58通过，0失败/错误/跳过，54.06秒**，测试数据库/secret已按身份清理。证据分别在
+  `deployment-v11/`、`bug149-tests/persistence-v11-platform-20261116/`。
+- Office已持久切换 `kb-onlyoffice:review-20261116-cjk-v1`，镜像ID
+  `sha256:fd7dd88841c1b79e5746b0b9783136d1ca9a61814563638f3b3d4e1ebb3e358c`。
+  仓库 `deploy/Dockerfile.onlyoffice` 固定官方基础镜像及既有WQY字体指纹，统一注册和
+  字体缓存；字体修复本身没有改变来源Word字节。副作用试验只在隔离容器执行。
+- v6仍为同一106页 `BiddingFile.pdf`，源SHA
+  `4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc`，
+  source_version/domain_revision均为1，分析未自动确认。目录执行
+  `web-outline-f930f18beb93212185f5621d84451df1a38963facc0a70ba43ddc9d4c1331cbd`
+  succeeded，13逻辑单元只有材料1次真实发送，12次按摘要重验复用，0重试/未知用量；
+  82978输入/453输出/83431总Token。23个唯一源表头判断全部显式，27实例分布
+  `{0:5,1:19,2:3}`，原正文/要求/主体/条件/参数与v5一致，独立来源表头门检通过。
+- 固定目录修订 `aae5d94b-dd9c-4c6e-8338-d158d8e513ff`，SHA
+  `a7e02953c815c897199ccca4a9f2f21a3334950686b9c70e1b78b27ae9c12e81`。
+  Word执行 `web-document-65c529f53cdb5fd4bf2d6a1d1d6110710b20e3353d4040756f213fce33fafa25`
+  succeeded，仅1次authoring_structure，64852输入/1159输出/66011总Token；无企业检索、
+  authoring_write、企业填值或实际附证。严格审计240任务/180宿主空白及12负对照通过。
+- 原生成保存版本 `ab967837-84c5-435b-8426-18d25c2aeb61`，Word SHA
+  `ec5d6cad4c5ea262a7944628f8e19227d26e6b0a9201ef10318592df11208ccb`，
+  原ZIP SHA `555da112912a36cdf5c12340fd1ddac6dd24af2be0820bbcb345781708ba5c39`。
+  原生成稿、ZIP、execution result及其不可变引用保留，不用手动保存版覆盖。
+- 已通过真实网页“引用→更新整个目录”及应用“保存修改”，核验Office callback、
+  `tender_draft_saves.saved`、下载字节及父子关系。当前manual保存版本
+  `e5f3f789-5715-4c60-9284-06e57cb623f7`，revision4，115348字节，SHA
+  `561d1cc2bcd2d25eaea42377b86d4b92d63dcbe479971847a92f625b69402eff`。
+  自身编辑/查看会话已关闭，父版字节保持。独立bindings及保存链分别为
+  `online-template-v6/office-saved-bindings.json`、`office-saved-chain.json`。
+- 独立核验manual版240目标书签及非表来源正文、27表文本/空白/横纵合并/头标、
+  176响应空白、4待附位置及具名条件未变；目录“待计算”为0。**同保存版PDF视觉、
+  真实页码与三个独立卷目录正在验收，整体尚未关闭。** 原ZIP的分册缓存不能借主稿
+  手动更新判通过；逐卷在隔离字体缓存容器刷新，另留来源及字节绑定，最终交付包另名。
+- 原件只有整稿共用封面依据，没有明确逐卷复制封面的要求，不增设无来源阻断。
+- 继续实物检查确认主稿2A的表名/表号/币种单位与首次表格完全分离，独立商务卷另有
+  8D-4表名落前页。故没有给v6整体通过。已先补BUG-152并以主稿/分册及narrative/跨章
+  反例建立回归（1失败/2通过），窄修同章原式文字→后继原表的keep-with-next，原表主体
+  标签接续、数据行不整体粘连；相关80通过，追加主体断言后的3定向通过。Prompt/
+  企业空白不改，新v7目录/成稿准备中，尚未启动新模型任务。混合注释与
+  下一表名共处的8D/8E/8I源段须特别实看，不把宿主分页约束宣传为caption语义识别。
+- BUG-156已确认目录版式文字绕过冻结的源字体证明；独立全原件清点17处来源私用符号
+  均有有效嵌入字体证据。新增逐页等义投影、缺证据/混合含义/重复证据/计数与类型异常
+  保原字及具名出口；真实联动审查又发现先投影会丢17条几何表绑定，已先记录并改为
+  原版式完成owner绑定后投影，保持模型可见正确符号及原行坐标。新目录合同为
+  `source_roles_continuations_headers_symbols_v6`，新请求只按实际摘要复用。
+- 中间候选v12未部署：构建及410文件指纹通过，完整unit2675通过/零跳过；真实PG
+  57通过/1失败（旧case仍断言v5协议），失败和已清理独占PG的证据保留。随后已精准
+  更新该协议断言并修owner顺序，须在新v13快照重验，不能借v12绿测宣布后续通过。
+  离线caption预检确认2A/8D-4已连接，但8E-1仍有列头留页；两种额外keepNext实验均
+  无效，未放入产品。正在以外部副本验证明确分页边界，旧在线主稿/原ZIP保持不变。
+
+证据根为 `/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/`。
+当前实物 `online-template-v6/`，字体 `office-cjk-fix/`，独立审计
+`independent-semantic-review/`。没有提交、暂存或推送，保留共享工作区既有修改。
+
+## v10冻结、新目录v5与原件逐项验收（2026-11-16，历史快照）
+
+目标仍是无企业资料模板，用户要求持续验证修复直到实际验收。下方历史v7/v8、未生成Word
+等描述只保留对应快照含义。当前独立环境Python四角色已切不可变v10，Rust/Web保持本轮
+runtime；init退出0，11个持续服务健康，没有操作既有zhaobiao栈或提交/暂存/推送代码。
+
+- v4目录 `web-outline-16bc16212016c97c9a4770befff8ee0eed43c10bef199d788e0bb5056f91eba0`
+  技术succeeded，13次发送、1重试、0未知用量，453901输入/38904输出/492805总Token。
+  两槽、1材料、7要求、1分类、2参数；三分册/原网格/五技术表阶段检查通过。
+  最终候选SHA `1a9cc94c2d6e5568b254a3eeb47558ad41d76c4098066de2296276196bc85b81`，
+  未采用、未生成项目Word。独立审查的4个真实阻断为：附件7条件无具名待核、跨槽8H重复、
+  原封面漏选、单页参数协议使跨页条款拆残句/交叠。不是只剩一个condition问题。
+- BUG-151补齐条件/补充义务差异、合并后精确源重叠保护及最终采用章的条件issue；
+  不裁正文，不按相似度删不同来源/实例，不把被挡父章后代挂到消失父章。
+  条件片102相关通过、跨槽片110唯一相关通过；最后两处有效审查反例2失败→26相关通过，
+  独立定版24通过。参数已校验项由宿主按注册来源位置排序，不为机械顺序新增模型纠正。
+- BUG-153把已有cover职责接入目录，保全来源封面空白并置于目录前，2例失败→相关86通过；
+  BUG-154增加同参数continuation_windows，跨页条件/证据一目标，成功回执前拒非法来源/
+  逆序续窗/同父行重叠，11新回归及相关115通过。新执行合同为
+  `source_roles_and_continuations_v4`，旧执行和Word不热改。
+- BUG-152保留实际章节/书签的可点击目录缓存，不虚填页码；原PDF统一字号/行距/内边距
+  只在原几何可核时恢复，表首行不孤页，不猜重复表头。相关82通过，离线27表逐格文字及
+  空白不变。Office CLI能力实验中文方框负证据保留，不引入生产；最终视觉仍走保存同版
+  converter，不把离线预览当项目保存版本。
+- v9冻结回归2622通过、58真实PG通过后，独立审查又发现跨item逆序和第二槽condition
+  issue丢失，故没有部署v9或冒称其已覆盖最后修复。v10最终**2624个唯一unit全部通过**，
+  0失败/错误/跳过，297.03秒；408构建输入前后无漂移，Ruff/diff通过。v10独立真实PG
+  **58通过 / 0失败/错误/跳过，58.62秒**；410文件前后无漂移，408部署清单匹配，测试
+  schema清净，自建PG及secret文件已核身份删除，不触碰真实独立栈。
+- 当前v10镜像 `kb-docreader:review-20261116-directory-integration-v10`，ID
+  `sha256:02ae0312167b379070b98d8a60a2cc0af90c0a852274a928dc62987598331be9`。
+  新真实目录 `web-outline-2f6509b054020fc7a5b08f56e9e6fe18a0b582459b1320b7c6e29a5cbda53dee`
+  已完成，仍同一106页原件/run/source_version1/domain_revision1；15次发送/3纠正/0未知，
+  实际626183输入/62457输出/688640总Token，13逻辑单元。候选经37项原件完整门检，
+  固定修订 `77125d1c-3220-40f1-8eed-d42283dfc2a7`，SHA
+  `a90cee037ef1c09d1ad8edbbf2056fd0dc88c76d5c87bbe8a4c033799c5a3913`。
+- 真实Word执行 `web-document-f2f08ce8c0afbf2a9c2ded0a2fa084d8f3bc9aa7bf669b59a095cd7e94417364`
+  succeeded，仅1次authoring_structure，64852输入/1452输出/66304总Token，0重试/未知；
+  没有authoring_write、真实知识材料、cell_fills/row_fills或实际企业附件。保存版本
+  `648d99e3-e167-4536-a542-2c73d7c4adf5`，Word SHA
+  `67d5ac1e32415627e8a5278c75970f8c6f7d979770311393576b078fd816e1d7`，103708字节；
+  ZIP SHA `77ccfe7a3a60a0d83da4556a22175b8be48d638470449384c484fd2c5af14e3b`。
+  1644段/27表/569空格，240目标均manual；176叙述/4附件有实际宿主空白，90目录链接
+  全部指向真实书签。新稿在确认旧稿SHA及无编辑/待保存后通过既有API显式切为current，
+  旧v3 Word下载字节未变，回执`explicit-word-selection.json`。
+- v5权威CAS/数据库/下载Word绑定一致；27表/23唯一源网格、104原文锚点、全部必需原式
+  及双主体财务各四表审计通过，无无据重复。严格无企业资料审计240任务/240单元/180个
+  逐字宿主占位通过，12负对照全拒绝；初版“非空blocks即企业生成”误报原报告保留，
+  更正后报告为`download-audit-final-technical.json`。独立实际Word37项/240目标语义与
+  出口审查通过；不据此授予最终视觉/业务通过。
+- 同版converter已转76页PDF，自建view会话关闭。但真实PNG中文普遍为方框，两个独立
+  审查者确认，**视觉验收失败，整体模板仍未关闭**。当前Office fc-list无可用CJK，PDF
+  未嵌CJK；Word XML中文及字体声明完整，与历史配置一致，历史v3 PDF字体来源未定。
+  BUG-155已先记录，正以独立不可变Office字体候选持久修复，不改Word字节/旧栈。修复后
+  固定同Word版本重转，必须重验表头/标题分页、签章/粘贴留白和全稿可读；不能以字体安装
+  或转换成功替代视觉通过。
+
+证据根不变。新轮`online-template-v5/`；冻结构建/完整unit在`deployment-v10/`，PG在
+`bug149-tests/persistence-v10-platform-20261116/`；独立缺口与代码复核在
+`independent-semantic-review/`，修复反例分别在`bug151-condition-merge/`、
+`bug151-cross-slot-ownership/`、`bug152-tests/`、`bug153-tests/`、
+`bug154-parameter-continuations/`和`v9-review-regressions/`。实际模板业务验收尚未关闭。
+
+## 真实Word语义查漏与BUG-151（2026-11-16，持续验收中）
+
+用户要求持续验证并修复直至验收，当前目标与独立环境不变。下列为本轮实际身份和结果，
+不把旧节“尚未生成Word”或“v7回归进行中”当作当前状态。
+
+- v7完整unit **2568 passed / 0 failed / 0 skipped**。独立PG的58项属于此前v6快照，
+  不能混称v7持久化全量。Python四角色为独立v7标签，Rust/Web保持本轮runtime标签。
+- v7目录 `web-outline-3307772b8ea7990459aef047df886f9dafdc048f6db679ddb19f078b02d79685`
+  succeeded，19次真实发送、1重试、0未知用量，输入481055/输出40311/总521366 Token。
+  两计划、1材料、7要求、1分类、8参数。固定修订 `9eb10b99-09ec-4d53-b84f-68d956f0d587`，
+  SHA `b6d499d8b3df92a62773a7bad2cc6aa42724406553720c1ef3f6e60cbaacb74d`。
+- 真实成稿 `web-document-4fadd86cc797499c22f5cba9ce2143c0e15658b82b363790fdeec023b391b2e5`
+  succeeded，仅1次authoring_structure，输入71937/输出1464/总73401 Token；无企业资料、
+  无basis/write调用，分析未自动确认。实际保存版本 `9c35dbe5-db28-473d-bbb6-a3ed8d9d0390`。
+- 下载Word SHA `97357ad5e934288cfadbfc24dcbed98c62484876bcee605f22824c5834505285`，
+  ZIP SHA `bf5099e300b25ab4518d3c3dad36dc01cd03ba837d6c36e6e01b948fc51e8146`；1479段、27表、
+  571空格。CAS result/outline/frozen、DB保存版本与下载字节一致，adopted-outline与最终
+  权威outline逐对象相同。已选择表格保全、三分册及5技术原表归属阶段核对通过。
+- 独立原件审查37项范围，形成9类开放语义缺口：附件7整体误排、专项授权空叶、限价
+  仅在issues、财务双主体未分别承载、B不适用借A.2泄漏、技术通用/专用结构顺序、技术逐段
+  应答/附证空位、原函与资审表同实例重复、来源未决未计待核。故实际模板**尚未验收通过**。
+  质保函填写出口、身份证粘贴文字、报价80/13%固定及四类企业报价空白已正向确认。
+- BUG-151已先记问题与五问方案，正在以失败回归修复：沿用现有目标kind及subject表达
+  职责/主体，适用性依据进入现有分块请求，真实未决保留人工核定栏及计数。旧执行和旧Word
+  不修改；后继online-template-v4已准备身份，尚未发送新模型任务。部署/真实复验待完成。
+
+证据根仍为 `/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/`。
+当前实物与权威绑定在 `online-template-v3/`，独立源文审查在 `independent-semantic-review/`，
+修前源码在 `bug151-baseline/`、失败/成功回归在 `bug151-tests/`。下载审计初版把81个纯人工
+占位块误作企业生成，外部审计器正在按真实计划/目标纠正；不据此否定或放行实际语义缺口。
+同版ONLYOFFICE PDF排版验证进行中。没有提交、暂存或推送；共享已有修改继续保留。
+
+### BUG-151候选v8及同版排版后续
+
+- 新增职责/主体/真实Word出口18项回归先失败后通过，相关8文件110项通过；root待核出口
+  相关59项通过，最终名称/引用失败/孤立章节三种未决分支另有10项定向通过及独立5项复核。
+  首次完整unit2592通过/1失败：测试进程在最后两行修改前已载入旧helper，随后测试断言
+  已更新，不能记全绿。新进程最终源码完整回归 **2593 passed / 0 failed / 0 skipped，306.02秒**；
+  2593个唯一测试身份已核对，401源码/测试前后指纹及v8的402构建输入均无漂移；Ruff/diff通过。
+  总结为`bug151-tests/summary-final.json`，不降低断言或删除用例。
+- v8镜像 `kb-docreader:review-20261116-directory-integration-v8`，镜像ID
+  `sha256:af8e0ba5bee501e2c8172e8a53e584418059bdf3fa3de8f6f5417de7be896e14`，
+  402个构建输入指纹无漂移。只更新本轮独立栈四个Python角色，init退出0，三持续角色健康。
+  切换前独立authoring_jobs在途为0；Rust/Web/数据/原旧栈不操作。
+- v4显式后继目录任务
+  `web-outline-16bc16212016c97c9a4770befff8ee0eed43c10bef199d788e0bb5056f91eba0`
+  已真实提交，继续同一run/source_version1/domain_revision1，未修改旧固定修订或Word。
+  目录合同为`explicit_response_instances_v3`，当前回执/语义与实物待验，不能称已完成。
+- v3严格无企业资料审计用权威plan逐目标构造宿主占位，297任务/297单元/81空白块通过，
+  12个反向对照全部拒绝。旧初版generated_units误报保留，不把纯宿主空位当企业事实。
+  原件基准仅增加3个原文明示分组的精确标题行别名，104锚点通过；27所选表/22必需原网格
+  保全通过，但实际附件7缺失仍使总审计失败，不因此授予业务通过。
+- 同版Word转换PDF成功，77页，自建只读会话已关闭。视觉查明目录仅更新提示、报价/财务
+  表头孤页及续页无表头，报价窄列二次折行；已先记录BUG-152，由独立排版修复片继续。
+  Word只保全原文字形/网格不代表排版可用，历史v3实际稿仍未验收。
+
+## 持续模板验收与BUG-149/150修复（2026-11-16）
+
+用户已明确要求持续边验证边修复直至实际验收，本轮目标仍是同一106页BiddingFile的
+无企业资料模板，不填企业事实/报价、不自动确认分析；独立环境保持运行，不操作旧栈。
+
+- 原文独立基准已建立：3逻辑分册、21个待填/提交原式网格及1个引用型原式网格、1个
+  可选网格，6张评审工作表不作投标原式、5张技术表的正确归属及实例、10组章节要求、
+  价格空位/80数量/13%固定说明。基准分母来自原件，99处源锚点有页/行/引文SHA，
+  不从模型已选结果倒推。A.1仅按原式框/固定参见保全判，不称需要独立重复填数据。
+- BUG-149显式body_windows必填、空窗无正文、坐标/结构在成功回执前编译校验；分组及
+  真实来源参与两计划比较，超集不能覆盖不同正文却声称保留第一份。新增失败回归先红
+  后绿，2/3/4组及非固定名称的真实pipeline→固定修订→Word/ZIP纵切通过。
+  v6完整unit **2565 passed / 0 failed / 0 skipped**；独立PG持久化4文件 **58 passed**，
+  同轮临时PG/随机端口/tmpfs和fixture schema均清理。实际3.11在线运行另列，不能混为一套。
+- v6新执行 `web-outline-9dde942f8e22d8135dc00cf3d1e44383409cf63bc9c2b09b00aa6a96ccc2fd73`
+  真实结束succeeded：2计划、1材料、7要求、1复用分类、7参数。19次发送、2重试，
+  已知输入390419/输出32043/总422462 Token，另2次未知用量不计零。
+  原文明示分册、禁评审表、五技术表唯一归属阶段核对通过；A.1仍以clause纯文字承载，
+  原框未保全，故未采纳该候选，没有发布为合格Word。
+- BUG-150已登记：数据可“详见分项报价表”不代表删除原件引用型原式。通用Prompt已区分
+  数据复用与原式保留；显式正文节点的clause按同源坐标求差集，不按文字删不同来源/实例。
+  新回归1失败/2通过→3通过，和受影响目录/范围/纵切合跑85通过。v7全量回归进行中。
+
+证据继续在 `/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/`，
+`acceptance-baseline.json` 与 `acceptance_baseline_checks.py` 只用于独立验收，不硬编码进
+生产。旧样稿negative审计证明“所选原表保真”与“满足完整模板要求”分别判定；旧报告及
+基准修正前快照保留。当前未达业务验收，后续只对新真实Word继续核原框、要求、版本及版式。
+
+Python v7候选从已验证依赖层只更新源码/Prompt，独立新tag，不热改v6原执行；计划用同一
+原件/项目/冻结快照、显式后继execution重验。两槽目录因提示修订重跑，其余只复用实际
+请求摘要完全一致的成功回包，不承诺全部复用。当前没有新的原件解析或企业资料调用。
+
+
+## 目录固定修订、镜像兼容与独立本机环境（2026-11-16）
+
+本轮用户先同意推进目录衔接、真实验证和部署，随后明确本轮只做**无企业资料模板验收**，
+并在本机另建独立 KnowledgeBrain 环境。企业资料检索/应答验收不在本轮关闭，222 留出样本未动。
+
+- BUG-145：两份目录计划使用固定槽位 1/2，真实请求和回执独立，同槽恢复仍精确复用；
+  第二份增量章的局部 ID 及父引用隔离，避免合法计划合并后丢章或重复章。冻结来源的大纲
+  执行 spec 增加 `independent_plan_slots_v1`，旧执行不能原地切换合同。
+- 接线复核确认网页已经支持“目录候选→固定修订→正文/模板→Word”；没有直接移除
+  `outline_only` 条件，保留自动组织与知识写作职责。3 项集成用例覆盖原文/原表、人工调序、
+  显式 knowledge 写作目标及空目录待核出口，模型为替身。
+- BUG-146：首次完整单元回归 2513 passed / 8 failed，改前快照精确复跑这 8 项同样失败。
+  将旧自动组织用例移到现存完整编制入口，预算列表补齐五种目录任务；82 条业务断言 AST
+  不变。修订后 3 文件 48 passed，随后完整 2521 passed。
+- 实际 Python 3.11 候选暴露 BUG-147 字符串枚举包含判断和 BUG-148 系统工具缺失；分别
+  最小修复角色值比较、正式 DocReader Dockerfile 的 Poppler/Tesseract 与中英文语言包。
+  最终源码完整单元回归 **2536 passed / 0 failed / 0 skipped**；另有隔离 PostgreSQL 的
+  持久回放、旧合同拒收、编制计划/单元恢复与知识操作测试 **58 passed**。后者在角色修复前
+  完成，角色修复另有真实 3.11 的 14 场景及相关源码 49 项定向验证，不混称同一快照全量。
+- 三份真实 PDF 用旧模型回包离线回放，共五稿；Python 3.11.18、Poppler 22.12.0、
+  Tesseract 5.3.0 的 v3 镜像中逐章原文、已选原表网格/合并/字形检查通过。
+  与宿主 Poppler 25.03.0 的五份 outline SHA 及五份 DOCX 全部解压条目 SHA 一致。
+  选中表为 111 每稿 19、BiddingFile 21、安服 16；原生总表仍为 41/41/42，不能把
+  “选中表保真”称为全部表格发现或全文件语义通过。BiddingFile 物理 37—42 页六表是
+  评审/评分依据，不是投标人应填交原式；原计划 tech 范围过宽仍待核，要求/评分交接另验。
+  初版审计器误丢带书签首段的失败证据保留，纠正后仍逐章比对，不放宽为整稿搜索。
+
+证据根 `/opt/workspace/kb-tender-evidence/2026-11-16-directory-integration/`。本轮相对开始
+快照的代码/测试基线、失败和成功报告均保留；没有提交、推送或混入已有工作区修改。
+
+### 独立部署与本轮在线验证
+
+当前原 `knowledgebrain-*` 栈属于 `/opt/workspace/zhaobiao/deploy`，不是本仓库 Python
+招标运行栈；先前健康观察只能说明该栈可达。本轮不重启或复用其容器、数据和 local 标签。
+新项目为 `kb-isolated`，容器前缀 `kb_isolated_`，独立 PG/Redis/MinIO/对象和 Python
+产物卷，知识库关闭，Office 单独部署，环回入口 `https://127.0.0.1:28080/`，Office 为
+`https://127.0.0.1:28081/`。配置、管理脚本及登录信息仅在仓库外受限部署目录维护。
+
+Rust/Web 从当前仓库冷构建 `kb-isolated:runtime-20261116`，包含 API、worker、retention、
+migrator 和静态网页；构建限制 jobs=4，303 个输入前后指纹一致。Python 四角色使用
+`kb-docreader:review-20261116-directory-integration-v3`。实际镜像、依赖版本、启动/退出
+及旧栈保全检查见证据 `deployment/`、`deployment-v3/`。前两份失败候选和报告保留。
+新栈 11 个持续服务均已健康，migrate/init 正常退出；这只证明部署技术链可用。
+
+登录脚本最初把 Compose 配置序列化的美元符号转义当作原口令，401 发生在建项目之前；
+修正测试脚本读取方式后成功登录。账户和密码未重置，Compose 配置保留。
+
+新项目 `2e41e3da-d217-5d5b-8690-9d08ab4b2506` 已真实登录并上传同一份 106 页
+BiddingFile.pdf，SHA `4c80edd6f570fe107ac1d5b3d0d224c20748f2379fe71a8ae05c8315df058fdc`。
+实际部署源快照为 3622 行、41 个原生表、7 个要求块；两槽最终目录请求各估算输入 70669、
+输出预留 32768、安全 4096，总 107533/131072，均准入。使用当前 `.env` 的
+`gpt-6.1-terra`、`https://code.zleiwork.cn/v1`，不打印或复制密钥到仓库。
+
+在线目录执行 `web-outline-ebf7d3a0e3adeab5f0f1f933e10617143558cc9a8d51a7333a2e2cdf60b5cc84`
+已技术结束为 `succeeded`：2 目录、1 材料、7 要求、1 分类、7 参数，共 18 次物理发送，
+0 重试、0 未知用量，实际输入 482789、输出 31912、合计 514701 Token。阶段评审发现
+BUG-149 后请求取消，但提交取消时模型工作已全部结束，不能把技术终态改称 cancelled。
+当前 0 在途；没有采用候选或发布项目 Word，原分析未自动确认。
+
+最终候选共 215 章、10 个顶层、0 分册；从原组成说明扩出的技术章误带六张评审工作表，
+另有五张技术表重复。为核对实际导出后果，使用同一最终候选和正式导出器零模型生成
+`online-template/验收未通过-目录候选样稿.docx`，未发布至项目；实际 32 张 Word 表对应
+27 个唯一来源，六张评审表和五项重复均仍存在。报告为 `final-diagnostic-review.json`。
+**本轮模板业务验收未通过**，不能由 2536 项技术测试、18 次正常请求或正常导出替代。
+
+用户随后明确最终目标是投标文件满足招标要求，要求分别保证稳定、正确、一致和高效。
+本轮据此收敛验收原则：分母来自全部适用原件/补遗，逐项检查“原文及条件→适用性→
+响应位置→同版本实际 Word/证明→明确结论”，所选表保真不证明没有漏选；人工填写/
+无需内容复核不代表义务已满足。业务缺口仍可保存下载，影响的是验收结论。来源计划
+正文边界的下一步设计仍在复核，未用新增循环或正则试错修改运行合同。
+
+部署技术核对通过：11 持续服务健康、migrate/init 退出 0，网页/ready、实际 JS/CSS、
+Office healthcheck 均 200，运行 Python 文件 SHA 匹配 v3。新旧网络/数据卷不相交。
+旧栈保全观察必须分开报告：旧 API/worker/retention 在 12:16Z 的 ID、image 和启动时间
+发生变化，仍属 zhaobiao 工作目录，原因未确认；其余九容器身份未变。本轮构建标签、
+Compose project 与新容器镜像均不与旧三者交叉，不能因此宣称旧十二容器全部未变。
+具体安全报告见 `deployment/deployed-verification.json` 及 `other-project-differences.json`。
+
+
 问题台账统一见[问题与修复记录](bug-fix.md)：每次发现问题追加或更新根因、方案和验证状态；
 本文保留运行时间线及证据位置，字段定义仍以[字段字典](field-dictionary.md)为准。
+
+## 用户修改.env后重新验收（2026-11-04）
+
+用户明确要求用修改后的.env重新运行以排查服务商影响。已直接读取deploy/.env，
+Chat/VLM均为https://cpamc.818996.xyz/v1/chat/completions、gpt-6.1-terra；同端点同模型
+的VLM沿配置逻辑继承Chat的131072窗口，仍保留并发2、60秒raw idle。无继承模型环境
+覆盖；GET models返回200且列有新模型，生成调用0。服务商和模型同时变化，后续对比
+是整组配置对比，不能只归因供应商。未打印/复制密钥，不改用户.env。
+
+已向唯一旧bug140-successor runner发送SIGINT，实际停在F0尚未准备/发送的边界；
+6次物理请求均已结束、0在途。首A0第1次完整流但JSON尾缺] }，第2次携带现有格式
+反馈后通过；第二局部包首次HTTP成功但两处章节多余purpose字段拒收，随后3次均首
+raw静默超时，局部额度耗尽后进入来源结果保全的F0门控。F0输入146858、fits=false，
+尚未发送。执行因用户切换配置主动停止，不记为新增模型失败；原分析、前驱回执、
+旧Word/ZIP、两份runtime保全检查全通过。详见旧目录provider-change-stop.json。
+
+新证据根为/opt/workspace/kb-tender-evidence/2026-11-04-perf-f9-provider2/。复制同一份
+已验证402文件代码，manifest SHA为72441120fd609b478e94962613f6b59a33987616e7459584706fe76a6ead3001，
+不热改旧冻结代码。准备独立analysis_provider2 schema的新分析，成功后才从新分析真实
+快照编制未确认稿；不自动确认、不将旧服务商回执混作新配置验收。此时仅连通检查，
+新模型生成尚未启动，入口与新分析/编制状态在本节后续记录。
+
+新分析已启动：run 5efa33e9-5e68-481b-84bd-503b095e0209，analysis_provider2初始化
+11张分析/checkpoint表且起始0 run/0请求/0确认。新入口独立复核通过，run_analysis.py
+SHA为6aa3dae1392c99fd0c21a9f9eba3fba8912dcb3b807dbdae6256f8b8349ac9c1；固定
+dotenv、完整执行/解析spec、源文件SHA、loopback与隔离DB/role/schema，终态额外记录
+在途请求计数，不自动retry新命令或确认。初始2个OCR均首发成功（3.931/3.481秒），
+OCR后实际4个抽取包，当前首2包在途；未据OCR速度宣布整轮提速。阶段对照只读脚本
+及截面证据在provider2/analysis-comparison，进行中raw计时没有落盘时保持未知。
+
+新编制入口已准备并独立复核，尚未启动。必须等本轮分析真正waiting-confirmation、
+failure_type=None、无在途/确认且全部spec/原件CAS身份一致；缺finished.json的实际
+负例已确认不创建编制目录/UUID/CAS。之后还需在analysis_provider2初始化authoring
+段表，再预检真实S调用；不借旧parent或回执宣称新配置完整链路。说明与输入要求见
+provider2/authoring-entry.md、authoring-input-requirements.json及independent-entry-review.json。
+
+本轮新分析已完整执行至终态`blocked`，1035.841秒、60次物理发送均正常返回且无重试，
+0在途、0确认、failure_type为空。调用为O2/E4/R8/D1/L24/A16/J5；覆盖无缺失、无未完成
+单元。抽取阶段548.727秒，旧配置同阶段881.022秒；新逐源核验8/8一次通过、82.988秒。
+旧核验只有7/8且最终失败，不能拿两轮总墙钟宣称完整流程提速。新抽取263事项/27关系，
+输出56791本地可见Token；旧230/23、65309Token，输出与语义不同，质量仍单独核对。
+
+OCR两份回执为complete1/unresolved1，先前“2个首发成功”仅指请求返回。未决项是封面
+公司标识，完整PNG确实随请求发送：离线重建请求digest与发送回执一致，模型正常返回
+`image_not_supplied`。根因见BUG-142，不能认定宿主漏图或供应商丢图。最终核验有389条
+blocking问题，其中388条属待人工核对，另1条受保护来源问题；包括抽取处置、引用、遗漏
+等，不能把全部问题归因封面图片，也不能把模型finding全当作已确认缺陷。
+
+用户随后明确“先跳过这个问题”，因此暂停OCR进一步诊断，无新增OCR调用，不修改旧
+识别回执或确认状态。继续新配置编制：产品`read_authoring_input/_available_input`原生
+允许带问题的固定快照，保留`authoring_analysis_issues`并生成未确认稿；外部验收runner
+先前额外要求waiting-confirmation过严，正按这一既有边界最小修正。只接受本轮已结束、
+无执行异常/在途、完整根产物及checklist身份一致的快照；不使用旧parent，不宣称分析
+或业务验收通过。相关修正只在外部验收脚本，不热改冻结生产runtime。
+
+编制准备期间再次检测到用户`.env`的Chat/VLM模型变为`gpt-6.1-sol`，端点与窗口不变。
+首次离线预检在配置校验处停止，未创建编制state、未发送请求；独立schema的authoring节
+两张空表及索引已初始化，实时分析与终态文件均未变。按最新配置继续编制，原terra分析
+不重跑；外部入口分别固定分析依据的原完整spec与编制sol配置，不能把这两段称作同模型
+对照。真实后续以该入口的最终preflight和execution回执为准。
+
+sol编制离线预检36.838秒完成，S为3包、首次输入92130/92092/33549 Token，均在94208
+预算内，累计217771；完整520个native unit按221/221/78进入来源包，旧回执复用0。
+执行`perf-provider2-authoring-8905af54488a4eb4868b60ae2ca70423`已启动，首段3个摘要
+放行、含原四次额度最多12次物理发送；后续动态请求仍在准备发送前逐段计量。输入固定
+本轮terra分析的blocked快照，问题389、human388、未独立核验关系13、confirmation为空，
+运行中不改冻结代码或模型配置。详见provider2/authoring-run与authoring-comparison。
+
+本轮sol编制已在全局A0尚未发送、0在途的边界正常SIGINT结束；持久执行状态为failed/
+CancelledError，原因是主动保存容量问题现场，不是新增模型失败。3个S、3个局部A0均已
+校验采纳；8次物理发送中7次完整返回，另1次S流内上游`server_error/request_timeout`
+在109.774秒结束，首raw/最大静默7.542秒，usage未知。首A0另有一次完整回包引用了本包
+不存在的`s855`（实际仅s1–s359），被正确拒收；原额度纠正后通过，未手改回包。
+
+S请求区间并集395.580秒；局部A0四次物理发送区间并集493.042秒；合计模型占用并集
+888.622秒，请求耗时和1210.532秒。整轮墙钟1351.830秒，其中外部逐段审核/停止等待
+404.869秒，不能将其当成引擎性能。7份已知provider用量输入563668、输出52616、其中
+reasoning2031；另1次未知不补零。8次请求最长raw静默35.993秒，未触发本地60秒idle。
+
+全局真实发送前视图与禁网重建一致：129137输入/94208有效输入预算/32768输出预留，
+在131072总窗口内仅剩1935，fits=false。局部3包92947/93950/69480均fit；91章、103
+候选完整不重，规则/模板/摘录闭包缺失0，37个未分配事项只在局部末包且在全局保留。
+全局摘要未获放行、发送0；F0/A1/正文/Word未执行，完整业务验收继续未完成。容量仍属
+BUG-140未完成部分，不能以更换服务商或机械增大上下文配置宣称解决。
+
+保全检查确认新分析/空人工确认、旧快照/Word/ZIP和冻结runtime全部未变。新证据为
+`authoring-run/capacity-boundary-stop.json`、`preservation.json`、`run-timing.json`及
+`a0-capacity/plan.json`/`verification.json`。Word审计入口已准备并核对本轮58个来源锚点，
+但没有新Word可审，不能把准备计为成稿验收。后续先解决全局输入及输出空间，再以新
+execution和完整摘要校验确定可复用范围；不覆写本轮已成功或失败回执。
+
+## F9后续真实验证准备（2026-11-04）
+
+用户要求继续后续计划，证据根为`/opt/workspace/kb-tender-evidence/2026-11-04-perf-f9-followup/`。
+已冻结当前runtime及完整SHA清单，保持原模型gpt-5.6-sol、131072窗口、并发2和新60秒
+raw idle；先编制有限样本，再运行独立新分析，避免共享Key并行干扰。原模型端点授权
+模型列表可达并列有原模型，仅是连通检查，不代表生成稳定或上游断连已解决。
+
+本机当前knowledgebrain容器实际属于另一仓库，不能据其健康状态认定本仓库已部署。
+原accept_real临时数据库端口不可达，未观察到原Python运行进程；不可把连不上库当作
+持久状态中没有在途。改用本轮新建专用数据库、分别隔离分析/编制schema，从已保存的
+真实快照核验输入，不修改旧业务数据库、旧回执、Word或人工确认。原confirmation为空
+仍为空；新分析入口明确不自动确认、不自动串联编制。
+
+编制预审：4个新S请求，最大/累计首次输入91956/279894 Token，旧精确复用0；含原
+四次额度最多16次物理调用。authoring_f9已导入真实parent及成功复用所需predecessor
+回执；旧审计仍保存在原外部快照，不将未导入的旧审计行当成旧用量0。动态A0/F/A1等
+在发送准备前等待本轮逐摘要放行，原心跳及取消仍生效；等待时间单列，不能算常规墙钟
+性能。完整清单与入口见authoring-run/preflight.json、authoring_preflight.py。
+
+新分析预审：106页原件，2个唯一OCR请求，未OCR时4个临时抽取包；OCR后分包可能
+变化。独立analysis_f9已初始化且0 run/0请求/0确认。抽取输入是字节保守估算，review
+是本地o200k，两个数值不能直接混比。analysis-preflight记录完整边界与只分析入口。
+两份入口已独立审查，尚未启动真实模型生成。
+
+启动受阻：自动审批拒绝执行首段真实编制，明确理由为发送可能敏感的招标内容到
+api.kunkun-gpt.com，而“继续计划”未明确授权具体内容和外部目的地。拒绝发生在进程
+创建前，没有模型发送；已询问用户是否授权该106页原件相关正文/结构化结果/OCR图片
+外发至既有端点用于本轮真实分析和编制。用户随后明确授权完整端点
+`https://api.kunkun-gpt.com:8317/v1/chat/completions`及本轮相关内容和模型费用；据此已启动
+authoring_preflight.py的首段真实执行。先核定4个S请求（含原重试最多16发送），后续
+动态请求逐段核定，完整分析待编制结算后执行，不并行争用Key。授权问题已解决。
+
+04:32 UTC首段观察：4个S已有3个正式采纳，累计6次发送，最后一个S第二次仍在途。
+首个完整回包191.471秒，首raw/最大静默26.550秒；S2首次313.249秒后采纳。S1因
+章节角色错放target而纠正一次后通过；S3首次258.601秒完整结束后JSON语法失败，
+仍报告91750输入/8157输出，不能将无效结果的用量记零。独立原流回放确认S3有DONE、
+stop和usage，根对象过早闭合导致Extra data；不是传输截断或客户端分块损坏。
+兼容json_object模式与已批准BUG-099一致，不临时切strict或猜修角色/JSON。
+细节见runtime-audit/live-source-diagnostics.json，实际总账以最终execution快照为准。
+
+04:45 UTC：本轮已在A0第二包未放行、模型无在途的边界主动结束，专用执行以
+CancelledError结算；这是发现BUG-140后中止基准，不记为模型失败或Word业务完成。
+成功的4个S和首个A0回执保留，原分析/前序回执/旧Word/runtime的保全检查全通过。
+共10次物理发送：S7次、A0首包3次。S完成请求区间并集1047.972秒，provider输入
+554948、completion58479、reasoning6947，7/7有usage；A0首包先非法JSON、再60秒
+首数据静默超时、第三次采纳，用量有1次未知。全轮wall1644.262秒，外部门控等待并集
+204.493秒、完成请求并集1394.251秒、请求耗时总和1835.194秒，三者不互相冒充。
+未进入F0/A1、未产出本轮Word，完整新分析亦未启动。
+
+BUG-140新增证据：实际A0为3+1，局部输入86081/93958/104045，全局155287；
+末包在试装后追加37项未分配规则，额外10211 Token；实际首、二包候选规则证据
+分别有29/18个x-id未闭包进完整source_excerpts。规则quote仍在、宿主原文未改，
+但不符合本请求Prompt的完整依据承诺。先修复依据闭包和最终装包，再测全局无损表示，
+新执行只按完整摘要复用本轮成功回包；不热改已冻结runtime。入口、停机理由与测量见
+authoring-run/boundary-stop.json、a0-offline-plan.json、a0-reference-closure.json。
+
+输出表示试算另发现6份可解析S JSON可见本地Token43969→34099，仅移除字符串外
+空白即可减少22.45%，逐值/类型/顺序不变；无效JSON未修复、未知usage不补零。
+这只证明表示开销，不证明模型会遵循紧凑格式或实际同比提速，当前Prompt未改。
+证据output-costs目录。
+
+BUG-140本地补片：候选/未分配规则证据闭包先2失败后通过，相关100项通过。
+实际固定原前两包缺失29/18→0，除新增所需source_excerpts外所有字段逐值不变。
+最终装包的末章试装纳入未分配规则，另2项失败反例转通过，相关83项通过。真实4份S
+禁网重验后，86章/125候选完整且唯一，37项未分配只在末包；1044份摘录完整保全。
+最终局部4包输入87138/91794/93600/88901，全部≤94208；旧3包变4包，4个A0摘要
+均变化，旧成功首A0不能直接复用。全局仍155287，故现计划仍4+1，最多20次物理发送。
+证据bug140-closure与bug140-packing；这是容量和保全证据，不是新编制业务采纳。
+
+新outline_assembly_planning_contract冻结标记先2失败/1通过，再21项document执行
+验收测试通过；另2项明确验证同合同/旧合同前驱均可在新execution按精确请求摘要及
+当前校验复用成功回包。测试用专用数据库随机schema和模型替身，不计真实发送。
+证据bug140-contract。源码新合同不注入已停旧执行或正在运行的原F9冻结分析runtime。
+
+全局无损表示试算：同值规则投影、模板描述、retained来源和原文行池逐值往返保全，
+组合输入155287→124191，仍超预算29983；最后窄试验只再省7 Token，未落生产。
+249条完整规则没有可删默认空字段，482个quote仅454种、仅1个与任意规则text完全相同，
+不能继续靠删引文冒充无损。证据bug140-global-view，不声明全局容量已修复。
+
+分析执行已在编制无在途的边界启动，使用原F9冻结runtime、独立analysis_f9和原授权
+端点；先2个OCR成功，随后2个抽取并行。此为新run，不自动确认或触发编制；编制后继
+等待分析结算，避免共享Key争用。动态analysis-preflight/run/progress.json和最终快照
+为准。新发现BUG-141局部回退重复/串批已先登记。
+
+BUG-141本地修复：局部接收器现绑定每次实际请求的t/a/u/x/p/e/s域，遗漏只保全本包；
+同一回调生成器覆盖单包/局部/全局/A1，compact/retained保持完整身份域和安全继承。
+新增14用例先13失败/1全局正例通过，再全部通过；相关218项回归通过、独立源码复核
+无阻断。拼接另先2失败/1通过，再59项通过；按包优先回绑，唯一旧跨包引用保持兼容，
+歧义保留目标并记录待核。合成实际DOCX/ZIP总稿分别参见1.1甲包、2.1乙包，两个分卷
+只含各自参见。它证明导出引用正确，不替代106页原件真实Word验收。证据bug141-binding、
+bug141-join；全量最终unit正在运行，源文件未提交/部署。
+
+规划冻结标记更新为complete_evidence_scoped_batches_v1，覆盖闭包/最终计量/局部
+接收域；先确认旧标记断言失败，再22项document执行隔离验收全通过，含旧前驱的新ID
+精确复用。新的bug140-successor入口已准备且完成独立差异审查，尚未freeze/preflight/
+创建数据库执行或发送；CAS回读已停F9及v8，旧runtime和快照不覆盖。
+
+新分析抽取阶段：4次发送均成功并逐工作单元找到extract-pack采纳回执，另有extract
+聚合；provider输入100345、completion68311、reasoning2978，完成区间并集881.022秒、
+耗时和1519.353秒。四份可见内容共65309本地Token，原来已全紧凑，去空白收益为0。
+前两次首内容后的输出阶段占95.25%/92.38%；不能套用S输出空白收益。最后242.201秒
+仅一槽运行，固定总工作量和等速无损调平的理论回收上限约121.346秒（13.77%），不是
+重分包实测改善。原2份cutoff与4份完整审计均保留在analysis-output-costs。
+
+随后R核验实际持久计划为8个，已有成功及首数据静默失败混合；失败样本同一逻辑单元
+连续3次在before_headers约60.04秒结束，0 raw/0 SSE/0 usage。确为本地首raw截止，
+尚不能称供应商断开、JSON损坏或计费为0；仍按原四次额度，最终状态以运行快照为准。
+只读report_analysis_progress.py经独立反例核对，逐指标报告已知小计/缺失覆盖，无usage
+返回null，区分在途待结算与结束后未知；不把HTTP成功和业务采纳合并为一项。
+
+新分析终态：1550.950秒后因ModelWorkUnitExhausted失败，20次物理发送全部结算、
+0在途、0人工确认。R共14发送=7成功+7次首raw静默失败；review-6d11前三次失败后
+第4次成功，review-150f连续4次失败耗尽；后者保持失败，不自动新建retry命令。
+7次失败共占用420.310请求秒，usage全未知。R实际8个、采纳7个；新台账230事项/
+23关系可离线构造D=1、输入63463、全26335事项对覆盖，但D并未运行/落计划，L/A/J
+仍动态未知，不填0冒充已完成。详见analysis-runtime-audit与analysis-preflight/run/finished.json。
+
+BUG-140/141最终技术验证：完整unit2455通过、0失败/错误/跳过（281.28秒），源码
+运行前后SHA不变；另document执行22项、来源/规划/前驱/提交来源10项PG验收通过。
+真实4S禁网回放配合合成空A0及global失败，4包各保全59/30/30/6候选，最终125个/
+125次绑定、0跨包重复；280规则refs、201候选来源、165提交来源保全，37未安排规则
+仍明确待核，旧runtime/Word/source未变。合成失败只验证宿主恢复，证据bug141-final。
+
+新后继已冻结402文件，manifest SHA为
+e8214f0b40568e47085ce2c1271b836cff8791f296ff6cc665c8bd8f1904764e，独立核对全部
+文件集合/字节与当前源码一致。新runtime不覆盖原F9。禁网预检31.963秒，4/4已成功S
+精确摘要及新校验通过，新增来源发送0。后继execution为
+perf-bug140-successor-8611145896364d04b44b14336ceab2f0，前驱为已停F9执行；仍使用
+authoring_f9、原分析快照、空confirmation和空企业资料，未将新失败分析冒充已完成输入。
+新分析结算后才启动编制，仅放行已测4个局部A0摘要、含重试最多16次，全局和其他
+动态请求仍在准备发送前门控。入口、清单与新快照见bug140-successor/authoring-run；
+此时首个局部A0已发送，尚无新Word。
+
+历史传输复算：两个原证据根31份快照去重561次请求，样本观测并发峰值2，跨command/
+execution重叠0秒，没有样本内不同任务争用额度的证据；不能外推共享Key的全局负载。
+280次transport_response_unknown均为before_headers，其中277次落在59—64秒，
+中位61.023秒；v8的14份HTTP trace显示请求body发完后等待headers失败。缺供应商/网关
+日志，关闭方与具体deadline根因仍待查。证据runtime-audit目录，未据此改网络或并发。
+
+固定依据的合批容量试算：64个旧associate/joint批、200目标，目标上限1/2/4分别需要
+200/109/64个请求，累计本地输入2593103/1429260/839504 Token；完整依据与成员逐值
+保留、回答目标不重不漏，发现计划39060对完整。独立复核373行明细及6个最大输入请求
+计量一致。该试算只拆回答targets，未全局重新装批；不证明模型质量、时延、推理或重试
+改善，保持现有4目标上限。证据batching-capacity目录，新增模型调用0。
+
+## F9分析与编制性能修复（2026-11-04）
+
+用户同意完整方案后，已本地实现请求计时、持久退避、纯review请求缓存、S包校验隔离与
+有界并发、抽取关系ID宿主派生。尚未部署/重启/提交/推送，新增真实模型调用0；完整
+单测及隔离workflow/acceptance扫描与失败项复验已结束，不能称为真实任务提速或Word语义验收。
+方案与源代码清单见tasks/plan.md、tasks/todo.md的F9；原F0—F8未完成项继续保留。
+
+证据根为`/opt/workspace/kb-tender-evidence/2026-11-04-perf-f9/`：
+
+- 请求计时分别保留first_raw、first_data（解码块）、first_content、max_raw_idle和内部
+  semaphore排队；gzip/心跳/thinking/空delta/取消/尾段与慢close均有先失败反例。首次
+  终止后冻结计时，不把JSON处理、CAS写入或close延迟算成网络静默。HTTP拒绝无法观察
+  raw时保持缺失。`request-timing/green-final.xml`208通过；安全字段过滤45通过，两条
+  PG保存路径48通过。`report-green.xml`52通过，历史编制24请求报告区间并集1534.488441秒，
+  与原独立诊断一致，旧回执缺raw计时不补零。
+- 普通/合批429统一现有30/60/120且封顶120秒；物理失败与语义拒收持久not_before，
+  恢复等剩余时间。物理审计后journal前崩溃、预留后等待中崩溃、过期、取消/失租、
+  成功兄弟复用及四次额度已定向覆盖。交叉复核另修复“新preflight失败误用上次429
+  deadline”的问题，本次物理回放限定当前group_attempt，发送前仍检查相关未过期截止。
+  218项定向通过后，曾因仅注入一个测试DSN跳过20项document测试；补齐环境后20/20通过，
+  不把跳过计验收。最后扩展物理/语义崩溃回归`f91-recovery-complete.xml`72通过。
+- 真实冻结回执禁网重放发现主热点是review_requests构建。原3轮44.348—45.412秒，
+  中位44.750秒；缓存冷构建44.726秒，热恢复8.645/8.716/8.976秒，中位减少36.034秒。
+  每轮完整verification SHA相同，0网络/0模型。10/10真实review请求摘要完全相同；
+  直接CAS排序会改变10/10摘要，因此缓存JSON字符串保序，体积992393字节。依据见
+  recovery-profile-before/after.json及review-cache-wire-audit.json。未落收益不足的
+  单独operation_plan缓存，也未跳过locate/association副作用规划。此为恢复准备收益，
+  不是98分钟续跑缩短80%的证据。
+- S包先以实际提供的冻结正文范围校验，完整原文可覆盖其片段，同native unit其它片段
+  不冒充已读。每包wire/回调固定，协调者按计划序归并；并发沿既有执行参数，默认2。
+  定向70通过，PG来源恢复/单发去重3通过。固定延迟夹具来源段0.604→0.353秒，
+  _organize总0.609→0.357秒，4个请求及完整产物摘要一致，证据f94/fixed-delay-report.json。
+  这是调度实验，不是真模型提速；样本R仅一包，未额外拆包或并行R。
+- 抽取只去掉模型必填关系ID，由宿主按原数组位置赋pack:lN；事项ID和全局Relation、
+  人工纠错合同不变。173项定向通过。BUG-077原始回包在当前接收器只读回放保留112事项、
+  27关系，仅第24个关系ID变化，关系文本/端点/证据逐值相同；233处置/23问题等是既有
+  规范化结果，不计本次业务改善，证据relation-id-real-replay.json。
+
+收尾验证：`unit-final-clock.xml`完整单测2433通过，0失败/错误/跳过；首轮两项精确
+sleep断言受实时时钟影响，测试改用推进虚拟时钟，仍精确检查1/2/4秒，不放松产品策略。
+`integration-final.xml`完整workflow/acceptance扫描372项，370通过、2失败、0错误/跳过；
+两项均是流解码后审计失败恢复的旧metadata全等断言，不认识合法新增的等待截止字段。
+仅调整测试，精确限定新增not_before和retry_deadline_origin，原metadata、请求身份、
+发送时间、回包引用和未知用量仍全等，并校验截止为恢复行的finished_at加1秒。随后整份流恢复、
+PG截止及普通语义/429恢复`stream-deadline-final.xml`64通过，覆盖原2失败项；没有把这次
+专项复验描述为第二次372项全量运行。新增测试无跳过或删除，独立审查通过。
+33份修改/新增Python文件语法编译、`git diff --check`及新增内容凭证模式检查通过；
+本机未安装Ruff，未执行该工具，也未为本次验证安装依赖。
+最终XML交叉核对及源码SHA见`final-verification.json`，两项原失败均在复验中逐ID通过。
+本轮专用PG数据库/角色和Redis容器已清理，临时凭证已删除，业务数据库/服务未改；
+测试报告和回放证据保留，清理记录为`cleanup.json`。复跑需重新建立隔离测试环境。
+
+冻结边界：三个模型执行入口新增retry_policy；编制另记录来源校验合同，抽取Schema及
+Prompt摘要随合同变化。旧spec不自动补字段，旧180秒执行仅指定原timeout也不足以匹配
+新runtime，必须使用原冻结runtime；新后继执行仍按精确请求摘要重验成功回包。
+
+未完成：上游约61秒断连缺供应商/网关日志，不能宣称关闭；当前S Prompt与v8不同，
+禁网预览在首个新请求停止（91750输入Token、374407 wire字节），未借旧S回包冒充新版
+A0/A1验证。进一步字段精简、缺集合补写及合批大小仍需可靠基线和质量/总成本证据。
+现成原始短引用回包去关系ID仅省615字节/216个本地o200k Token（可见输出约0.73%）；
+112个事项中仅2个text与某条quote完全相同，不能继续按原文冗余删除语义文本。准确的
+缺集合候选未定位，补写还需携带原依据及已有事项，未证明净收益，暂不启用。保持当前
+4目标合批及完整配对覆盖；依据见extraction-output-costs.json和f95-f96-conditional-decisions.json。
+普通路径混合传输与语义失败后重启，后续语义短退避序号仍可能为2秒而非累计物理序号
+对应的4秒；已记录截止不重置、物理四次额度不突破，此既有限制未扩为通用attempt日志。
+
+## 连续60秒无流数据期限（2026-11-04）
+
+用户提出先收紧连续无数据等待。源码中OpenAIModel、编制execute_document及保存稿复核
+execute_saved_review三个默认timeout由180改为60秒，复用原始字节idle算法，无请求总时长
+截止；心跳、thinking及非空原始字节均续期。部分流超时仍保留uncertain与原始回包，原有
+首次加三次额度不变。没有部署、重启服务或新增模型调用，真实提速和误超时率未验证。
+
+证据`/opt/workspace/kb-tender-evidence/2026-11-04-idle60-tbf1VY/`：red.xml记录旧默认下5项
+失败；首次相关回归264通过/1失败，失败是tool活动测试累计虚拟时长旧断言未同步；修正后
+green-final.xml共265通过，0失败/错误/跳过。覆盖首数据共享期限、60秒边界、中途静默、
+每59秒来流且总时长472秒、心跳/推理/SSE/UTF-8/gzip活动、部分回包、配置漂移及恢复。
+独立源码与XML复核通过，未提交或推送；原有并行方案文件保留。
+
+timeout属于冻结执行身份，新默认不覆盖旧180秒快照；旧分析revision或编制execution若
+直接改用新默认续跑会被身份校验拒绝。叠加F9合同修改后，须沿原冻结runtime恢复，
+仅显式指定旧timeout已不足以匹配旧spec。新编制后继执行
+可按原精确摘要与重验规则复用成功回包。既有约61秒响应头前断连通常只能提前约1秒结束；
+成功编制首批解码数据曾到60.226秒，raw最大空闲不可由该字段还原，实际误超时风险待观察。
 
 ## Word内容修复与同文件编制恢复（2026-11-03）
 

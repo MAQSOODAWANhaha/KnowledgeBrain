@@ -13,7 +13,7 @@ import json
 
 from pydantic import ValidationError
 
-from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted, build_request
+from docreader.llm.request import ModelBudgetError, ModelConfigurationError, ModelContractError, ModelWorkUnitExhausted, build_request
 from docreader.llm.wire import WirePayload
 from docreader.tender.authoring import (
     _OutlineContext, _check_reference_ids, load_outline_source, project_source_sections, validate_outline_references,
@@ -22,9 +22,52 @@ from docreader.tender.authoring_templates import (
     prepare_template_parts, load_template_part, template_part_key, ordered_template_part_ids, template_part_runs, expand_template_spans,
 )
 from docreader.tender.authoring_excerpts import (
-    load_source_excerpt, source_excerpt_key, whole_source_excerpts, response_row_id,
+    load_source_excerpt, source_excerpt_key, whole_source_excerpts, response_row_id, response_table_excerpts,
+)
+from docreader.tender.status import AuthoringTask
+from docreader.tender.directory_compile import (
+    ClassificationPlan, DirectoryPlan, ReadingDirectoryPlan, DirectoryPlanRejected, MaterialPlan, NativeMaterialPlan, ParameterPlan, RequirementPlan,
+    PARAMETER_SOURCE_CONTRACT,
+    apply_classification, apply_materials, apply_parameters, apply_requirements, apply_table_headers, compile_directory, compile_plans,
+    documents_from_frozen, note_missing_requirements, outline_from_compiled, parameter_view, reading_payload,
+    requirement_blocks, soften_directory_plan, sparse_page_issues, table_header_catalog, unplaced_tables,
+    validate_requirement_windows, validate_table_headers,
 )
 from docreader.tender.evidence.references import EvidenceRepository
+from docreader.tender.directory_adjudication import (
+    requirement_cases, validate_requirement_adjudications, apply_requirement_adjudications,
+)
+from docreader.tender.directory_choices import (
+    directory_cases, apply_directory_adjudications, reference_exclusions,
+    validate_reference_exclusions, validate_requirement_exclusions,
+)
+from docreader.tender.directory_titles import (
+    title_catalog, validate_chapter_titles, apply_chapter_titles, accept_parameter_titles,
+)
+from docreader.tender.directory_ref_plan import (
+    DIRECTORY_REF_CONTRACT, LEGACY_DIRECTORY_REF_CONTRACT, RefDirectoryPlan, RefDirectoryPlanV2, decode_plan,
+)
+from docreader.tender.directory_sources import SourceRefs
+from docreader.tender.directory_source_groups import (
+    SOURCE_GROUP_CONTRACT, SOURCE_GROUP_OPERATION, MaterialSourceGroupPlan,
+    apply_source_groups, source_group_candidates, validate_source_groups,
+)
+from docreader.tender.directory_material_closure import (
+    SOURCE_CARRIER_CONTRACT, SOURCE_CARRIER_OPERATION, MaterialClosurePlan,
+    apply_carrier_closure, candidate_carriers, native_parts, source_carrier_catalog,
+)
+from docreader.tender.directory_response_forms import (
+    RESPONSE_FORM_CONTRACTS, ResponseFormView, response_form_catalog, require_response_form_budget,
+    validate_response_form_selections, pending_response_form,
+)
+from docreader.tender.reviewed_source_facts import (
+    REVIEWED_CLASSIFICATION_OPERATION, REVIEWED_BODY_ENTRY_CONTRACT,
+    load_reviewed_facts, reviewed_material_summary, apply_reviewed_material_facts,
+    reviewed_body_summary, validate_reviewed_body_dispositions, apply_reviewed_body_dispositions, ReviewedClassificationPlan,
+    bind_reviewed_outline_facts,
+    bind_reviewed_carrier_results,
+    reviewed_classification_view, apply_reviewed_classification,
+)
 from docreader.integrations.store import Conflict
 from docreader.tender.authoring_coverage import (
     accept_assessments, batch_coverage_view, build_ledger, coverage_scope_index, fair_select, plan_queries,
@@ -47,6 +90,154 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
+def _accept_directory_plan(raw, documents=None, *, model=DirectoryPlan):
+    softened, skipped = soften_directory_plan(raw)
+    plan = _parse(model, softened)
+    if skipped:
+        plan['skipped_item_issues'] = skipped
+    if documents is not None:
+        try:
+            compile_directory(plan, documents)
+        except DirectoryPlanRejected as error:
+            raise ModelContractError([{'path': [], 'code': 'directory_source_invalid',
+                                       'detail': error.detail}]) from None
+    return plan
+
+
+def _accept_ref_directory_plan(raw, refs, documents, *, model=RefDirectoryPlan):
+    plan = decode_plan(raw, refs, model=model)
+    try:
+        return _accept_directory_plan(plan, documents,
+            model=ReadingDirectoryPlan if model is RefDirectoryPlanV2 else DirectoryPlan)
+    except ModelContractError as error:
+        errors = deepcopy(error.errors)
+        for entry in errors:
+            for node, selected in zip(plan['nodes'], raw.get('nodes', [])):
+                entry['detail'] = entry['detail'].replace(node['id'], f'heading_ref={selected["heading_ref"]}')
+        raise ModelContractError(errors) from None
+
+
+def _accept_parameter_plan(raw, compiled, documents, chapter_id):
+    plan = _parse(ParameterPlan, raw)
+    parents = [chapter['chapter_id'] for chapter in plan['chapters']]
+    if len(parents) != len(set(parents)) or any(identity != chapter_id for identity in parents):
+        raise ModelContractError([{'path': ['chapters'], 'code': 'directory_parameter_scope_invalid',
+                                   'detail': 'parameter plan must only select the requested parent once'}])
+    checked = deepcopy(compiled)
+    before = len(checked['issues'])
+    apply_parameters(checked, documents, plan['chapters'])
+    errors = [issue for issue in checked['issues'][before:]
+              if issue['code'] in {'outline_directory_parameter_rejected', 'outline_directory_parameter_short'}]
+    if errors:
+        raise ModelContractError([{'path': ['chapters'], 'code': 'directory_parameter_source_invalid',
+                                   'detail': issue['detail']} for issue in errors])
+    try:
+        accept_parameter_titles(plan)
+    except DirectoryPlanRejected as error:
+        raise ModelContractError([{'path': ['chapters'], 'code': 'directory_parameter_title_invalid',
+                                   'detail': error.detail}]) from None
+    return plan
+
+
+def _accept_requirement_plan(raw, documents, block, compiled=None):
+    plan = _parse(RequirementPlan, raw)
+    try:
+        validate_requirement_windows(documents, plan['assignments'], block)
+        if compiled is not None:
+            validate_requirement_exclusions(compiled, plan['assignments'])
+    except DirectoryPlanRejected as error:
+        raise ModelContractError([{'path': ['assignments'], 'code': 'directory_requirement_source_invalid',
+                                   'detail': error.detail}]) from None
+    return plan
+
+
+def _accept_material_plan(raw, catalog, compiled=None, documents=None, *, response_forms_catalog=None,
+                          source_group_contract=None, source_carrier_contract=None, reviewed_source_facts=()):
+    closed = source_carrier_contract == SOURCE_CARRIER_CONTRACT
+    grouped = closed or source_group_contract == SOURCE_GROUP_CONTRACT
+    model = (MaterialClosurePlan if closed else MaterialSourceGroupPlan if grouped
+             else NativeMaterialPlan if response_forms_catalog is not None else MaterialPlan)
+    plan = _parse(model, raw)
+    try:
+        validate_table_headers(catalog, plan['table_headers'])
+    except DirectoryPlanRejected as error:
+        raise ModelContractError([{'path': ['table_headers'], 'code': 'directory_table_header_invalid',
+                                   'detail': error.detail}]) from None
+    if compiled is not None:
+        try:
+            chosen = deepcopy(compiled)
+            apply_directory_adjudications(chosen, documents, plan['directory_adjudications'])
+        except DirectoryPlanRejected as error:
+            raise ModelContractError([{'path': ['directory_adjudications'],
+                'code': 'directory_adjudication_invalid', 'detail': error.detail}]) from None
+        try:
+            validate_chapter_titles(chosen, documents, plan['chapter_titles'], title_catalog(compiled, documents))
+        except DirectoryPlanRejected as error:
+            raise ModelContractError([{'path': ['chapter_titles'],
+                'code': 'directory_title_invalid', 'detail': error.detail}]) from None
+        before = len(chosen['issues'])
+        apply_materials(chosen, documents, plan['assignments'],
+                        **({'source_owner': True} if grouped else {}))
+        errors = [issue for issue in chosen['issues'][before:]
+                  if issue['code'] == 'outline_directory_material_rejected']
+        if errors:
+            raise ModelContractError([{'path': ['assignments'], 'code': 'directory_material_source_invalid',
+                                       'detail': issue['detail']} for issue in errors])
+        try:
+            validate_reference_exclusions(chosen)
+        except DirectoryPlanRejected as error:
+            raise ModelContractError([{'path': ['assignments'], 'code': 'directory_reference_exclusion_invalid',
+                                       'detail': error.detail}]) from None
+        if response_forms_catalog is not None:
+            validate_response_form_selections(chosen, documents, plan['response_forms'], supplied=response_forms_catalog)
+        if grouped:
+            if response_forms_catalog is None and plan['response_forms']:
+                raise ModelContractError([{'path': ['response_forms'], 'code': 'directory_response_form_invalid',
+                    'detail': 'Response forms must be selected only from a supplied native form catalog.'}])
+            try:
+                if closed:
+                    apply_source_groups(chosen, documents, plan['source_groups'])
+                else:
+                    validate_source_groups(chosen, documents, plan['source_groups'])
+            except DirectoryPlanRejected as error:
+                raise ModelContractError([{'path': ['source_groups'], 'code': 'directory_source_group_invalid',
+                    'detail': error.detail}]) from None
+        if reviewed_source_facts:
+            try:
+                apply_reviewed_material_facts(chosen, documents, reviewed_source_facts)
+            except DirectoryPlanRejected as error:
+                raise ModelContractError([{'path': [], 'code': 'reviewed_material_fact_invalid', 'detail': error.detail}]) from None
+        if closed:
+            apply_carrier_closure(chosen, documents, plan['carrier_dispositions'], candidate_carriers(compiled, documents))
+            if reviewed_source_facts:
+                bind_reviewed_carrier_results(chosen, reviewed_source_facts)
+    return plan
+
+
+def _accept_classification_plan(raw, compiled, documents, *, reviewed_source_facts=None):
+    plan = _parse(ReviewedClassificationPlan if reviewed_source_facts else ClassificationPlan, raw)
+    legacy = reviewed_classification_view(compiled, reviewed_source_facts)[0] if reviewed_source_facts else compiled
+    try:
+        validate_requirement_adjudications(legacy, documents, plan['requirement_adjudications'])
+    except DirectoryPlanRejected as error:
+        raise ModelContractError([{'path': ['requirement_adjudications'],
+            'code': 'directory_requirement_adjudication_invalid', 'detail': error.detail}]) from None
+    if reviewed_source_facts:
+        try:
+            validate_reviewed_body_dispositions(compiled, documents, plan['reviewed_body_dispositions'], reviewed_source_facts)
+        except DirectoryPlanRejected as error:
+            raise ModelContractError([{'path': ['reviewed_body_dispositions'], 'code': 'reviewed_body_fact_invalid', 'detail': error.detail}]) from None
+    checked = deepcopy(compiled)
+    before = len(checked['issues'])
+    apply_classification(checked, documents, plan['items'])
+    errors = [issue for issue in checked['issues'][before:]
+              if issue['code'] == 'outline_directory_classification_rejected']
+    if errors:
+        raise ModelContractError([{'path': ['items'], 'code': 'directory_classification_source_invalid',
+                                   'detail': issue['detail']} for issue in errors])
+    return plan
+
+
 def _parse(schema, value):
     try:
         return schema.model_validate(value).model_dump()
@@ -61,7 +252,33 @@ def _prompt(budget, task):
 
 def _request(budget, task, payload):
     prompt_name = 'outline_assemble' if task == 'outline' and payload.get('operation') == 'assemble' else task
-    return build_request(budget.model, _prompt(budget, prompt_name), payload, task=task)
+    if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') in {'select_directory_refs_v1', 'select_directory_refs_v2'}:
+        prompt_name = 'directory_ref_plan'
+    prompt = _prompt(budget, prompt_name)
+    if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') == 'select_directory_refs_v2':
+        prompt += '\n\n' + _prompt(budget, 'directory_ref_plan_v2')
+    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('operation') == 'select_response_forms_v1':
+        prompt += '\n\n' + _prompt(budget, 'directory_material_response_forms')
+    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('operation') == SOURCE_GROUP_OPERATION:
+        prompt += '\n\n' + _prompt(budget, 'directory_material_source_groups')
+    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('operation') == SOURCE_CARRIER_OPERATION:
+        prompt += '\n\n' + _prompt(budget, 'directory_material_source_groups')
+        prompt += '\n\n' + _prompt(budget, 'directory_material_closure')
+    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('identity_format') == 'material_short_ids_v3':
+        prompt += ('\n目录采用column_blocks_v1：blocks按原顺序展开，constant_values为每行共有字段，'
+                   'rows按columns逐值对应；全部来源和值均保留。输出仍按原Schema返回对象。')
+    if task == AuthoringTask.DIRECTORY_RESPONSE_FORM and payload.get('operation') in {'select_native_response_form_v2', 'select_native_response_form_v3'}:
+        prompt += '\n\n' + _prompt(budget, 'directory_response_form_v2')
+    if task == AuthoringTask.DIRECTORY_RESPONSE_FORM and payload.get('operation') == 'select_native_response_form_v3':
+        prompt += '\n\n' + _prompt(budget, 'directory_response_form_v3')
+    if task == AuthoringTask.DIRECTORY_REQUIREMENT and payload.get('operation') == 'select_native_requirement_sources_v1':
+        prompt += '\n\n' + _prompt(budget, 'directory_requirement_native')
+    if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == 'classify_with_native_requirement_cases_v1':
+        prompt += '\n\n' + _prompt(budget, 'directory_classification_native')
+    if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == REVIEWED_CLASSIFICATION_OPERATION:
+        prompt += '\n\n' + _prompt(budget, 'directory_classification_reviewed_facts')
+    return build_request(budget.model, prompt, payload, task=task,
+                         reasoning_effort=budget.reasoning_effort)
 
 
 def _fits(budget, task, payload, *, headroom_tokens=0):
@@ -72,11 +289,341 @@ def _fits(budget, task, payload, *, headroom_tokens=0):
     return measured['input_tokens'] + headroom_tokens <= measured['effective_input_budget_tokens']
 
 
+def _directory_chapters(compiled):
+    return [{'id': chapter['id'], 'title': chapter.get('display_title', chapter['title']), 'parent_id': chapter.get('parent_id'),
+                 'response_kind': chapter.get('response_kind', 'form'), 'subjects': chapter.get('subjects', [])}
+                for chapter in compiled['chapters'] if not chapter.get('unplaced')]
+
+
+def _directory_applicability(compiled):
+    value = {'excluded': [deepcopy(issue) for issue in compiled['issues'] if issue['code'] == 'outline_directory_excluded'],
+                     'conditions': [{'chapter_id': chapter['id'], 'text': chapter['condition']}
+                                    for chapter in compiled['chapters'] if chapter.get('condition')]}
+    exclusions = reference_exclusions(compiled)
+    if exclusions:
+        value['source_reference_exclusions'] = exclusions
+    return value
+
+
+def _full_source_reading(reading):
+    value = deepcopy(reading)
+    value['source_line_format'] = 'numbered_line_pairs_v1'
+    for document in value['documents']:
+        for page in document['pages']:
+            page['lines'] = [[entry['line'], entry['text']] for entry in page['lines']]
+    return value
+
+
+async def _request_directory_details(compiled, documents, budget, execute, identity=None, *, artifacts=None,
+                                     response_form_contract=None, parameter_source_contract=None, source_group_contract=None,
+                                     native_requirement_contract=None, source_carrier_contract=None,
+                                     reviewed_source_facts=(), on_source_closure=None, reviewed_body_entry_contract=None):
+    from docreader.tender.native_requirement_sources import CONTRACT as NATIVE_CONTRACT
+    if reviewed_body_entry_contract not in (None, REVIEWED_BODY_ENTRY_CONTRACT):
+        raise ModelConfigurationError('unsupported reviewed body entry contract')
+    entry_options = {'entry_contract': reviewed_body_entry_contract} if reviewed_body_entry_contract is not None else {}
+    if native_requirement_contract not in (None, NATIVE_CONTRACT):
+        raise ModelConfigurationError('unsupported native requirement source contract')
+    if source_group_contract not in (None, SOURCE_GROUP_CONTRACT):
+        raise ModelConfigurationError('unsupported directory source group contract')
+    if source_carrier_contract not in (None, SOURCE_CARRIER_CONTRACT):
+        raise ModelConfigurationError('unsupported directory source carrier contract')
+    if reviewed_source_facts and source_carrier_contract != SOURCE_CARRIER_CONTRACT:
+        raise ModelConfigurationError('reviewed source facts require source_carriers_closed_v1')
+    if reviewed_source_facts and native_requirement_contract is not None:
+        raise ModelConfigurationError('reviewed source facts require the supported legacy requirement classification path')
+    if reviewed_source_facts:
+        compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in reviewed_source_facts if f['kind'] == 'required_native')
+    reviewed_body_facts = tuple(f for f in reviewed_source_facts if f['kind'] == 'independent_body_response')
+    closed = source_carrier_contract == SOURCE_CARRIER_CONTRACT
+    grouped = closed or source_group_contract == SOURCE_GROUP_CONTRACT
+    if response_form_contract not in (None, *RESPONSE_FORM_CONTRACTS):
+        raise ModelConfigurationError('unsupported response form source contract')
+    if parameter_source_contract not in (None, PARAMETER_SOURCE_CONTRACT):
+        raise ModelConfigurationError('unsupported parameter source contract')
+    if parameter_source_contract == PARAMETER_SOURCE_CONTRACT:
+        compiled['_parameter_source_contract'] = parameter_source_contract
+    forms_catalog = None
+    if response_form_contract in RESPONSE_FORM_CONTRACTS:
+        compiled['_response_form_contract'] = response_form_contract
+        forms_catalog = response_form_catalog(compiled, documents)
+    compiled['issues'].extend(sparse_page_issues(documents))
+    chapters = _directory_chapters(compiled)
+    applicability = _directory_applicability(compiled)
+    reading = reading_payload(documents, identity)
+    catalog = table_header_catalog(compiled, documents)
+    choices = directory_cases(compiled, documents)
+    titles = title_catalog(compiled, documents)
+    material_options = ({'operation': 'select_response_forms_v1', 'response_form_catalog': forms_catalog}
+                        if forms_catalog is not None else {})
+    if grouped:
+        material_options.update(operation=SOURCE_GROUP_OPERATION, source_group_candidates=source_group_candidates(compiled))
+    carriers = candidate_carriers(compiled, documents) if closed else []
+    if closed:
+        material_options.update(operation=SOURCE_CARRIER_OPERATION, source_carrier_catalog=source_carrier_catalog(
+            carriers, required_native_ids=compiled.get('_reviewed_required_native_table_ids', [])))
+    material_facts = reviewed_material_summary(reviewed_source_facts)
+    if material_facts:
+        material_options['reviewed_source_facts'] = material_facts
+    materials = None
+    try:
+        materials = await _ask(execute, budget, AuthoringTask.DIRECTORY_MATERIAL,
+                               {**_full_source_reading(reading), 'chapters': chapters, 'applicability': applicability,
+                                'unplaced_tables': unplaced_tables(compiled, documents), 'table_header_catalog': catalog,
+                                'chapter_title_catalog': titles,
+                                **({'directory_cases': choices} if choices else {}),
+                                **material_options},
+                               lambda raw: _accept_material_plan(raw, catalog, compiled, documents,
+                                    response_forms_catalog=forms_catalog, source_group_contract=source_group_contract,
+                                    source_carrier_contract=source_carrier_contract, reviewed_source_facts=reviewed_source_facts))
+    except _LOCAL_FAILURES:
+        compiled['issues'].append({'code': 'outline_directory_material_rejected', 'detail': '章内材料未完成，其余继续'})
+        if reviewed_source_facts:
+            apply_reviewed_material_facts(compiled, documents, reviewed_source_facts)
+        if closed:
+            present = {identity for chapter in compiled['chapters'] if not chapter.get('unplaced')
+                       for identity in native_parts(chapter)}
+            apply_carrier_closure(compiled, documents,
+                [{'table_id': item['table_id'], 'action': 'unresolved'} for item in carriers
+                 if item['table_id'] not in present], carriers)
+    else:
+        apply_directory_adjudications(compiled, documents, materials['directory_adjudications'])
+        apply_chapter_titles(compiled, documents, materials['chapter_titles'], titles)
+        apply_materials(compiled, documents, materials['assignments'],
+                        **({'source_owner': True} if grouped else {}))
+        if grouped:
+            apply_source_groups(compiled, documents, materials['source_groups'])
+        if reviewed_source_facts:
+            apply_reviewed_material_facts(compiled, documents, reviewed_source_facts)
+        if closed:
+            apply_carrier_closure(compiled, documents, materials['carrier_dispositions'], carriers)
+    if reviewed_source_facts and closed:
+        bind_reviewed_carrier_results(compiled, reviewed_source_facts)
+    if on_source_closure is not None and closed:
+        await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
+    apply_table_headers(compiled, documents, catalog, materials.get('table_headers', []) if materials else [],
+                        failure='材料请求未完成，请对照原件核定' if materials is None else None)
+    chapters = _directory_chapters(compiled)
+    applicability = _directory_applicability(compiled)
+
+    async def requirements():
+        requirement_chapters = deepcopy(chapters)
+        originals = {chapter['id']: chapter for chapter in compiled['chapters']}
+        for chapter in requirement_chapters:
+            original = originals[chapter['id']]
+            if chapter['response_kind'] in {'form', 'attachment'} and original.get('text', '').strip():
+                chapter['source_body'] = original['text']
+            if original.get('obligations', '').strip():
+                chapter['source_obligations'] = original['obligations']
+        blocks = list(enumerate(requirement_blocks(documents), start=1))
+        semaphore = asyncio.Semaphore(2)
+
+        async def one(block):
+            async with semaphore:
+                try:
+                    return await _ask(execute, budget, AuthoringTask.DIRECTORY_REQUIREMENT,
+                                      {'chapters': requirement_chapters, 'block': block, 'applicability': applicability, **(
+                                          {'source_version': identity.get('source_version'),
+                                           'domain_revision': identity.get('domain_revision')} if identity else {})},
+                                      lambda raw: _accept_requirement_plan(raw, documents, block, compiled))
+                except _LOCAL_FAILURES:
+                    return None
+
+        results = await asyncio.gather(*(one(block) for _, block in blocks))
+        for (index, _), plan in zip(blocks, results):
+            if plan is None:
+                compiled['issues'].append({'code': 'outline_directory_requirement_rejected',
+                                           'detail': f'要求分块{index}未完成，其余继续'})
+            else:
+                apply_requirements(compiled, documents, plan['assignments'])
+
+    if native_requirement_contract == NATIVE_CONTRACT:
+        await _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability)
+    else:
+        await requirements()
+    classification_view = reviewed_classification_view(compiled, reviewed_body_facts)[0] if reviewed_body_facts else compiled
+    cases = requirement_cases(classification_view, documents)
+    if native_requirement_contract != NATIVE_CONTRACT:
+        classification_payload = {**_full_source_reading(reading), **({'requirement_cases': cases, 'chapters': chapters,
+                                                 'applicability': applicability} if cases else {})}
+        if reviewed_body_facts:
+            classification_payload.update(operation=REVIEWED_CLASSIFICATION_OPERATION,
+                chapters=chapters, applicability=applicability,
+                reviewed_source_facts=reviewed_body_summary(reviewed_body_facts))
+        try:
+            classification_plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_CLASSIFICATION,
+                classification_payload, lambda raw: _accept_classification_plan(raw, compiled, documents, reviewed_source_facts=reviewed_body_facts))
+        except _LOCAL_FAILURES:
+            classification_plan = None
+        if classification_plan is None:
+            compiled['issues'].append({'code': 'outline_directory_classification_rejected', 'detail': '分类未完成，其余继续'})
+        else:
+            if reviewed_body_facts:
+                apply_reviewed_classification(compiled, documents, classification_plan, reviewed_body_facts, **entry_options)
+            else:
+                apply_classification(compiled, documents, classification_plan['items'])
+                apply_requirement_adjudications(compiled, documents, classification_plan['requirement_adjudications'])
+        if reviewed_body_facts:
+            if classification_plan is None:
+                if reviewed_body_entry_contract == REVIEWED_BODY_ENTRY_CONTRACT:
+                    apply_reviewed_classification(compiled, documents, None, reviewed_body_facts, **entry_options)
+                else:
+                    apply_reviewed_body_dispositions(compiled, documents, [
+                        {'fact_id': f['fact_id'], 'scope': 'unassigned', 'chapter_id': None}
+                        for f in reviewed_body_facts], reviewed_body_facts, **entry_options)
+    long_chapters = [chapter for chapter in compiled['chapters']
+                   if not chapter.get('unplaced')
+                   and chapter.get('response_kind', 'form') == 'narrative'
+                   and len([line for line in chapter.get('text', '').splitlines() if line.strip()]) >= 25]
+    for chapter in long_chapters:
+        try:
+            plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_PARAMETER,
+                              {'chapter': {'id': chapter['id'], 'title': chapter.get('display_title', chapter['title']),
+                                           'lines': parameter_view(chapter, documents)}},
+                              lambda raw: _accept_parameter_plan(raw, compiled, documents, chapter['id']))
+        except _LOCAL_FAILURES:
+            compiled['issues'].append({'code': 'outline_directory_parameter_rejected',
+                                       'detail': f'“{chapter["title"]}”的参数展开未完成，原章保留'})
+            continue
+        apply_parameters(compiled, documents, plan['chapters'])
+    for selection in (materials or {}).get('response_forms', []):
+        try:
+            if artifacts is None or identity is None:
+                raise ValueError('native response form sources are unavailable')
+            pending = pending_response_form(artifacts, compiled, documents, selection, identity)
+            compiled.setdefault('_response_form_pending', []).append(pending)
+            view = ResponseFormView(artifacts, compiled, documents, selection, identity, contract=response_form_contract)
+        except (ModelContractError, OSError, ValueError, KeyError):
+            compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
+                'detail': '逐条响应原式的完整来源范围暂不能核定，原表及已选来源保留，请核定后展开。'})
+            continue
+        try:
+            form_plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_RESPONSE_FORM, view.payload, view.accept)
+        except _LOCAL_FAILURES:
+            compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
+                'detail': '逐条响应原式尚未完成有界来源选择，原表保留；请按其完整来源范围人工列条款或修订后重试。'})
+            continue
+        compiled.setdefault('_response_form_plans', []).append(form_plan)
+        if not form_plan['complete']:
+            pending['pending']['reason'] = 'selection_incomplete'
+            compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
+                'detail': '逐条响应原式仍有未决来源或布局，未把部分条款写成完整表；原表保留，须核定完整范围后展开。'})
+    return note_missing_requirements(compiled)
+
+
+async def _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability):
+    from docreader.tender.native_requirement_sources import SourceLedger, plan_native_packs, require_native_budget
+    from docreader.tender.native_requirement_flow import JointRequirements, JointClassification, require_classification_budget
+    requirement_chapters = deepcopy(chapters)
+    originals = {chapter['id']: chapter for chapter in compiled['chapters']}
+    for chapter in requirement_chapters:
+        original = originals[chapter['id']]
+        if chapter['response_kind'] in {'form', 'attachment'} and original.get('text', '').strip():
+            chapter['source_body'] = original['text']
+        if original.get('obligations', '').strip():
+            chapter['source_obligations'] = original['obligations']
+    try:
+        if artifacts is None or not identity or not identity.get('frozen_ref'):
+            raise ValueError('Frozen native requirement sources are unavailable.')
+        frozen = artifacts.read_json(identity['frozen_ref'])
+        ledger = SourceLedger(artifacts, frozen['documents'], chapters=requirement_chapters)
+        joint = JointRequirements(ledger, documents, applicability, identity)
+    except (OSError, ValueError, KeyError, ModelContractError) as error:
+        compiled['issues'].append({'code': 'outline_directory_native_source_unavailable',
+            'detail': '完整原生要求来源暂不可核定；原件保留，请在Word对照完整原件人工核定正文及归属。' + type(error).__name__})
+        return
+    task = AuthoringTask.DIRECTORY_REQUIREMENT
+    packs = await asyncio.to_thread(plan_native_packs, ledger, budget, joint.payload,
+        _prompt(budget, task) + '\n\n' + _prompt(budget, 'directory_requirement_native'),
+        request_factory=lambda view, payload: _request(budget, task, payload))
+    for pending in packs['pending_ranges']:
+        joint.pending(compiled, pending['range_ordinals'], pending['reason'])
+    for view in packs['views']:
+        payload = joint.payload(view)
+        try:
+            require_native_budget(budget, view, payload, '', request=_request(budget, task, payload))
+            prepared = await _ask(execute, budget, task, payload, lambda raw: joint.accept(view, raw, compiled))
+        except _LOCAL_FAILURES:
+            joint.pending(compiled, view.range_ordinals, 'joint_B_unfinished')
+            continue
+        joint.apply(compiled, prepared)
+    joint.unknown_geometry(compiled)
+    classification = JointClassification(ledger, compiled, documents, proof=joint.proof)
+    payload = {**classification.payload, 'applicability': applicability,
+               **joint.identity}
+    try:
+        measured = require_classification_budget(budget, _request(budget, AuthoringTask.DIRECTORY_CLASSIFICATION, payload), payload)
+        compiled['_native_classification_budget'] = {k: v for k, v in measured.items() if k != 'request'}
+        prepared = await _ask(execute, budget, AuthoringTask.DIRECTORY_CLASSIFICATION, payload, classification.accept)
+    except _LOCAL_FAILURES:
+        compiled['issues'].append({'code': 'outline_directory_classification_rejected',
+            'detail': '完整联合分类未完成或超出完整输入/输出预算；全部精确来源保留，请核定具名未决来源后修订。'})
+    else:
+        classification.apply(compiled, prepared)
+
+
+async def _request_directory_plans(documents, budget, execute, identity=None, *, contract=None):
+    if contract not in (None, 'source_closure_business_titles_v10', LEGACY_DIRECTORY_REF_CONTRACT, DIRECTORY_REF_CONTRACT):
+        raise ModelConfigurationError('unsupported directory planning contract')
+    refs = None
+    if contract in {LEGACY_DIRECTORY_REF_CONTRACT, DIRECTORY_REF_CONTRACT}:
+        refs = SourceRefs(documents, identity)
+        payload = {**refs.reading(), 'operation': ('select_directory_refs_v2' if contract == DIRECTORY_REF_CONTRACT
+                                                 else 'select_directory_refs_v1')}
+    else:
+        payload = _full_source_reading(reading_payload(documents, identity))
+
+    def accept(raw):
+        return (_accept_ref_directory_plan(raw, refs, documents,
+                    model=RefDirectoryPlanV2 if contract == DIRECTORY_REF_CONTRACT else RefDirectoryPlan) if refs is not None
+                else _accept_directory_plan(raw, documents))
+
+    plans, failures = [], []
+    for slot in (1, 2):
+        try:
+            if contract == DIRECTORY_REF_CONTRACT:
+                # A valid v11 response is a strict subset of the new reading-ref
+                # contract. Reuse only its exact original request and revalidate;
+                # rejected or merely similar old replies never become successes.
+                legacy = {**payload, 'operation': 'select_directory_refs_v1', 'plan_slot': slot}
+                hit, value = await _replay(execute, AuthoringTask.DIRECTORY_PLAN,
+                    _request(budget, AuthoringTask.DIRECTORY_PLAN, legacy),
+                    lambda raw: _accept_ref_directory_plan(raw, refs, documents))
+                if hit:
+                    plans.append(value)
+                    continue
+            plans.append(await _ask(execute, budget, AuthoringTask.DIRECTORY_PLAN,
+                                    {**payload, 'plan_slot': slot}, accept))
+        except _LOCAL_FAILURES as error:
+            failures.append(f'{type(error).__name__}: {error}')
+    return plans, failures
+
+
 async def _ask(execute, budget, task, payload, validate):
     request = _request(budget, task, payload)
     hit, value = await _replay(execute, task, request, validate)
     if hit:
         return value
+    if (task == AuthoringTask.DIRECTORY_MATERIAL or
+            (task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == REVIEWED_CLASSIFICATION_OPERATION)):
+        from docreader.tender.directory_material_ids import MATERIAL_IDENTITY_CONTRACT, MaterialIds
+
+        source_validate = validate
+        identities = MaterialIds(payload)
+        request = _request(budget, task, identities.payload)
+        validate = identities.accept(validate)
+        hit, value = await _replay(execute, task, request, validate)
+        if hit:
+            return value
+        if (task == AuthoringTask.DIRECTORY_MATERIAL
+                and (getattr(execute, 'spec', None) or {}).get('directory_material_identity_contract') == MATERIAL_IDENTITY_CONTRACT
+                and not await asyncio.to_thread(_fits, budget, task, identities.payload)):
+            identities = MaterialIds(payload, contract=MATERIAL_IDENTITY_CONTRACT)
+            request = _request(budget, task, identities.payload)
+            validate = identities.accept(source_validate)
+            hit, value = await _replay(execute, task, request, validate)
+            if hit:
+                return value
     if (task == 'outline' and payload.get('operation') == 'assemble'
             and payload.get('assembly_view') != 'compact_v1'):
         if not await asyncio.to_thread(_fits, budget, task, payload):
@@ -86,6 +633,8 @@ async def _ask(execute, budget, task, payload, validate):
             hit, value = await _replay(execute, task, request, validate)
             if hit:
                 return value
+    if task == AuthoringTask.DIRECTORY_RESPONSE_FORM:
+        require_response_form_budget(budget, request, payload)
     budget.admit_request(request, task)
     return await execute(task, request, validate)
 
@@ -105,6 +654,29 @@ def _batches(records, budget, task, payload, *, headroom_tokens=0):
         batch.append(record)
     if batch:
         yield batch
+
+
+def _note_unassigned_rules(outline, context):
+    """A known rule that no target cites stays unassigned. The model does not place it."""
+    assigned, existing = set(), set()
+
+    def walk(chapters):
+        for chapter in chapters:
+            for target in chapter.get('targets', []):
+                assigned.update(_json(ref) for ref in target.get('rule_refs', []))
+            walk(chapter.get('children', []))
+
+    walk(outline.get('chapters', []))
+    for issue in outline.get('issues', []):
+        if issue.get('code') == 'outline_rule_unassigned':
+            existing.update(_json(ref) for ref in issue.get('rule_refs', []))
+    for ref in context.rules.values():
+        identity = _json(ref)
+        if identity in assigned or identity in existing:
+            continue
+        outline.setdefault('issues', []).append({
+            'code': 'outline_rule_unassigned', 'detail': '该有效规则尚未安排响应位置，需补充大纲映射。',
+            'rule_refs': [ref]})
 
 
 def _gap(code, detail, task=None):
@@ -168,7 +740,7 @@ def _excerpt_texts(artifacts, outline):
     texts = {}
     for target in _walk_targets(outline):
         table = target.get('response_table') or {}
-        for row in [target, {'source_excerpts': table.get('context_source_excerpts', [])}, *table.get('rows', [])]:
+        for row in [target, {'source_excerpts': list(response_table_excerpts(table))}]:
             for ref in row.get('source_excerpts', []):
                 key = _json(ref)
                 if key in texts:
@@ -397,7 +969,10 @@ def _chapter_refs(chapters):
                 excerpt_ids.update(table.get('context_range_ids') or [])
                 for row in table.get('rows') or []:
                     excerpt_ids.update(row.get('range_ids') or [])
+                    excerpt_ids.update(row.get('context_range_ids') or [])
                     rule_ids.update(row.get('rule_ids') or [])
+                for guidance in table.get('source_guidance') or []:
+                    excerpt_ids.update(guidance.get('range_ids') or [])
             walk(chapter.get('children') or [])
     walk(chapters)
     return part_ids, excerpt_ids, rule_ids
@@ -406,17 +981,18 @@ def _chapter_refs(chapters):
 def _assembly_subset(payload, chapters, *, include_unassigned):
     """One fitting assembly request: this chapter group plus shared submission constraints."""
     part_ids, excerpt_ids, rule_ids = _chapter_refs(chapters)
-    if include_unassigned:
-        for rule in payload.get('unassigned_rules') or []:
-            for evidence in (rule.get('rule') or {}).get('evidence') or []:
-                excerpt_ids.update(evidence.get('range_ids') or [])
+    candidate_rules = [rule for rule in payload.get('candidate_rules') or [] if rule.get('rule_id') in rule_ids]
+    unassigned_rules = list(payload.get('unassigned_rules') or []) if include_unassigned else []
+    for rule in [*candidate_rules, *unassigned_rules]:
+        for evidence in (rule.get('rule') or {}).get('evidence') or []:
+            excerpt_ids.update(evidence.get('range_ids') or [])
     result = {key: value for key, value in payload.items() if key not in {
         'chapters', 'template_parts', 'template_runs', 'source_excerpts', 'candidate_rules', 'unassigned_rules'}}
     result['chapters'] = chapters
     result['template_parts'] = [part for part in payload.get('template_parts') or [] if part.get('part_id') in part_ids]
     result['source_excerpts'] = [item for item in payload.get('source_excerpts') or [] if item.get('range_id') in excerpt_ids]
-    result['candidate_rules'] = [rule for rule in payload.get('candidate_rules') or [] if rule.get('rule_id') in rule_ids]
-    result['unassigned_rules'] = list(payload.get('unassigned_rules') or []) if include_unassigned else []
+    result['candidate_rules'] = candidate_rules
+    result['unassigned_rules'] = unassigned_rules
     order = [part.get('part_id') for part in payload.get('template_parts') or []]
     index = {identity: position for position, identity in enumerate(order)}
     runs = []
@@ -449,8 +1025,8 @@ def _assembly_batches(payload, budget):
     if len(chapters) <= 1:
         return [payload]
     groups, current = [], []
-    for chapter in chapters:
-        trial = _assembly_subset(payload, [*current, chapter], include_unassigned=False)
+    for index, chapter in enumerate(chapters):
+        trial = _assembly_subset(payload, [*current, chapter], include_unassigned=index == len(chapters) - 1)
         if current and not _request_fits(budget, trial):
             groups.append(current)
             current = [chapter]
@@ -490,27 +1066,39 @@ def _join_assemblies(results):
     """Host-concatenate fitting batches. No second full-tree assembly call."""
     chapters, omitted, issues, origins, constraints, intents = [], False, [], set(), [], []
     bindings, selections = {}, {}
-    alias_lists, selection_list = [], []
-    for numbered, one_omitted, one_issues, one_origins, one_constraints, one_intents, one_bindings, one_selections in results:
+    alias_lists, selection_list, scoped_ids = [], [], []
+    for scope, (numbered, one_omitted, one_issues, one_origins, one_constraints, one_intents, one_bindings, one_selections) in enumerate(results):
         omitted = omitted or one_omitted
         issues.extend(one_issues)
         origins.update(one_origins)
         constraints.extend(one_constraints)
         intents.extend(one_intents)
         for target in _targets_of(numbered):
+            scoped_ids.append((scope, target['target_id']))
             alias_lists.append(one_bindings.get(target['target_id'], []))
             selection_list.append(one_selections.get(target['target_id'], {}))
         chapters.extend(numbered)
-    old_ids = [target['target_id'] for target in _targets_of(chapters)]
     combined = _renumber(chapters)
     new_targets = list(_targets_of(combined))
-    remap = dict(zip(old_ids, (target['target_id'] for target in new_targets)))
-    for target, aliases, selection in zip(new_targets, alias_lists, selection_list):
+    remap = dict(zip(scoped_ids, (target['target_id'] for target in new_targets)))
+    shared = {}
+    for (_, identity), mapped in remap.items():
+        shared.setdefault(identity, []).append(mapped)
+    for (scope, _), target, aliases, selection in zip(scoped_ids, new_targets, alias_lists, selection_list):
         if aliases:
             bindings[target['target_id']] = aliases
         if selection:
             selections[target['target_id']] = selection
-        target['related_target_ids'] = [remap[identity] for identity in target.get('related_target_ids') or [] if identity in remap]
+        related = []
+        for identity in target.get('related_target_ids') or []:
+            matches = [remap[(scope, identity)]] if (scope, identity) in remap else shared.get(identity, [])
+            if len(matches) == 1:
+                related.append(matches[0])
+            else:
+                issues.append({'code': 'outline_reference_ambiguous',
+                    'detail': '跨位置引用未能确定唯一填写实例，保留待核。',
+                    'rule_refs': target.get('rule_refs', []), 'target_id': target['target_id']})
+        target['related_target_ids'] = related
     return combined, omitted, issues, origins, constraints, intents, bindings, selections
 
 
@@ -535,7 +1123,29 @@ def _renumber(chapters):
     return result
 
 
-async def _organize(artifacts, context, budget, execute, gaps, *, submission_sources=(), structure_results=None):
+async def _organize(artifacts, context, budget, execute, gaps, *, submission_sources=(), structure_results=None,
+                    concurrency=1):
+    if concurrency < 1:
+        raise ValueError('source concurrency must be positive')
+    def prepare_batch(batch, template_parts):
+        local_payload = _outline_payload(context, batch, template_parts)
+        wire = WirePayload('outline', local_payload)
+        local_rules = frozenset(r['rule_id'] for row in batch for r in row.get('rules', []))
+        read_sources = frozenset(source['range_id'] for row in batch for source in _record_sources(row))
+        local_sources = frozenset(wire.mapping.get('r', {})) & context.sources.keys()
+        local_parts = frozenset(part['part_id'] for part in local_payload['template_parts'])
+        read_units = {(ref['source_index_ref']['sha256'], ref['unit_id'])
+                      for identity in read_sources for ref in context.sources.get(identity, [])}
+
+        def validate_local(raw):
+            value = _parse(OutlineResponse, wire.decode(raw))
+            validate_outline_references(value, rule_ids=local_rules, source_ids=local_sources,
+                template_part_ids=local_parts, constraint_source_ids=local_sources,
+                context_source_ids=read_sources)
+            return context.validate(value, template_part_ids=local_parts, read_source_ids=read_sources)
+
+        return wire.payload, validate_local, read_units
+
     def plan_sources():
         records, template_parts = prepare_template_parts(artifacts, context, _source_records(artifacts, context))
         # Original source content is visible in each local pass. No model coverage echo.
@@ -550,29 +1160,49 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 expanded.extend({'rules': [rule]} for rule in row['rules'])
             else:
                 expanded.append(row)
-        return template_parts, list(_batches(expanded, budget, 'outline', build,
+        batches = list(_batches(expanded, budget, 'outline', build,
             headroom_tokens=_OUTLINE_CORRECTION_TOKENS)) or [[]]
-    template_parts, batches = await asyncio.to_thread(plan_sources)
-    fragments = []
-    for batch in batches:
-        local_payload = _outline_payload(context, batch, template_parts)
-        wire = WirePayload('outline', local_payload)
+        return [prepare_batch(batch, template_parts) for batch in batches]
+    source_batches = await asyncio.to_thread(plan_sources)
+    source_jobs = iter(enumerate(source_batches))
+    stopped = False
+
+    async def organize_sources():
+        nonlocal stopped
+        completed = []
         try:
-            local_rules = {r['rule_id'] for row in batch for r in row.get('rules', [])}
-            read_sources = {source['range_id'] for row in batch for source in _record_sources(row)}
-            local_sources = set(wire.mapping.get('r', {})) & context.sources.keys()
-            local_parts = {part['part_id'] for part in local_payload['template_parts']}
-            def validate_local(raw):
-                value = _parse(OutlineResponse, wire.decode(raw))
-                validate_outline_references(value, rule_ids=local_rules, source_ids=local_sources,
-                    template_part_ids=local_parts, constraint_source_ids=local_sources,
-                    context_source_ids=read_sources)
-                context.read_units.update((ref['source_index_ref']['sha256'], ref['unit_id'])
-                                          for identity in read_sources for ref in context.sources.get(identity, []))
-                return context.validate(value, template_part_ids=local_parts)
-            fragments.append(await _ask(execute, budget, 'outline', wire.payload, validate_local))
-        except _LOCAL_FAILURES as error:
-            gaps.append(_gap('outline_batch_unavailable', f'部分原文组织未完成（{type(error).__name__}），保留待核对。'))
+            while not stopped:
+                job = next(source_jobs, None)
+                if job is None:
+                    break
+                ordinal, (payload, validate_local, read_units) = job
+                try:
+                    fragment = await _ask(execute, budget, 'outline', payload, validate_local)
+                except _LOCAL_FAILURES as error:
+                    completed.append((ordinal, None, set(), _gap('outline_batch_unavailable',
+                        f'部分原文组织未完成（{type(error).__name__}），保留待核对。')))
+                else:
+                    completed.append((ordinal, fragment, read_units, None))
+        except BaseException:
+            stopped = True
+            raise
+        return completed
+
+    workers = [asyncio.create_task(organize_sources()) for _ in range(min(concurrency, len(source_batches)))]
+    try:
+        completed = await asyncio.gather(*workers)
+    except BaseException:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+    fragments = []
+    for _, fragment, read_units, gap in sorted(result for batch in completed for result in batch):
+        if gap is not None:
+            gaps.append(gap)
+        else:
+            fragments.append(fragment)
+            context.read_units.update(read_units)
     if not fragments:
         return AuthoringOutline(schema_version=2, authoring_input=context.input, issues=[], chapters=[{
             'chapter_id': 'chapter-1', 'title': '投标文件待补内容', 'children': [],
@@ -676,8 +1306,14 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                         descriptor['response_table'] = {'context_range_ids': [register_excerpt(ref)
                             for ref in target['response_table'].get('context_source_excerpts', [])], 'rows': [
                             {'range_ids': [register_excerpt(ref) for ref in row['source_excerpts']],
+                             **({'context_range_ids': [register_excerpt(ref) for ref in row['context_source_excerpts']]}
+                                if row.get('context_source_excerpts') else {}),
                              'rule_ids': [register_rule(ref) for ref in row['rule_refs']]}
                             for row in target['response_table']['rows']]}
+                        if target['response_table'].get('source_guidance'):
+                            descriptor['response_table']['source_guidance'] = [
+                                {'kind': entry['kind'], 'range_ids': [register_excerpt(ref) for ref in entry['source_excerpts']]}
+                                for entry in target['response_table']['source_guidance']]
                     targets.append(descriptor)
                 entries.append({'title': chapter['title'], 'title_path': list(path),
                                 'is_volume': chapter.get('is_volume', False),
@@ -741,16 +1377,38 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
     payload = await asyncio.to_thread(prepare_assembly)
     assembly_gap = None
     try:
-        def assemble(raw):
+        def assemble(raw, provided):
+            def provided_ids(field, key):
+                entries = provided.get(field) or []
+                return set(entries) if isinstance(entries, dict) else {entry[key] for entry in entries}
+
+            target_ids = {target['target_id'] for chapter in provided['chapters'] for target in chapter['targets']}
+            unassigned_ids = provided_ids('unassigned_rules', 'rule_id')
+            rule_ids = provided_ids('candidate_rules', 'rule_id') | unassigned_ids
+            part_aliases = provided_ids('template_parts', 'part_id')
+            excerpt_aliases = provided_ids('source_excerpts', 'range_id')
+            visible_targets = {identity: target for identity, target in mapping.items() if identity in target_ids}
+            visible_rules = {identity: ref for identity, ref in assembly_rules.items() if identity in rule_ids}
+            visible_unassigned = {identity: ref for identity, ref in missing_rules.items()
+                                  if identity in unassigned_ids}
+            visible_parts = {identity: part for identity, part in part_map.items()
+                             if identity in part_aliases}
+            visible_excerpts = {identity: ref for identity, ref in excerpt_map.items()
+                                if identity in excerpt_aliases}
+            visible_submission_sources = provided_ids('submission_sources', 'source_id')
             parsed = _parse(OutlineAssemblyResponse, raw)
             used, used_rules, header_issues = set(), set(), []
             fully_used, scoped_coverage = set(), {}
             owners, links, selections = {}, [], []
-            selected_parts = deepcopy(part_map)
-            descriptors = {part['part_id']: part for part in parts}
+            selected_parts = deepcopy(visible_parts)
+            descriptors = {part['part_id']: part for part in parts if part['part_id'] in visible_parts}
             header_counts, invalid_headers = {}, set()
-            for entry in parsed['table_headers']:
+            for ordinal, entry in enumerate(parsed['table_headers']):
                 identity, count = entry['part_id'], entry['header_row_count']
+                if identity not in visible_parts:
+                    raise ModelContractError([{'path': ['table_headers', ordinal, 'part_id'],
+                        'code': 'outline_unknown_template',
+                        'detail': 'Select a template part supplied in this request.'}])
                 grid = descriptors.get(identity, {}).get('grid') or {}
                 previous = header_counts.get(identity, count)
                 header_counts[identity] = count
@@ -768,8 +1426,8 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 selected_parts[identity]['header_row_count'] = count
 
             def rule_refs(identities, path):
-                _check_reference_ids(identities, assembly_rules, path, 'Select only supplied rule references.')
-                return [deepcopy(assembly_rules[i]) for i in dict.fromkeys(identities)]
+                _check_reference_ids(identities, visible_rules, path, 'Select only supplied rule references.')
+                return [deepcopy(visible_rules[i]) for i in dict.fromkeys(identities)]
 
             views = {entry['rule_id']: entry for entry in context.payload['rules']}
             by_ref = {_json(ref): views.get(identity, {}) for identity, ref in context.rules.items()}
@@ -788,12 +1446,12 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                     instances = []
                     for number, target in enumerate(c['targets']):
                         for field in ('target_ids', 'related_target_ids'):
-                            _check_reference_ids(target[field], mapping, (*chapter_path, 'targets', number, field),
+                            _check_reference_ids(target[field], visible_targets, (*chapter_path, 'targets', number, field),
                                                  'Select supplied response-target references.')
-                        subjects = list(dict.fromkeys(mapping[identity]['subject'] for identity in target['target_ids']
-                            if identity in mapping and mapping[identity].get('subject')))
+                        subjects = list(dict.fromkeys(visible_targets[identity]['subject'] for identity in target['target_ids']
+                            if identity in visible_targets and visible_targets[identity].get('subject')))
                         unknown_subjects = [identity for identity in dict.fromkeys(target['target_ids'])
-                                            if not mapping[identity].get('subject')]
+                                            if not visible_targets[identity].get('subject')]
                         raw_target = raw
                         for key in (*chapter_path, 'targets', number):
                             raw_target = raw_target[key]
@@ -805,7 +1463,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             for subject in subjects:
                                 instances.append((number, {**target, 'subject': subject,
                                     'target_ids': [identity for identity in target['target_ids']
-                                        if mapping.get(identity, {}).get('subject') == subject]}))
+                                        if visible_targets.get(identity, {}).get('subject') == subject]}))
                             instances.extend((number, {**target, 'subject': None, 'target_ids': [identity]})
                                              for identity in unknown_subjects)
                             header_issues.append({'code': 'outline_subject_instances_retained',
@@ -816,9 +1474,9 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                     for number, target in instances:
                         target_path = (*chapter_path, 'targets', number)
                         for field in ('target_ids', 'related_target_ids'):
-                            _check_reference_ids(target[field], mapping, (*target_path, field),
+                            _check_reference_ids(target[field], visible_targets, (*target_path, field),
                                                  'Select supplied response-target references.')
-                        selected = [mapping[key] for key in dict.fromkeys(target['target_ids'])]
+                        selected = [visible_targets[key] for key in dict.fromkeys(target['target_ids'])]
                         used.update(target['target_ids'])
                         previous_key = (tuple(sorted(set(target['target_ids']))), target['subject'])
                         previous = previous_positions.get(previous_key)
@@ -845,14 +1503,14 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                 raise ModelContractError([{'path': [*target_path, 'candidate_scope'],
                                     'code': 'outline_scope_carrier_conflict',
                                     'detail': 'Scope only one narrative candidate without a native template or response table; retain complete carriers.'}])
-                            allowed_ranges = {excerpt_ids[source_excerpt_key(ref)] for ref in candidate_excerpts}
-                            allowed_rules = {identity for identity, ref in assembly_rules.items() if ref in candidate_rules}
+                            allowed_ranges = {excerpt_ids[source_excerpt_key(ref)] for ref in candidate_excerpts} & visible_excerpts.keys()
+                            allowed_rules = {identity for identity, ref in visible_rules.items() if ref in candidate_rules}
                             _check_reference_ids(scope['range_ids'], allowed_ranges,
                                 (*target_path, 'candidate_scope', 'range_ids'), 'Select excerpts belonging to this candidate.')
                             _check_reference_ids(scope['rule_ids'], allowed_rules,
                                 (*target_path, 'candidate_scope', 'rule_ids'), 'Select complete rules belonging to this candidate.')
                             candidate_rules = rule_refs(scope['rule_ids'], (*target_path, 'candidate_scope', 'rule_ids'))
-                            candidate_excerpts = [deepcopy(excerpt_map[identity])
+                            candidate_excerpts = [deepcopy(visible_excerpts[identity])
                                 for identity in dict.fromkeys(scope['range_ids'])]
                             candidate_sources = [ref['source_ref'] for ref in candidate_excerpts]
                         else:
@@ -867,18 +1525,18 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             selection['candidate_scope'] = deepcopy(scope)
                         if target['same_instance'] or 'same_instance' in raw_target:
                             selection['same_instance'] = target['same_instance']
-                        _check_reference_ids(selection['related_target_ids'], mapping,
+                        _check_reference_ids(selection['related_target_ids'], visible_targets,
                             (*target_path, 'related_target_ids'), 'Select supplied response-target references.')
                         additional = rule_refs(selection['rule_ids'], (*target_path, 'rule_ids'))
                         used_rules.update(selection['rule_ids'])
-                        _check_reference_ids(target['template_part_ids'], part_map, (*target_path, 'template_part_ids'),
+                        _check_reference_ids(target['template_part_ids'], visible_parts, (*target_path, 'template_part_ids'),
                             'Select template parts provided in this assembly request.', code='outline_unknown_template')
                         template_ids = list(dict.fromkeys([*target['template_part_ids'],
-                            *expand_template_spans(part_map, target['template_spans'],
+                            *expand_template_spans(visible_parts, target['template_spans'],
                                 repository or EvidenceRepository(artifacts), path=[*target_path, 'template_spans'],
-                                all_parts=getattr(context, 'template_parts', part_map))]))
+                                all_parts=getattr(context, 'template_parts', visible_parts))]))
                         if target['template_spans']:
-                            template_ids = ordered_template_part_ids({identity: part_map[identity]
+                            template_ids = ordered_template_part_ids({identity: visible_parts[identity]
                                 for identity in template_ids}, repository or EvidenceRepository(artifacts))
                         inherited = [previous] if previous else selected
                         if not template_override(target_path):
@@ -889,9 +1547,9 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                         raw_key = (tuple(sorted(set(raw_target.get('target_ids', [])))), raw_target.get('subject'))
                         excluded_parts.update(instance_decoration_exclusions.get(raw_key, set()))
                         template_ids = [identity for identity in template_ids
-                                        if template_part_key(part_map[identity]) not in excluded_parts]
+                                        if template_part_key(visible_parts[identity]) not in excluded_parts]
                         additional_sources = []
-                        _check_reference_ids(selection['source_ids'], submission_source_ids, (*target_path, 'source_ids'),
+                        _check_reference_ids(selection['source_ids'], visible_submission_sources, (*target_path, 'source_ids'),
                             'Select sources supplied in this assembly request.', code='outline_unknown_source')
                         _check_reference_ids(selection['source_ids'], source_bindings, (*target_path, 'source_ids'),
                             'This source has no frozen reference; select a bindable source or leave it unresolved.',
@@ -929,17 +1587,17 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                 raise ModelContractError([{'path': [*target_path, 'response_table'],
                                     'code': 'outline_conflicting_table',
                                     'detail': 'Select one actual table carrier per position; use distinct targets for distinct deliverables.'}])
-                            _check_reference_ids(target['response_table']['context_range_ids'], excerpt_map,
+                            _check_reference_ids(target['response_table']['context_range_ids'], visible_excerpts,
                                 (*target_path, 'response_table', 'context_range_ids'),
                                 'Select supplied exact source references.')
-                            explicit_context = [deepcopy(excerpt_map[i])
+                            explicit_context = [deepcopy(visible_excerpts[i])
                                 for i in target['response_table']['context_range_ids']]
                             table_context.extend(explicit_context)
                             for row_number, row in enumerate(target['response_table']['rows']):
-                                _check_reference_ids(row['range_ids'], excerpt_map,
+                                _check_reference_ids(row['range_ids'], visible_excerpts,
                                     (*target_path, 'response_table', 'rows', row_number, 'range_ids'),
                                     'Select supplied exact source references.')
-                                row_values.append({'source_excerpts': [deepcopy(excerpt_map[i])
+                                row_values.append({'source_excerpts': [deepcopy(visible_excerpts[i])
                                     for i in dict.fromkeys(row['range_ids'])],
                                     'rule_refs': rule_refs(row['rule_ids'], (*target_path, 'response_table', 'rows', row_number, 'rule_ids'))})
                                 used_rules.update(row['rule_ids'])
@@ -1036,8 +1694,8 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 return output
             result = bind(parsed['chapters'])
             excluded, exclusion_issues = set(), list(header_issues)
-            retained_constraints = {rule['rule_id'] for rule in payload['submission_rules']}
-            _check_reference_ids(parsed['constraint_rule_ids'], assembly_rules.keys() | retained_constraints,
+            retained_constraints = provided_ids('submission_rules', 'rule_id')
+            _check_reference_ids(parsed['constraint_rule_ids'], visible_rules.keys() | retained_constraints,
                                  ['constraint_rule_ids'], 'Select only supplied rule references.')
             new_constraints = [identity for identity in parsed['constraint_rule_ids'] if identity not in retained_constraints]
             added_constraints = rule_refs(new_constraints, ['constraint_rule_ids'])
@@ -1045,25 +1703,25 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             for number, entry in enumerate(parsed['excluded_rules']):
                 path = ['excluded_rules', number, 'rule_ids']
                 excluded_refs = rule_refs(entry['rule_ids'], path)
-                _check_reference_ids(entry['rule_ids'], missing_rules.keys() - used_rules, path,
+                _check_reference_ids(entry['rule_ids'], visible_unassigned.keys() - used_rules, path,
                     'A rule cannot be both assigned and excluded.', code='outline_conflicting_disposition')
                 exclusion_issues.append({'code': 'outline_rule_excluded', 'detail': entry['reason'],
                                          'rule_refs': excluded_refs})
             for number, entry in enumerate(parsed['excluded_targets']):
                 identities = set(entry['target_ids'])
                 path = ['excluded_targets', number, 'target_ids']
-                _check_reference_ids(entry['target_ids'], mapping, path,
+                _check_reference_ids(entry['target_ids'], visible_targets, path,
                                      'Exclude only supplied response-target references.')
-                _check_reference_ids(entry['target_ids'], mapping.keys() - used, path,
+                _check_reference_ids(entry['target_ids'], visible_targets.keys() - used, path,
                     'A candidate cannot be both selected and excluded.', code='outline_conflicting_disposition')
                 excluded.update(identities)
-                selected = [mapping[key] for key in dict.fromkeys(entry['target_ids'])]
+                selected = [visible_targets[key] for key in dict.fromkeys(entry['target_ids'])]
                 exclusion_issues.append({'code': 'outline_target_excluded',
                     'detail': entry['reason'] + ' 原候选用途：' + '；'.join(t['purpose'] for t in selected),
                     'rule_refs': list({_json(ref): ref for t in selected for ref in t['rule_refs']}.values())})
             used.update(excluded)
             omitted = {}
-            for key, original in mapping.items():
+            for key, original in visible_targets.items():
                 if key in excluded or key in fully_used:
                     continue
                 if key not in scoped_coverage:
@@ -1103,7 +1761,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 selections.append((retained, {'candidate_scope': {
                     'range_ids': [excerpt_ids[source_excerpt_key(ref)] for ref in remaining_excerpts],
                     'rule_ids': [identity for reference in remaining_rules
-                                 for identity, ref in assembly_rules.items() if reference == ref]}}))
+                                 for identity, ref in visible_rules.items() if reference == ref]}}))
             for role in ('body', 'submission_note'):
                 retained = [target for key, target in omitted.items()
                             if (candidate_roles[key] == 'submission_note') == (role == 'submission_note')]
@@ -1148,14 +1806,17 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                     for target, selection in selections}
             return (numbered, bool(omitted), exclusion_issues, {origins[key] for key in excluded},
                     added_constraints, added_intents, candidate_bindings, candidate_selections)
+        def assembly_validator(view):
+            return lambda raw: assemble(raw, view)
+
         batches = _assembly_batches(payload, budget)
         if len(batches) == 1:
-            assembled = await _ask(execute, budget, 'outline', batches[0], assemble)
+            assembled = await _ask(execute, budget, 'outline', batches[0], assembly_validator(batches[0]))
         else:
-            batch_results = [await _ask(execute, budget, 'outline', batch, assemble) for batch in batches]
+            batch_results = [await _ask(execute, budget, 'outline', batch, assembly_validator(batch)) for batch in batches]
             slim = _strip_assembly_bodies(payload)
             try:
-                assembled = await _ask(execute, budget, 'outline', slim, assemble)
+                assembled = await _ask(execute, budget, 'outline', slim, assembly_validator(slim))
             except _LOCAL_FAILURES:
                 assembled = _join_assemblies(batch_results)
         (chapters, omitted, exclusion_issues, excluded_origins, added_constraints, added_intents,
@@ -1276,7 +1937,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             for identity, removed in decoration_exclusions.items()}} if decoration_exclusions else {})})
             try:
                 repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = await _ask(
-                    execute, budget, 'outline', feedback, assemble)
+                    execute, budget, 'outline', feedback, assembly_validator(feedback))
                 refs = list({_json(ref): ref for ref in [*refs, *new_constraints]}.values())
                 candidate = finalize(repaired, new_issues, new_excluded, new_intents)
                 changed = candidate['chapters'] != outline['chapters']
@@ -1339,10 +2000,12 @@ def plan_writing_tasks(outline):
 
 
 def _load_task(artifacts, context, task, basis, materials):
+    from docreader.tender.source_body import load_source_body
     rules, sources, issues, seed_ranges = [], {}, [], set()
     repository = getattr(context, 'repository', None)
     source_options = {'repository': repository} if repository is not None else {}
     template_supports, response_context_supports, response_rows = {}, {}, []
+    source_context_supports, body_cache = {}, {}
     views = {r['rule_id']: r for r in context.payload['rules']}
     by_ref = {_json(ref): views[identity] for identity, ref in context.rules.items()}
     needed = {m['material_id']: m for m in _task_materials(materials, task)}
@@ -1382,13 +2045,15 @@ def _load_task(artifacts, context, task, basis, materials):
 
     for ordinal, target in enumerate(task['targets'], 1):
         alias = f't{ordinal}'
+        if (target.get('source_body_contract') is not None or target.get('source_body_ref') is not None
+                or target.get('source_context_excerpts')):
+            load_source_body(artifacts, context.input, target, repository=repository, cache=body_cache)
         target_rules = [by_ref[_json(ref)] for ref in target['rule_refs'] if _json(ref) in by_ref]
         rules.extend(target_rules)
         rows = (target.get('response_table') or {}).get('rows', [])
         table_context = (target.get('response_table') or {}).get('context_source_excerpts', [])
-        excerpts = [*target.get('source_excerpts', []),
-                    *table_context,
-                    *(ref for row in rows for ref in row['source_excerpts'])]
+        excerpts = [*target.get('source_excerpts', []), *target.get('source_context_excerpts', []),
+                    *response_table_excerpts(target.get('response_table') or {})]
         precise_units = {_json(ref['source_ref']) for ref in excerpts}
         coarse_refs = [ref for ref in target['source_refs'] if _json(ref) not in precise_units]
         refs = [*excerpts, *coarse_refs]
@@ -1424,16 +2089,19 @@ def _load_task(artifacts, context, task, basis, materials):
             register(ref, alias)
         response_context_supports[alias] = list(dict.fromkeys(identity for ref in table_context
             if (identity := register(ref, alias))))
+        source_context_supports[alias] = list(dict.fromkeys(identity for ref in target.get('source_context_excerpts', [])
+            if (identity := register(ref, alias))))
         template_supports[alias] = []
         for part in target.get('template_refs', []):
             identity = register(part['source_ref'], alias, template=part)
             if identity:
                 template_supports[alias].append(identity)
         for row in rows:
-            identities = [register(ref, alias) for ref in row['source_excerpts']]
+            identities = [register(ref, alias) for ref in [*row.get('context_source_excerpts', []), *row['source_excerpts']]]
             response_rows.append({'row_id': f'q{len(response_rows) + 1}', 'target_id': alias,
                 'rule_ids': [by_ref[_json(ref)]['rule_id'] for ref in row['rule_refs'] if _json(ref) in by_ref],
-                'support_ids': list(dict.fromkeys(identity for identity in identities if identity))})
+                'support_ids': list(dict.fromkeys(identity for identity in identities if identity)),
+                **({'source_join': row['source_join']} if row.get('source_join') else {})})
     material_aliases = {identity: f'k{i}' for i, identity in enumerate(needed, 1)}
     shared = {**basis['response'], 'project_background': '', 'approach': '',
               'shared_arrangements': [{**{k: v for k, v in entry.items() if k != 'material_ids'},
@@ -1461,6 +2129,19 @@ def _load_task(artifacts, context, task, basis, materials):
                **_analysis_context(context, rules, seed_ranges, global_issues)}
     if response_rows:
         payload['response_rows'] = response_rows
+    for descriptor, target in zip(payload['targets'], task['targets']):
+        if target.get('source_body_contract'):
+            descriptor['source_body_contract'] = target['source_body_contract']
+            descriptor['source_context_support_ids'] = source_context_supports[descriptor['target_id']]
+        table = target.get('response_table') or {}
+        if table.get('native_layout'):
+            descriptor['native_response_layout'] = {key: value for key, value in table['native_layout'].items()
+                                                     if key != 'source_ref'}
+        if table.get('source_guidance'):
+            descriptor['source_guidance'] = [
+                {'kind': entry['kind'], 'support_ids': list(dict.fromkeys(identity for ref in entry['source_excerpts']
+                    if (identity := register(ref, descriptor['target_id']))))}
+                for entry in table['source_guidance']]
     return payload, {s['support_id']: s['reference'] for s in sources.values()}, issues
 
 
@@ -1631,9 +2312,109 @@ def _adopt_reviewed(units, findings, artifacts, superseded):
 async def generate_document(artifacts, snapshot, budget, execute, *, materials=(), knowledge=None,
                             concurrency=2, review_request=None, submission_sources=(), on_outline=None,
                             outline=None, outline_only=False, saved_units=(), on_unit=None,
-                            saved_plan=None, on_plan=None):
+                            saved_plan=None, on_plan=None, directory_plans=None, directory_documents=None,
+                            directory_contract=None, response_form_contract=None, parameter_source_contract=None,
+                            source_group_contract=None, native_requirement_contract=None, source_carrier_contract=None,
+                            reviewed_source_facts_ref=None, on_source_closure=None, on_reviewed_facts=None,
+                            render_pdf=None, on_layout=None, saved_layout_exports=None, reviewed_body_entry_contract=None,
+                            native_body_contract=None, on_source_bodies=None):
     """Plan an outline or compile its fixed tree; the executor supplies document usage."""
+    if directory_plans is not None and directory_documents is None:
+        raise ValueError('directory plans require registered documents')
+    if reviewed_body_entry_contract not in (None, REVIEWED_BODY_ENTRY_CONTRACT):
+        raise ModelConfigurationError('unsupported reviewed body entry contract')
+    from docreader.tender.native_body_selection import CONTRACT as NATIVE_BODY_CONTRACT
+    if native_body_contract not in (None, NATIVE_BODY_CONTRACT):
+        raise ModelConfigurationError('unsupported final source body contract')
+    if native_body_contract is not None and (outline is not None or not outline_only):
+        raise ModelConfigurationError('final source resolution requires automatic directory outline generation')
+    source_body_result = None
     snapshot = AuthoringInput.model_validate(snapshot).model_dump()
+    if outline is None and directory_documents is None and directory_plans is None and outline_only:
+        loaded = None
+        if snapshot.get('frozen_ref'):
+            try:
+                frozen = await asyncio.to_thread(artifacts.read_json, snapshot['frozen_ref'])
+                loaded = await asyncio.to_thread(documents_from_frozen, artifacts, frozen)
+            except DirectoryPlanRejected:
+                loaded = []
+            except (OSError, ValueError, KeyError):
+                loaded = None
+        if loaded:
+            directory_documents = loaded
+        else:
+            directory_documents, directory_plans = [], []
+    reviewed_source_facts = ()
+    reviewed_fact_records = None
+    if reviewed_source_facts_ref is not None and outline is None:
+        if directory_documents is None:
+            raise ModelConfigurationError('reviewed source facts require the frozen directory outline flow')
+        if source_carrier_contract != SOURCE_CARRIER_CONTRACT:
+            raise ModelConfigurationError('reviewed source facts require source_carriers_closed_v1')
+        if directory_plans is not None or native_requirement_contract is not None:
+            raise ModelConfigurationError('reviewed source facts require the material and legacy classification outline flow')
+        reviewed_source_facts = await asyncio.to_thread(
+            load_reviewed_facts, artifacts, snapshot, directory_documents, reviewed_source_facts_ref)
+    if directory_documents is not None:
+        if outline is not None:
+            raise ValueError('directory compilation replaces a model outline')
+        fetch_details = directory_plans is None and bool(directory_documents)
+        if directory_plans is None:
+            directory_plans, plan_failures = ([], [])
+            if directory_documents:
+                directory_plans, plan_failures = await _request_directory_plans(
+                    directory_documents, budget, execute, snapshot, contract=directory_contract)
+        else:
+            plan_failures = []
+        compiled = compile_plans(directory_plans, directory_documents)
+        compiled['issues'].extend({'code': 'outline_directory_plan_failed', 'detail': detail} for detail in plan_failures)
+        if fetch_details and compiled['chapters']:
+            source_options = {}
+            if reviewed_source_facts:
+                source_options['reviewed_source_facts'] = reviewed_source_facts
+            if reviewed_body_entry_contract is not None:
+                source_options['reviewed_body_entry_contract'] = reviewed_body_entry_contract
+            if on_source_closure is not None:
+                source_options['on_source_closure'] = on_source_closure
+            if response_form_contract is not None:
+                source_options['response_form_contract'] = response_form_contract
+            if parameter_source_contract is not None:
+                source_options['parameter_source_contract'] = parameter_source_contract
+            if source_group_contract is not None:
+                source_options['source_group_contract'] = source_group_contract
+            if source_carrier_contract is not None:
+                source_options['source_carrier_contract'] = source_carrier_contract
+            if native_requirement_contract is not None:
+                source_options['native_requirement_contract'] = native_requirement_contract
+            if source_options:
+                source_options['artifacts'] = artifacts
+            compiled = await _request_directory_details(
+                compiled, directory_documents, budget, execute, snapshot, **source_options)
+        elif reviewed_source_facts:
+            # A failed to supply a usable directory. Preserve every reviewed fact
+            # as named pending work without manufacturing a material or C owner.
+            compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in reviewed_source_facts if f['kind'] == 'required_native')
+            apply_reviewed_material_facts(compiled, directory_documents, reviewed_source_facts)
+            apply_carrier_closure(compiled, directory_documents, [], [])
+            bind_reviewed_carrier_results(compiled, reviewed_source_facts)
+            apply_reviewed_body_dispositions(compiled, directory_documents, [
+                {'fact_id': f['fact_id'], 'scope': 'unassigned', 'chapter_id': None}
+                for f in reviewed_source_facts if f['kind'] == 'independent_body_response'], reviewed_source_facts,
+                **({'entry_contract': reviewed_body_entry_contract} if reviewed_body_entry_contract is not None else {}))
+            if on_source_closure is not None:
+                await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
+        outline = outline_from_compiled(snapshot, compiled, artifacts=artifacts)
+        if reviewed_source_facts:
+            bind_reviewed_outline_facts(outline, compiled, reviewed_source_facts)
+        if reviewed_source_facts_ref is not None:
+            reviewed_fact_records = deepcopy(compiled.get('_reviewed_source_fact_applications', []))
+        if native_body_contract is not None:
+            from docreader.tender.native_body_scope import NativeBodyScope
+            from docreader.tender.native_body_flow import resolve_native_bodies
+            scope = await asyncio.to_thread(NativeBodyScope, artifacts, snapshot, directory_documents, compiled, outline)
+            outline, source_body_result = await resolve_native_bodies(artifacts, snapshot, outline, scope, budget, execute)
+    elif native_body_contract is not None:
+        raise ModelConfigurationError('final source resolution requires the registered directory source flow')
     supplied_outline = outline is not None
     if supplied_outline:
         parsed = AuthoringOutline.model_validate(outline)
@@ -1653,8 +2434,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     if not supplied_outline:
         organization_options = {'submission_sources': submission_sources} if submission_sources else {}
         outline = await _organize(artifacts, context, budget, execute, gaps,
-                                  structure_results=structure_results, **organization_options)
-    elif not outline_only:
+                                  structure_results=structure_results, concurrency=concurrency, **organization_options)
+    elif not outline_only and directory_plans is None:
         # Rebuild the same paragraph references registered during automatic organization.
         await asyncio.to_thread(prepare_template_parts, artifacts, context)
         from docreader.tender.authoring_structure import review_structure
@@ -1662,6 +2443,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             artifacts, outline, [], budget, execute, outline_phase=True)
         structure_results.update(findings=findings, gaps=structure_gaps)
     gaps.extend(structure_results['gaps'])
+    if supplied_outline:
+        _note_unassigned_rules(outline, context)
     if not any(c['targets'] for c in _flatten(outline['chapters'])):
         gaps.append(_gap('outline_empty', '当前大纲没有实际响应位置，保留待补正文；不代表已覆盖招标要求。'))
         if not supplied_outline:
@@ -1673,7 +2456,19 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         issues = [*outline['issues'], *({'code': gap['code'], 'detail': gap['detail'], 'rule_refs': [],
                   **({'target_id': gap['target_id']} if gap.get('target_id') else {})} for gap in gaps)]
         outline['issues'] = list({_json(issue): issue for issue in issues}.values())
+    from docreader.tender.source_body import validate_outline_source_bodies
+    await asyncio.to_thread(validate_outline_source_bodies, artifacts, outline)
     outline_ref = artifacts.put_json(outline)
+    if on_reviewed_facts is not None and reviewed_fact_records is not None:
+        await on_reviewed_facts(outline_ref, reviewed_fact_records)
+    if source_body_result is not None:
+        body_receipt_ref = artifacts.put_json({**source_body_result, 'authoring_input': snapshot,
+            'outline_ref': outline_ref, 'reviewed_source_facts_ref': reviewed_source_facts_ref})
+        if on_source_bodies is not None:
+            await on_source_bodies(body_receipt_ref)
+        if not source_body_result['complete']:
+            from docreader.tender.native_body_flow import SourceBodyResolutionPending
+            raise SourceBodyResolutionPending('Final source bodies require named source review; diagnostic receipt retained.')
     if on_outline is not None:
         await on_outline(outline_ref)
     if outline_only:
@@ -1853,7 +2648,9 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         if all(t.get('manual_fill', False) for t in task['targets']):
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
-                blocks=[{'kind': 'paragraph', 'text': '________（人工填写）'}
+                blocks=[{'kind': 'paragraph', 'text': ('________（待附证明材料）' if t['kind'] == 'attachment' else
+                        '我方响应：________（人工填写）\n证明材料或附件位置：________（原条款要求时填写）'
+                        if t.get('support_origins') == ['tender'] else '________（人工填写）')}
                         for t in task['targets'] if t['kind'] != 'form'],
                 gaps=['此处为人工填写位置；最终报价等数据留空，不由模型代填或按0计算。']).model_dump()
             unit['gaps'].extend(source_issues)
@@ -2060,8 +2857,25 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     gaps.extend({'code': i['code'], 'detail': i['detail'],
                  **({'target_id': i['target_id']} if i.get('target_id') else {})} for i in outline['issues'])
     from docreader.tender.authoring_export import export_authoring_document
-    exported = await asyncio.to_thread(export_authoring_document, artifacts, outline, units, gaps,
-                                      requirements=requirements, coverage=coverage)
+    export_digest = hashlib.sha256(_json({'contract': 'toc_layout_export_v1', 'outline': outline,
+        'units': units, 'gaps': gaps, 'requirements': requirements, 'coverage': coverage}).encode()).hexdigest()
+    saved_export = (saved_layout_exports or {}).get(export_digest) if render_pdf is not None else None
+    if saved_export is not None:
+        exported = await asyncio.to_thread(artifacts.read_json, saved_export)
+        for key in ('docx_ref', 'package_ref', 'layout_ref'):
+            await asyncio.to_thread(artifacts.path, exported[key])
+        report = await asyncio.to_thread(artifacts.read_json, exported['layout_ref'])
+        if report.get('status') != 'fixed' or report['documents'][0]['artifact_ref'] != exported['docx_ref']:
+            raise ValueError('stored layout export is not bound to its verified document')
+    else:
+        layout_options = {'render_pdf': render_pdf} if render_pdf is not None else {}
+        exported = await asyncio.to_thread(export_authoring_document, artifacts, outline, units, gaps,
+                                          requirements=requirements, coverage=coverage, **layout_options)
+        if on_layout is not None and exported.get('layout_ref') is not None:
+            export_ref = await asyncio.to_thread(artifacts.put_json, exported)
+            await on_layout({'layout_ref': exported['layout_ref'], 'outline_ref': outline_ref,
+                'docx_ref': exported['docx_ref'], 'package_ref': exported['package_ref'],
+                'export_input_digest': export_digest, 'export_result_ref': export_ref})
     all_gaps = list({_json(g): g for g in [*gaps, *exported['gaps']]}.values())
     result = AuthoringDocument(authoring_input=snapshot, outline_ref=outline_ref, requirements_ref=requirements_ref,
                                basis_ref=basis_ref,

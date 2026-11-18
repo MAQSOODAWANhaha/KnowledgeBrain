@@ -1,3 +1,6 @@
+import { Button } from "@astryxdesign/core/Button";
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
+import { TextArea } from "@astryxdesign/core/TextArea";
 import { useEffect, useState } from "react";
 import type { TenderChapter } from "../api/workbench";
 import { reviewTargetIds } from "./outlineTree";
@@ -47,8 +50,8 @@ export function ChapterRevision({ source, disabled, busy, pending, pendingReques
   const render = (chapters: TenderChapter[]) => <ul>{chapters.map(chapter => {
     const ids = reviewTargetIds([chapter]);
     const count = ids.filter(id => selected.includes(id)).length;
-    return <li key={chapter.chapter_id}><label><input type="checkbox" aria-label={`复核章节：${chapter.title}`} disabled={locked || !ids.length} checked={!!ids.length && count === ids.length} onChange={() => toggle(ids)} /> {chapter.title} <span className="tender-note">{ids.length ? `${count}/${ids.length} 项响应（含子章节）` : "没有可自动复核的响应"}</span></label>
-      {!!chapter.targets.length && <ul>{chapter.targets.map(target => <li key={target.target_id}><label><input type="checkbox" aria-label={`复核响应：${target.purpose}`} disabled={locked || target.manual_fill} checked={selected.includes(target.target_id)} onChange={() => toggle([target.target_id])} /> {target.purpose}{target.manual_fill && <span className="tender-note"> · 需人工填写</span>}</label></li>)}</ul>}
+    return <li key={chapter.chapter_id}><CheckboxInput label={`复核章节：${chapter.title}`} description={ids.length ? `${count}/${ids.length} 项响应（含子章节）` : "没有可自动复核的响应"} isDisabled={locked || !ids.length} value={!!ids.length && count === ids.length} onChange={() => toggle(ids)} />
+      {!!chapter.targets.length && <ul>{chapter.targets.map(target => <li key={target.target_id}><CheckboxInput label={`复核响应：${target.purpose}`} description={target.manual_fill ? "需人工填写" : undefined} isDisabled={locked || !!target.manual_fill} value={selected.includes(target.target_id)} onChange={() => toggle([target.target_id])} /></li>)}</ul>}
       {!!chapter.children.length && render(chapter.children)}</li>;
   })}</ul>;
   return <section className="tender-info-card" aria-label="定向复核与修订">
@@ -59,12 +62,12 @@ export function ChapterRevision({ source, disabled, busy, pending, pendingReques
     {manualWordRevision != null && <p className="tender-context-warning">当前人工 Word v{manualWordRevision} 的编辑内容不作为本次复核输入。</p>}
     <p className="tender-note">现有 Word 稿继续保留，新稿生成后由你选择载入。</p>
     <p className="tender-note">提交前请先保存并确认 Word 中的修改。</p>
-    {changedSource && <div className="tender-alert" role="alert">生成稿已切换，原选择与理由仍保留。<button disabled={disabled || busy || pending || !source} onClick={() => { if (window.confirm("载入当前生成稿会清空尚未提交的复核选择与理由，继续？")) setDraft(null); }}>载入当前生成稿作为基准</button></div>}
+    {changedSource && <div className="tender-alert" role="alert">生成稿已切换，原选择与理由仍保留。<Button isDisabled={disabled || busy || pending || !source} onClick={() => { if (window.confirm("载入当前生成稿会清空尚未提交的复核选择与理由，继续？")) setDraft(null); }} label="载入当前生成稿作为基准" /></div>}
     {basis && !frozenSourceDiffers && render(basis.chapters)}
     {frozenSourceDiffers && <p className="tender-note">待确认请求已固定 {selected.length} 项原生成稿响应。当前稿件已变化，确认时继续使用原请求。</p>}
-    <label>复核与修订理由<textarea aria-label="复核与修订理由" rows={3} value={reason} disabled={locked} onChange={event => change({ reason: event.target.value })} /></label>
+    <TextArea label="复核与修订理由" rows={3} value={reason} isDisabled={locked} onChange={next => change({ reason: next })} />
     <p className="tender-note">已选择 {selected.length} 项响应。需人工填写的内容请在 Word 中处理。</p>
-    <button disabled={pending ? disabled || busy || submitting : locked || !selected.length || !reason.trim()} onClick={() => void submit()}>{pending ? "确认同一次定向复核请求" : "生成复核修订稿"}</button>
-    {draft && <button disabled={busy || pending || submitting} onClick={() => { if (window.confirm("放弃尚未提交的复核选择与理由？")) setDraft(null); }}>放弃本次复核选择</button>}
+    <Button isDisabled={pending ? disabled || busy || submitting : locked || !selected.length || !reason.trim()} onClick={() => void submit()} label={pending ? "确认同一次定向复核请求" : "生成复核修订稿"} />
+    {draft && <Button isDisabled={busy || pending || submitting} onClick={() => { if (window.confirm("放弃尚未提交的复核选择与理由？")) setDraft(null); }} label="放弃本次复核选择" />}
   </section>;
 }

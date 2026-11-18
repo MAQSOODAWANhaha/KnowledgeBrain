@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -325,6 +326,88 @@ async def test_audit_failure_before_send_does_not_call_provider():
     assert calls == []
 
 
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_semaphore_wait_is_observation_only_for_both_call_paths(monkeypatch, prepared):
+    from docreader.llm import client as client_module, streaming
+    from docreader.llm.request import request_digest
+
+    clock, sent = [0.0], []
+    monkeypatch.setattr(streaming, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: clock[0], time=client_module.time.time))
+    def handler(request):
+        sent.append(json.loads(request.content))
+        reply = response()
+        return httpx.Response(200, stream=httpx.ByteStream(reply.content), headers=reply.headers)
+
+    client, audit = model(handler, concurrency=1)
+    budget = client.request_budget()
+    request = budget.request("extract", {"source": "unchanged"})
+    spec = client.execution_spec()
+    expected_digest = request_digest(client.config.chat.base_url, request)
+    async with client:
+        await client._semaphore.acquire()
+        pending = asyncio.create_task(
+            client.call_request(request, budget, task="extract", execution_spec=spec) if prepared
+            else client.call("extract", {"source": "unchanged"})
+        )
+        await asyncio.sleep(0)
+        assert not audit.events and not sent
+        clock[0] = 7
+        client._semaphore.release()
+        assert await pending == {"result": "ok"}
+    assert audit.events[-1]["activity"]["semaphore_wait_seconds"] == 7
+    assert audit.events[-1]["activity"]["first_raw_seconds"] == 0
+    assert audit.events[0]["metadata"]["request_digest"] == expected_digest
+    assert sent == [request] and client.execution_spec() == spec
+
+
+@pytest.mark.parametrize("deadline,expected_wait", [(123.0, 23.0), (99.0, 0.0), (None, 0.0)])
+async def test_durable_request_wait_precedes_the_sent_fence(monkeypatch, deadline, expected_wait):
+    from docreader.llm import client as client_module
+
+    waits, lookups, sent = [], [], []
+    audit = Audit()
+
+    async def request_not_before(lease, task, logical_digest, *, group_work_unit_keys=None):
+        assert [event["status"] for event in audit.events] == ["prepared"]
+        lookups.append((task, logical_digest, group_work_unit_keys))
+        return deadline
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    audit.request_not_before = request_not_before
+    monkeypatch.setattr(client_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(client_module.asyncio, "sleep", sleep)
+    client, _ = model(lambda request: (sent.append(request), response())[1], audit)
+    async with client:
+        assert await client.call("extract", {}) == {"result": "ok"}
+    assert waits == ([expected_wait] if expected_wait else [])
+    assert lookups == [("extract", audit.events[0]["metadata"]["logical_request_digest"], None)]
+    assert len(sent) == 1 and [event["status"] for event in audit.events] == ["prepared", "sent", "succeeded"]
+
+
+async def test_cancel_during_durable_request_wait_never_sends(monkeypatch):
+    from docreader.llm import client as client_module
+
+    audit, sent = Audit(), []
+
+    async def request_not_before(*args, **kwargs):
+        return 130.0
+
+    async def sleep(seconds):
+        raise asyncio.CancelledError()
+
+    audit.request_not_before = request_not_before
+    monkeypatch.setattr(client_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(client_module.asyncio, "sleep", sleep)
+    client, _ = model(lambda request: sent.append(request), audit)
+    async with client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.call("extract", {})
+    assert not sent and [event["status"] for event in audit.events] == ["prepared"]
+
+
 @pytest.mark.parametrize(
     "status,exception,recorded",
     [
@@ -556,6 +639,7 @@ def test_execution_spec_is_non_secret_json_with_all_actual_prompts():
         for task, prompt in prompts.items()
     }
     assert spec["timeout_seconds"] == 45
+    assert spec["retry_policy"] == "bounded_work_unit_deadline_v1"
     assert spec["concurrency"] == 3
     encoded = json.dumps(spec)
     for private in (
@@ -660,7 +744,7 @@ async def test_execution_drift_fails_before_request_audit_or_http(change):
     elif change == "concurrency":
         kwargs["concurrency"] = 3
     else:
-        kwargs["timeout_seconds"] = 60
+        kwargs["timeout_seconds"] = 180
     second = OpenAIModel(
         ModelConfig.from_env(values),
         audit,
@@ -674,6 +758,21 @@ async def test_execution_drift_fails_before_request_audit_or_http(change):
             await second.call("extract", {})
     assert len(calls) == 1
     assert audit.events == before
+
+
+async def test_legacy_execution_without_retry_policy_fails_before_new_send():
+    audit, sent = Audit(), []
+
+    def handler(request):
+        sent.append(request)
+        return response()
+
+    instance, _ = model(handler, audit)
+    audit.spec = {key: value for key, value in instance.execution_spec().items() if key != "retry_policy"}
+    async with instance:
+        with pytest.raises(Conflict):
+            await instance.call("extract", {})
+    assert sent == [] and audit.events == []
 
 
 async def test_snapshot_prompt_is_the_prompt_actually_sent():

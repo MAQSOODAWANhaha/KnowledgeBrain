@@ -230,6 +230,12 @@ def test_tokenized_authoring_spec_records_full_tasks_without_changing_analysis(
         "authoring_review",
         "authoring_structure",
         "authoring_write",
+        "directory_classification",
+        "directory_material",
+        "directory_parameter",
+        "directory_plan",
+        "directory_requirement",
+        "directory_response_form",
         "outline",
         "verify",
     ]
