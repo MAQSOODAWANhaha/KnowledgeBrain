@@ -64,7 +64,7 @@ from docreader.tender.reviewed_source_facts import (
     REVIEWED_CLASSIFICATION_OPERATION, REVIEWED_BODY_ENTRY_CONTRACT,
     load_reviewed_facts, reviewed_material_summary, apply_reviewed_material_facts,
     reviewed_body_summary, validate_reviewed_body_dispositions, apply_reviewed_body_dispositions, ReviewedClassificationPlan,
-    bind_reviewed_outline_facts,
+    bind_reviewed_outline_facts, bind_reviewed_credential_slots,
     bind_reviewed_carrier_results,
     reviewed_classification_view, apply_reviewed_classification,
 )
@@ -2381,6 +2381,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     if directory_documents is not None:
         if outline is not None:
             raise ValueError('directory compilation replaces a model outline')
+        directory_facts = tuple(f for f in reviewed_source_facts if f['kind'] != 'credential_slot')
         fetch_details = directory_plans is None and bool(directory_documents)
         if directory_plans is None:
             directory_plans, plan_failures = ([], [])
@@ -2393,8 +2394,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         compiled['issues'].extend({'code': 'outline_directory_plan_failed', 'detail': detail} for detail in plan_failures)
         if fetch_details and compiled['chapters']:
             source_options = {}
-            if reviewed_source_facts:
-                source_options['reviewed_source_facts'] = reviewed_source_facts
+            if directory_facts:
+                source_options['reviewed_source_facts'] = directory_facts
             if reviewed_body_entry_contract is not None:
                 source_options['reviewed_body_entry_contract'] = reviewed_body_entry_contract
             if on_source_closure is not None:
@@ -2413,29 +2414,30 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 source_options['artifacts'] = artifacts
             compiled = await _request_directory_details(
                 compiled, directory_documents, budget, execute, snapshot, **source_options)
-        elif reviewed_source_facts:
+        elif directory_facts:
             # A failed to supply a usable directory. Preserve every reviewed fact
             # as named pending work without manufacturing a material or C owner.
-            compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in reviewed_source_facts if f['kind'] == 'required_native')
-            apply_reviewed_material_facts(compiled, directory_documents, reviewed_source_facts)
+            compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in directory_facts if f['kind'] == 'required_native')
+            apply_reviewed_material_facts(compiled, directory_documents, directory_facts)
             apply_carrier_closure(compiled, directory_documents, [], [])
-            bind_reviewed_carrier_results(compiled, reviewed_source_facts)
+            bind_reviewed_carrier_results(compiled, directory_facts)
             apply_reviewed_body_dispositions(compiled, directory_documents, [
                 {'fact_id': f['fact_id'], 'scope': 'unassigned', 'chapter_id': None}
-                for f in reviewed_source_facts if f['kind'] == 'independent_body_response'], reviewed_source_facts,
+                for f in directory_facts if f['kind'] == 'independent_body_response'], directory_facts,
                 **({'entry_contract': reviewed_body_entry_contract} if reviewed_body_entry_contract is not None else {}))
             if on_source_closure is not None:
                 await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
         outline = outline_from_compiled(snapshot, compiled, artifacts=artifacts)
-        if reviewed_source_facts:
-            bind_reviewed_outline_facts(outline, compiled, reviewed_source_facts)
-        if reviewed_source_facts_ref is not None:
-            reviewed_fact_records = deepcopy(compiled.get('_reviewed_source_fact_applications', []))
+        if directory_facts:
+            bind_reviewed_outline_facts(outline, compiled, directory_facts)
         if native_body_contract is not None:
             from docreader.tender.native_body_scope import NativeBodyScope
             from docreader.tender.native_body_flow import resolve_native_bodies
             scope = await asyncio.to_thread(NativeBodyScope, artifacts, snapshot, directory_documents, compiled, outline)
             outline, source_body_result = await resolve_native_bodies(artifacts, snapshot, outline, scope, budget, execute)
+        if reviewed_source_facts_ref is not None:
+            bind_reviewed_credential_slots(outline, compiled, reviewed_source_facts)
+            reviewed_fact_records = deepcopy(compiled.get('_reviewed_source_fact_applications', []))
     elif native_body_contract is not None:
         raise ModelConfigurationError('final source resolution requires the registered directory source flow')
     supplied_outline = outline is not None

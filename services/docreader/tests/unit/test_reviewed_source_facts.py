@@ -590,3 +590,90 @@ def test_distinct_source_coverage_or_real_instance_scope_is_not_merged(tmp_path,
         fact['subjects'] = [{'source': window(1, 1), 'role': '制造商'}]
     data[3]['facts'].append(fact)
     assert len(load(data)) == 4
+
+
+async def test_reviewed_credentials_have_distinct_blanks_in_main_word_and_own_volume(tmp_path, monkeypatch):
+    from io import BytesIO
+    import json
+    from zipfile import ZipFile
+
+    from docx import Document
+    from docreader.llm.budget import RequestBudget
+
+    artifacts, snapshot, documents, manifest, compiled, make_fact = fixture(tmp_path)
+    source_id = next(c['id'] for c in compiled['chapters'] if c['heading'] == point(2))
+    index_ref = manifest['facts'][0]['source_excerpts'][0]['source_ref']['source_index_ref']
+    repository = EvidenceRepository(artifacts)
+    native, = [r for r in repository.source_index(index_ref).ranges if r['unit_id'] == 'unit:2']
+    labels = ('证明材料甲', '证明材料乙', '证明材料丙')
+    facts = []
+    for label, required in zip(labels, ('完整', '实施', '职责'), strict=True):
+        start = native['start'] + native['text'].index(required, native['text'].index('\n'))
+        part = fragment(native, start, start + len(required))
+        base = make_fact('credential_slot', 2, carrier_heading=point(2))
+        base.update(label=label, source_text_sha256=sha256(required.encode()).hexdigest(),
+                    source_excerpts=[{'source_ref': {'source_index_ref': index_ref, 'unit_id': native['unit_id']},
+                                     'selectors': [selector(part)]}])
+        facts.append(base)
+    manifest['facts'] = facts
+    review = reviewed()
+    loaded = review.load_reviewed_facts(artifacts, snapshot, documents, artifacts.put_json(manifest))
+    assert review.reviewed_material_summary(loaded) == review.reviewed_body_summary(loaded) == []
+    raw = plan([{**node('solution', 2, 0), 'heading': point(2), 'body_windows': [window(2, 0, 1)],
+                 'response_kind': 'narrative'}], [item('solution')])
+
+    async def replay_directory(*args, **kwargs):
+        return [raw], []
+
+    async def replay_details(compiled, *args, **kwargs):
+        assert 'reviewed_source_facts' not in kwargs
+        return compiled
+
+    async def no_model(*args):
+        pytest.fail('host binding requests no new model decision')
+
+    monkeypatch.setattr(pipeline, '_request_directory_plans', replay_directory)
+    monkeypatch.setattr(pipeline, '_request_directory_details', replay_details)
+    accepted = artifacts.read_json(await pipeline.generate_document(artifacts, snapshot,
+        RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), no_model,
+        outline_only=True, directory_documents=documents, source_carrier_contract=pipeline.SOURCE_CARRIER_CONTRACT,
+        reviewed_source_facts_ref=artifacts.put_json(manifest)))
+    assert [t['purpose'] for c in accepted['chapters'] for t in c['targets'] if t['kind'] == 'attachment'] == list(labels)
+    outline = outline_from_compiled(snapshot, compiled)
+    carrier = outline['chapters'][1]
+    carrier['is_volume'] = True
+    before = deepcopy(carrier['targets'])
+    review.bind_reviewed_credential_slots(outline, compiled, loaded)
+    review.bind_reviewed_credential_slots(outline, compiled, loaded)
+    added = carrier['targets'][len(before):]
+    assert carrier['targets'][:len(before)] == before and len(added) == 3
+    assert all(t['kind'] == 'attachment' and t['manual_fill'] for t in added)
+    assert [t['source_excerpts'] for t in added] == [f['source_excerpts'] for f in loaded]
+    records = compiled['_reviewed_source_fact_applications']
+    assert all(r['chapter_ids'] == [source_id] and r['state'] == 'credential_bound' for r in records)
+
+    async def execute(stage, request, validate):
+        assert stage == 'authoring_structure'
+        return validate({'findings': []})
+
+    result = artifacts.read_json(await pipeline.generate_document(artifacts, snapshot,
+        RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), execute, outline=outline))
+    with ZipFile(BytesIO(artifacts.read_bytes(result['package_ref']))) as archive:
+        assert archive.testzip() is None
+        package = json.loads(archive.read('manifest.json'))
+        main = artifacts.read_bytes(result['docx_ref'])
+        assert archive.read(package['document']['package_path']) == main
+        volume, = package['volumes']
+        for data in (main, archive.read(volume['package_path'])):
+            paragraphs = [p.text for p in Document(BytesIO(data)).paragraphs]
+            assert paragraphs.count('完整实施职责') == 1
+            for label in labels:
+                assert paragraphs.count(label) == 1
+                assert paragraphs[paragraphs.index(label) + 1] == '________（待附证明材料）'
+
+    # A reviewed location that disappears from the compiled outline is visible as pending.
+    carrier['targets'] = before
+    compiled['chapters'] = [c for c in compiled['chapters'] if c['id'] != source_id]
+    review.bind_reviewed_credential_slots(outline, compiled, loaded)
+    assert len(carrier['targets']) == len(before)
+    assert all(any(f['label'] in issue['detail'] for issue in outline['issues']) for f in facts)

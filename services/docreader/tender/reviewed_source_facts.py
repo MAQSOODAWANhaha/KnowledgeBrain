@@ -74,13 +74,19 @@ class SubjectLayoutFact(ReviewedFact):
     subjects: list[DirectorySubject]
 
 
+class CredentialSlotFact(ReviewedFact):
+    kind: Literal['credential_slot']
+    label: Text = Field(max_length=80)
+    carrier_heading: DirectoryPoint
+
+
 class ReviewedFactsManifest(Contract):
     schema_version: Literal[1]
     contract: Literal['reviewed_source_facts_v1']
     authoring_input: AuthoringInput
     source_projection_digest: Digest
-    facts: list[Annotated[RequiredNativeFact | IndependentBodyFact | SourceGroupFact | SubjectLayoutFact | SourceDecorationFact,
-                          Field(discriminator='kind')]]
+    facts: list[Annotated[RequiredNativeFact | IndependentBodyFact | SourceGroupFact | SubjectLayoutFact
+                          | SourceDecorationFact | CredentialSlotFact, Field(discriminator='kind')]]
 
     @field_validator('schema_version', mode='before')
     @classmethod
@@ -291,6 +297,13 @@ def load_reviewed_facts(artifacts, snapshot, documents, manifest_ref):
             if key in exclusive:
                 raise ArtifactIntegrityError('duplicate independent body facts have the same source coverage and instance scope')
             exclusive.add(key)
+        elif fact['kind'] == 'credential_slot':
+            heading = _canonical(fact['carrier_heading'])
+            keys = {(fact['kind'], heading, fact['label'].strip()),
+                    (fact['kind'], heading, tuple(sorted(selected)))}
+            if len(document_ids) != 1 or not text.strip() or not fact['label'].strip() or exclusive.intersection(keys):
+                raise ArtifactIntegrityError('credential slots require distinct named requirements from the carrier document')
+            exclusive.update(keys)
         result.append(fact)
     validate_decoration_duties(artifacts, repository, result, registered.values(), source)
     return tuple(result)
@@ -298,7 +311,7 @@ def load_reviewed_facts(artifacts, snapshot, documents, manifest_ref):
 
 def _pending(compiled, fact, detail):
     text = f'已核来源“{fact["label"]}”待核：{detail}。企业事实未确认。请对照原核定来源补充核定。'
-    if fact['kind'] == 'independent_body_response':
+    if fact['kind'] in {'independent_body_response', 'credential_slot'}:
         text += '\n' + fact['_source_text']
         if fact.get('_context_text'):
             text += '\n来源上下文（不作为企业应答）：\n' + fact['_context_text']
@@ -596,7 +609,7 @@ def _bind_all_fact_applications(outline, compiled, facts, nodes, chapters):
         return None
     applications = {r['fact_id']: r for r in compiled.get('_reviewed_source_fact_applications', [])}
     for fact in facts:
-        if fact['kind'] == 'source_decoration':
+        if fact['kind'] in {'source_decoration', 'credential_slot'}:
             continue
         record = applications.get(fact['fact_id'])
         if record is None:
@@ -643,3 +656,42 @@ def _bind_all_fact_applications(outline, compiled, facts, nodes, chapters):
         if not valid:
             record['state'] = 'unresolved'
             _pending(outline, fact, '最终章节或响应位置待确认，请核定实际位置')
+
+
+def bind_reviewed_credential_slots(outline, compiled, facts):
+    """Place each reviewed credential after source body selection, in its actual chapter."""
+    slots = [fact for fact in facts if fact['kind'] == 'credential_slot']
+    if not slots:
+        return
+    nodes = {}
+    _assign_ids(_nest(compiled['chapters'], source_nodes=nodes))
+    chapters = {}
+
+    def visit(entries, volume=None):
+        for entry in entries:
+            identity = entry['chapter_id']
+            active_volume = identity if entry.get('is_volume') else volume
+            if entry.get('presentation_role', 'body') == 'body':
+                chapters[identity] = entry, active_volume
+            visit(entry['children'], active_volume)
+
+    visit(outline['chapters'])
+    for fact in slots:
+        owners = [c['id'] for c in compiled['chapters'] if not c.get('unplaced')
+                  and c['heading'] == fact['carrier_heading'] and c['id'] in nodes]
+        places = [chapters[nodes[identity]['chapter_id']] for identity in owners
+                  if nodes[identity]['chapter_id'] in chapters]
+        receipt = {key: deepcopy(fact[key]) for key in ('label', 'source_excerpts', 'review_evidence_ref', 'source_text_sha256')}
+        if len(owners) != 1 or len(places) != 1:
+            _pending(outline, fact, '无法唯一定位凭证章节，请核定并保留独立填写位置')
+            _application(compiled, fact, 'unresolved', **receipt)
+            continue
+        chapter, volume = places[0]
+        target = _verbatim_target('attachment', fact['label'].strip())
+        target.update(target_id=f'{chapter["chapter_id"]}:credential-{fact["fact_id"]}',
+                      source_excerpts=deepcopy(fact['source_excerpts']))
+        if not any(t['target_id'] == target['target_id'] for t in chapter['targets']):
+            chapter['targets'].append(target)
+        _application(compiled, fact, 'credential_bound', **receipt, chapter_ids=owners,
+                     final_chapter_ids=[chapter['chapter_id']], target_ids=[target['target_id']],
+                     volume_chapter_ids=[volume] if volume is not None else [])
