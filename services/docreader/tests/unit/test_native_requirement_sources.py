@@ -499,7 +499,9 @@ def test_proven_literal_body_in_B_and_C_keeps_original_lines_and_bounds(tmp_path
     with pytest.raises(ModelContractError) as rejected:
         gap.accept(unproven)
     assert rejected.value.errors[0]['path'] == ['native_assignments', 0, 'body_refs', 0]
-    assert 'keep it as unresolved in native_dispositions' in rejected.value.errors[0]['detail']
+    detail = rejected.value.errors[0]['detail']
+    assert f'Ref {literal[1]}' in detail
+    assert 'unresolved only in native_dispositions' in detail
     unproven['native_assignments'].clear()
     for disposition in unproven['native_dispositions']:
         if disposition['refs'] == literal[1:2]:
@@ -538,3 +540,24 @@ def test_native_assignment_recovery_points_to_failed_field_without_echo(tmp_path
         view.accept(raw)
     assert rejected.value.errors[0]['path'][0] == field
     assert rejected.value.feedback_fragments == []
+
+
+@pytest.mark.parametrize(('position', 'edge'), [(0, 'open_after'), (1, 'open_before')])
+def test_native_boundary_recovery_identifies_ref_and_preserves_pending_case(tmp_path, position, edge):
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view([position])
+    raw = reply(ledger, view, scope='chapter', chapter_ids=['c1'], context=False)
+    assignment = raw['native_assignments'][0]
+    ref = assignment['body_refs'][0]
+    with pytest.raises(ModelContractError) as rejected:
+        view.accept(raw)
+    error, = rejected.value.errors
+    assert error['path'] == ['native_assignments', 0, 'scope']
+    assert f'ref {ref} ({edge})' in error['detail']
+    assert 'scope=unassigned and chapter_ids=[]' in error['detail']
+    assert rejected.value.feedback_fragments == []
+    assignment.update(scope='unassigned', chapter_ids=[])
+    accepted = view.accept(raw)
+    retained = next(case for case in accepted['cases'] if case['source']['body']['text'] in ('Alpha ', ' Beta  0.5 / 5'))
+    assert retained['source']['body']['text'] == ('Alpha ', ' Beta  0.5 / 5')[position]
+    assert not retained['enterprise_confirmed']

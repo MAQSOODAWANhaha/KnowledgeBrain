@@ -397,8 +397,8 @@ def native_requirement_model(payload):
                 raise ValueError('Body ref is outside this pack. Use a supplied, eligible body ref.')
             if ref in reviewed:
                 raise ValueError('Reviewed ref cannot be a body ref. Keep its host-owned disposition.')
-            raise ValueError('This pack ref has no certified body location. Remove it from body_refs. '
-                             'If its requirement is still pending, keep it as unresolved in native_dispositions.')
+            raise ValueError(f'Ref {ref} has no certified body location. Remove it from body_refs. '
+                             'Keep a pending requirement at this ref as unresolved only in native_dispositions.')
         body_ref = Annotated[body_ref, AfterValidator(allowed)]
     body_refs = Annotated[list[body_ref], Field(min_length=1, max_length=body_count)]
     chapter = Literal.__getitem__(tuple(chapter_map)) if chapter_map else Literal['__none__']
@@ -503,10 +503,12 @@ class NativeSourceView:
         return native_requirement_model({**self.payload, 'chapters': self.chapter_payload,
             'block': block, 'allow_legacy_assignments': bool(legacy_line_limit)})
 
-    def _open_body(self, refs):
-        ranges = {self.ledger.atoms[r]['range_ordinal'] for r in refs}
-        return any((c['open_before'] and c['range_ordinals'][0] in ranges)
-                   or (c['open_after'] and c['range_ordinals'][-1] in ranges) for c in self.components)
+    def _open_body_edges(self, refs):
+        ranges = {self.ledger.atoms[ref]['range_ordinal']: ref for ref in reversed(refs)}
+        return [(ranges[ordinal], edge) for component in self.components
+                for edge, ordinal in (('open_before', component['range_ordinals'][0]),
+                                      ('open_after', component['range_ordinals'][-1]))
+                if component[edge] and ordinal in ranges]
 
     def accept(self, raw, *, legacy_block=(), carried_refs=()):
         line_limit = len(_prose_points(legacy_block, self.ledger.document_map, self.ledger.grid_units))
@@ -548,9 +550,12 @@ class NativeSourceView:
                 _reject('Body atom ownership must be unique and match its source disposition.')
             owned.update(body)
             _scope(item['scope'], item['chapter_ids'])
-            if (self._open_body(body) or kinds != {'requirement'}) and item['scope'] != 'unassigned':
-                _reject('Open boundary/external/unresolved sources require explicit C adjudication. Set scope to unassigned.',
-                        path=['native_assignments', assignment_index, 'scope'])
+            if item['scope'] != 'unassigned':
+                edges = self._open_body_edges(body)
+                if edges or kinds != {'requirement'}:
+                    reason = ', '.join(f'ref {ref} ({edge})' for ref, edge in edges) if edges else next(iter(kinds))
+                    _reject(f'{reason} requires C adjudication. Keep the assignment with scope=unassigned and chapter_ids=[].',
+                            path=['native_assignments', assignment_index, 'scope'])
             chain, identity = [], item['context_id']
             while identity is not None:
                 if identity > len(contexts):
