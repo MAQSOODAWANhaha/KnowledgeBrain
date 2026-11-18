@@ -2025,6 +2025,8 @@ def plan_writing_tasks(outline):
                                               title_path=list(path), targets=deepcopy(group)).model_dump(exclude_unset=True))
                     group.clear()
             for target in chapter['targets']:
+                if target.get('credential_response_replaced'):
+                    continue
                 related = target.get('related_target_ids', [])
                 if (target['kind'] == 'narrative' and not target.get('manual_fill', False)
                         and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'template_refs'))

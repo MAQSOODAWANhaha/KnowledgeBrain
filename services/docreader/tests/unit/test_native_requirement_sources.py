@@ -509,3 +509,25 @@ def test_proven_literal_body_in_B_and_C_keeps_original_lines_and_bounds(tmp_path
         NativeCaseView(ledger, cases).accept({'items': [], 'requirement_adjudications': [{
             'item_ids': ['q1', 'q2'], 'scope': 'chapter', 'chapter_ids': ['c1'], 'basis_windows': [],
             'source_join': 'continuation'}]})
+
+
+@pytest.mark.parametrize(('failure', 'field'), [
+    ('unused_context', 'contexts'), ('missing_assignment', 'native_assignments'), ('needs_c', 'native_assignments'),
+])
+def test_native_assignment_recovery_points_to_failed_field_without_echo(tmp_path, failure, field):
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
+    raw = reply(ledger)
+    if failure == 'unused_context':
+        raw['native_assignments'][0]['context_id'] = None
+    elif failure == 'missing_assignment':
+        raw['native_assignments'].clear()
+        raw['contexts'].clear()
+        raw['native_dispositions'][1]['kind'] = 'unresolved'
+    else:
+        raw['native_dispositions'][0]['kind'] = 'external_action'
+        raw['native_assignments'][0].update(scope='chapter', chapter_ids=[next(iter(ledger.chapter_map))])
+    with pytest.raises(ModelContractError) as rejected:
+        view.accept(raw)
+    assert rejected.value.errors[0]['path'][0] == field
+    assert rejected.value.feedback_fragments == []

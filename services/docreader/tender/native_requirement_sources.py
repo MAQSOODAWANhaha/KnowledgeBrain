@@ -38,8 +38,9 @@ def _hash(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
-def _reject(detail):
-    raise ModelContractError([{'path': [], 'code': 'native_requirement_source_invalid', 'detail': detail}])
+def _reject(detail, *, path=None):
+    raise ModelContractError([{'path': path or [], 'code': 'native_requirement_source_invalid', 'detail': detail}],
+                             feedback_fragments=[] if path else None)
 
 
 def _parse(model, raw):
@@ -528,7 +529,7 @@ class NativeSourceView:
             context_refs.update(group['refs'])
             contexts.append(group)
         owned, used_contexts, native, cases = set(), set(), [], []
-        for item in value['native_assignments']:
+        for assignment_index, item in enumerate(value['native_assignments']):
             body = item['body_refs']
             if not set(body) <= set(self.refs):
                 _reject('Body refs must be visible in this source pack.')
@@ -542,7 +543,8 @@ class NativeSourceView:
             owned.update(body)
             _scope(item['scope'], item['chapter_ids'])
             if (self._open_body(body) or kinds != {'requirement'}) and item['scope'] != 'unassigned':
-                _reject('Open boundary/external/unresolved sources require explicit C adjudication.')
+                _reject('Open boundary/external/unresolved sources require explicit C adjudication. Set scope to unassigned.',
+                        path=['native_assignments', assignment_index, 'scope'])
             chain, identity = [], item['context_id']
             while identity is not None:
                 if identity > len(contexts):
@@ -556,10 +558,16 @@ class NativeSourceView:
             native.append(record)
             if item['scope'] == 'unassigned':
                 cases.append(self.ledger.case(source, origin=self.binding, candidate_chapter_ids=chapter_ids))
-        if used_contexts != set(range(1, len(contexts) + 1)) or context_refs != {r for r, k in dispositions.items() if k == 'context'}:
-            _reject('Every declared context atom/group must reach a real source assignment.')
-        if any(k in {'requirement', 'external_action'} and r not in owned for r, k in dispositions.items()):
-            _reject('Every substantive requirement/external action needs an explicit assignment.')
+        unused_groups = sorted(set(range(1, len(contexts) + 1)) - used_contexts)
+        ungrouped_refs = sorted(r for r, k in dispositions.items() if k == 'context' and r not in context_refs)
+        if unused_groups or ungrouped_refs:
+            _reject('Every declared context atom/group must reach a real source assignment. '
+                    f'Unused group IDs: {unused_groups[:8]}; ungrouped source refs: {ungrouped_refs[:8]}. '
+                    'Resolve every such group/ref, including any beyond the listed examples.', path=['contexts'])
+        missing_body = sorted(r for r, k in dispositions.items() if k in {'requirement', 'external_action'} and r not in owned)
+        if missing_body:
+            _reject('Every substantive requirement/external action needs an explicit assignment. '
+                    f'Unassigned source refs include: {missing_body[:8]}.', path=['native_assignments'])
         if not {r for r, k in dispositions.items() if k == 'already_carried'} <= (set(carried_refs) | set(reviewed)):
             _reject('Already-carried source claims need exact host-owned source coverage.')
         guidance = []

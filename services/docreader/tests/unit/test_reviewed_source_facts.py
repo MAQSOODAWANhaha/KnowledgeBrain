@@ -656,8 +656,9 @@ async def test_reviewed_credentials_have_distinct_blanks_in_main_word_and_own_vo
         assert stage == 'authoring_structure'
         return validate({'findings': []})
 
+    accepted['chapters'][0]['is_volume'] = True
     result = artifacts.read_json(await pipeline.generate_document(artifacts, snapshot,
-        RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), execute, outline=outline))
+        RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), execute, outline=accepted))
     with ZipFile(BytesIO(artifacts.read_bytes(result['package_ref']))) as archive:
         assert archive.testzip() is None
         package = json.loads(archive.read('manifest.json'))
@@ -677,3 +678,59 @@ async def test_reviewed_credentials_have_distinct_blanks_in_main_word_and_own_vo
     review.bind_reviewed_credential_slots(outline, compiled, loaded)
     assert len(carrier['targets']) == len(before)
     assert all(any(f['label'] in issue['detail'] for issue in outline['issues']) for f in facts)
+
+
+@pytest.mark.parametrize('mismatch', ['entry', 'subjects'])
+def test_reviewed_credential_cannot_bind_to_a_different_submission_instance(tmp_path, mismatch):
+    artifacts, snapshot, documents, manifest, compiled, make_fact = fixture(tmp_path)
+    manifest['facts'] = [make_fact('credential_slot', 2, carrier_heading=point(2))]
+    review = reviewed()
+    facts = review.load_reviewed_facts(artifacts, snapshot, documents, artifacts.put_json(manifest))
+    carrier = next(c for c in compiled['chapters'] if c['heading'] == point(2))
+    carrier[mismatch] = point(2) if mismatch == 'entry' else [{'source': window(2, 1), 'role': '投标人'}]
+    outline = outline_from_compiled(snapshot, compiled)
+    before = deepcopy(outline['chapters'])
+    review.bind_reviewed_credential_slots(outline, compiled, facts)
+    assert outline['chapters'] == before
+    assert any('credential_slot' in issue['detail'] for issue in outline['issues'])
+    assert compiled['_reviewed_source_fact_applications'][-1]['state'] == 'unresolved'
+
+
+async def test_only_exactly_covered_attachment_loses_its_generic_response(tmp_path):
+    from io import BytesIO
+
+    from docx import Document
+    from docreader.llm.budget import RequestBudget
+
+    artifacts, snapshot, documents, manifest, compiled, make_fact = fixture(tmp_path)
+    manifest['facts'] = [make_fact('credential_slot', 2, carrier_heading=point(2))]
+    slot, = reviewed().load_reviewed_facts(artifacts, snapshot, documents, artifacts.put_json(manifest))
+    carrier = next(c for c in compiled['chapters'] if c['heading'] == point(2))
+    carrier['response_kind'] = 'attachment'
+    outline = outline_from_compiled(snapshot, compiled)
+    targets = outline['chapters'][1]['targets']
+    original, = targets
+    original['source_excerpts'] = deepcopy(slot['source_excerpts'])
+    original_text = original['purpose']
+    other = {**deepcopy(original), 'target_id': 'another-attachment', 'purpose': '其他附件',
+             'source_excerpts': deepcopy(make_fact('credential_slot', 1)['source_excerpts'])}
+    targets.append(other)
+    reviewed().bind_reviewed_credential_slots(outline, compiled, [slot])
+    assert targets[0]['purpose'] == original_text
+    assert targets[0]['source_excerpts'] == slot['source_excerpts']
+    writing_ids = {t['target_id'] for task in pipeline.plan_writing_tasks(outline) for t in task['targets']}
+    assert original['target_id'] not in writing_ids
+    assert {other['target_id'], targets[-1]['target_id']} <= writing_ids
+
+    async def execute(stage, request, validate):
+        assert stage == 'authoring_structure'
+        return validate({'findings': []})
+
+    result = artifacts.read_json(await pipeline.generate_document(artifacts, snapshot,
+        RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384), execute, outline=outline))
+    doc = Document(BytesIO(artifacts.read_bytes(result['docx_ref'])))
+    paragraphs = [p.text for p in doc.paragraphs]
+    assert paragraphs.count('完整实施职责') == 1
+    generic_blank = '________（待附证明材料）'
+    assert paragraphs.count(generic_blank) == 2
+    assert all(paragraphs[paragraphs.index(label) + 1] == generic_blank for label in ('其他附件', slot['label']))

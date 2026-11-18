@@ -600,11 +600,18 @@ class ResponseTarget(Contract):
     response_table: ResponseTable | None = None
     response_form_pending: ResponseFormPending | None = Field(default=None, exclude_if=lambda value: value is None)
     manual_fill: StrictBool = False
+    credential_response_replaced: StrictBool = Field(default=False, exclude_if=lambda value: not value)
     support_origins: SupportOrigins = Field(default_factory=lambda: ["knowledge"])
     related_target_ids: list[Identity] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def explicit_native_body(self):
+        if self.credential_response_replaced and (
+            self.kind != "attachment" or not self.manual_fill or self.support_origins != ["tender"]
+            or not self.source_excerpts or self.template_refs or self.source_refs or self.rule_refs
+            or self.response_table is not None or self.response_form_pending is not None
+        ):
+            raise ValueError("only a source-bound manual attachment can have its generic response replaced")
         if self.source_body_contract is None:
             if self.source_context_excerpts or self.source_body_ref is not None:
                 raise ValueError("source context requires an explicit source body contract")

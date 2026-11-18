@@ -78,6 +78,8 @@ class CredentialSlotFact(ReviewedFact):
     kind: Literal['credential_slot']
     label: Text = Field(max_length=80)
     carrier_heading: DirectoryPoint
+    entry: DirectoryPoint | None = Field(default=None, exclude_if=lambda value: value is None)
+    subjects: list[DirectorySubject] = Field(default_factory=list, exclude_if=lambda value: not value)
 
 
 class ReviewedFactsManifest(Contract):
@@ -299,8 +301,9 @@ def load_reviewed_facts(artifacts, snapshot, documents, manifest_ref):
             exclusive.add(key)
         elif fact['kind'] == 'credential_slot':
             heading = _canonical(fact['carrier_heading'])
-            keys = {(fact['kind'], heading, fact['label'].strip()),
-                    (fact['kind'], heading, tuple(sorted(selected)))}
+            scope = _canonical((heading, fact.get('entry'), fact.get('subjects', [])))
+            keys = {(fact['kind'], scope, fact['label'].strip()),
+                    (fact['kind'], scope, tuple(sorted(selected)))}
             if len(document_ids) != 1 or not text.strip() or not fact['label'].strip() or exclusive.intersection(keys):
                 raise ArtifactIntegrityError('credential slots require distinct named requirements from the carrier document')
             exclusive.update(keys)
@@ -419,7 +422,7 @@ def bind_reviewed_carrier_results(compiled, facts):
 def _compatible_body(fact, chapter):
     return (not chapter.get('unplaced') and chapter.get('presentation') not in {'cover', 'content'}
             and chapter.get('response_kind', 'form') in {'narrative', 'form', 'attachment'}
-            and chapter.get('subjects', []) == fact['subjects'] and chapter.get('entry') == fact['entry'])
+            and chapter.get('subjects', []) == fact.get('subjects', []) and chapter.get('entry') == fact.get('entry'))
 
 
 def reviewed_body_summary(facts):
@@ -676,22 +679,44 @@ def bind_reviewed_credential_slots(outline, compiled, facts):
             visit(entry['children'], active_volume)
 
     visit(outline['chapters'])
+    bound = {}
     for fact in slots:
-        owners = [c['id'] for c in compiled['chapters'] if not c.get('unplaced')
+        owners = [c['id'] for c in compiled['chapters'] if _compatible_body(fact, c)
                   and c['heading'] == fact['carrier_heading'] and c['id'] in nodes]
         places = [chapters[nodes[identity]['chapter_id']] for identity in owners
                   if nodes[identity]['chapter_id'] in chapters]
         receipt = {key: deepcopy(fact[key]) for key in ('label', 'source_excerpts', 'review_evidence_ref', 'source_text_sha256')}
         if len(owners) != 1 or len(places) != 1:
-            _pending(outline, fact, '无法唯一定位凭证章节，请核定并保留独立填写位置')
+            _pending(outline, fact, '无法唯一定位凭证章节、提交入口或填写主体，请核定并保留独立填写位置')
             _application(compiled, fact, 'unresolved', **receipt)
             continue
         chapter, volume = places[0]
-        target = _verbatim_target('attachment', fact['label'].strip())
-        target.update(target_id=f'{chapter["chapter_id"]}:credential-{fact["fact_id"]}',
-                      source_excerpts=deepcopy(fact['source_excerpts']))
-        if not any(t['target_id'] == target['target_id'] for t in chapter['targets']):
-            chapter['targets'].append(target)
+        target_ids = []
+        roles = list(dict.fromkeys(subject['role'] for subject in fact.get('subjects', [])))
+        for ordinal, role in enumerate(roles or [None], 1):
+            target = _verbatim_target('attachment', fact['label'].strip())
+            identity = f'{chapter["chapter_id"]}:credential-{fact["fact_id"]}'
+            if role is not None:
+                identity += f'-{ordinal}'
+                target['subject'] = role
+            target.update(target_id=identity, source_excerpts=deepcopy(fact['source_excerpts']))
+            if not any(t['target_id'] == identity for t in chapter['targets']):
+                chapter['targets'].append(target)
+            target_ids.append(identity)
+            bound.setdefault((chapter['chapter_id'], role), set()).update(
+                source_excerpt_key(excerpt) for excerpt in fact['source_excerpts'])
         _application(compiled, fact, 'credential_bound', **receipt, chapter_ids=owners,
-                     final_chapter_ids=[chapter['chapter_id']], target_ids=[target['target_id']],
+                     final_chapter_ids=[chapter['chapter_id']], target_ids=target_ids,
                      volume_chapter_ids=[volume] if volume is not None else [])
+
+    for chapter, _ in chapters.values():
+        for target in chapter['targets']:
+            if (target['kind'] != 'attachment' or not target.get('manual_fill')
+                    or target.get('support_origins') != ['tender']
+                    or target['target_id'].startswith(f'{chapter["chapter_id"]}:credential-')
+                    or any(target.get(key) for key in ('template_refs', 'source_refs', 'rule_refs', 'response_table',
+                                                       'response_form_pending'))):
+                continue
+            required = {source_excerpt_key(excerpt) for excerpt in target.get('source_excerpts', [])}
+            if required and required <= bound.get((chapter['chapter_id'], target.get('subject')), set()):
+                target['credential_response_replaced'] = True
