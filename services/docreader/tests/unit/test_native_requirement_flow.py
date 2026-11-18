@@ -191,3 +191,60 @@ async def test_canonical_native_text_renders_once_in_Word_and_keeps_enterprise_b
     assert 'name tag' in text and '5.00' in text
     assert '________' in text
     assert not document.tables
+
+
+@pytest.mark.asyncio
+async def test_literal_body_guard_uses_only_its_line_and_withholds_unlocated(tmp_path):
+    from docreader.tender.directory_compile import documents_from_frozen
+    from docreader.tender.native_requirement_flow import source_windows
+    from docreader.tender.native_requirement_sources import SourceLedger
+    from test_pdf_literal_freeze import freeze_pdf
+
+    artifacts, record, _, _ = await freeze_pdf(tmp_path, ['Exact source # 2.', 'Unrelated reference.'])
+    documents = documents_from_frozen(artifacts, {'documents': [record]})
+    ledger = SourceLedger(artifacts, [record])
+    exact, unrelated = ledger.ranges
+    ref = next(ref for ref, a in ledger.atoms.items() if a['range_ordinal'] == exact['ordinal'])
+    source = ledger.source([ref], [])
+    assert unrelated['base']['text'].strip() == 'Unrelated reference.'
+    assert source_windows(ledger, source, documents) == []
+
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.native_requirement_flow import JointClassification
+
+    chapter = {'id': 'technical', 'title': 'Technical', 'lines': []}
+    ledger = SourceLedger(artifacts, [record], chapters=[chapter])
+    case = ledger.case(source, origin='manual:missing-layout')
+    compiled = {'chapters': [chapter], 'issues': [], '_native_requirement_cases': [case]}
+    classification = JointClassification(ledger, compiled, documents)
+    assert classification.payload['requirement_cases'][0]['manual_only'] is True
+    decision = {'item_ids': ['q1'], 'scope': 'chapter', 'chapter_ids': ['c1'], 'basis_id': None}
+    with pytest.raises(ModelContractError) as rejected:
+        classification.accept({'items': [], 'basis_groups': [], 'requirement_adjudications': [decision]})
+    assert 'pending for manual review' in rejected.value.errors[0]['detail']
+    decision.update(scope='unassigned', chapter_ids=[])
+    prepared = classification.accept({'items': [], 'basis_groups': [], 'requirement_adjudications': [decision]})
+    classification.apply(compiled, prepared)
+    assert compiled['_native_requirement_cases'][0]['source'] == source
+
+    doc = record['document_id']
+    line = documents[0]['pages'][0].splitlines().index(exact['base']['text'])
+    unit = exact['reference']['unit_id']
+    proof = {(doc, 0): [{'line': i, 'unit_id': unit, 'source_role': 'native_literal'}
+                       if i == line else {'line': i, 'source_role': 'prose'}
+                       for i, _ in enumerate(documents[0]['pages'][0].splitlines())]}
+    assert source_windows(ledger, source, documents, proof) == [
+        {'document_id': doc, 'page': 0, 'start_line': line, 'end_line': line}]
+
+
+def test_bound_source_word_preserves_source_spaces_and_empty_paragraphs():
+    from docx import Document
+    from docreader.tender.authoring_export import _write_carried_source
+    from docreader.tender.schema import SOURCE_BODY_CONTRACT
+
+    document = Document()
+    assert _write_carried_source(document, {
+        'source_body_contract': SOURCE_BODY_CONTRACT, 'purpose': ' Leading  gap\n\nTail. ',
+    })
+    assert [p.text for p in document.paragraphs] == [' Leading  gap', '', 'Tail. ']
+    assert 'xml:space="preserve"' in document.paragraphs[0]._p.xml

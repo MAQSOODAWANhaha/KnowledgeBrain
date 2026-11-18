@@ -400,3 +400,75 @@ def test_new_operation_dispatch_and_derived_fingerprints_only(tmp_path):
     assert response_model('directory_classification', {}) is ClassificationPlan
     fingerprints = output_contract_spec()
     assert {'NativeRequirementPlan', 'NativeClassificationPlan'} <= fingerprints.keys()
+
+
+def test_proven_literal_body_in_B_and_C_keeps_original_lines_and_bounds(tmp_path):
+    ledger, store, index, frozen = synthetic(tmp_path)
+    raw = deepcopy(index.raw)
+    for offset, (page, value) in enumerate(((1, 'Literal # rule '), (2, 'ends with 0.25'), (2, 'separate row'))):
+        locator = {'locator_kind': 'page', 'page_ordinal': page}
+        unit_id = f'literal-test-{offset}'
+        raw['units'].append({'unit_id': unit_id, 'ordinal': offset + 2, 'kind': 'section',
+                             'locator': locator, 'text_basis': 'pdf_literal', 'text': value})
+        raw['source_contract']['units'].append({'unit_id': unit_id, 'section_id': 'literal',
+            'parent_section_id': None, 'heading_path': '', 'physical_locator': locator})
+    index = SourceIndex(index.document, raw)
+    frozen['source_index_ref'] = store.put_json(index.descriptor(store.put_json(raw)))
+    ledger = SourceLedger(store, [frozen], chapters=[{'id': 'first-chapter', 'title': 'Technical'}])
+    literal = [ref for ref, atom in ledger.atoms.items() if atom['base'].get('text_basis') == 'pdf_literal']
+    grid = [ref for ref in ledger.atoms if ref not in literal]
+    old_binding = ledger.binding
+    keys = [(frozen['document_id'], f'literal-test-{i}') for i in range(3)]
+    locations = {keys[0]: (1, 4), keys[1]: (2, 2), keys[2]: (2, 4)}
+    ledger.bind_literal_locations(locations, continuation_edges=[(keys[0], keys[1]), (keys[1], keys[2])])
+    view = ledger.view()
+    assert view.payload['source_domain'] == 'grid_and_certified_literal_body_v1'
+    assert ledger.binding != old_binding
+    assert native_output_bound(view)['literal_body_atoms'] == 3
+    assert native_output_bound(view)['chapter_choice_occurrences'] == len(grid) + 3
+    assert [row['literal_body_line'] for row in view.payload['source_scope'] if 'literal_body_line' in row] == [4, 2, 4]
+    assert [row['literal_predecessor_ref'] for row in view.payload['source_scope']
+            if 'literal_predecessor_ref' in row] == literal[:2]
+    assert ledger.require_body(literal[1:]) is None
+    raw = reply(ledger, view, selected=literal[:2], context=False)
+    model = view.response_model()
+    accepted = view.accept(raw)
+    case, = [c for c in accepted['cases'] if c['source']['body']['text'].startswith('Literal #')]
+    assert case['source']['body']['text'] == 'Literal # rule ends with 0.25'
+    c = NativeCaseView(ledger, [case])
+    assert c.payload['requirement_cases'][0]['source_locations'][1]['literal_predecessor_ref'] == literal[0]
+    resolved = c.accept({'items': [], 'requirement_adjudications': [{'item_ids': ['q1'],
+        'scope': 'chapter', 'chapter_ids': ['c1'], 'basis_windows': []}]})
+    assert resolved['native_decisions'][0]['source'] == case['source']
+    split = [ledger.case(ledger.source([ref], []), origin='boundary') for ref in literal[:2]]
+    merged = NativeCaseView(ledger, split).accept({'items': [], 'requirement_adjudications': [{
+        'item_ids': ['q1', 'q2'], 'scope': 'chapter', 'chapter_ids': ['c1'], 'basis_windows': [],
+        'source_join': 'continuation'}]})
+    assert merged['native_decisions'][0]['source'] == case['source']
+    model.model_validate(raw)
+    mixed = reply(ledger, view, selected=[grid[-1], literal[0]], context=False)
+    with pytest.raises(ModelContractError):
+        view.accept(mixed)
+    with pytest.raises(ModelContractError):
+        ledger.bind_literal_locations(locations, continuation_edges=[(keys[0], keys[2])])
+    ledger.bind_literal_locations({keys[0]: (1, 4), keys[2]: (2, 4)})
+    with pytest.raises(ModelContractError):
+        view.accept(raw)
+    gap = ledger.view()
+    unproven = reply(ledger, gap, selected=literal[1:2], context=False)
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        gap.response_model().model_validate(unproven)
+    with pytest.raises(ModelContractError):
+        gap.accept(unproven)
+    with pytest.raises(ModelContractError):
+        NativeCaseView(ledger, [ledger.case(ledger.source(literal[1:2], []), origin='unknown')]).accept({
+            'items': [], 'requirement_adjudications': [{'item_ids': ['q1'], 'scope': 'chapter',
+                'chapter_ids': ['c1'], 'basis_windows': []}]})
+    with pytest.raises(ModelContractError):
+        gap.accept(reply(ledger, gap, selected=literal[::2], context=False))
+    cases = [ledger.case(ledger.source([ref], []), origin='split') for ref in literal[::2]]
+    with pytest.raises(ModelContractError):
+        NativeCaseView(ledger, cases).accept({'items': [], 'requirement_adjudications': [{
+            'item_ids': ['q1', 'q2'], 'scope': 'chapter', 'chapter_ids': ['c1'], 'basis_windows': [],
+            'source_join': 'continuation'}]})

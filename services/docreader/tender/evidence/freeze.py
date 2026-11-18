@@ -7,8 +7,10 @@ import hashlib
 import inspect
 import json
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
+from zipfile import BadZipFile, ZipFile
 
 from pydantic import TypeAdapter, ValidationError
 from copy import deepcopy
@@ -26,6 +28,44 @@ from docreader.tender.evidence.registration import issue
 from docreader.tender.schema import OCRStatus, PackDescriptor, PackPlan, SourceDocument
 
 _OCR_STATUS = TypeAdapter(OCRStatus)
+
+
+def _docx_payload(payload):
+    try:
+        with ZipFile(BytesIO(payload)) as package:
+            return {'[Content_Types].xml', 'word/document.xml'} <= set(package.namelist())
+    except BadZipFile:
+        return False
+
+
+async def _freeze_pdf_attachments(artifacts, source, entries):
+    occurrences, indexed = {}, {}
+    for unit_id, (names, payload) in entries.items():
+        entry = {'names': names, 'status': 'unreadable'}
+        occurrences[unit_id] = entry
+        if payload is None:
+            continue
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest not in indexed:
+            is_docx = await asyncio.to_thread(_docx_payload, payload)
+            media = ('application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                     if is_docx else 'application/octet-stream')
+            original = await asyncio.to_thread(artifacts.put_bytes, payload, media)
+            result = {'original_ref': original, 'status': 'unreadable' if is_docx else 'unsupported'}
+            if is_docx:
+                child = {'document_id': f'{source["document_id"]}:embedded:{digest}', 'document_version': digest,
+                         'ordinal': 0, 'role': 'attachment', 'file_name': 'embedded.docx', 'issues': [],
+                         'original_ref': original}
+                ref = await freeze_sources({'documents': [child], 'issues': []}, artifacts, plan=False)
+                frozen = await asyncio.to_thread(artifacts.read_json, ref)
+                result['frozen_ref'] = ref
+                if frozen['native_range_count']:
+                    result['status'] = 'applicability_pending'
+            indexed[digest] = result
+        entry.update(indexed[digest])
+        if entry['status'] == 'unsupported' and any(name.lower().endswith('.docx') for name in names):
+            entry['status'] = 'unreadable'
+    return occurrences
 
 
 def _image_review(reviews: list, source: dict, unit: dict, image_ref: dict | None):
@@ -99,9 +139,18 @@ async def freeze_sources(registration: dict, artifacts: ArtifactStore, ocr: Call
             raw['source_contract']['literal_source_profile'] = await asyncio.to_thread(literal_source_profile)
             await asyncio.to_thread(validate_literal_source, raw, literal, source)
         canonical_image_keys(raw)
+        entries = native.metadata.get('pdf_embedded_files')
+        if entries:
+            raw['embedded_sources'] = await _freeze_pdf_attachments(artifacts, source, entries)
         for identity in contract.get("units", []):
+            embedded = raw.get('embedded_sources', {}).get(identity['unit_id'])
+            if embedded and embedded['status'] == 'applicability_pending':
+                identity['reasons'] = ['attachment_applicability_pending' if reason == 'attachment_content_not_extracted'
+                                       else reason for reason in identity['reasons']]
             for reason in identity.get("reasons", []):
                 problem = issue(reason, source["document_id"], unit_id=identity["unit_id"])
+                if embedded:
+                    problem.update(names=embedded['names'], attachment_status=embedded['status'])
                 summary["issues"].append(problem)
                 problems.append(problem)
         for problem in raw['metadata'].get("evidence_issues", []):

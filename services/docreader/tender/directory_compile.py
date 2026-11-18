@@ -289,6 +289,21 @@ class ParameterPlan(Contract):
     chapters: list[ParameterChapter] = Field(default_factory=list)
 
 
+class _FrozenLayout(dict):
+    """Keep the host proof outside the serialized directory reading contract."""
+
+    def bind_layout(self, raw_sha256):
+        self.layout_proof = raw_sha256, self._layout_digest()
+
+    def has_layout_proof(self, raw_sha256):
+        return getattr(self, 'layout_proof', None) == (raw_sha256, self._layout_digest())
+
+    def _layout_digest(self):
+        encoded = json.dumps([self.get(key) for key in ('document_id', 'pages', 'line_units')],
+                             ensure_ascii=False, separators=(',', ':'))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def documents_from_frozen(artifacts, frozen):
     """Project registered documents in their stored order. One file stays one file."""
     from docreader.tender.evidence.references import EvidenceRepository
@@ -298,13 +313,48 @@ def documents_from_frozen(artifacts, frozen):
     for record in frozen.get('documents', []):
         index = repository.source_index(record['source_index_ref'])
         pages, line_units, ocr_issues, unread_pages = _reading_pages(artifacts, index.raw)
-        documents.append({'document_id': record['document_id'], 'role': record['role'], 'pages': pages,
-                          'line_units': line_units, 'ocr_issues': ocr_issues, 'unread_pages': unread_pages,
-                          'template_parts': _grid_parts(index, record['source_index_ref']),
-                          'grids': _grid_catalog(index)})
+        document = {'document_id': record['document_id'], 'role': record['role'], 'pages': pages,
+                    'line_units': line_units, 'ocr_issues': ocr_issues, 'unread_pages': unread_pages,
+                    'template_parts': _grid_parts(index, record['source_index_ref']), 'grids': _grid_catalog(index)}
+        if index.raw.get('literal_source_ref') and not any(
+                issue['code'] == 'outline_directory_layout_rejected' for issue in ocr_issues):
+            document = _FrozenLayout(document)
+            document.bind_layout(record['raw_ref']['sha256'])
+        documents.append(document)
+        source_reviews = _frozen_source_reviews(record, index.raw)
+        if source_reviews:
+            documents[-1]['source_review_issues'] = source_reviews
     if not documents:
         raise DirectoryPlanRejected('directory source requires the registered documents')
     return documents
+
+
+def _frozen_source_reviews(record, raw):
+    name = record.get('file_name') or record['document_id']
+    reasons = {'applicability_pending': '已读取，适用关系待核',
+               'unsupported': '格式暂不支持读取', 'unreadable': '内容无法读取'}
+    issues = [{'code': 'outline_directory_attachment_unconfirmed',
+               'detail': f'{name} 内嵌附件 {unit_id}（{" / ".join(entry["names"])}）{reasons[entry["status"]]}'}
+              for unit_id, entry in (raw.get('embedded_sources') or {}).items()]
+    if not raw.get('literal_source_ref'):
+        return issues
+    images = {}
+    for unit in raw['units']:
+        if unit.get('kind') != 'image_region':
+            continue
+        unit_id, locator = unit['unit_id'], unit['locator']
+        ocr = raw.get('ocr', {}).get(unit_id, {})
+        if ocr.get('status') == 'complete' and not ocr.get('issues'):
+            continue
+        ref = raw.get('images', {}).get(locator.get('image_key'), {})
+        identity = ref.get('sha256') or unit_id
+        images.setdefault(identity, []).append(locator.get('page_ordinal'))
+    for identity, positions in images.items():
+        pages = '、'.join(str(page + 1) for page in sorted({p for p in positions if isinstance(p, int)}))
+        place = f'第{pages}页' if pages else '无页码定位'
+        issues.append({'code': 'outline_directory_image_unconfirmed',
+                       'detail': f'{name} {place}，图片 {identity[:16]} 共 {len(positions)} 处，内容或用途待核。'})
+    return issues
 
 
 def reading_payload(documents, identity=None):
@@ -351,7 +401,9 @@ def _reading_pages(artifacts, raw):
         pages, symbol_issues = _normalize_layout_symbols(pages, raw)
         return pages, owners, symbol_issues + issues, unread
     texts, issues, unread = _image_texts(artifacts, raw)
-    pages, owners = _project_units(raw.get('units') or [], texts)
+    attachments = raw.get('embedded_sources') or {}
+    units = [unit for unit in raw.get('units') or [] if unit['unit_id'] not in attachments]
+    pages, owners = _project_units(units, texts)
     if problem:
         issues.insert(0, {'code': 'outline_directory_layout_rejected', 'detail': problem})
     return pages, owners, issues, unread
@@ -1554,10 +1606,11 @@ def compile_directory(plan, documents):
     _place_wrapped_grids(adopted['chapters'], source, adopted['issues'])
     _segment_template_content(adopted['chapters'], source)
     binding_issues = _apply_format_bindings(plan, source, adopted['chapters'])
-    ocr_issues = [issue for document in source.documents for issue in document.get('ocr_issues') or []]
+    source_issues = [issue for document in source.documents for key in ('ocr_issues', 'source_review_issues')
+                     for issue in document[key]]
     compiled = {'chapters': adopted['chapters'],
             'issues': [*adopted['issues'], *excluded['issues'], *binding_issues, *skipped,
-                       *_revision_issues(source, nodes, composition), *ocr_issues]}
+                       *_revision_issues(source, nodes, composition), *source_issues]}
     if 'reading_only_sources' in plan:
         compiled['_reading_references'] = reading
     return _note_conditions(compiled)
@@ -1588,7 +1641,7 @@ class _Source:
         self.documents, self.by_id = [], {}
         for index, document in enumerate(documents):
             _keys(document, frozenset(('document_id', 'role', 'pages', 'line_units', 'template_parts',
-                                       'ocr_issues', 'unread_pages', 'grids')), 'source document')
+                                       'ocr_issues', 'source_review_issues', 'unread_pages', 'grids')), 'source document')
             identity, role, pages = document.get('document_id'), document.get('role'), document.get('pages')
             if not isinstance(identity, str) or not identity or identity in self.by_id:
                 raise DirectoryPlanRejected(f'duplicate or empty document {identity}')
@@ -1600,7 +1653,8 @@ class _Source:
                       'line_units': document.get('line_units') or [],
                       'template_parts': document.get('template_parts') or {},
                       'grids': document.get('grids') or [],
-                      'ocr_issues': document.get('ocr_issues') or []}
+                      'ocr_issues': document.get('ocr_issues') or [],
+                      'source_review_issues': document.get('source_review_issues') or []}
             self.documents.append(record)
             self.by_id[identity] = record
 

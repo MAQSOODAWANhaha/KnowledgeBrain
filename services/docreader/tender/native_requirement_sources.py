@@ -9,7 +9,7 @@ import json
 import re
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictInt, ValidationError, create_model
+from pydantic import AfterValidator, Field, StrictInt, ValidationError, create_model
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, build_request
 from docreader.tender.authoring_excerpts import source_excerpts_text
@@ -27,6 +27,7 @@ _ROLE = Literal['requirement', 'context', 'external_action', 'evaluator_procedur
                 'reference', 'navigation', 'layout', 'already_carried', 'unresolved']
 _SCOPE = Literal['chapter', 'chapters', 'document', 'unassigned']
 _REFS = Annotated[list[StrictInt], Field(min_length=1)]
+_LITERAL_BODY_DOMAIN = 'grid_and_certified_literal_body_v1'
 
 
 def _json(value):
@@ -164,6 +165,8 @@ class SourceLedger:
         if pages is not None and not set(pages) <= set(self.document_map.values()):
             _reject('Selected pages must belong to registered frozen documents.')
         self.atoms, self.ranges, self.grid_units = {}, [], set()
+        self.literal_locations, self.literal_body_refs, self._literal_atoms, self._refs_by_range = {}, {}, {}, {}
+        self.literal_predecessors = {}
         for document_number, document in enumerate(self.documents, 1):
             if pages is not None and document['document_id'] not in pages:
                 continue
@@ -195,6 +198,11 @@ class SourceLedger:
                         self.atoms[ref] = {'base': deepcopy(base), 'source_ref': deepcopy(reference),
                             'start': start + offset, 'end': start + offset + len(line), 'range_ordinal': ordinal,
                             'document': document_number, 'page': page, 'row': base.get('row_start'), 'column': column}
+                        key = index_ref['sha256'], unit['unit_id'], base['source_range_id']
+                        self._refs_by_range.setdefault(key, []).append(ref)
+                        if (base.get('text_basis') == 'pdf_literal' and start + offset == base['start']
+                                and len(line) == base['end'] - base['start']):
+                            self._literal_atoms[document['document_id'], unit['unit_id']] = ref
                         result.append([ref, line])
                     return result
                 if base.get('text_basis') == 'grid_row':
@@ -210,9 +218,40 @@ class SourceLedger:
                 _reject('A requested physical page has no located native source; retain its layout for review.')
         if not self.ranges:
             _reject('No complete native source ranges were selected.')
-        self.binding = _hash({'contract': CONTRACT, 'documents': self.documents, 'pages': pages,
+        self.binding = self._source_binding = _hash({'contract': CONTRACT, 'documents': self.documents, 'pages': pages,
             'atoms': [(r, a['source_ref'], a['base']['source_range_id'], a['start'], a['end']) for r, a in self.atoms.items()],
             'ranges': [(r['reference'], r['base']['range_id']) for r in self.ranges]})
+
+    def bind_literal_locations(self, locations, *, continuation_edges=()):
+        """Bind whole lines and independently proven adjacent layout points."""
+        seen = set()
+        for key, (page, line) in locations.items():
+            ref = self._literal_atoms.get(key)
+            point = (key[0], page, line)
+            if (ref is None or type(page) is not int or page != self.atoms[ref]['page']
+                    or type(line) is not int or line < 0 or point in seen):
+                _reject('Literal body locations must identify unique whole frozen lines on their physical page.')
+            seen.add(point)
+        predecessors, successors = {}, set()
+        for before, after in continuation_edges:
+            if before not in locations or after not in locations or before[0] != after[0]:
+                _reject('Literal continuity requires two certified positions in one document.')
+            first, second = self._literal_atoms[before], self._literal_atoms[after]
+            start, end = (self.atoms[r]['range_ordinal'] for r in (first, second))
+            page, line = locations[before]
+            next_page, next_line = locations[after]
+            ordered = next_page == page and next_line > line or next_page == page + 1
+            if (not ordered or end != start + 1 or second in predecessors or first in successors
+                    or not _continuous_ranges(self, [start, end])):
+                _reject('Literal continuity cannot skip an intervening frozen nonblank source or branch.')
+            predecessors[second] = first
+            successors.add(first)
+        self.literal_locations = dict(locations)
+        self.literal_body_refs = {self._literal_atoms[key]: point for key, point in locations.items()}
+        self.literal_predecessors = predecessors
+        self.binding = (_hash({'source_binding': self._source_binding, 'literal_locations': sorted(locations.items()),
+                               'literal_predecessors': sorted(predecessors.items())})
+                        if locations else self._source_binding)
 
     def view(self, range_ordinals=None):
         return NativeSourceView(self, list(range(len(self.ranges))) if range_ordinals is None else range_ordinals)
@@ -233,17 +272,22 @@ class SourceLedger:
             previous = key
         return result
 
-    def require_grid_body(self, refs):
-        if any(self.atoms[r]['base'].get('text_basis') != 'grid_row' for r in refs):
-            _reject('Native response bodies select grid atoms; prose stays context or on the verified legacy path.')
+    def require_body(self, refs):
+        if all(self.atoms[r]['base'].get('text_basis') == 'grid_row' for r in refs):
+            return
+        if any(r not in self.literal_body_refs for r in refs):
+            _reject('One native body uses grid atoms or whole certified literal lines.')
+        if any(self.literal_predecessors.get(second) != first for first, second in zip(refs, refs[1:])):
+            _reject('Certified literal bodies must select contiguous lines in physical source order.')
 
     def _refs(self, excerpts):
         refs = []
         for excerpt in excerpts:
             for selected in excerpt['selectors']:
-                refs.extend(r for r, a in self.atoms.items() if a['source_ref'] == excerpt['source_ref']
-                    and a['base']['source_range_id'] == selected['source_range_id']
-                    and selected['start'] <= a['start'] < a['end'] <= selected['end'])
+                reference = excerpt['source_ref']
+                key = reference['source_index_ref']['sha256'], reference['unit_id'], selected['source_range_id']
+                refs.extend(r for r in self._refs_by_range.get(key, ())
+                            if selected['start'] <= self.atoms[r]['start'] < self.atoms[r]['end'] <= selected['end'])
         if not refs or self.excerpts(refs) != excerpts:
             _reject('Canonical source must resolve exactly to this ledger whole source atoms.')
         return refs
@@ -305,8 +349,11 @@ def native_requirement_model(payload):
     if refs != tuple(sorted(set(refs))):
         _reject('Wire source aliases must follow the complete native range/cell order.')
     count = len(refs)
-    grid_refs = [line[0] for block in payload['source_scope'] if block['kind'] == 'native_row'
-                 for cell in block['cells'] for line in cell['lines']]
+    literal_domain = payload.get('source_domain') == _LITERAL_BODY_DOMAIN
+    body_choices = tuple(line[0] for block in payload['source_scope']
+                      for lines in ([cell['lines'] for cell in block['cells']] if block['kind'] == 'native_row'
+                                    else [block['lines']] if literal_domain and 'literal_body_line' in block else [])
+                      for line in lines)
     chapter_map = {c['id']: c['id'] for c in payload['chapters']}
     document_map = {d: d for d in payload['document_aliases']}
     if (any(not re.fullmatch(r'c[1-9][0-9]*', c) for c in chapter_map)
@@ -317,9 +364,18 @@ def native_requirement_model(payload):
     visible = Annotated[StrictInt, Field(ge=min(refs, default=1), le=max(refs, default=1),
                                        json_schema_extra={'enum': list(refs)})]
     refs = Annotated[list[visible], Field(min_length=1, max_length=count)]
-    body_ref = Annotated[StrictInt, Field(ge=min(grid_refs, default=1), le=max(grid_refs, default=1),
-                                        json_schema_extra={'enum': grid_refs})]
-    body_refs = Annotated[list[body_ref], Field(min_length=1, max_length=len(grid_refs))]
+    body_count = len(body_choices)
+    body_ref = Annotated[StrictInt, Field(ge=min(body_choices, default=1), le=max(body_choices, default=1),
+                                        json_schema_extra={'enum': list(body_choices)})]
+    if body_choices and literal_domain:
+        choices = frozenset(body_choices)
+
+        def allowed(ref):
+            if ref not in choices:
+                raise ValueError('Body refs must belong to the supplied body source domain.')
+            return ref
+        body_ref = Annotated[body_ref, AfterValidator(allowed)]
+    body_refs = Annotated[list[body_ref], Field(min_length=1, max_length=body_count)]
     chapter = Literal.__getitem__(tuple(chapter_map)) if chapter_map else Literal['__none__']
     native = create_model('NativeRequirementAssignmentView', __base__=NativeRequirementAssignment,
         body_refs=(body_refs, ...), chapter_ids=(Annotated[list[chapter], Field(max_length=len(chapter_map))], Field(default_factory=list)),
@@ -342,7 +398,7 @@ def native_requirement_model(payload):
     return create_model('NativeRequirementPlanView', __base__=NativeRequirementPlan,
         assignments=(Annotated[list[legacy], Field(max_length=legacy_line_limit)], Field(default_factory=list)),
         contexts=(Annotated[list[context], Field(max_length=count)], Field(default_factory=list)),
-        native_assignments=(Annotated[list[native], Field(max_length=len(grid_refs))], Field(default_factory=list)),
+        native_assignments=(Annotated[list[native], Field(max_length=body_count)], Field(default_factory=list)),
         native_dispositions=(Annotated[list[disposition], Field(max_length=count)], Field(default_factory=list)))
 
 
@@ -375,25 +431,39 @@ class NativeSourceView:
                 or range_ordinals[0] < 0 or range_ordinals[-1] >= len(ledger.ranges)):
             _reject('Native packs select ordered complete source ranges, never slice a row.')
         self.ledger, self.range_ordinals = ledger, list(range_ordinals)
+        self.ledger_binding = ledger.binding
         self.components = _source_components(ledger, range_ordinals)
         self.component_of = {ordinal: component['id'] for component in self.components
                              for ordinal in component['range_ordinals']}
-        self.refs = tuple(r for r, a in ledger.atoms.items() if a['range_ordinal'] in range_ordinals)
+        selected = set(range_ordinals)
+        self.refs = tuple(r for r, a in ledger.atoms.items() if a['range_ordinal'] in selected)
+        literal_lines = {}
+        visible = set(self.refs)
+        for ref in visible.intersection(ledger.literal_body_refs):
+            placement = {'literal_body_line': ledger.literal_body_refs[ref][1]}
+            previous = ledger.literal_predecessors.get(ref)
+            if previous in visible:
+                placement['literal_predecessor_ref'] = previous
+            literal_lines[ledger.atoms[ref]['range_ordinal']] = placement
         self.chapter_payload = deepcopy(ledger.chapter_payload)
         self.binding = _hash({'source_binding': ledger.binding, 'ranges': range_ordinals,
                               'chapter_aliases': ledger.chapter_map, 'document_aliases': ledger.document_map})
         self.payload = {'operation': REQUIREMENT_OPERATION, 'native_requirement_contract': CONTRACT,
             'source_binding': self.binding, 'source_scope': [
-                {**deepcopy(ledger.ranges[i]['wire']), 'component': self.component_of[i]} for i in range_ordinals],
+                {**deepcopy(ledger.ranges[i]['wire']), 'component': self.component_of[i],
+                 **literal_lines.get(i, {})} for i in range_ordinals],
             'document_aliases': list(ledger.document_map),
             'atom_count': len(self.refs), 'source_closure': 'complete_ranges_with_explicit_components_v1',
-            'source_domain': 'grid_body_verified_legacy_prose_v1', 'source_components': deepcopy(self.components),
+            'source_domain': _LITERAL_BODY_DOMAIN if literal_lines else 'grid_body_verified_legacy_prose_v1',
+            'source_components': deepcopy(self.components),
             'component_gaps': [{'before': a['id'], 'after': b['id'],
                                'reason': 'document_boundary' if a['document'] != b['document'] else 'unseen_source_ranges'}
                               for a, b in zip(self.components, self.components[1:])],
             'open_before': self.components[0]['open_before'], 'open_after': self.components[-1]['open_after']}
 
     def response_model(self, legacy_line_limit=0, *, legacy_block=()):
+        if self.ledger.binding != self.ledger_binding:
+            _reject('This source view belongs to an older ledger binding.')
         if legacy_line_limit != len(_prose_points(legacy_block, self.ledger.document_map, self.ledger.grid_units)):
             _reject('Schema limits must bind the complete supplied legacy prose block.')
         block = deepcopy(legacy_block)
@@ -436,7 +506,7 @@ class NativeSourceView:
             if not set(body) <= set(self.refs):
                 _reject('Body refs must be visible in this source pack.')
             self.ledger.excerpts(body)
-            self.ledger.require_grid_body(body)
+            self.ledger.require_body(body)
             if len({self.component_of[self.ledger.atoms[r]['range_ordinal']] for r in body}) != 1:
                 _reject('B cannot join independent source components; keep separate cases for explicit C closure.')
             kinds = {dispositions[r] for r in body}
@@ -522,6 +592,9 @@ class NativeCaseView:
             _reject('A native pending case may appear only once.')
         self.case_map = {f'q{i}': case for i, case in enumerate(self.cases, 1)}
         pool, by_key, capsules = [], {}, []
+        case_refs = {case['id']: [ledger._refs([excerpt]) for excerpt in case['source']['body']['source_excerpts']]
+                     for case in self.cases}
+        visible = {ref for groups in case_refs.values() for refs in groups for ref in refs}
         for alias, case in self.case_map.items():
             context_ids = []
             for context in case['source']['contexts']:
@@ -530,14 +603,22 @@ class NativeCaseView:
                     by_key[key] = len(pool) + 1
                     pool.append({'id': by_key[key], 'text': context['text'], 'source_join': context['source_join']})
                 context_ids.append(by_key[key])
+            locations = []
+            for refs in case_refs[case['id']]:
+                ref = refs[0]
+                atom = ledger.atoms[ref]
+                location = dict(document=atom['document'], page=atom['page'],
+                    unit=ledger.ranges[atom['range_ordinal']]['wire']['unit'],
+                    row=atom['row'], column=atom['column'], first_ref=ref, last_ref=refs[-1])
+                if ref in ledger.literal_body_refs:
+                    location['literal_body_line'] = ledger.literal_body_refs[ref][1]
+                    previous = ledger.literal_predecessors.get(ref)
+                    if previous in visible:
+                        location['literal_predecessor_ref'] = previous
+                locations.append(location)
             capsules.append({'id': alias, 'body': case['source']['body']['text'],
                 'source_join': case['source']['body']['source_join'], 'context_ids': context_ids,
-                'source_locations': [dict(document=atoms[0]['document'], page=atoms[0]['page'],
-                    unit=self.ledger.ranges[atoms[0]['range_ordinal']]['wire']['unit'],
-                    row=atoms[0]['row'], column=atoms[0]['column'], first_ref=refs[0], last_ref=refs[-1])
-                    for excerpt in case['source']['body']['source_excerpts']
-                    for refs in [self.ledger._refs([excerpt])]
-                    for atoms in [[self.ledger.atoms[r] for r in refs]]],
+                'source_locations': locations,
                 'source_identity': case['source']['source_id'].removeprefix('native-source-')})
         self.payload = {'operation': CLASSIFICATION_OPERATION,
             'native_requirement_contract': CONTRACT, 'source_binding': _hash({'cases': [c['id'] for c in self.cases], 'chapter_aliases': ledger.chapter_map,
@@ -569,8 +650,9 @@ class NativeCaseView:
                         contexts.append({'refs': self.ledger._refs(group['source_excerpts']), 'source_join': group['source_join']})
             if len(body_refs) != len(set(body_refs)):
                 _reject('Merged native cases overlap; resolve source ownership before merging.')
-            if decision['scope'] in {'chapter', 'chapters'}:
-                self.ledger.require_grid_body(body_refs)
+            has_literal = any(self.ledger.atoms[r]['base'].get('text_basis') == 'pdf_literal' for r in body_refs)
+            if decision['scope'] in {'chapter', 'chapters'} or (has_literal and len(cases) > 1):
+                self.ledger.require_body(sorted(body_refs))
             if len(cases) == 1:
                 original_join = cases[0]['source']['body']['source_join']
                 if decision['source_join'] is not None and decision['source_join'] != original_join:
@@ -614,13 +696,15 @@ def native_output_bound(view, *, legacy_block=()):
     """
     n = len(view.refs)
     g = sum(view.ledger.atoms[r]['base'].get('text_basis') == 'grid_row' for r in view.refs)
+    literal = sum(r in view.ledger.literal_body_refs for r in view.refs)
+    body_count = g + literal
     ref = max(view.refs, default=1)
     chapters = [max(view.ledger.chapter_map, key=len)] * len(view.ledger.chapter_map) if view.ledger.chapter_map else []
     assignment = {'body_refs': [ref], 'context_id': None if len(str(max(n, 1))) < 4 else max(n, 1), 'source_join': 'continuation',
                   'scope': 'unassigned', 'chapter_ids': chapters}
     shape = {'assignments': [],
         'contexts': [{'refs': [ref], 'parent_id': None if len(str(max(n, 1))) < 4 else max(n, 1), 'source_join': 'continuation'} for _ in range(n)],
-        'native_assignments': [deepcopy(assignment) for _ in range(g)],
+        'native_assignments': [deepcopy(assignment) for _ in range(body_count)],
         'native_dispositions': [{'refs': [ref], 'kind': 'evaluator_procedure'} for _ in range(n)]}
     points = _legacy_points(legacy_block, view.ledger.document_map)
     legacy_line_limit = len(_prose_points(legacy_block, view.ledger.document_map, view.ledger.grid_units))
@@ -634,7 +718,8 @@ def native_output_bound(view, *, legacy_block=()):
     from docreader.llm.budget import _o200k_tokens
     return {'token_upper_bound': len(encoded.encode('ascii')) + 256,
             'worst_shape_tokenized': _o200k_tokens(encoded), 'native_atoms': n,
-            'grid_body_atoms': g, 'chapter_count': len(chapters), 'chapter_choice_occurrences': g * len(chapters),
+            'grid_body_atoms': g, **({'literal_body_atoms': literal} if literal else {}),
+            'chapter_count': len(chapters), 'chapter_choice_occurrences': body_count * len(chapters),
             'context_parent_edges': n, 'assignment_context_edges': n, 'legacy_window_limit': legacy_line_limit}
 
 
@@ -654,32 +739,50 @@ def require_native_budget(budget, view, payload, prompt, *, request=None):
 
 
 def plan_native_packs(ledger, budget, payload_factory, prompt, *, request_factory=None):
-    """Greedy complete-range packing; no fragment truncation, model call or retry."""
-    views, pending, current = [], [], []
-    def fits(ordinals):
-        view = ledger.view(ordinals)
+    """Find budgeted packs using complete contiguous ranges and measured candidates."""
+    views, pending = [], []
+
+    def admit(start, count):
+        view = ledger.view(list(range(start, start + count)))
         try:
             payload = payload_factory(view)
             require_native_budget(budget, view, payload, prompt,
                                   request=request_factory(view, payload) if request_factory else None)
         except ModelBudgetError:
-            return False
-        return True
-    for ordinal in range(len(ledger.ranges)):
-        if fits([*current, ordinal]):
-            current.append(ordinal)
-            continue
-        if current:
-            views.append(ledger.view(current))
-            current = []
-        if fits([ordinal]):
-            current = [ordinal]
-        else:
-            pending.append({'range_ordinals': [ordinal], 'source_binding': ledger.binding,
-                'source_reference': deepcopy(ledger.ranges[ordinal]['reference']),
-                'range_id': ledger.ranges[ordinal]['base']['range_id'],
+            return None
+        return view
+
+    start, total = 0, len(ledger.ranges)
+    while start < total:
+        accepted = admit(start, 1)
+        if accepted is None:
+            pending.append({'range_ordinals': [start], 'source_binding': ledger.binding,
+                'source_reference': deepcopy(ledger.ranges[start]['reference']),
+                'range_id': ledger.ranges[start]['base']['range_id'],
                 'outlet': 'manual_source_review', 'reason': 'complete_native_record_over_budget',
                 'enterprise_confirmed': False})
-    if current:
-        views.append(ledger.view(current))
+            start += 1
+            continue
+
+        remaining = total - start
+        size, rejected = 1, None
+        while size < remaining:
+            probe = min(size * 2, remaining)
+            candidate = admit(start, probe)
+            if candidate is None:
+                rejected = probe
+                break
+            size, accepted = probe, candidate
+
+        # Budget may vary across adjacent lengths. Only emit a measured fit and
+        # leave every later range for the next pack regardless of the search.
+        while rejected is not None and rejected - size > 1:
+            probe = (size + rejected) // 2
+            candidate = admit(start, probe)
+            if candidate is None:
+                rejected = probe
+            else:
+                size, accepted = probe, candidate
+        views.append(accepted)
+        start += size
     return {'views': views, 'pending_ranges': pending, 'complete': not pending, 'model_calls': 0}

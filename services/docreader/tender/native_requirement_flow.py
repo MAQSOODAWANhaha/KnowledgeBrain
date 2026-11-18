@@ -1,8 +1,9 @@
 """Opt-in native requirements: source proof, common C identities and atomic preparation."""
-from collections import Counter
+from collections import Counter, defaultdict
 from copy import deepcopy
 import hashlib
 import json
+from math import isfinite
 from pathlib import Path
 from subprocess import run, TimeoutExpired
 from tempfile import TemporaryDirectory
@@ -16,7 +17,7 @@ from docreader.tender.directory_adjudication import (
     requirement_cases, validate_requirement_adjudications, apply_requirement_adjudications,
 )
 from docreader.tender.directory_compile import (
-    ClassificationItem, DirectoryPlanRejected, _Source, _window, _window_text,
+    ClassificationItem, DirectoryPlanRejected, _FrozenLayout, _Source, _compact, _window, _window_text,
     apply_classification,
 )
 from docreader.tender.directory_sources import SourceRefs
@@ -126,6 +127,68 @@ def layout_certificates(ledger, documents):
     return proof
 
 
+def literal_layout_locations(artifacts, index, document):
+    """Locate unique whole glyph lines in a same-snapshot physical layout."""
+    raw = index.raw
+    if (not raw.get('literal_source_ref') or not isinstance(document, _FrozenLayout)
+            or document.get('document_id') != index.document['document_id']
+            or not document.has_layout_proof(_hash(raw))):
+        return {}
+    pages = artifacts.read_json(raw['literal_source_ref'])['pages']
+    if len(pages) != len(document['pages']):
+        return {}
+
+    def bounds(locator):
+        box = tuple(locator.get(key) for key in ('left', 'bottom', 'right', 'top'))
+        if all(type(value) in (int, float) and isfinite(value) for value in box):
+            if box[0] < box[2] and box[1] < box[3]:
+                return box
+
+    grids, literals = defaultdict(list), defaultdict(list)
+    for unit in raw['units']:
+        locator = unit.get('physical_locator') or unit['locator']
+        if unit.get('grid'):
+            grids[locator.get('page_ordinal')].append(bounds(locator))
+        elif unit.get('text_basis') == 'pdf_literal':
+            literals[locator['page_ordinal']].append(unit)
+    if None in grids:
+        return {}
+    grid_candidates = {(entry['page_ordinal'], entry['char_index'])
+                       for entry in raw['literal_projection_dispositions']
+                       if entry['reason'] == 'native_grid_candidate'}
+    owners, locations = document.get('line_units') or [], {}
+    for page, units in literals.items():
+        layout = defaultdict(list)
+        page_lines = document['pages'][page].splitlines()
+        for number, line in enumerate(page_lines):
+            layout[_compact(line)].append(number)
+        native_counts = Counter(_compact(unit['text']) for unit in units)
+        page_owners = owners[page] if page < len(owners) else []
+        for unit in units:
+            text = _compact(unit['text'])
+            lines = layout.get(text, [])
+            if not text or len(lines) != 1 or native_counts[text] != 1:
+                continue
+            line, = lines
+            if page_lines[line].split() != unit['text'].split():
+                continue
+            if line < len(page_owners) and page_owners[line] is not None:
+                continue
+            unit_id = unit['unit_id']
+            box = bounds(unit['physical_locator'])
+            if box is None or any(grid is None or not (
+                    box[2] < grid[0] or grid[2] < box[0] or box[3] < grid[1] or grid[3] < box[1])
+                    for grid in grids[page]):
+                continue
+            chars = pages[page]['characters']
+            if any((page, i) in grid_candidates or chars[i]['bbox'] is None or
+                   {'outside_page', 'invisible_text_bbox_candidate'}.intersection(chars[i]['flags'])
+                   for i in raw['literal_units'][unit_id]['char_indices']):
+                continue
+            locations[unit_id] = {'document_id': document['document_id'], 'page': page, 'line': line}
+    return locations
+
+
 def canonical_text(source):
     return '\n'.join([*(g['text'] for g in source['contexts']), source['body']['text']])
 
@@ -159,26 +222,37 @@ def append_native_records(compiled, records):
 
 def source_windows(ledger, source, documents, proof=None):
     """Conservative legacy-coordinate proxy used only by existing scope/exclusion guards."""
-    units = {e['source_ref']['unit_id'] for e in source['body']['source_excerpts']}
-    pages = {(ledger.document_map[f'd{a["document"]}'], a['page'])
-             for a in ledger.atoms.values() if a['source_ref']['unit_id'] in units
-             and a['source_ref']['source_index_ref'] == source['body']['source_excerpts'][0]['source_ref']['source_index_ref']}
+    atoms = [ledger.atoms[r] for r in ledger._refs(source['body']['source_excerpts'])]
+    native = defaultdict(set)
+    literal = defaultdict(set)
+    for atom in atoms:
+        key = ledger.document_map[f'd{atom["document"]}'], atom['page']
+        unit = atom['source_ref']['unit_id']
+        (literal if atom['base'].get('text_basis') == 'pdf_literal' else native)[key].add(unit)
     windows = []
     for document in documents:
         for page, text in enumerate(document['pages']):
-            if (document['document_id'], page) not in pages:
+            key = document['document_id'], page
+            if key not in native and key not in literal:
                 continue
-            rows = (proof or {}).get((document['document_id'], page))
+            rows = (proof or {}).get(key) or []
+            wanted = literal.get(key, set())
+            located = {row['unit_id']: row['line'] for row in rows
+                       if row.get('source_role') == 'native_literal' and row['unit_id'] in wanted}
+            if wanted - located.keys():
+                return []
+            windows.extend({'document_id': key[0], 'page': page, 'start_line': line, 'end_line': line}
+                           for line in sorted(located.values()))
+            if key not in native:
+                continue
             owners = document.get('line_units') or []
-            selected = [i for i, _ in enumerate(text.splitlines())
-                        if (rows[i].get('unit_id') if rows else owners[page][i] if page < len(owners) and i < len(owners[page]) else None) in units]
-            if not selected and text.splitlines():
-                selected = list(range(len(text.splitlines())))
+            selected = [row['line'] for row in rows if row.get('unit_id') in native[key]] if rows else [
+                line for line, unit in enumerate(owners[page] if page < len(owners) else ()) if unit in native[key]]
+            if not selected:
+                selected = range(len(text.splitlines()))
             if selected:
-                windows.append({'document_id': document['document_id'], 'page': page,
+                windows.append({'document_id': key[0], 'page': page,
                                 'start_line': min(selected), 'end_line': max(selected)})
-    if not windows:
-        _reject('Native source has no registered source-page guard; preserve it for manual source review.')
     return windows
 
 
@@ -212,12 +286,15 @@ class JointClassification:
         self.legacy = requirement_cases(compiled, documents)
         self.native = [ledger.validate_case(c) for c in compiled.get('_native_requirement_cases', [])]
         self.native_view = NativeCaseView(ledger, self.native)
+        self.native_windows = {case['id']: source_windows(ledger, case['source'], documents, proof)
+                               for case in self.native}
         self.all_cases = [*self.legacy, *self.native]
         self.mapping = {f'q{i}': case['id'] for i, case in enumerate(self.all_cases, 1)}
         self.reverse = {value: key for key, value in self.mapping.items()}
         capsules = [{'id': self.reverse[c['id']], 'source_kind': 'legacy', 'source_windows': deepcopy(c['source_windows'])} for c in self.legacy]
         for original, capsule in zip(self.native, self.native_view.payload['requirement_cases']):
-            capsules.append({**deepcopy(capsule), 'id': self.reverse[original['id']], 'source_kind': 'native'})
+            capsules.append({**deepcopy(capsule), 'id': self.reverse[original['id']], 'source_kind': 'native',
+                             **({'manual_only': True} if not self.native_windows[original['id']] else {})})
         reading = self.refs.reading()
         reverse_docs = {v: k for k, v in ledger.document_map.items()}
         for doc in reading['documents']:
@@ -235,7 +312,9 @@ class JointClassification:
         shadow = deepcopy(self.compiled)
         source = _Source(self.documents)
         for case in self.native:
-            windows = source_windows(self.ledger, case['source'], self.documents, self.proof)
+            windows = self.native_windows[case['id']]
+            if not windows:
+                continue
             text = '\n'.join(_window_text(source, _window(w, source, 'native guard')) for w in windows).strip()
             shadow.setdefault('_requirement_cases', []).append({'id': case['id'], 'source_windows': windows, 'source_text': text})
             shadow['issues'].append({'code': 'outline_directory_requirement_unassigned', 'requirement_case_id': case['id'], 'detail': text})
@@ -265,7 +344,12 @@ class JointClassification:
                 used.add(identity)
             raw_decision = {**decision, 'item_ids': ids, 'chapter_ids': [self.ledger.chapter_map[c] for c in decision['chapter_ids']],
                             'basis_windows': basis}
-            decisions.append({k: v for k, v in raw_decision.items() if k != 'source_join'})
+            undecidable = [i for i in ids if i in self.native_windows and not self.native_windows[i]]
+            if undecidable and decision['scope'] != 'unassigned':
+                _reject('Native source without exact layout ownership stays pending for manual review.')
+            guard_ids = [i for i in ids if i not in undecidable]
+            if guard_ids:
+                decisions.append({**{k: v for k, v in raw_decision.items() if k != 'source_join'}, 'item_ids': guard_ids})
             if all(is_native):
                 native.append({**decision, 'item_ids': [local_native[x] for x in ids],
                     'basis_windows': [{**w, 'document_id': reverse_docs[w['document_id']]} for w in basis]})
@@ -383,9 +467,36 @@ def bind_native_targets(compiled, nodes, *, artifacts=None, snapshot=None):
 
 class JointRequirements:
     """One joint B inventory: complete ranges and a unique prose owner per page."""
-    def __init__(self, ledger, documents, applicability, identity=None):
+    def __init__(self, ledger, documents, applicability, identity=None, *, carried_points=()):
         self.ledger, self.documents = ledger, documents
         self.proof = layout_certificates(ledger, documents)
+        locations, continuation_edges = {}, []
+        literal_ranges = {(ledger.document_map[f'd{entry["wire"]["document"]}'], entry['reference']['unit_id']): entry
+                          for entry in ledger.ranges if entry['base'].get('text_basis') == 'pdf_literal'}
+        frozen = {doc['document_id']: doc for doc in ledger.documents}
+        for document in documents:
+            doc = document['document_id']
+            index = ledger.repository.source_index(frozen[doc]['source_index_ref'])
+            for unit, point in literal_layout_locations(ledger.artifacts, index, document).items():
+                page, line = point['page'], point['line']
+                row = self.proof[doc, page][line]
+                if ((doc, unit) in literal_ranges and row['source_role'] == 'prose'
+                        and (doc, page, line) not in carried_points):
+                    row.update(source_role='native_literal', unit_id=unit)
+                    locations[doc, unit] = (page, line)
+            previous = None
+            for page in range(len(document['pages'])):
+                for row in self.proof[doc, page]:
+                    if not row['text'].strip():
+                        continue
+                    current = (doc, row['unit_id']) if row['source_role'] == 'native_literal' else None
+                    if previous and current and locations[current][0] - locations[previous][0] <= 1:
+                        before, after = literal_ranges[previous], literal_ranges[current]
+                        if (after['ordinal'] == before['ordinal'] + 1
+                                and after['source_ordinal'] == before['source_ordinal'] + 1):
+                            continuation_edges.append((previous, current))
+                    previous = current
+        ledger.bind_literal_locations(locations, continuation_edges=continuation_edges)
         self.identity = {k: identity.get(k) for k in ('source_version', 'domain_revision')} if identity else {}
         self.applicability = deepcopy(applicability)
         self.page_owner = {}
@@ -434,8 +545,10 @@ class JointRequirements:
             validate_requirement_exclusions(compiled, prepared['assignments'])
             guards = []
             for record in prepared['native_records']:
-                guards.extend({**w, 'scope': record['scope'], 'chapter_ids': record['chapter_ids']}
-                              for w in source_windows(self.ledger, record['source'], self.documents, self.proof))
+                windows = source_windows(self.ledger, record['source'], self.documents, self.proof)
+                if not windows and record['scope'] != 'unassigned':
+                    _reject('Native source without exact layout ownership stays pending for manual review.')
+                guards.extend({**w, 'scope': record['scope'], 'chapter_ids': record['chapter_ids']} for w in windows)
             validate_requirement_exclusions(compiled, guards)
             covers = {c['id'] for c in compiled['chapters'] if c.get('presentation') == 'cover'}
             if any(covers.intersection(r['chapter_ids']) for r in prepared['native_records']):

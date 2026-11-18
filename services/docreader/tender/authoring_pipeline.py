@@ -527,7 +527,8 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
             raise ValueError('Frozen native requirement sources are unavailable.')
         frozen = artifacts.read_json(identity['frozen_ref'])
         ledger = SourceLedger(artifacts, frozen['documents'], chapters=requirement_chapters)
-        joint = JointRequirements(ledger, documents, applicability, identity)
+        from docreader.tender.directory_compile import _used_lines
+        joint = JointRequirements(ledger, documents, applicability, identity, carried_points=_used_lines(compiled))
     except (OSError, ValueError, KeyError, ModelContractError) as error:
         compiled['issues'].append({'code': 'outline_directory_native_source_unavailable',
             'detail': '完整原生要求来源暂不可核定；原件保留，请在Word对照完整原件人工核定正文及归属。' + type(error).__name__})

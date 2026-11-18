@@ -643,6 +643,7 @@ def pending_outline_issues(outline):
         "outline_directory_requirement_unassigned", "outline_directory_partial_table",
         "outline_directory_table_unbound", "outline_directory_sparse_page",
         "outline_directory_ocr_unconfirmed", "outline_directory_revision_unreviewed",
+        "outline_directory_attachment_unconfirmed", "outline_directory_image_unconfirmed",
         "outline_directory_material_rejected", "outline_directory_requirement_rejected",
         "outline_directory_parameter_rejected", "outline_directory_rejected",
         "outline_directory_name_unconfirmed", "outline_directory_binding_rejected",

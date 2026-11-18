@@ -260,13 +260,28 @@ class WebBridge:
             )
         return {"analysis": await self.analysis_view(await self.store.get_run(row["run_id"]), payload["project_id"])}
 
-    async def sources_current(self, run, registered):
+    async def sources_current(self, run, registered, *, require_current_pdf=False):
         frozen = [entry for entry in run["artifacts"] if entry["stage"] == "freeze" and not entry["scope"]
                   and entry["source_version"] == run["source_version"] and entry["domain_revision"] == 0]
         if len(frozen) != 1:
             return False
         source = await asyncio.to_thread(self.artifacts.read_json, frozen[0]["artifact_ref"])
-        return _source_identities(source["documents"]) == _source_identities(registered["documents"])
+        if _source_identities(source["documents"]) != _source_identities(registered["documents"]):
+            return False
+        if require_current_pdf:
+            from docreader.tender.evidence.references import literal_source_profile
+
+            pdfs = [document for document in source["documents"] if document["file_name"].lower().endswith(".pdf")]
+            if pdfs:
+                profile = await asyncio.to_thread(literal_source_profile)
+                for document in pdfs:
+                    if not document.get("raw_ref"):
+                        return False
+                    raw = await asyncio.to_thread(self.artifacts.read_json, document["raw_ref"])
+                    if (not raw.get("literal_source_ref")
+                            or raw["source_contract"].get("literal_source_profile") != profile):
+                        return False
+        return True
 
     async def source_run(self, project_id, *, registered=None):
         """Initialize usable native sources without enqueueing an analysis call."""
@@ -466,7 +481,8 @@ class WebBridge:
             run = await self.store.get_run(identity["run_id"])
         else:
             run = await self.latest_run(payload["project_id"])
-            if run is None or not await self.sources_current(run, registered):
+            if run is None or not await self.sources_current(
+                    run, registered, require_current_pdf=request["previous_execution_id"] is None):
                 run = await self.source_run(payload["project_id"], registered=registered)
             identity = _identity(run)
         if request["previous_execution_id"] is not None:

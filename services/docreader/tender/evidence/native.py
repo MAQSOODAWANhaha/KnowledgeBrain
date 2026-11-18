@@ -85,15 +85,26 @@ def _supplement_pdf_images(document, content: bytes) -> None:
         unit.ordinal = ordinal
     document.metadata["evidence_issues"] = problems
     from pypdf import PdfReader
-    # Embedded files are explicit unresolved sources until separately registered.
-    # Keeping their carrier prevents apparently complete coverage from losing them.
-    for attachment_index, name in enumerate(PdfReader(io.BytesIO(content)).attachments):
+    from pypdf.errors import DependencyError, PdfReadError
+
+    embedded = {}
+    for attachment_index, entry in enumerate(PdfReader(io.BytesIO(content)).attachment_list):
+        name = entry.name
+        unit_id = f"attachment:{attachment_index}"
+        names = list(dict.fromkeys([name, *(str(entry.pdf_object[key]) for key in ('/UF', '/F')
+                                           if isinstance(entry.pdf_object.get(key), str))]))
+        try:
+            payload = entry.content
+        except (PdfReadError, DependencyError, KeyError, ValueError, OSError, TypeError, NotImplementedError):
+            payload = None
+        embedded[unit_id] = (names, payload)
         document.structured_source_units.append(StructuredSourceUnit(
-            key=f"attachment:{attachment_index}", ordinal=len(document.structured_source_units),
+            key=unit_id, ordinal=len(document.structured_source_units),
             kind=StructuredSourceUnitKind.ATTACHMENT_REGION, text=name,
             locator=AttachmentLocator(part_name=name, relationship_type="pdf_embedded_file"),
             physical_path=f"pdf:embedded-file:{name}",
         ))
+    document.metadata['pdf_embedded_files'] = embedded
     if document.metadata.get("repeating_lines"):
         document.metadata["evidence_issues"].append({
             "code": "pdf_repeating_edge_lines_removed",

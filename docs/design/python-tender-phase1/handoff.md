@@ -1,5 +1,29 @@
 # Python 招标第一期交接
 
+## 首轮原字正文接入与四源容量验证（本段优先）
+
+- 本阶段提交保存首轮原字接入、附件、图片待核和 Word 导出修复，尚未部署。四源完整模板验收仍为 **0/4**，本轮未发模型请求。覆盖原字、附件、冻结与分包的 110 项回归通过，证据 `unit-commit-wLAu3Bdu/pytest.log`。
+- BUG234 已接通显式联合 B/C 的正文选择及 Word 来源绑定。四源 5,698 / 9,964 原字行唯一定位，校验约 0.98 秒。已承载行保持既有路径，新选原字使用同一投影坐标作排除检查。4,266 行仍留来源待核。两页合成 PDF 的跨页正文、原本存在的 `#`、尾句、相邻条款和 DOCX/ZIP 一致性通过。证据 `literal-layout-identity-FjIvOpXB/four-source-locations.json`、`literal-word-regression-EQEYHhXU/pytest.log`。
+- 以四份真实冻结和 v36 已有目录做离线测量，11,299 个来源范围完整保留，Bidding/安服/111/222 分别需 64/53/46/32 个 B 包。195 包均通过输入及合法输出形状预算，个别包接近 32,768 预留。原逐行试包合计约 325.52 秒，缩减重复试包后约 73.45 秒。调用数量仍受每个正文组可选择整套章节的最坏输出边界影响。证据 `joint-integration-KH9gRQJM/budget-four.json`、`native-pack-search-eW5V9HYO/budget-optimized.json`。
+- 正常入口还未启用联合 B/C。当前带核定事实的修订显式要求旧分类路径，且旧核定对象绑定旧冻结和完整输入。要先验证事实在新冻结中的来源关系，明确已核定正文的唯一承载，以及 C 对未决来源的预算与处置，再做正式四源 Word/PDF/ZIP 验收。候选预检 `isolated-candidate-plan-lMKqJbzN/PLAN.md`，配置仍按用户选择 `low`。
+
+## 111 内嵌原件与审查出口已接入（本段优先）
+
+- 当前仍为 **0/4** 最终成品验收。BUG230 本地修改尚未部署，独立候选栈未启动本轮模型任务。
+- 四真实原件重新冻结并重载，共 402 页、253715 个原字符，四原件 SHA 均一致。耗时依次 5.748、16.283、16.002、3.641 秒，总计 41.674 秒，包含证据重载核对。外置证据 `2026-11-17-source-contract-realignment/attachment-four-audit-1zOuvow3/result.json`。父 PDF 共 196 处图像待处置。111 的单个内嵌载体有两个原名，子 DOCX 256844 字节、631 个逻辑范围、17 个原生表、2 处图像，保留父子适用性待核及子件自身问题。
+- 真实 111 隔离导出探测中，Word 和 ZIP 的待核清单均只列一次该附件并保留填写位，附件未列为投标证明。证据同目录 `111-attachment-export-probe.json`。这是单项监督样稿。图像和附件仍按原件绑定核对，生产未导入评审处置。
+- 111 的 30 个非精确匹配长段逐项对照后，29 项确认是版式差异，1 项对应 PDF 实体第 51 页公式及 DOCX `Equation.3`。独立读取 PDF、内嵌对象原生流及 WMF 后确认公式一致，子件整体适用关系仍待核。证据 `111-paragraph-compare-ONEulMTX/REPORT.md` 与 `FORMULA.md`。
+- 196 位点有 8 个图像哈希，192 处是装饰候选，4 处是参考截图。其中 111 第 85 页的金额为保证金提交示意，222 第 68–69 页的三类信用截图须留真实凭证位置。隔离回放验证 192 处装饰候选可按原件和图片 SHA、位置及坐标生效，剩 4 处参考图待核。新大纲待核出口在原快照显示 8 组，在隔离回放显示 4 组。111 子件另有 2 处独立哈希图像。证据 `image-position-review-g7y9CkFp/REPORT.md`、`attachment-four-audit-1zOuvow3/image-review-outlet-audit.json`。176 项覆盖冻结、编制和导出回归通过，证据 `attachment-outlet-gnjcNhFw/image-green.log`。
+- 正文首轮选择的根因和五问见 BUG234。B 即使收到原字引用，也会在 Schema 或 B/C 宿主格内限制处拒绝它。正在建立逐行位置证明，之后按可选正文重新计算容量，验证跨页续句和格内邻项。
+
+## 新任务原字版本准入与旧正文兼容（本段优先）
+
+- 本次BUG232/233修改尚未部署；生产CAS、运行数据库、`.env`与四份原件未写。真实成品验收仍为 **0/4**，本轮无新模型请求、无新Word。
+- BUG232：新`pdf_literal`范围继续参与来源索引，退出旧Markdown/单行自动正文判断。缺显式来源的旧正文不获自动完整性；不影响已绑定正文或旧生成ATX路径。先红后绿，相关79项通过，外置`2026-11-17-source-contract-realignment/literal-legacy-regression-DHtH0qHP/pytest.log`。
+- BUG233：无显式前稿的新任务复用PDF分析冻结时核原件身份与当前原字profile；已锁定的历史前稿仍沿用原冻结。隔离PG流程50项通过，随后新增前稿绑定断言，版本准入文件4项通过（范围有重叠，不相加）；外置`freeze-admission-green-St91ePyw/pytest.log`及`freeze-admission-pinned-6f8Fz1kc/pytest.log`。
+- 四真实来源只读核：旧v36四份原件身份有效、均须为无前稿新任务刷新；新冻结四份通过原字profile准入，402页/253715原字符重载，111和222共5个原`#`未变。外置`legacy-four-source-admission-audit-nH1SLPIL/result.json`及`four-source-admission-audit-v7TvlYIf/result.json`。
+- 下一处主断点：默认执行仍用旧layout生成目录与要求，再配置末端R；实验Joint B/C虽然提供了literal atoms，但目前只允许grid进入正文，并按grid估合法输出，不能仅删除`require_grid_body()`。后续应让首次选择在完整原字段与已证格内选取正文、上下文及连接，明确同页唯一认领、重复格字证据和超界待核；原字首行只能作定位。仍需覆盖196个图像位置、111同一DOCX的两别名及独立成品核对。
+
 ## 方案已获确认，正在实施原件来源纠偏（本段优先，2026-11-18 UTC）
 
 - 用户后继要求“先提交当前所有改动的代码”，本轮先保存整个工作区阶段改动，随后继续原四源目标。Python最新稳定全量回归为3831 passed，530个源码/Prompt文件无漂移，证据`unit-gate-20261118T015611Z-c2a534b8/`。此前外置pytest启动脚本缺少multiprocessing主入口保护导致子进程重入的尝试已停止、保留且不算通过；最终通过用的是已加主入口保护的脚本。

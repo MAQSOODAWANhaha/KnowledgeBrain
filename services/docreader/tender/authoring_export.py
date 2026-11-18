@@ -184,22 +184,27 @@ def _body_entries(entries):
 
 def _carried_source(target):
     """Directory compilation stores verbatim source in purpose. Internal instructions do not."""
-    text = (target.get("purpose") or "").strip()
-    if text and (target.get('source_body_contract') == SOURCE_BODY_CONTRACT
-                 or target.get("manual_fill") and target.get("support_origins") == ["tender"]):
-        return text
+    purpose = target.get("purpose") or ""
+    if target.get('source_body_contract') == SOURCE_BODY_CONTRACT:
+        return purpose
+    if target.get("manual_fill") and target.get("support_origins") == ["tender"]:
+        return purpose.strip()
     return ""
 
 
 def _write_carried_source(document, target, *, keep_with_next=False):
     text = _carried_source(target)
-    if not text:
+    if not text.strip():
         return False
+    exact = target.get('source_body_contract') == SOURCE_BODY_CONTRACT
     for paragraph in text.split("\n"):
-        if paragraph.strip():
-            added = document.add_paragraph(re.sub(r' {2,}', lambda match: '\u00a0' * len(match.group()), paragraph))
-            if keep_with_next:
-                added.paragraph_format.keep_with_next = True
+        if not exact:
+            if not paragraph.strip():
+                continue
+            paragraph = re.sub(r' {2,}', lambda match: '\u00a0' * len(match.group()), paragraph)
+        added = document.add_paragraph(paragraph)
+        if keep_with_next:
+            added.paragraph_format.keep_with_next = True
     return True
 
 
@@ -562,7 +567,8 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
         ('outline_directory_response_form_row_roles', '原式行责任核定', False),
         ('outline_directory_title_mapping', '章节名称与来源对应', False),
     )
-    separate = {code for code, _, _ in groups}
+    separate = {'outline_directory_attachment_unconfirmed', 'outline_directory_image_unconfirmed',
+                *(code for code, _, _ in groups)}
     placed_targets = {target['target_id']: target for chapter, _ in entries for target in chapter.get('targets', [])}
     for code, title, checkbox in groups:
         selected = [issue for issue in outline.get('issues', []) if issue.get('code') == code]

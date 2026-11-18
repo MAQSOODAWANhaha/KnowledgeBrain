@@ -329,6 +329,10 @@ async def test_embedded_pdf_attachment_is_explicitly_unresolved(tmp_path, artifa
     assert any(problem['code'] == 'attachment_content_not_extracted' for problem in index['issues'])
     raw = artifacts.read_json(index['documents'][0]['raw_ref'])
     assert any(unit['locator'].get('part_name') == 'terms.txt' for unit in raw['units'])
+    attachment, = raw['embedded_sources'].values()
+    assert artifacts.read_bytes(attachment['original_ref']) == b'Additional conditions apply.'
+    assert attachment['status'] == 'unsupported'
+    assert 'frozen_ref' not in attachment
 
 
 async def test_storage_corruption_remains_technical_failure(tmp_path, artifacts):

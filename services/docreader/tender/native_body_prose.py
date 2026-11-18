@@ -42,7 +42,7 @@ class NativeProseSources:
                 point = (source['document_id'], page)
                 if unit.get('grid') or base.get('text_basis') in ('grid_row', 'spreadsheet_row'):
                     self.grids[point].append(text)
-                elif unit['kind'] != 'image_region' and base.get('text_basis') != 'literal_ocr':
+                elif unit['kind'] != 'image_region' and base.get('text_basis') not in ('literal_ocr', 'pdf_literal'):
                     self.prose[point].append((source, index, base, text))
 
     def match(self, purpose, active_pages):
