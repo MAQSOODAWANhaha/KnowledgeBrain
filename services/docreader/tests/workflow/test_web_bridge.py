@@ -371,6 +371,60 @@ async def test_outline_predecessor_is_persisted_and_forwarded_to_the_worker(runt
     assert "outline_ref" not in observed[0] and observed[0]["review_request"] is None
 
 
+@pytest.mark.parametrize("native", [True, False])
+async def test_web_outline_successor_inherits_native_contract_and_exact_receipt(runtime, monkeypatch, native):
+    from docreader.llm.request import build_request, request_digest
+    from docreader.tender import document_execution
+    from docreader.tender.native_requirement_sources import CONTRACT
+
+    await upload(runtime)
+    endpoint = ModelEndpoint("http://fixture.invalid", "test-only", "fixture", 131072)
+    monkeypatch.setattr(ModelConfig, "from_env", classmethod(lambda cls: ModelConfig(endpoint, None)))
+    env = "KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT"
+    if native:
+        monkeypatch.setenv(env, CONTRACT)
+    else:
+        monkeypatch.delenv(env, raising=False)
+    first = await runtime.bridge.start_outline(payload(runtime, request_key="native-before"))
+    predecessor = first["generation"]["execution_id"]
+    response = {"native_dispositions": []} if native else {"assignments": []}
+    task = "directory_requirement"
+
+    async def generate(artifacts, snapshot, budget, executor, **options):
+        contract = options.get("native_requirement_contract")
+        request = build_request(budget.model, "fixture", {"native_requirement_contract": contract})
+        digest = request_digest(endpoint.base_url, request)
+        if executor.lease.execution_id == predecessor:
+            reference = artifacts.put_json({"task": task, "input_digest": digest, "response": response})
+            await executor.store.commit_artifact(executor.lease, "document-model-response", reference,
+                scope=f"{task}:{digest}", input_digest=digest)
+        else:
+            assert await executor.replay(task, request, lambda raw: raw) == (True, response)
+        return artifacts.put_json({"schema_version": 2, "authoring_input": snapshot, "issues": [], "chapters": [{
+            "chapter_id": "chapter-1", "title": "实施方案", "children": [], "targets": [{
+                "target_id": "chapter-1:target-1", "kind": "narrative", "purpose": "说明实施方法",
+                "rule_refs": [], "source_refs": []}]}]})
+
+    monkeypatch.setattr(document_execution, "generate_document", generate)
+    await execute_authoring_job(predecessor, runtime.settings)
+    prior = await runtime.bridge.authoring.get_execution(predecessor)
+    assert prior["status"] == "succeeded"
+    assert prior["execution_spec"].get("native_requirement_contract") == (CONTRACT if native else None)
+    if native:
+        monkeypatch.delenv(env)
+    else:
+        monkeypatch.setenv(env, CONTRACT)
+    second = await runtime.bridge.start_outline(payload(runtime, request_key="native-after", previous_execution_id=predecessor))
+    execution_id = second["generation"]["execution_id"]
+    await execute_authoring_job(execution_id, runtime.settings)
+    successor = await runtime.bridge.authoring.get_execution(execution_id)
+    assert successor["execution_spec"].get("native_requirement_contract") == (CONTRACT if native else None)
+    assert successor["status"] == "succeeded" and successor["requests"] == []
+    assert successor["authoring_input"] == prior["authoring_input"]
+    receipt, = [r for r in successor["receipts"] if r["stage"] == "document-model-response"]
+    assert receipt["metadata"]["reused_from_execution_id"] == predecessor
+
+
 async def test_reviewed_fact_ref_is_frozen_in_the_job_inherited_and_forwarded(runtime, monkeypatch):
     from docreader.tender import document_execution
     from docreader.tender.directory_compile import documents_from_frozen

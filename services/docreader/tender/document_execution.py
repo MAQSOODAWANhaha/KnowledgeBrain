@@ -633,14 +633,29 @@ async def execute_document(
             and snapshot["checklist_digest"] != checklist_digest
         ):
             raise Conflict("execution_id already identifies a different document input")
+    previous = None
+    if previous_execution_id is not None:
+        previous = await store.get_execution(previous_execution_id)
+        if (
+            previous["authoring_input"]["run_id"] != run_id
+            or previous["execution_spec"].get("protocol") != _PROTOCOL
+            or previous["execution_spec"].get("outline_only", False) != outline_only
+        ):
+            raise Conflict(
+                "document predecessor must belong to the same analysis run, protocol and operation"
+            )
+        if outline_only and reviewed_source_facts_ref is None:
+            reviewed_source_facts_ref = previous['execution_spec'].get('reviewed_source_facts_ref')
     if existing is not None:
         stored_contract = existing['execution_spec'].get('native_requirement_contract')
         if native_requirement_contract is not None and native_requirement_contract != stored_contract:
             raise Conflict('execution_id already identifies a different native requirement contract')
         native_requirement_contract = stored_contract
-    elif (native_requirement_contract is None and outline_only and outline_ref is None
-          and previous_execution_id is None and snapshot.get('frozen_ref')):
-        native_requirement_contract = os.environ.get('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT') or None
+    elif native_requirement_contract is None and outline_only and outline_ref is None and snapshot.get('frozen_ref'):
+        native_requirement_contract = (
+            previous['execution_spec'].get('native_requirement_contract') if previous is not None
+            else os.environ.get('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT') or None
+        )
         if native_requirement_contract not in (None, NATIVE_REQUIREMENT_CONTRACT):
             raise ModelConfigurationError('unsupported native requirement execution contract')
     if native_requirement_contract is not None and (not outline_only or outline_ref is not None or not snapshot.get('frozen_ref')):
@@ -719,19 +734,6 @@ async def execute_document(
         spec["submission_sources"] = submission_sources
     if layout_renderer is not None:
         spec['document_layout'] = layout_renderer.spec()
-    previous = None
-    if previous_execution_id is not None:
-        previous = await store.get_execution(previous_execution_id)
-        if (
-            previous["authoring_input"]["run_id"] != run_id
-            or previous["execution_spec"].get("protocol") != _PROTOCOL
-            or previous["execution_spec"].get("outline_only", False) != outline_only
-        ):
-            raise Conflict(
-                "document predecessor must belong to the same analysis run, protocol and operation"
-            )
-        if outline_only and reviewed_source_facts_ref is None:
-            reviewed_source_facts_ref = previous['execution_spec'].get('reviewed_source_facts_ref')
     if reviewed_source_facts_ref is not None:
         from docreader.tender.reviewed_source_facts import (
             REVIEWED_FACTS_CONTRACT, REVIEWED_BODY_ENTRY_CONTRACT, validate_fact_successor,
