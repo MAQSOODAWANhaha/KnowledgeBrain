@@ -382,6 +382,7 @@ def native_requirement_model(payload):
     legacy_line_limit = len(_prose_points(legacy_block, document_map, set()))
     visible = Annotated[StrictInt, Field(ge=min(refs, default=1), le=max(refs, default=1),
                                        json_schema_extra={'enum': list(refs)})]
+    visible_refs = frozenset(refs)
     refs = Annotated[list[visible], Field(min_length=1, max_length=count)]
     body_count = len(body_choices)
     body_ref = Annotated[StrictInt, Field(ge=min(body_choices, default=1), le=max(body_choices, default=1),
@@ -390,9 +391,14 @@ def native_requirement_model(payload):
         choices = frozenset(body_choices)
 
         def allowed(ref):
-            if ref not in choices:
-                raise ValueError('Body refs must belong to the supplied body source domain.')
-            return ref
+            if ref in choices:
+                return ref
+            if ref not in visible_refs:
+                raise ValueError('Body ref is outside this pack. Use a supplied, eligible body ref.')
+            if ref in reviewed:
+                raise ValueError('Reviewed ref cannot be a body ref. Keep its host-owned disposition.')
+            raise ValueError('This pack ref has no certified body location. Remove it from body_refs. '
+                             'If its requirement is still pending, keep it as unresolved in native_dispositions.')
         body_ref = Annotated[body_ref, AfterValidator(allowed)]
     body_refs = Annotated[list[body_ref], Field(min_length=1, max_length=body_count)]
     chapter = Literal.__getitem__(tuple(chapter_map)) if chapter_map else Literal['__none__']

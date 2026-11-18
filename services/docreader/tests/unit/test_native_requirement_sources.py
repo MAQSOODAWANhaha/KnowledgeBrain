@@ -496,8 +496,15 @@ def test_proven_literal_body_in_B_and_C_keeps_original_lines_and_bounds(tmp_path
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         gap.response_model().model_validate(unproven)
-    with pytest.raises(ModelContractError):
+    with pytest.raises(ModelContractError) as rejected:
         gap.accept(unproven)
+    assert rejected.value.errors[0]['path'] == ['native_assignments', 0, 'body_refs', 0]
+    assert 'keep it as unresolved in native_dispositions' in rejected.value.errors[0]['detail']
+    unproven['native_assignments'].clear()
+    for disposition in unproven['native_dispositions']:
+        if disposition['refs'] == literal[1:2]:
+            disposition['kind'] = 'unresolved'
+    assert any(case['source']['body']['text'] == 'ends with 0.25' for case in gap.accept(unproven)['cases'])
     with pytest.raises(ModelContractError):
         NativeCaseView(ledger, [ledger.case(ledger.source(literal[1:2], []), origin='unknown')]).accept({
             'items': [], 'requirement_adjudications': [{'item_ids': ['q1'], 'scope': 'chapter',
