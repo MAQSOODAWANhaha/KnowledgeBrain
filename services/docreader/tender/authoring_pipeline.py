@@ -273,8 +273,23 @@ def _request(budget, task, payload):
         prompt += '\n\n' + _prompt(budget, 'directory_response_form_v3')
     if task == AuthoringTask.DIRECTORY_REQUIREMENT and payload.get('operation') == 'select_native_requirement_sources_v1':
         prompt += '\n\n' + _prompt(budget, 'directory_requirement_native')
+        if payload.get('reviewed_body_refs') or payload.get('reviewed_partial_refs') or any(
+                line.get('source_role') == 'reviewed_body' for page in payload.get('block', ()) for line in page['lines']):
+            prompt += ('\n核定正文由分类阶段独立裁定。source_role=reviewed_body 的原行只供阅读，'
+                       '不能进入assignments。reviewed_body_refs必须标为already_carried，'
+                       'reviewed_partial_refs必须标为reference（宿主保留整片待核）。'
+                       '两类引用均不得进入native_assignments，仍须逐个处置。')
     if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == 'classify_with_native_requirement_cases_v1':
         prompt += '\n\n' + _prompt(budget, 'directory_classification_native')
+        if payload.get('reviewed_source_facts'):
+            prompt += ('\n同时裁定 reviewed_source_facts，保留原生 items、basis_groups 和 '
+                       'requirement_adjudications。reviewed_body_dispositions 每条事实恰出现一次，'
+                       '只返回 fact_id（短 fN）、scope 和 chapter_id（短 cN 或 null）。'
+                       'scope=chapter 时选一个真实职责、主体和提交实例相容的已有章节。'
+                       '无法确认时 scope=unassigned 且 chapter_id=null，保留具名待核。'
+                       'body 是核定正文权威，context 与原件坐标保留出处。'
+                       '独有续段不得删除；共享片段或相同 entry 的不同事实不得合并。'
+                       'manual_only 的案件须独立留待核，不可作为响应正文。不要誊写原文。')
     if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == REVIEWED_CLASSIFICATION_OPERATION:
         prompt += '\n\n' + _prompt(budget, 'directory_classification_reviewed_facts')
     return build_request(budget.model, prompt, payload, task=task,
@@ -330,8 +345,6 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
         raise ModelConfigurationError('unsupported directory source carrier contract')
     if reviewed_source_facts and source_carrier_contract != SOURCE_CARRIER_CONTRACT:
         raise ModelConfigurationError('reviewed source facts require source_carriers_closed_v1')
-    if reviewed_source_facts and native_requirement_contract is not None:
-        raise ModelConfigurationError('reviewed source facts require the supported legacy requirement classification path')
     if reviewed_source_facts:
         compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in reviewed_source_facts if f['kind'] == 'required_native')
     reviewed_body_facts = tuple(f for f in reviewed_source_facts if f['kind'] == 'independent_body_response')
@@ -438,7 +451,8 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
                 apply_requirements(compiled, documents, plan['assignments'])
 
     if native_requirement_contract == NATIVE_CONTRACT:
-        await _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability)
+        await _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability,
+            reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
     else:
         await requirements()
     classification_view = reviewed_classification_view(compiled, reviewed_body_facts)[0] if reviewed_body_facts else compiled
@@ -511,7 +525,8 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
     return note_missing_requirements(compiled)
 
 
-async def _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability):
+async def _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability,
+                                       *, reviewed_body_facts=(), reviewed_body_entry_contract=None):
     from docreader.tender.native_requirement_sources import SourceLedger, plan_native_packs, require_native_budget
     from docreader.tender.native_requirement_flow import JointRequirements, JointClassification, require_classification_budget
     requirement_chapters = deepcopy(chapters)
@@ -528,10 +543,14 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
         frozen = artifacts.read_json(identity['frozen_ref'])
         ledger = SourceLedger(artifacts, frozen['documents'], chapters=requirement_chapters)
         from docreader.tender.directory_compile import _used_lines
-        joint = JointRequirements(ledger, documents, applicability, identity, carried_points=_used_lines(compiled))
+        joint = JointRequirements(ledger, documents, applicability, identity, carried_points=_used_lines(compiled),
+                                  reviewed_body_facts=reviewed_body_facts)
     except (OSError, ValueError, KeyError, ModelContractError) as error:
         compiled['issues'].append({'code': 'outline_directory_native_source_unavailable',
             'detail': '完整原生要求来源暂不可核定；原件保留，请在Word对照完整原件人工核定正文及归属。' + type(error).__name__})
+        if reviewed_body_facts:
+            apply_reviewed_classification(compiled, documents, None, reviewed_body_facts,
+                                          entry_contract=reviewed_body_entry_contract)
         return
     task = AuthoringTask.DIRECTORY_REQUIREMENT
     packs = await asyncio.to_thread(plan_native_packs, ledger, budget, joint.payload,
@@ -549,7 +568,9 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
             continue
         joint.apply(compiled, prepared)
     joint.unknown_geometry(compiled)
-    classification = JointClassification(ledger, compiled, documents, proof=joint.proof)
+    joint.reviewed_partial_geometry(compiled)
+    classification = JointClassification(ledger, compiled, documents, proof=joint.proof,
+        reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
     payload = {**classification.payload, 'applicability': applicability,
                **joint.identity}
     try:
@@ -559,6 +580,7 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
     except _LOCAL_FAILURES:
         compiled['issues'].append({'code': 'outline_directory_classification_rejected',
             'detail': '完整联合分类未完成或超出完整输入/输出预算；全部精确来源保留，请核定具名未决来源后修订。'})
+        classification.fallback(compiled)
     else:
         classification.apply(compiled, prepared)
 
@@ -2352,8 +2374,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             raise ModelConfigurationError('reviewed source facts require the frozen directory outline flow')
         if source_carrier_contract != SOURCE_CARRIER_CONTRACT:
             raise ModelConfigurationError('reviewed source facts require source_carriers_closed_v1')
-        if directory_plans is not None or native_requirement_contract is not None:
-            raise ModelConfigurationError('reviewed source facts require the material and legacy classification outline flow')
+        if directory_plans is not None:
+            raise ModelConfigurationError('reviewed source facts require the model directory and material outline flow')
         reviewed_source_facts = await asyncio.to_thread(
             load_reviewed_facts, artifacts, snapshot, directory_documents, reviewed_source_facts_ref)
     if directory_documents is not None:

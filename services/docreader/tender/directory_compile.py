@@ -1038,6 +1038,7 @@ def outline_from_compiled(snapshot, compiled, *, artifacts=None):
     outline = {'schema_version': 2, 'authoring_input': snapshot,
                'chapters': chapters,
                'issues': [{'code': issue['code'], 'detail': issue['detail'], 'rule_refs': [],
+                           **({'source_evidence_ref': issue['source_evidence_ref']} if issue.get('source_evidence_ref') else {}),
                            **({'target_id': issue['target_id']}
                               if issue['code'] in {'outline_directory_response_form_decision',
                                                    'outline_directory_response_form_row_roles'} else {})}

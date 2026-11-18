@@ -1,5 +1,13 @@
 # Python 招标第一期交接
 
+## 独立环境联合 B/C 和四源实跑
+
+- 真实项目已进入独立 `kb-literal-candidate`。四份上传回读 SHA、402 页和 253715 个原字符通过。按当前实际冻结输入迁移 Bidding 10、安服 51、111 6、222 3，共 70 条事实全部通过加载，68 个依赖工件已附加导入独立 CAS。证据 `kb-literal-candidate/web-freeze-ShzYt62H/` 和 `web-fact-migration-WDBCgT6T/`。
+- 联合编制已接上核定事实，兼容 Bidding 两事实共享来源但分别保留独有续段；部分重叠整格在 Word 用短说明待核，选择器移到独立证据。B 分包失败保留其独占页面的普通正文。C 超预算或来源不可用时，具名事项、已核原文和人工空位保留在 Word。当前合并定向 110 通过，入口追加 11 通过，隔离 PostgreSQL 完成 3 项构建执行与恢复回归。全量 3855 通过在追加入口前启动，不算追加后的全量门禁。证据 `joint-BC-reviewed-94V7bKg4/`。
+- 同一批归档目录和冻结源的分包复测覆盖 11299 范围，B 用 58/45/40/29 包，共 172 包，超限范围为 0。C 最小未决场景实测输入为 72273/86416/69037/46526，输入预算 94208；完整 C 仍要按 B 实际输出复验。证据 `joint-mixed-four-QVnjxg1h/`。
+- 候选源码与镜像建构快照的 551 个文件逐一核对 SHA 一致，最终入口在内的全量 Python 单测 3856 项通过。111 的宿主投影与候选投影仅第 1 页有差异，按候选投影复核六条事实原字范围和坐标后已通过准入。证据 `unit-live-candidate-6X2MfBWK/`、`candidate-fact-refs-BbEnKSdp/`。四份已进入普通 Web 执行。安服在途使用 51 条清单，独立复核的 50 条清单排除含第 62 页未能唯一核定日期锚点的分组。采用前须复核这处分组与日期空位。
+- 独立候选 DocReader、dispatcher、worker 使用 `kb-docreader:joint-entry-023ba0d0c3ef`，API 与 OnlyOffice HTTPS 健康检查均 200，实际 worker 为 `low` 和 `native_requirement_sources_v1`。候选实时任务回执 `outline-candidate-driver-gZ8hiXBe/`。成品验收仍 0/4，Word 待核区在主稿，分册待核归属仍需按实际职责核验。
+
 ## 首轮原字正文接入与四源容量验证（本段优先）
 
 - 本阶段提交保存首轮原字接入、附件、图片待核和 Word 导出修复，尚未部署。四源完整模板验收仍为 **0/4**，本轮未发模型请求。覆盖原字、附件、冻结与分包的 110 项回归通过，证据 `unit-commit-wLAu3Bdu/pytest.log`。

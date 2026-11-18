@@ -248,3 +248,75 @@ def test_bound_source_word_preserves_source_spaces_and_empty_paragraphs():
     })
     assert [p.text for p in document.paragraphs] == [' Leading  gap', '', 'Tail. ']
     assert 'xml:space="preserve"' in document.paragraphs[0]._p.xml
+
+
+def test_B_keeps_reviewed_grid_atoms_visible_but_blocks_body_and_layout_reselection(tmp_path):
+    from docreader.tender.native_requirement_flow import JointRequirements
+    from docreader.tender.native_requirement_sources import native_output_bound
+    from test_native_requirement_sources import refs
+
+    ledger, _, _, frozen = synthetic(tmp_path)
+    doc = frozen['document_id']
+    documents = [{'document_id': doc, 'role': 'main', 'pages': ['full\npartial', 'other'],
+                  'line_units': [['page:0:table:0'] * 2, ['page:1:table:0']]}]
+    full, = refs(ledger, 0, 1)
+    partial, = refs(ledger, 0, 3)
+    excerpts = ledger.excerpts([full]) + ledger.excerpts([partial])
+    from docreader.tender.evidence.references import fragment, selector
+    atom = ledger.atoms[partial]
+    excerpts[-1]['selectors'][-1] = selector(fragment(atom['base'], atom['start'], atom['end'] - 1))
+    facts = [{'kind': 'independent_body_response', 'source_excerpts': excerpts,
+              'source_windows': [{'document_id': doc, 'page': 0, 'start_line': 0, 'end_line': 0}]}]
+    baseline = native_output_bound(ledger.view())['grid_body_atoms']
+    joint = JointRequirements(ledger, documents, {}, reviewed_body_facts=facts)
+    view = ledger.view()
+    payload = joint.payload(view)
+    assert payload['reviewed_body_refs'] == [full]
+    assert payload['reviewed_partial_refs'] == [partial]
+    assert {full, partial} <= set(view.refs)
+    assert native_output_bound(view)['grid_body_atoms'] == baseline - 2
+    assert joint.block(view)[0]['lines'][0]['source_role'] == 'reviewed_body'
+    dispositions = [{'refs': [full], 'kind': 'already_carried'},
+                    {'refs': [partial], 'kind': 'reference'},
+                    {'refs': [r for r in view.refs if r not in {full, partial}], 'kind': 'navigation'}]
+    response = {'assignments': [], 'native_dispositions': dispositions}
+    compiled = {'chapters': [], 'issues': []}
+    assert not joint.accept(view, response, compiled)['cases']
+    joint.reviewed_partial_geometry(compiled)
+    issue, = compiled['issues']
+    assert '与已核定正文部分重叠' in issue['detail'] and 'source_index_ref' not in issue['detail']
+    assert ledger.artifacts.read_json(issue['source_evidence_ref'])['origin'] == 'manual:reviewed_partial_atom'
+    for selected in (full, partial):
+        bad = deepcopy(response)
+        bad['native_assignments'] = [{'body_refs': [selected], 'scope': 'unassigned', 'chapter_ids': []}]
+        with pytest.raises(ModelContractError):
+            joint.accept(view, bad, {'chapters': [], 'issues': []})
+
+
+def test_B_failed_pack_preserves_legacy_only_page_for_word_and_manual_C(tmp_path):
+    from io import BytesIO
+    from docx import Document
+    from docreader.tender.authoring_export import export_authoring_document
+    from docreader.tender.native_requirement_flow import JointClassification, JointRequirements
+    from test_authoring_pipeline_boundaries import snapshot
+    from test_directory_compile import item, node, plan
+
+    ledger, artifacts, _, frozen = synthetic(tmp_path)
+    doc = frozen['document_id']
+    documents = [{'document_id': doc, 'role': 'main', 'pages': ['Technical', '原格', '独立正文要求 # 2'],
+                  'line_units': [[None], ['page:1:table:0'], [None]]}]
+    chapter = node('technical', 0, 0, document_id=doc)
+    chapter['body_windows'] = [{'document_id': doc, 'page': 0, 'start_line': 0, 'end_line': 0}]
+    compiled = compile_directory(plan([chapter], [item('technical')]), documents)
+    joint = JointRequirements(ledger, documents, {}, carried_points={(doc, 0, 0)})
+    owner = joint.page_owner[doc, 2]
+    joint.pending(compiled, [owner], 'joint_B_unfinished')
+    joint.unknown_geometry(compiled)
+    source, = [case for case in compiled.get('_requirement_cases', ()) if case['source_windows'][0]['page'] == 2]
+    classification = JointClassification(ledger, compiled, documents, proof=joint.proof)
+    capsule = next(case for case in classification.payload['requirement_cases'] if case['source_kind'] == 'legacy')
+    assert capsule['manual_only']
+    outline = outline_from_compiled(snapshot(artifacts), compiled)
+    delivery = export_authoring_document(artifacts, outline, [])
+    paragraphs = [p.text for p in Document(BytesIO(artifacts.read_bytes(delivery['docx_ref']))).paragraphs]
+    assert source['source_text'] in '\n'.join(paragraphs[paragraphs.index('适用性与来源待核'):])

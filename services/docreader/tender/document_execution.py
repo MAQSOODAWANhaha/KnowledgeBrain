@@ -9,6 +9,7 @@ import hashlib
 from importlib.resources import files
 import json
 import math
+import os
 
 import psycopg
 import httpx
@@ -43,6 +44,7 @@ from docreader.tender.directory_response_forms import RESPONSE_FORM_ROLE_CONTRAC
 from docreader.tender.directory_source_groups import SOURCE_GROUP_CONTRACT
 from docreader.tender.directory_material_closure import SOURCE_CARRIER_CONTRACT
 from docreader.tender.native_body_selection import CONTRACT as NATIVE_BODY_CONTRACT
+from docreader.tender.native_requirement_sources import CONTRACT as NATIVE_REQUIREMENT_CONTRACT
 from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY,
     AUTHORING_UNIT_BINDING_CONTRACT,
@@ -508,6 +510,7 @@ async def execute_document(
     outline_ref=None,
     authoring_input_ref=None,
     reviewed_source_facts_ref=None,
+    native_requirement_contract=None,
     layout_renderer=None,
     concurrency: int = 2,
     lease_seconds: float = 60,
@@ -545,6 +548,8 @@ async def execute_document(
         raise ModelConfigurationError(
             "document requires its configured Chat model, window, reasoning effort and positive output reserve"
         )
+    if native_requirement_contract not in (None, NATIVE_REQUIREMENT_CONTRACT):
+        raise ModelConfigurationError('unsupported native requirement source contract')
     if previous_execution_id == execution_id:
         raise Conflict("a document execution cannot inherit from itself")
     if reviewed_source_facts_ref is not None:
@@ -628,6 +633,18 @@ async def execute_document(
             and snapshot["checklist_digest"] != checklist_digest
         ):
             raise Conflict("execution_id already identifies a different document input")
+    if existing is not None:
+        stored_contract = existing['execution_spec'].get('native_requirement_contract')
+        if native_requirement_contract is not None and native_requirement_contract != stored_contract:
+            raise Conflict('execution_id already identifies a different native requirement contract')
+        native_requirement_contract = stored_contract
+    elif (native_requirement_contract is None and outline_only and outline_ref is None
+          and previous_execution_id is None and snapshot.get('frozen_ref')):
+        native_requirement_contract = os.environ.get('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT') or None
+        if native_requirement_contract not in (None, NATIVE_REQUIREMENT_CONTRACT):
+            raise ModelConfigurationError('unsupported native requirement execution contract')
+    if native_requirement_contract is not None and (not outline_only or outline_ref is not None or not snapshot.get('frozen_ref')):
+        raise ModelConfigurationError('native requirement sources require full frozen directory generation')
     if outline is not None and outline["authoring_input"] != snapshot:
         raise Conflict("fixed outline differs from the execution input snapshot")
     if pinned_input is not None and pinned_input != snapshot:
@@ -686,7 +703,9 @@ async def execute_document(
             spec["directory_material_identity_contract"] = existing["execution_spec"]["directory_material_identity_contract"]
         spec["directory_parameter_source_contract"] = PARAMETER_SOURCE_CONTRACT
         spec["directory_response_form_contract"] = RESPONSE_FORM_ROLE_CONTRACT
-        if existing is None and outline_ref is None:
+        if native_requirement_contract is not None:
+            spec['native_requirement_contract'] = native_requirement_contract
+        elif existing is None and outline_ref is None:
             spec['directory_native_body_contract'] = NATIVE_BODY_CONTRACT
         elif existing is not None and 'directory_native_body_contract' in existing['execution_spec']:
             spec['directory_native_body_contract'] = existing['execution_spec']['directory_native_body_contract']

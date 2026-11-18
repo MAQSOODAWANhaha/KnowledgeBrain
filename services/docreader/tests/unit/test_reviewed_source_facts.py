@@ -258,7 +258,8 @@ def test_required_native_needs_the_complete_grid_not_one_reviewed_row(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generate_preflights_review_before_A_and_runs_M_C_to_single_source_bound_word_body(tmp_path, monkeypatch):
+@pytest.mark.parametrize('joint', [False, True])
+async def test_generate_preflights_review_before_A_and_runs_M_C_to_single_source_bound_word_body(tmp_path, monkeypatch, joint):
     from io import BytesIO
     import json
     from zipfile import ZipFile
@@ -266,6 +267,7 @@ async def test_generate_preflights_review_before_A_and_runs_M_C_to_single_source
     from docreader.llm.budget import RequestBudget
     from docreader.llm.request import ModelConfigurationError
     from docreader.tender.authoring_export import export_authoring_document
+    from docreader.tender.native_requirement_sources import CONTRACT, CLASSIFICATION_OPERATION
     from test_directory_compile import fixture_titles
     data = fixture(tmp_path)
     artifacts, snapshot, documents, manifest, compiled, _ = data
@@ -285,9 +287,19 @@ async def test_generate_preflights_review_before_A_and_runs_M_C_to_single_source
             assert not any('subjects' in f or 'member_headings' in f for f in payload['reviewed_source_facts'])
             return validate({'chapter_titles': fixture_titles(payload)})
         if task == 'directory_requirement':
-            return validate({'assignments': []})
+            if not joint:
+                return validate({'assignments': []})
+            reviewed = set(payload['reviewed_body_refs'])
+            atoms = {ref for block in payload['source_scope'] for ref, _ in block['lines']}
+            assert reviewed and reviewed < atoms
+            assert 'source_role=reviewed_body' in request['messages'][0]['content']
+            return validate({'assignments': [], 'native_dispositions': [
+                {'refs': sorted(reviewed), 'kind': 'already_carried'},
+                {'refs': sorted(atoms - reviewed), 'kind': 'navigation'}]})
         assert task == 'directory_classification'
-        assert payload['operation'] == 'classify_with_reviewed_source_facts_v1'
+        assert payload['operation'] == (CLASSIFICATION_OPERATION if joint else 'classify_with_reviewed_source_facts_v1')
+        if joint:
+            assert '短 fN' in request['messages'][0]['content'] and '短 cN' in request['messages'][0]['content']
         assert payload['reviewed_source_facts'][0]['fact_id'] == 'f1'
         owner = next(c['id'] for c in payload['chapters'] if c['response_kind'] == 'narrative')
         return validate({'items': [], 'requirement_adjudications': [], 'reviewed_body_dispositions': [
@@ -298,6 +310,8 @@ async def test_generate_preflights_review_before_A_and_runs_M_C_to_single_source
     budget = RequestBudget(model='synthetic', context_tokens=131072, output_reserve=32768)
     options = dict(outline_only=True, directory_documents=documents, source_carrier_contract='source_carriers_closed_v1',
         reviewed_source_facts_ref=artifacts.put_json(manifest), on_source_closure=receipt)
+    if joint:
+        options['native_requirement_contract'] = CONTRACT
     bad_manifest = deepcopy(manifest)
     bad_manifest['source_projection_digest'] = '0' * 64
     with pytest.raises(ValueError):

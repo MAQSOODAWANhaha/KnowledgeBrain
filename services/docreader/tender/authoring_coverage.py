@@ -652,6 +652,8 @@ def pending_outline_issues(outline):
         "outline_directory_symbol_unconfirmed",
         "outline_directory_requirement_overlap_unconfirmed",
         "outline_directory_response_form_unconfirmed", "outline_directory_response_form_unbound",
+        "outline_directory_reviewed_fact_pending", "outline_directory_native_source_unavailable",
+        "outline_directory_classification_rejected",
     }
     found = {}
     for issue in (outline or {}).get("issues", []):

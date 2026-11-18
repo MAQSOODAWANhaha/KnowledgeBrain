@@ -297,10 +297,12 @@ def load_reviewed_facts(artifacts, snapshot, documents, manifest_ref):
 
 
 def _pending(compiled, fact, detail):
-    issue = {'code': 'outline_directory_reviewed_fact_pending',
-             'detail': f'已核来源“{fact["label"]}”待核：{detail}。企业事实未确认；保留原核定来源和证据，请修订来源布局或补充核定。'
-             + ('\n' + fact['_source_text'] + ('\n来源上下文（不作为企业应答）：\n' + fact['_context_text']
-                 if fact.get('_context_text') else '') if fact['kind'] == 'independent_body_response' else '')}
+    text = f'已核来源“{fact["label"]}”待核：{detail}。企业事实未确认。请对照原核定来源补充核定。'
+    if fact['kind'] == 'independent_body_response':
+        text += '\n' + fact['_source_text']
+        if fact.get('_context_text'):
+            text += '\n来源上下文（不作为企业应答）：\n' + fact['_context_text']
+    issue = {'code': 'outline_directory_reviewed_fact_pending', 'detail': text, 'rule_refs': []}
     if issue not in compiled['issues']:
         compiled['issues'].append(issue)
 
@@ -555,8 +557,7 @@ def bind_reviewed_outline_facts(outline, compiled, facts):
         mapped = nodes.get(source_id)
         chapter = chapters.get(mapped['chapter_id']) if mapped else None
         if chapter is None:
-            issue = {'code': 'outline_directory_reviewed_fact_pending', 'detail': f'已核来源“{fact["label"]}”最终正文位置不唯一，请核定canonical承载；企业事实未确认。\n' + fact['_source_text'], 'rule_refs': []}
-            outline['issues'].append(issue)
+            _pending(outline, fact, '无法唯一定位最终正文，请核定实际位置')
             continue
         target_ids = []
         expected_sources = [source_excerpt_key(e) for e in fact['source_excerpts']]
@@ -641,7 +642,4 @@ def _bind_all_fact_applications(outline, compiled, facts, nodes, chapters):
         record['target_ids'] = list(dict.fromkeys(t['target_id'] for t in targets))
         if not valid:
             record['state'] = 'unresolved'
-            issue = {'code': 'outline_directory_reviewed_fact_pending', 'rule_refs': [],
-                'detail': f'已核来源“{fact["label"]}”的最终章节或响应绑定未闭合，请核定实际位置；企业事实未确认，原核定来源及证据保留。'}
-            if issue not in outline['issues']:
-                outline['issues'].append(issue)
+            _pending(outline, fact, '最终章节或响应位置待确认，请核定实际位置')

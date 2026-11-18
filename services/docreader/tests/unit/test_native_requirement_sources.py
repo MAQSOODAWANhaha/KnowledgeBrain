@@ -187,6 +187,43 @@ def test_complete_request_schema_and_actual_K_are_counted(tmp_path):
     with pytest.raises(ModelBudgetError):require_native_budget(budget(1024),view,{'chapters':view.chapter_payload},'x'*5000)
 
 
+def test_B_output_reserve_does_not_charge_body_atoms_twice(tmp_path):
+    ledger, _, _, _ = synthetic(tmp_path, first='\n'.join(f'Clause {i}' for i in range(84)))
+    ledger = SourceLedger(ledger.artifacts, ledger.documents,
+                          chapters=[{'id': f'chapter-{i}', 'title': f'Chapter {i}'} for i in range(30)])
+    view = ledger.view()
+    chosen = list(view.refs)
+    raw = {'assignments': [], 'contexts': [], 'native_assignments': [
+        {'body_refs': [ref], 'context_id': None, 'source_join': 'continuation',
+         'scope': 'chapters', 'chapter_ids': list(ledger.chapter_map)} for ref in chosen],
+        'native_dispositions': [{'refs': [ref], 'kind': 'requirement'} for ref in chosen]}
+    assert len(view.accept(raw)['native_records']) == len(chosen)
+    measured = require_native_budget(budget(), view, {'chapters': view.chapter_payload}, 'Select exact sources.')
+    bound = measured['output_shape']
+    assert len(J(raw).encode('ascii')) <= bound['compact_json_byte_upper_bound']
+    assert measured['worst_accepted_output_tokens'] == bound['compact_json_byte_upper_bound'] + 256
+    assert measured['worst_accepted_output_tokens'] <= measured['output_reserve']
+
+
+def test_B_compact_envelope_covers_shared_context_and_legacy_continuations(tmp_path):
+    ledger, _, _, _ = synthetic(tmp_path)
+    ledger = SourceLedger(ledger.artifacts, ledger.documents,
+                          chapters=[{'id': f'chapter-{i}', 'title': f'Chapter {i}'} for i in range(12)])
+    view = ledger.view()
+    raw = reply(ledger, scope='chapters', chapter_ids=ledger.chapter_map)
+    block = [{'document_id': 'd1', 'page': 200, 'lines': [
+        {'line': line, 'text': 'Exact source', 'source_role': 'prose'} for line in (99, 100, 101, 102)]}]
+    windows = [{'document_id': 'd1', 'page': 200, 'start_line': line, 'end_line': line}
+               for line in (99, 100, 101, 102)]
+    cap = native_output_bound(view, legacy_block=block)['compact_json_byte_upper_bound']
+    for primary_count in range(1, len(windows) + 1):
+        raw['assignments'] = [{**window, 'scope': 'chapters', 'chapter_ids': list(ledger.chapter_map),
+                               'continuation_windows': windows[primary_count:] if index == primary_count - 1 else []}
+                              for index, window in enumerate(windows[:primary_count])]
+        assert len(view.accept(raw, legacy_block=block)['assignments']) == primary_count
+        assert len(J(raw).encode('ascii')) <= cap
+
+
 def test_pack_complete_ranges_and_keep_oversize_record_unfinished(tmp_path):
     ledger,_,_,_=synthetic(tmp_path,first='Alpha '*2500)
     result=plan_native_packs(ledger,budget(4096),lambda v:{'chapters':v.chapter_payload},'Select exact source.')

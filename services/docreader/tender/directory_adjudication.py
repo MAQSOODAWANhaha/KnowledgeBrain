@@ -168,7 +168,8 @@ def apply_requirement_adjudications(compiled, documents, decisions):
                 result_case_ids = decision['item_ids']
                 for issue in compiled['issues']:
                     if (issue['code'] == 'outline_directory_requirement_unassigned'
-                            and issue.get('requirement_case_id') in decision['item_ids']):
+                            and issue.get('requirement_case_id') in decision['item_ids']
+                            and not issue.get('_keep_pending_detail')):
                         issue['detail'] = '\n'.join(_window_text(source, window) for window in windows).strip()
             _record_decision(compiled, source, decision, windows, basis, result_case_ids)
             continue

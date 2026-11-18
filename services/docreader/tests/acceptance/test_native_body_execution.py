@@ -82,7 +82,7 @@ async def test_source_receipt_precedes_publication_and_survives_real_sql_recover
     snapshot, outline, scope = source_fixture(artifacts, run)
     scope.pending = ([{'target_id': 'chapter-1:target-1', 'reason': 'synthetic_source_review',
                        'outlet': 'manual_source_review'}] if interruption == 'source_pending' else [])
-    monkeypatch.setattr(authoring_pipeline, 'outline_from_compiled', lambda *_args: deepcopy(outline))
+    monkeypatch.setattr(authoring_pipeline, 'outline_from_compiled', lambda *_args, artifacts: deepcopy(outline))
     monkeypatch.setattr(native_body_scope, 'NativeBodyScope', lambda *_args: scope)
     real_generate = authoring_pipeline.generate_document
 
@@ -154,3 +154,40 @@ async def test_source_receipt_precedes_publication_and_survives_real_sql_recover
     stages = [r['stage'] for r in final['receipts']]
     assert stages.count('directory-native-body-sources') == stages.count('document-outline') == 1
     assert stages.index('directory-native-body-sources') < stages.index('document-outline')
+
+
+async def test_joint_contract_is_stable_on_real_sql_retry(analysis_runtime, monkeypatch):
+    from docreader.tender.native_requirement_sources import CONTRACT as JOINT_CONTRACT
+
+    analysis, artifacts, settings, run, _ = analysis_runtime
+    snapshot, outline, _ = source_fixture(artifacts, run)
+    observed = []
+
+    async def generate(*_args, **kwargs):
+        observed.append(kwargs['native_requirement_contract'])
+        assert 'native_body_contract' not in kwargs
+        if len(observed) == 1:
+            raise ConnectionError('synthetic lost execution after claiming lease')
+        return artifacts.put_json(outline)
+
+    monkeypatch.setattr(document_execution, 'generate_document', generate)
+    configured = config()
+    budget = RequestBudget(configured.chat.context_tokens, model=configured.chat.model)
+    execution_id = uuid4().hex
+    pinned = artifacts.put_json(snapshot)
+
+    async def execute(**options):
+        return await document_execution.execute_document(analysis, artifacts, configured, budget,
+            execution_id=execution_id, **{k: run[k] for k in ('run_id', 'source_version', 'domain_revision')},
+            outline_only=True, authoring_input_ref=pinned, **options)
+
+    with pytest.raises(ConnectionError):
+        await execute(native_requirement_contract=JOINT_CONTRACT)
+    store = AuthoringStore(settings.dsn)
+    first = await store.get_execution(execution_id)
+    assert first['execution_spec']['native_requirement_contract'] == JOINT_CONTRACT
+    assert 'directory_native_body_contract' not in first['execution_spec']
+    await execute()
+    final = await store.get_execution(execution_id)
+    assert observed == [JOINT_CONTRACT, JOINT_CONTRACT]
+    assert final['status'] == 'succeeded' and final['epoch'] == first['epoch'] + 1

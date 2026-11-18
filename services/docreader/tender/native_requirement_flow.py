@@ -25,6 +25,9 @@ from docreader.tender.native_requirement_sources import (
     CONTRACT, CLASSIFICATION_OPERATION, NativeClassificationPlan, NativeRequirementAdjudication,
     NativeCaseView, _parse, _reject,
 )
+from docreader.tender.reviewed_source_facts import (
+    ReviewedBodyDisposition, apply_reviewed_classification, reviewed_body_summary, reviewed_classification_view,
+)
 from docreader.tender.schema import Contract
 
 
@@ -273,17 +276,39 @@ def native_classification_model(payload):
         basis_id=(Annotated[StrictInt, Field(ge=1, le=max(1, s))] | None, None))
     item = create_model('NativeClassificationEvidence', __base__=Contract,
         kind=(ClassificationItem.model_fields['kind'].annotation, ...), range=(span, ...))
+    reviewed = tuple(f['fact_id'] for f in payload.get('reviewed_source_facts', ()))
+    reviewed_fields = {}
+    if reviewed:
+        disposition = create_model('JointReviewedBodyDisposition', __base__=ReviewedBodyDisposition,
+            fact_id=(Literal.__getitem__(reviewed), ...), chapter_id=(c | None, None))
+        reviewed_fields['reviewed_body_dispositions'] = (
+            Annotated[list[disposition], Field(min_length=len(reviewed), max_length=len(reviewed))], ...)
     return create_model('JointNativeClassificationPlan', __base__=NativeClassificationPlan,
         items=(Annotated[list[item], Field(max_length=4 * payload['document_count'])], Field(default_factory=list)),
         basis_groups=(Annotated[list[basis], Field(max_length=s)], Field(default_factory=list)),
-        requirement_adjudications=(Annotated[list[decision], Field(max_length=s)], Field(default_factory=list)))
+        requirement_adjudications=(Annotated[list[decision], Field(max_length=s)], Field(default_factory=list)),
+        **reviewed_fields)
 
 
 class JointClassification:
-    def __init__(self, ledger, compiled, documents, *, proof=None):
+    def __init__(self, ledger, compiled, documents, *, proof=None, reviewed_body_facts=(),
+                 reviewed_body_entry_contract=None):
         self.ledger, self.compiled, self.documents, self.proof = ledger, compiled, documents, proof
+        self.reviewed_body_facts = tuple(f for f in reviewed_body_facts if f['kind'] == 'independent_body_response')
+        self.reviewed_body_entry_contract = reviewed_body_entry_contract
+        classification_view = (reviewed_classification_view(compiled, self.reviewed_body_facts)[0]
+                               if self.reviewed_body_facts else compiled)
         self.refs = SourceRefs(documents)
-        self.legacy = requirement_cases(compiled, documents)
+        self.legacy = requirement_cases(classification_view, documents)
+        reviewed_points = {(w['document_id'], w['page'], line)
+                           for fact in self.reviewed_body_facts for w in fact['source_windows']
+                           for line in range(w['start_line'], w['end_line'] + 1)}
+        self.reviewed_overlap = {case['id'] for case in self.legacy
+                                 if any((w['document_id'], w['page'], line) in reviewed_points
+                                        for w in case['source_windows']
+                                        for line in range(w['start_line'], w['end_line'] + 1))}
+        self.manual_legacy = {c['id'] for c in compiled.get('_requirement_cases', [])
+                              if c.get('_geometry_unconfirmed') or c.get('_requirement_pack_failed')}
         self.native = [ledger.validate_case(c) for c in compiled.get('_native_requirement_cases', [])]
         self.native_view = NativeCaseView(ledger, self.native)
         self.native_windows = {case['id']: source_windows(ledger, case['source'], documents, proof)
@@ -291,7 +316,8 @@ class JointClassification:
         self.all_cases = [*self.legacy, *self.native]
         self.mapping = {f'q{i}': case['id'] for i, case in enumerate(self.all_cases, 1)}
         self.reverse = {value: key for key, value in self.mapping.items()}
-        capsules = [{'id': self.reverse[c['id']], 'source_kind': 'legacy', 'source_windows': deepcopy(c['source_windows'])} for c in self.legacy]
+        capsules = [{'id': self.reverse[c['id']], 'source_kind': 'legacy', 'source_windows': deepcopy(c['source_windows']),
+                     **({'manual_only': True} if c['id'] in self.reviewed_overlap or c['id'] in self.manual_legacy else {})} for c in self.legacy]
         for original, capsule in zip(self.native, self.native_view.payload['requirement_cases']):
             capsules.append({**deepcopy(capsule), 'id': self.reverse[original['id']], 'source_kind': 'native',
                              **({'manual_only': True} if not self.native_windows[original['id']] else {})})
@@ -307,9 +333,25 @@ class JointClassification:
             'source_binding': _hash({'native': ledger.binding, 'cases': self.mapping, 'chapters': ledger.chapter_map}),
             'requirement_cases': capsules, 'native_contexts': self.native_view.payload['native_contexts'],
             'chapters': ledger.chapter_payload}
+        self.fact_map = {}
+        if self.reviewed_body_facts:
+            reviewed = reviewed_body_summary(self.reviewed_body_facts)
+            for ordinal, fact in enumerate(reviewed, 1):
+                alias = f'f{ordinal}'
+                self.fact_map[alias] = fact['fact_id']
+                fact['fact_id'] = alias
+                points = [*fact['source_windows'], *(subject['source'] for subject in fact['subjects'])]
+                if fact['entry'] is not None:
+                    points.append(fact['entry'])
+                for point in points:
+                    point['document_id'] = reverse_docs[point['document_id']]
+            self.payload['reviewed_source_facts'] = reviewed
+            self.payload['source_binding'] = _hash({'joint': self.payload['source_binding'], 'reviewed_facts': self.fact_map,
+                                                    'entry_contract': self.reviewed_body_entry_contract})
 
     def _shadow(self):
-        shadow = deepcopy(self.compiled)
+        shadow = (reviewed_classification_view(self.compiled, self.reviewed_body_facts)[0]
+                  if self.reviewed_body_facts else deepcopy(self.compiled))
         source = _Source(self.documents)
         for case in self.native:
             windows = self.native_windows[case['id']]
@@ -345,8 +387,8 @@ class JointClassification:
             raw_decision = {**decision, 'item_ids': ids, 'chapter_ids': [self.ledger.chapter_map[c] for c in decision['chapter_ids']],
                             'basis_windows': basis}
             undecidable = [i for i in ids if i in self.native_windows and not self.native_windows[i]]
-            if undecidable and decision['scope'] != 'unassigned':
-                _reject('Native source without exact layout ownership stays pending for manual review.')
+            if undecidable and (decision['scope'] != 'unassigned' or len(ids) != 1):
+                _reject('Native source without exact layout ownership stays separately pending for manual review.')
             guard_ids = [i for i in ids if i not in undecidable]
             if guard_ids:
                 decisions.append({**{k: v for k, v in raw_decision.items() if k != 'source_join'}, 'item_ids': guard_ids})
@@ -354,10 +396,12 @@ class JointClassification:
                 native.append({**decision, 'item_ids': [local_native[x] for x in ids],
                     'basis_windows': [{**w, 'document_id': reverse_docs[w['document_id']]} for w in basis]})
             else:
+                if self.reviewed_overlap.intersection(ids) and (decision['scope'] != 'unassigned' or len(ids) != 1):
+                    _reject('Legacy source partially overlaps reviewed body authority. Keep the entire case separately pending.')
                 if decision.get('source_join') not in (None, 'paragraphs'):
                     _reject('Legacy windows keep their existing source-text semantics.')
-                if any(c.get('_geometry_unconfirmed') and c['id'] in ids for c in self.compiled.get('_requirement_cases', [])) and decision['scope'] != 'unassigned':
-                    _reject('Unconfirmed layout ownership stays named/unassigned until source geometry is resolved.')
+                if self.manual_legacy.intersection(ids) and (decision['scope'] != 'unassigned' or len(ids) != 1):
+                    _reject('Manual layout review stays separately unassigned until the source is resolved.')
                 legacy.append(decisions[-1])
         if selected != set(self.mapping.values()) or used != set(range(1, len(bases) + 1)):
             _reject('Cover every common case once and use every declared shared basis group.')
@@ -376,19 +420,40 @@ class JointClassification:
                 _reject('Classify each registered document/kind once using complete source evidence.')
             kinds.add(key)
             items.extend({'kind': item['kind'], **window} for window in windows)
+        prepared = {'items': items, 'legacy': legacy, 'native': prepared_native}
+        if self.reviewed_body_facts:
+            prepared['reviewed_body_dispositions'] = [
+                {**fact, 'fact_id': self.fact_map[fact['fact_id']],
+                 'chapter_id': self.ledger.chapter_map.get(fact['chapter_id'])}
+                for fact in value['reviewed_body_dispositions']]
         trial = deepcopy(self.compiled)
-        before = len(trial['issues'])
-        apply_classification(trial, self.documents, items)
-        if any(i['code'] == 'outline_directory_classification_rejected' for i in trial['issues'][before:]):
+        original_rejections = sum(i['code'] == 'outline_directory_classification_rejected' for i in trial['issues'])
+        try:
+            self._apply_legacy(trial, prepared)
+        except DirectoryPlanRejected as error:
+            _reject(error.detail)
+        if sum(i['code'] == 'outline_directory_classification_rejected' for i in trial['issues']) > original_rejections:
             _reject('Classification evidence must stay inside the registered source.')
-        # Existing application validates the complete legacy sub-batch before mutation.
-        apply_requirement_adjudications(trial, self.documents, legacy)
-        return {'items': items, 'legacy': legacy, 'native': prepared_native}
+        return prepared
+
+    def _apply_legacy(self, compiled, prepared):
+        if self.reviewed_body_facts:
+            apply_reviewed_classification(compiled, self.documents,
+                {'items': prepared['items'], 'requirement_adjudications': prepared['legacy'],
+                 'reviewed_body_dispositions': prepared['reviewed_body_dispositions']},
+                self.reviewed_body_facts, entry_contract=self.reviewed_body_entry_contract)
+        else:
+            apply_classification(compiled, self.documents, prepared['items'])
+            apply_requirement_adjudications(compiled, self.documents, prepared['legacy'])
+
+    def fallback(self, compiled):
+        if self.reviewed_body_facts:
+            apply_reviewed_classification(compiled, self.documents, None, self.reviewed_body_facts,
+                                          entry_contract=self.reviewed_body_entry_contract)
 
     def apply(self, compiled, prepared):
         trial = deepcopy(compiled)
-        apply_classification(trial, self.documents, prepared['items'])
-        apply_requirement_adjudications(trial, self.documents, prepared['legacy'])
+        self._apply_legacy(trial, prepared)
         resolved = {identity for record in prepared['native'] for identity in record['item_ids']}
         trial['_native_requirement_cases'] = [c for c in trial.get('_native_requirement_cases', []) if c['id'] not in resolved]
         trial['issues'] = [i for i in trial['issues'] if i.get('native_case_id') not in resolved]
@@ -413,7 +478,13 @@ def classification_output_bound(payload):
              'requirement_adjudications': [{'item_ids': [q], 'scope': 'not_applicable',
                  'chapter_ids': chapters, 'basis_windows': [], 'basis_id': max(s, 1),
                  'source_join': 'continuation'} for _ in range(s)]}
+    reviewed = payload.get('reviewed_source_facts', ())
+    if reviewed:
+        chapter = chapters[0] if chapters and len(_json(chapters[0])) > len('null') else None
+        shape['reviewed_body_dispositions'] = [
+            {'fact_id': fact['fact_id'], 'scope': 'unassigned', 'chapter_id': chapter} for fact in reviewed]
     return {'token_upper_bound': len(_json(shape).encode('ascii')) + 256,
+            **({'reviewed_fact_count': len(reviewed)} if reviewed else {}),
             'case_count': s, 'case_chapter_edges': s * len(chapters), 'shared_basis_ranges': s,
             'classification_items': 4 * d}
 
@@ -467,9 +538,16 @@ def bind_native_targets(compiled, nodes, *, artifacts=None, snapshot=None):
 
 class JointRequirements:
     """One joint B inventory: complete ranges and a unique prose owner per page."""
-    def __init__(self, ledger, documents, applicability, identity=None, *, carried_points=()):
+    def __init__(self, ledger, documents, applicability, identity=None, *, carried_points=(), reviewed_body_facts=()):
         self.ledger, self.documents = ledger, documents
+        self.carried_points = set(carried_points)
         self.proof = layout_certificates(ledger, documents)
+        for fact in reviewed_body_facts:
+            for window in fact['source_windows']:
+                page = self.proof[window['document_id'], window['page']]
+                for line in range(window['start_line'], window['end_line'] + 1):
+                    page[line]['source_role'] = 'reviewed_body'
+
         locations, continuation_edges = {}, []
         literal_ranges = {(ledger.document_map[f'd{entry["wire"]["document"]}'], entry['reference']['unit_id']): entry
                           for entry in ledger.ranges if entry['base'].get('text_basis') == 'pdf_literal'}
@@ -497,6 +575,7 @@ class JointRequirements:
                             continuation_edges.append((previous, current))
                     previous = current
         ledger.bind_literal_locations(locations, continuation_edges=continuation_edges)
+        ledger.bind_reviewed_body_refs(excerpt for fact in reviewed_body_facts for excerpt in fact['source_excerpts'])
         self.identity = {k: identity.get(k) for k in ('source_version', 'domain_revision')} if identity else {}
         self.applicability = deepcopy(applicability)
         self.page_owner = {}
@@ -570,29 +649,62 @@ class JointRequirements:
         compiled.clear(); compiled.update(trial)
 
     def pending(self, compiled, ordinals, reason):
+        failed = set(ordinals)
+        reviewed = self.ledger.reviewed_body_refs | self.ledger.reviewed_partial_refs
         for ordinal in ordinals:
-            refs = [r for r, a in self.ledger.atoms.items() if a['range_ordinal'] == ordinal]
+            refs = [r for r, a in self.ledger.atoms.items() if a['range_ordinal'] == ordinal and r not in reviewed]
             if not refs:
                 continue
             case = self.ledger.case(self.ledger.source(refs, []), origin='manual:' + reason)
             compiled.setdefault('_native_requirement_cases', []).append(case)
             compiled['issues'].append(_case_issue(case))
+        for (document, page), owner in self.page_owner.items():
+            if owner in failed:
+                self._pending_layout(compiled, document, page, 'prose', '_requirement_pack_failed')
+
+    def reviewed_partial_geometry(self, compiled):
+        for ref in sorted(self.ledger.reviewed_partial_refs):
+            atom = self.ledger.atoms[ref]
+            source = self.ledger.source([ref], [])
+            case = self.ledger.case(source, origin='manual:reviewed_partial_atom')
+            evidence_ref = self.ledger.artifacts.put_json(case)
+            document = self.ledger.document_map[f'd{atom["document"]}']
+            location = f'{document} 第{atom["page"] + 1}页'
+            if atom['row'] is not None and atom['column'] is not None:
+                location += f'，原表第{atom["row"] + 1}行第{atom["column"] + 1}列'
+            else:
+                location += f'，原文字符区间 {atom["start"] + 1}–{atom["end"]}'
+            compiled['issues'].append({'code': 'outline_directory_requirement_unassigned',
+                'native_case_id': case['id'], 'source_evidence_ref': evidence_ref,
+                'detail': f'{location}与已核定正文部分重叠，请核对其余内容是否另需应答。\n' + source['body']['text']})
+
+    def _pending_layout(self, compiled, document, page, role, flag):
+        from docreader.tender.directory_compile import apply_requirements
+        groups = []
+        for row in self.proof[document, page]:
+            line = row['line']
+            if (row['source_role'] != role or not row['text'].strip()
+                    or (document, page, line) in self.carried_points):
+                continue
+            if not groups or line != groups[-1][-1] + 1:
+                groups.append([])
+            groups[-1].append(line)
+        for group in groups:
+            before = len(compiled['issues'])
+            apply_requirements(compiled, self.documents, [{'document_id': document, 'page': page,
+                'start_line': group[0], 'end_line': group[-1], 'scope': 'unassigned'}])
+            if len(compiled['issues']) == before:
+                continue
+            issue = compiled['issues'][-1]
+            for case in compiled.get('_requirement_cases', []):
+                if case['id'] == issue.get('requirement_case_id'):
+                    case[flag] = True
+                    if flag == '_requirement_pack_failed':
+                        issue['_keep_pending_detail'] = True
+                        issue['detail'] = (f'{document} 第{page + 1}页第{group[0] + 1}–{group[-1] + 1}行，'
+                                           '要求提取未完成，请对照原件核定。\n' + case['source_text'])
+                    break
 
     def unknown_geometry(self, compiled):
-        from docreader.tender.directory_compile import apply_requirements
-        for (document, page), lines in self.proof.items():
-            unknown = [line['line'] for line in lines if line['source_role'] == 'unknown' and line['text'].strip()]
-            if not unknown:
-                continue
-            groups = []
-            for line in unknown:
-                if not groups or line != groups[-1][-1] + 1:
-                    groups.append([])
-                groups[-1].append(line)
-            for group in groups:
-                before = {c['id'] for c in compiled.get('_requirement_cases', [])}
-                apply_requirements(compiled, self.documents, [{'document_id': document, 'page': page,
-                    'start_line': group[0], 'end_line': group[-1], 'scope': 'unassigned'}])
-                for case in compiled.get('_requirement_cases', []):
-                    if case['id'] not in before:
-                        case['_geometry_unconfirmed'] = True
+        for document, page in self.proof:
+            self._pending_layout(compiled, document, page, 'unknown', '_geometry_unconfirmed')

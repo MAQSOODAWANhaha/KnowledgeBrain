@@ -150,3 +150,26 @@ async def test_queued_execution_uses_its_submitted_snapshot_after_analysis_chang
     changed = {**runtime.snapshot, 'domain_revision': 2}
     with pytest.raises(Conflict):
         await runtime.execute(authoring_input_ref=runtime.artifacts.put_json(changed), outline_only=True)
+
+
+async def test_candidate_joint_contract_is_pinned_at_first_outline_execution(runtime, monkeypatch):
+    from docreader.tender.native_requirement_sources import CONTRACT
+
+    runtime.snapshot['frozen_ref'] = runtime.artifacts.put_json({'documents': []})
+    runtime.outline['authoring_input'] = deepcopy(runtime.snapshot)
+    monkeypatch.setattr(document_execution, '_has_outline_responses', lambda _chapters: True)
+    monkeypatch.setenv('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT', CONTRACT)
+    result = await runtime.execute(outline_only=True)
+    spec = runtime.rows['execution']['execution_spec']
+    assert spec['native_requirement_contract'] == CONTRACT
+    assert 'directory_native_body_contract' not in spec
+    assert runtime.observed[0][1]['native_requirement_contract'] == CONTRACT
+
+    monkeypatch.delenv('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT')
+    assert await runtime.execute(outline_only=True) == result
+    assert len(runtime.observed) == 1
+
+    await runtime.execute(execution_id='legacy', outline_only=True)
+    assert 'native_requirement_contract' not in runtime.rows['legacy']['execution_spec']
+    monkeypatch.setenv('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT', CONTRACT)
+    assert await runtime.execute(execution_id='legacy', outline_only=True) == result

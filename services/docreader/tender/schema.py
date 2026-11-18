@@ -638,6 +638,7 @@ class OutlineIssue(_AnalysisContract):
     detail: Text
     rule_refs: list[EffectiveItemRef]
     target_id: Identity | None = None
+    source_evidence_ref: ArtifactRef | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SearchIntent(Contract):

@@ -167,6 +167,7 @@ class SourceLedger:
         self.atoms, self.ranges, self.grid_units = {}, [], set()
         self.literal_locations, self.literal_body_refs, self._literal_atoms, self._refs_by_range = {}, {}, {}, {}
         self.literal_predecessors = {}
+        self.reviewed_body_refs, self.reviewed_partial_refs = set(), set()
         for document_number, document in enumerate(self.documents, 1):
             if pages is not None and document['document_id'] not in pages:
                 continue
@@ -252,6 +253,22 @@ class SourceLedger:
         self.binding = (_hash({'source_binding': self._source_binding, 'literal_locations': sorted(locations.items()),
                                'literal_predecessors': sorted(predecessors.items())})
                         if locations else self._source_binding)
+
+    def bind_reviewed_body_refs(self, excerpts):
+        for excerpt in excerpts:
+            reference = excerpt['source_ref']
+            for selected in excerpt['selectors']:
+                key = reference['source_index_ref']['sha256'], reference['unit_id'], selected['source_range_id']
+                for ref in self._refs_by_range.get(key, ()):
+                    atom = self.atoms[ref]
+                    if selected['start'] <= atom['start'] and atom['end'] <= selected['end']:
+                        self.reviewed_body_refs.add(ref)
+                    elif selected['start'] < atom['end'] and atom['start'] < selected['end']:
+                        self.reviewed_partial_refs.add(ref)
+        self.reviewed_partial_refs.difference_update(self.reviewed_body_refs)
+        if self.reviewed_body_refs or self.reviewed_partial_refs:
+            self.binding = _hash({'native': self.binding, 'reviewed': sorted(self.reviewed_body_refs),
+                                  'partial': sorted(self.reviewed_partial_refs)})
 
     def view(self, range_ordinals=None):
         return NativeSourceView(self, list(range(len(self.ranges))) if range_ordinals is None else range_ordinals)
@@ -350,10 +367,11 @@ def native_requirement_model(payload):
         _reject('Wire source aliases must follow the complete native range/cell order.')
     count = len(refs)
     literal_domain = payload.get('source_domain') == _LITERAL_BODY_DOMAIN
+    reviewed = set(payload.get('reviewed_body_refs', ())) | set(payload.get('reviewed_partial_refs', ()))
     body_choices = tuple(line[0] for block in payload['source_scope']
                       for lines in ([cell['lines'] for cell in block['cells']] if block['kind'] == 'native_row'
                                     else [block['lines']] if literal_domain and 'literal_body_line' in block else [])
-                      for line in lines)
+                      for line in lines if line[0] not in reviewed)
     chapter_map = {c['id']: c['id'] for c in payload['chapters']}
     document_map = {d: d for d in payload['document_aliases']}
     if (any(not re.fullmatch(r'c[1-9][0-9]*', c) for c in chapter_map)
@@ -367,7 +385,7 @@ def native_requirement_model(payload):
     body_count = len(body_choices)
     body_ref = Annotated[StrictInt, Field(ge=min(body_choices, default=1), le=max(body_choices, default=1),
                                         json_schema_extra={'enum': list(body_choices)})]
-    if body_choices and literal_domain:
+    if body_choices and (literal_domain or reviewed):
         choices = frozenset(body_choices)
 
         def allowed(ref):
@@ -460,6 +478,11 @@ class NativeSourceView:
                                'reason': 'document_boundary' if a['document'] != b['document'] else 'unseen_source_ranges'}
                               for a, b in zip(self.components, self.components[1:])],
             'open_before': self.components[0]['open_before'], 'open_after': self.components[-1]['open_after']}
+        for key, refs in (('reviewed_body_refs', ledger.reviewed_body_refs),
+                          ('reviewed_partial_refs', ledger.reviewed_partial_refs)):
+            if selected_refs := visible.intersection(refs):
+                self.payload[key] = sorted(selected_refs)
+
 
     def response_model(self, legacy_line_limit=0, *, legacy_block=()):
         if self.ledger.binding != self.ledger_binding:
@@ -489,6 +512,10 @@ class NativeSourceView:
                 dispositions[ref] = item['kind']
         if set(dispositions) != set(self.refs):
             _reject('Disposition coverage must preserve the complete supplied source denominator.')
+        reviewed = self.payload.get('reviewed_body_refs', ())
+        partial = self.payload.get('reviewed_partial_refs', ())
+        if any(dispositions[r] != 'already_carried' for r in reviewed) or any(dispositions[r] != 'reference' for r in partial):
+            _reject('Reviewed atoms require their host-owned complete or partial disposition.')
         context_refs, contexts = set(), []
         for i, group in enumerate(value['contexts'], 1):
             if not set(group['refs']) <= set(self.refs):
@@ -533,12 +560,12 @@ class NativeSourceView:
             _reject('Every declared context atom/group must reach a real source assignment.')
         if any(k in {'requirement', 'external_action'} and r not in owned for r, k in dispositions.items()):
             _reject('Every substantive requirement/external action needs an explicit assignment.')
-        if not {r for r, k in dispositions.items() if k == 'already_carried'} <= set(carried_refs):
+        if not {r for r, k in dispositions.items() if k == 'already_carried'} <= (set(carried_refs) | set(reviewed)):
             _reject('Already-carried source claims need exact host-owned source coverage.')
         guidance = []
         for ordinal in self.range_ordinals:
             for kind in ('unresolved', 'reference', 'evaluator_procedure', 'navigation', 'layout'):
-                refs = [r for r, k in dispositions.items() if k == kind and r not in owned
+                refs = [r for r, k in dispositions.items() if k == kind and r not in owned and r not in partial
                         and self.ledger.atoms[r]['range_ordinal'] == ordinal]
                 if not refs:
                     continue
@@ -688,24 +715,34 @@ class NativeCaseView:
 
 
 def native_output_bound(view, *, legacy_block=()):
-    """Conservative ASCII-byte token ceiling of every accepted native graph.
+    """Bound compact ASCII JSON of accepted B replies, with a planning margin.
 
-    Sources occur once in body/context groups; groups have one parent and each
-    assignment one context pointer. Chapter selection still costs n*K, not n.
-    Legacy windows retain their complete visible-line/coordinate cap.
+    Acceptance gives each atom one disposition and permits at most one use in
+    either a context group or a body. Nonempty groups have distinct refs, so
+    charging a singleton object and a separator per ref covers any grouping.
+    Each legacy window consumes a distinct verified prose line. Its charge
+    includes the larger primary assignment shape to cover continuation windows.
     """
-    n = len(view.refs)
-    g = sum(view.ledger.atoms[r]['base'].get('text_basis') == 'grid_row' for r in view.refs)
-    literal = sum(r in view.ledger.literal_body_refs for r in view.refs)
-    body_count = g + literal
-    ref = max(view.refs, default=1)
-    chapters = [max(view.ledger.chapter_map, key=len)] * len(view.ledger.chapter_map) if view.ledger.chapter_map else []
-    assignment = {'body_refs': [ref], 'context_id': None if len(str(max(n, 1))) < 4 else max(n, 1), 'source_join': 'continuation',
+    atom_count = len(view.refs)
+    selectable = set(view.refs) - view.ledger.reviewed_body_refs - view.ledger.reviewed_partial_refs
+    grid_refs = {ref for ref in selectable if view.ledger.atoms[ref]['base'].get('text_basis') == 'grid_row'}
+    literal_refs = view.ledger.literal_body_refs.keys() & selectable
+    body_count = len(grid_refs | literal_refs)
+    chapters = list(view.ledger.chapter_map)
+    pointer = max(atom_count, 1) if len(str(atom_count)) > len('null') else None
+    assignment = {'body_refs': [0], 'context_id': pointer, 'source_join': 'continuation',
                   'scope': 'unassigned', 'chapter_ids': chapters}
-    shape = {'assignments': [],
-        'contexts': [{'refs': [ref], 'parent_id': None if len(str(max(n, 1))) < 4 else max(n, 1), 'source_join': 'continuation'} for _ in range(n)],
-        'native_assignments': [deepcopy(assignment) for _ in range(body_count)],
-        'native_dispositions': [{'refs': [ref], 'kind': 'evaluator_procedure'} for _ in range(n)]}
+    context = {'refs': [0], 'parent_id': pointer, 'source_join': 'continuation'}
+    disposition = {'refs': [0], 'kind': 'evaluator_procedure'}
+    envelope = {'assignments': [], 'contexts': [], 'native_assignments': [], 'native_dispositions': []}
+    assignment_bytes, context_bytes, disposition_bytes = (
+        len(_json(item).encode('ascii')) - 1 for item in (assignment, context, disposition))
+    ref_bytes_with_separator = sum(len(str(ref)) + 1 for ref in view.refs)
+    compact_bytes = (len(_json(envelope).encode('ascii'))
+                     + body_count * max(assignment_bytes, context_bytes)
+                     + (atom_count - body_count) * context_bytes
+                     + atom_count * disposition_bytes
+                     + 2 * ref_bytes_with_separator)
     points = _legacy_points(legacy_block, view.ledger.document_map)
     legacy_line_limit = len(_prose_points(legacy_block, view.ledger.document_map, view.ledger.grid_units))
     if legacy_line_limit:
@@ -713,14 +750,13 @@ def native_output_bound(view, *, legacy_block=()):
         legacy = {'document_id': document, 'page': max(p[1] for p in points),
                   'start_line': max(p[2] for p in points), 'end_line': max(p[2] for p in points),
                   'continuation_windows': [], 'scope': 'unassigned', 'chapter_ids': chapters}
-        shape['assignments'] = [deepcopy(legacy) for _ in range(legacy_line_limit)]
-    encoded = _json(shape)
-    from docreader.llm.budget import _o200k_tokens
-    return {'token_upper_bound': len(encoded.encode('ascii')) + 256,
-            'worst_shape_tokenized': _o200k_tokens(encoded), 'native_atoms': n,
-            'grid_body_atoms': g, **({'literal_body_atoms': literal} if literal else {}),
+        compact_bytes += legacy_line_limit * (len(_json(legacy).encode('ascii')) + 1)
+    margin = 256
+    return {'token_upper_bound': compact_bytes + margin, 'compact_json_byte_upper_bound': compact_bytes,
+            'planning_margin_tokens': margin, 'native_atoms': atom_count,
+            'grid_body_atoms': len(grid_refs), **({'literal_body_atoms': len(literal_refs)} if literal_refs else {}),
             'chapter_count': len(chapters), 'chapter_choice_occurrences': body_count * len(chapters),
-            'context_parent_edges': n, 'assignment_context_edges': n, 'legacy_window_limit': legacy_line_limit}
+            'context_parent_edges': atom_count, 'assignment_context_edges': body_count, 'legacy_window_limit': legacy_line_limit}
 
 
 def require_native_budget(budget, view, payload, prompt, *, request=None):
@@ -733,7 +769,7 @@ def require_native_budget(budget, view, payload, prompt, *, request=None):
     measured = budget.require_request(request, 'directory_requirement')
     output = native_output_bound(view, legacy_block=legacy_block)
     if output['token_upper_bound'] > measured['output_reserve']:
-        raise ModelBudgetError('Complete native range scope exceeds its reserved n*K/context output ceiling.')
+        raise ModelBudgetError('Complete native range scope exceeds its reserved compact B output ceiling.')
     return {**measured, 'worst_accepted_output_tokens': output['token_upper_bound'],
             'output_shape': output, 'schema_sha256': _hash(schema), 'request': request}
 
