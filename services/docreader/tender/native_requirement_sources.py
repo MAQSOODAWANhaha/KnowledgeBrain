@@ -588,7 +588,7 @@ class NativeSourceView:
                         and self.ledger.atoms[r]['range_ordinal'] == ordinal]
                 if not refs:
                     continue
-                source = self.ledger.source(refs, [])
+                source = self.ledger.source(sorted(refs), [])
                 if kind == 'unresolved':
                     cases.append(self.ledger.case(source, origin=self.binding))
                 else:

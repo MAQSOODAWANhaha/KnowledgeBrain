@@ -234,6 +234,41 @@ def test_pack_complete_ranges_and_keep_oversize_record_unfinished(tmp_path):
     assert len(all_ordinals)==len(set(all_ordinals))
 
 
+def test_unresolved_dispositions_rebuild_sources_in_frozen_order(tmp_path):
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
+    raw = reply(ledger, context=False)
+    expected = view.accept(raw)
+    unresolved = raw['native_dispositions'].pop()['refs']
+    assert len(unresolved) >= 2
+    for ref in reversed(unresolved):
+        raw['native_dispositions'].append({'refs': [ref], 'kind': 'unresolved'})
+
+    actual = view.accept(raw)
+
+    assert actual['cases'] == expected['cases']
+    assert actual['native_records'] == expected['native_records']
+    assert not actual['complete']
+
+
+@pytest.mark.parametrize(('mutation', 'error'), [
+    ('duplicate', 'exactly one disposition'),
+    ('missing', 'complete supplied source denominator'),
+])
+def test_disposition_coverage_still_rejects_duplicate_or_missing_refs(tmp_path, mutation, error):
+    ledger, _, _, _ = synthetic(tmp_path)
+    raw = reply(ledger, context=False)
+    unresolved = raw['native_dispositions'][-1]['refs']
+    if mutation == 'duplicate':
+        raw['native_dispositions'].append({'refs': [unresolved[0]], 'kind': 'unresolved'})
+    else:
+        unresolved.pop()
+
+    with pytest.raises(ModelContractError) as rejected:
+        ledger.view().accept(raw)
+    assert error in rejected.value.errors[0]['detail']
+
+
 def test_full_synthetic_inventory_keeps_83_atoms_explicitly_unresolved(tmp_path):
     first = 'Alpha\nBeta\nGamma\nDelta\nPrefix '
     second = 'Suffix\nTheta\nIota\n0.25 / 8'
