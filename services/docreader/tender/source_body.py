@@ -186,7 +186,8 @@ def _materialize(artifacts, snapshot, binding, repository, cache=None):
     return text, excerpts
 
 
-def bind_source_body(artifacts, snapshot, target, parts=None, *, source_projection_ref=None, context_groups=None):
+def bind_source_body(artifacts, snapshot, target, parts=None, *, source_projection_ref=None, context_groups=None,
+                     repository=None, cache=None):
     """Create a new target value only after exact host materialization succeeds."""
     parts = parts if parts is not None else [
         {'source_excerpt': excerpt} for excerpt in target.get('source_excerpts', [])]
@@ -196,7 +197,7 @@ def bind_source_body(artifacts, snapshot, target, parts=None, *, source_projecti
         'context_source_excerpts': target.get('source_context_excerpts', []),
         'context_groups': context_groups,
         'source_projection_ref': source_projection_ref}).model_dump(exclude_none=True)
-    text, excerpts = _materialize(artifacts, snapshot, binding, EvidenceRepository(artifacts))
+    text, excerpts = _materialize(artifacts, snapshot, binding, repository or EvidenceRepository(artifacts), cache)
     result = {**deepcopy(target), 'purpose': text, 'source_excerpts': excerpts,
               'source_body_contract': SOURCE_BODY_CONTRACT}
     result['source_body_ref'] = artifacts.put_json(binding)

@@ -552,11 +552,16 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
     try:
         if artifacts is None or not identity or not identity.get('frozen_ref'):
             raise ValueError('Frozen native requirement sources are unavailable.')
-        frozen = artifacts.read_json(identity['frozen_ref'])
-        ledger = SourceLedger(artifacts, frozen['documents'], chapters=requirement_chapters)
-        from docreader.tender.directory_compile import _used_lines
-        joint = JointRequirements(ledger, documents, applicability, identity, carried_points=_used_lines(compiled),
-                                  reviewed_body_facts=reviewed_body_facts)
+
+        def build_joint():
+            frozen = artifacts.read_json(identity['frozen_ref'])
+            ledger = SourceLedger(artifacts, frozen['documents'], chapters=requirement_chapters)
+            from docreader.tender.directory_compile import _used_lines
+            joint = JointRequirements(ledger, documents, applicability, identity, carried_points=_used_lines(compiled),
+                                      reviewed_body_facts=reviewed_body_facts)
+            return ledger, joint
+
+        ledger, joint = await asyncio.to_thread(build_joint)
     except (OSError, ValueError, KeyError, ModelContractError) as error:
         compiled['issues'].append({'code': 'outline_directory_native_source_unavailable',
             'detail': '完整原生要求来源暂不可核定；原件保留，请在Word对照完整原件人工核定正文及归属。' + type(error).__name__})
@@ -596,10 +601,14 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
                 joint.pending(compiled, view.range_ordinals, 'joint_B_unfinished')
             else:
                 joint.apply(compiled, prepared)
-    joint.unknown_geometry(compiled)
-    joint.reviewed_partial_geometry(compiled)
-    classification = JointClassification(ledger, compiled, documents, proof=joint.proof,
-        reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
+
+    def build_classification():
+        joint.unknown_geometry(compiled)
+        joint.reviewed_partial_geometry(compiled)
+        return JointClassification(ledger, compiled, documents, proof=joint.proof,
+            reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
+
+    classification = await asyncio.to_thread(build_classification)
     await _request_joint_classification(compiled, classification, budget, execute,
                                         {'applicability': applicability, **joint.identity})
 
@@ -615,7 +624,7 @@ async def _request_joint_classification(compiled, classification, budget, execut
         return payload, {key: value for key, value in measured.items() if key != 'request'}
 
     try:
-        payload, measured = admit(classification.payload)
+        payload, measured = await asyncio.to_thread(admit, classification.payload)
     except ModelBudgetError:
         pass
     else:
@@ -625,9 +634,9 @@ async def _request_joint_classification(compiled, classification, budget, execut
         except _LOCAL_FAILURES:
             compiled['issues'].append({'code': 'outline_directory_classification_rejected',
                 'detail': '完整联合分类未完成或超出完整输入/输出预算；全部精确来源保留，请核定具名未决来源后修订。'})
-            classification.fallback(compiled)
+            await asyncio.to_thread(classification.fallback, compiled)
         else:
-            classification.apply(compiled, prepared)
+            await asyncio.to_thread(classification.apply, compiled, prepared)
         return
 
     scopes, budgets = [], []
@@ -645,7 +654,7 @@ async def _request_joint_classification(compiled, classification, budget, execut
         return True
 
     try:
-        document = admit(classification.scope_payload())
+        document = await asyncio.to_thread(lambda: admit(classification.scope_payload()))
     except ModelBudgetError:
         pass
     else:
@@ -658,30 +667,36 @@ async def _request_joint_classification(compiled, classification, budget, execut
         except ModelBudgetError:
             return None
 
-    groups = classification.scoped_groups()
+    groups = await asyncio.to_thread(classification.scoped_groups)
     start = 0
     while start < len(groups):
-        admitted = admit_cases(groups[start:start + 1])
+        def next_scope(offset):
+            admitted = admit_cases(groups[offset:offset + 1])
+            if admitted is None:
+                return None, 1
+            size, rejected = 1, None
+            remaining = len(groups) - offset
+            while size < remaining:
+                probe = min(size * 2, remaining)
+                candidate = admit_cases(groups[offset:offset + probe])
+                if candidate is None:
+                    rejected = probe
+                    break
+                size, admitted = probe, candidate
+            while rejected is not None and rejected - size > 1:
+                probe = (size + rejected) // 2
+                candidate = admit_cases(groups[offset:offset + probe])
+                if candidate is None:
+                    rejected = probe
+                else:
+                    size, admitted = probe, candidate
+            return admitted, size
+
+        admitted, size = await asyncio.to_thread(next_scope, start)
         if admitted is None:
             held += len(groups[start])
             start += 1
             continue
-        size, rejected = 1, None
-        remaining = len(groups) - start
-        while size < remaining:
-            probe = min(size * 2, remaining)
-            candidate = admit_cases(groups[start:start + probe])
-            if candidate is None:
-                rejected = probe
-                break
-            size, admitted = probe, candidate
-        while rejected is not None and rejected - size > 1:
-            probe = (size + rejected) // 2
-            candidate = admit_cases(groups[start:start + probe])
-            if candidate is None:
-                rejected = probe
-            else:
-                size, admitted = probe, candidate
         if not await request_scope(*admitted):
             held += len(admitted[0]['requirement_cases'])
         start += size
@@ -690,13 +705,13 @@ async def _request_joint_classification(compiled, classification, budget, execut
         'document_completed': document_completed, 'held_case_count': held}
     if scopes:
         try:
-            prepared = classification.merge_scopes(scopes)
+            prepared = await asyncio.to_thread(classification.merge_scopes, scopes)
         except ModelContractError:
             scopes.clear()
         else:
-            classification.apply(compiled, prepared)
+            await asyncio.to_thread(classification.apply, compiled, prepared)
     if not scopes:
-        classification.fallback(compiled)
+        await asyncio.to_thread(classification.fallback, compiled)
     if not scopes or held or not document_completed:
         compiled['issues'].append({'code': 'outline_directory_classification_rejected',
             'detail': '部分来源分类待核。请根据具名未决事项核对完整原文、适用性和所属章节。'})
@@ -2547,16 +2562,16 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 **({'entry_contract': reviewed_body_entry_contract} if reviewed_body_entry_contract is not None else {}))
             if on_source_closure is not None:
                 await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
-        outline = outline_from_compiled(snapshot, compiled, artifacts=artifacts)
+        outline = await asyncio.to_thread(outline_from_compiled, snapshot, compiled, artifacts=artifacts)
         if directory_facts:
-            bind_reviewed_outline_facts(outline, compiled, directory_facts)
+            await asyncio.to_thread(bind_reviewed_outline_facts, outline, compiled, directory_facts)
         if native_body_contract is not None:
             from docreader.tender.native_body_scope import NativeBodyScope
             from docreader.tender.native_body_flow import resolve_native_bodies
             scope = await asyncio.to_thread(NativeBodyScope, artifacts, snapshot, directory_documents, compiled, outline)
             outline, source_body_result = await resolve_native_bodies(artifacts, snapshot, outline, scope, budget, execute)
         if reviewed_source_facts_ref is not None:
-            bind_reviewed_credential_slots(outline, compiled, reviewed_source_facts)
+            await asyncio.to_thread(bind_reviewed_credential_slots, outline, compiled, reviewed_source_facts)
             reviewed_fact_records = deepcopy(compiled.get('_reviewed_source_fact_applications', []))
     elif native_body_contract is not None:
         raise ModelConfigurationError('final source resolution requires the registered directory source flow')

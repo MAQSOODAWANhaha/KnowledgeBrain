@@ -478,6 +478,7 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
 
     append_rules("已知提交与编制约束", constraints)
     body_paths = {path for _, path in _body_entries(entries)}
+    excerpt_repository = EvidenceRepository(artifacts) if artifacts is not None else None
     for chapter, path in entries:
         if path not in body_paths:
             lines.extend(["## 提交待办：" + chapter["title"], ""])
@@ -490,9 +491,9 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
                     try:
                         for reference in target.get("source_refs", []):
                             if _source_key(reference) not in precise:
-                                excerpts.extend(whole_source_excerpts(artifacts, reference))
+                                excerpts.extend(whole_source_excerpts(artifacts, reference, repository=excerpt_repository))
                         for excerpt in excerpts:
-                            text = load_source_excerpt(artifacts, excerpt)["text"]
+                            text = load_source_excerpt(artifacts, excerpt, repository=excerpt_repository)["text"]
                             lines.extend(["> " + text.replace("\n", "\n> "), ""])
                     except (OSError, ValueError, KeyError):
                         lines.extend(["原文暂不可读，来源引用保留在本次大纲中，待人工核对。", ""])
@@ -531,7 +532,8 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
                     lines.extend(['### ' + label, ''])
                     try:
                         text = source_excerpts_text(artifacts, entry['source_excerpts'],
-                                                    source_join=entry.get('source_join', 'paragraphs'))
+                                                    source_join=entry.get('source_join', 'paragraphs'),
+                                                    repository=excerpt_repository)
                     except (OSError, ValueError, KeyError):
                         lines.extend(['原文暂不可读，精确来源引用保留在本次编制计划，须核对后使用。', ''])
                     else:

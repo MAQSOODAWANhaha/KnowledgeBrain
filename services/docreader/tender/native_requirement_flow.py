@@ -610,6 +610,11 @@ def require_classification_budget(budget, request, payload):
 def bind_native_targets(compiled, nodes, *, artifacts=None, snapshot=None):
     """One canonical source drives its prose target and persisted guide binding."""
     issues = []
+    repository = None
+    cache = {}
+    if artifacts is not None:
+        from docreader.tender.evidence.references import EvidenceRepository
+        repository = EvidenceRepository(artifacts)
     for record in compiled.get('_native_requirements', []):
         for chapter_id in record['chapter_ids']:
             node = nodes[chapter_id]
@@ -626,13 +631,14 @@ def bind_native_targets(compiled, nodes, *, artifacts=None, snapshot=None):
                           for group in source['contexts']]
                 for accepted, group in zip(source['contexts'], groups, strict=True):
                     if accepted['text'] != source_excerpts_text(artifacts, group['source_excerpts'],
-                                                              source_join=group['source_join']):
+                                                              source_join=group['source_join'], repository=repository):
                         raise ArtifactIntegrityError('accepted native context differs from its frozen sources')
                 target['source_context_excerpts'] = [excerpt for group in groups for excerpt in group['source_excerpts']]
                 parts = [{'source_excerpt': excerpt,
                           'join': source['body']['source_join'] if ordinal else 'paragraphs'}
                          for ordinal, excerpt in enumerate(source['body']['source_excerpts'])]
-                target = bind_source_body(artifacts, snapshot, target, parts, context_groups=groups)
+                target = bind_source_body(artifacts, snapshot, target, parts, context_groups=groups,
+                                          repository=repository, cache=cache)
                 if target['purpose'] != source['body']['text']:
                     raise ArtifactIntegrityError('accepted native body differs from its frozen sources')
             node['targets'].append(target)

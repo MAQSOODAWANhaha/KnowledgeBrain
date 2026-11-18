@@ -6160,6 +6160,7 @@ BUG-096已移除下述历史通用依据表。剩余缺口是实际技术响应�
   3. 修订可能消耗剩余预算，宿主对失败或超预算包保留原范围和具名人工核定出口。未获认证的原文由原生待核案件保留。可证续接及后续归属由 C 处理。
   4. 同摘要且通过当前校验的接受回执不重跑。需要修订的包继续受原有最多三轮自动修订限制。已持久化的旧反馈继续沿用原修订摘要，新反馈在收到新的拒绝后生效。
   5. 宿主给出已知的短 ref、失败字段和待核动作，模型继续返回结构化处置，无须誊写原文或坐标。
+- 验证：离线回归通过，111 正式回执对照的 43 个首轮摘要一致、已接受回执重验通过，26 个修订请求均在输入预算内（证据 `bug246-GFAwNZW9/`）。另对首轮候选提示做外部单包实测（111 第 7 包，原运行 4 次均因未认证正文引用被拒）：候选单次调用中未认证 `body_refs` 错误从 40 项降为 0、开放边界归属一次合规，但漏列第 14 页 `764..803` 共 40 个原子，触发 `Disposition coverage must preserve the complete supplied source denominator.` 宿主拒收（证据 `111-b-prompt-single-ZPyr5w/send1/`）。首轮候选提示未获单次通过，不安排整份后继重跑。
 
 ## BUG-247 B 待核来源的处置顺序触发误拒
 
@@ -6172,3 +6173,31 @@ BUG-096已移除下述历史通用依据表。剩余缺口是实际技术响应�
   4. 原请求摘要及已接受回执的重验路径保持一致。同摘要的已接受结果可直接重验。曾因此误拒且已存回复可离线复验，线上重试遵循既有领取与发送额度。
   5. 宿主从冻结原子确定顺序并重建原文，模型只需要返回引用和处置。
 - 验证：反序逐条处置在修复前触发原件顺序拒绝，修复后与正序产生完全相同的待核案例和正文记录。重复、遗漏两条反例在前后均被拒绝。B/C 相关 72 项回归通过。证据 `bug247-order-obD6Ti/red-verified.log` 和 `green.log`。此记录为本地测试结果，未部署或发模型请求。
+
+## BUG-248 原生大纲收尾重复校验源索引并同步阻塞租约心跳
+
+- 状态 / 发现阶段：已修复并验证恢复；222 后继、111 CMap 与原候选环境真实大纲执行。
+- 现象与影响：222 后继（`web-outline-3334c1a314e4bb40d5a5a61656482878aeb7311820e88faa06ea89538bbd019a`）在完成全部模型请求（A 2 条、M 1 条、B 25/29 包通过且 4 包耗尽、C 3/5 作用域通过且 2 作用域耗尽，末条回执于 `06:30:00+00` 落库）后，在 `06:30:00`–`06:32:27` 连续写入原生目标绑定构件达 147 秒，超出 45 秒租约 TTL（`06:30:45+00`），于 `06:32:29+00` 因 `StaleExecution` 失败。同样，111 CMap（`c4daf242`）在完成 43 个 B 包及参数/响应表后，以及 `kb-literal-candidate` 中共享单 worker 事件循环的安服（`03a20559`）、Bidding（`8b6617ad`）、111（`5e242ac4`）在完成 B 阶段后进入同步编译与收尾时连续阻塞事件循环 76–150 秒，均因心跳协程饥饿触发 `StaleExecution`。
+- 根因：
+  1. `bind_native_targets`（`services/docreader/tender/native_requirement_flow.py`）在遍历 `_native_requirements` 生成每个响应目标时，调用 `source_excerpts_text` 与 `bind_source_body` 均未传入共享的 `EvidenceRepository(artifacts)` 与 `cache`（而 `validate_outline_source_bodies` 已复用 `repository` 和 `cache`）。每个目标和上下文组都会新建 `EvidenceRepository`，重复从磁盘读取并运行 `validate_literal_source` 逐字校验全书 PDF 字形及重建 `SourceIndex`，造成约 2 秒/目标、单份大纲百秒级的同步 CPU/IO 开销。
+  2. `generate_document` 及 `_request_native_requirements` / `_request_joint_classification` 中，`SourceLedger` + `JointRequirements` 初始化、`JointClassification` 分组预检与合并、以及 `outline_from_compiled` 直接在主 asyncio 事件循环线程同步执行，未放入 `asyncio.to_thread`，阻塞期间同事件循环的 `heartbeat()` 协程无法续租。
+- 解决方案：
+  1. `bind_source_body` 支持传入可选 `repository` 与 `cache`，`bind_native_targets`（及导出 `todo.md` 的来源摘录读取）在单次调用内复用同一个 `EvidenceRepository(artifacts)` 和 `cache`，保持与 `validate_outline_source_bodies` 相同的完整性校验。
+  2. 将 `_request_native_requirements` / `_request_joint_classification` 中的同步源台账与分类准备、以及 `generate_document` 中的 `outline_from_compiled` 放入 `await asyncio.to_thread(...)`，让主事件循环在收尾与规划期间持续执行 `heartbeat()`。
+  3. 协议与容量核算：
+     - (1) 全文件调用次数仍为 `3+B+C` 或 `3+B+G+S`，新增模型调用为 0。
+     - (2) 单个请求最坏输入输出、提示、Schema 与预算上界完全不变。
+     - (3) 不新增阻断问题；已落库的全部接受与拒绝回执原样保留，未决事项继续走既有具名人工核定出口。
+     - (4) 修订或恢复零重跑已完成调用：已落库的 A/M/B/C 接受回执及已达 4 次上限的拒绝回执在恢复执行时直接按原摘要复用。
+     - (5) 模型无需誊写任何宿主已知或可推出的内容。
+- 验证：红测复现多目标重复读取 `frozen_ref` 8 次及 `outline_from_compiled` 期间心跳计数为 0（`bug248-heartbeat-cache/red-verified.log`），修复后单次读取且心跳正常，定向 103 项与全量 3,874 项单测全部通过（`green.log`、`unit-all.log`）。在各自对应基线镜像打入该修复后：
+  - 222 后继（`web-outline-3334c1a3...`）以 **0 次新增模型调用**在 28.605 秒完成恢复并出件（`222-next-live-v1zWWWsY/completed-222/`），原件必交项专项门禁 `remaining-delivery-audits-igwAXEvk/222.audit.log` 退出码 `0`（`passed: true`，8 张原表、主稿 3 处信誉查询截图空栏及交付包均通过；大纲中另有 387 条 `outline_directory_requirement_unassigned` 与 88 条 `outline_directory_native_source_decision` 保留待核）。
+  - 111 CMap（`web-outline-52b006f6...`）以 **0 次新增模型调用**在 51.171 秒完成恢复并出件（`111-cmap-export-wPO0WPaJ/completed-111/`），专项审计中 CPU 原表、补充分卷与附件待核通过，但因所绑清单 `e26c83b3...` 的 3 条 `credential_slot` 事实 `entry` 为 `None`（而第 3.4 章投标保证金带目录入口 `page: 79, line: 10`），3 处保证金空位落入 `outline_directory_reviewed_fact_pending` 待核（`anfu-111-delivery-audits-zktWvwBh/111.audit.log`）。
+  - 原候选 Bidding（`web-outline-c8cfdf5a...`）以 **0 次新增模型调用**完成大纲恢复落库（`160` 条请求不变），导出阶段暴露 BUG-249。
+
+## BUG-249 Bidding 原生字形软连字符占位符 `\ufffe` 触发 Word XML 导出失败
+
+- 状态 / 发现阶段：已定位，待修复；原候选环境 Bidding（`web-outline-c8cfdf5a...`）大纲完成后导出 Word。
+- 现象与影响：Bidding 大纲在 `kb-literal-candidate` 恢复成功后，执行 `post-outline-export-Aytf4ruN/export.py` 在 `authoring_export.py` 第 1462 行 `document.add_paragraph(issue["detail"])` 抛出 `ValueError: All strings must be XML compatible: Unicode or ASCII, no NULL bytes or control characters`，导致 `completed-bidding` 未能生成 `template.docx`。
+- 根因：`Bidding.pdf` 物理第 21 页（`page_ordinal: 20, char_index: 626`）行末连字符在 PDFium 中返回 `pdfium_unicode: 2`、`text: '\ufffe'`（`U+FFFE`），进入冻结单元 `literal:page:20:d5cdfc3ddfdc9e065f63`（`“业务系统-电子招投标\ufffe参与的项目-招标业务管理-标前质疑”`）及大纲未归属待核项 `issues[699]['detail']`。`U+FFFE` 属于 XML 1.0 非法字符，`python-docx` / `lxml` 写入 `<w:t>` 时直接拒绝。
+- 解决方案：在 Word 导出层（或 XML 文本写入入口）处理 XML 1.0 非法码位，同时保持冻结源与 JSON 台账的字节摘要不变。修复后重跑 Bidding 导出与 `check_bidding.py` 门禁。
