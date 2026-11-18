@@ -332,7 +332,8 @@ def _full_source_reading(reading):
 async def _request_directory_details(compiled, documents, budget, execute, identity=None, *, artifacts=None,
                                      response_form_contract=None, parameter_source_contract=None, source_group_contract=None,
                                      native_requirement_contract=None, source_carrier_contract=None,
-                                     reviewed_source_facts=(), on_source_closure=None, reviewed_body_entry_contract=None):
+                                     reviewed_source_facts=(), on_source_closure=None, reviewed_body_entry_contract=None,
+                                     native_requirement_concurrency=2):
     from docreader.tender.native_requirement_sources import CONTRACT as NATIVE_CONTRACT
     if reviewed_body_entry_contract not in (None, REVIEWED_BODY_ENTRY_CONTRACT):
         raise ModelConfigurationError('unsupported reviewed body entry contract')
@@ -452,7 +453,8 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
 
     if native_requirement_contract == NATIVE_CONTRACT:
         await _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability,
-            reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
+            reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract,
+            concurrency=native_requirement_concurrency)
     else:
         await requirements()
     classification_view = reviewed_classification_view(compiled, reviewed_body_facts)[0] if reviewed_body_facts else compiled
@@ -526,7 +528,9 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
 
 
 async def _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability,
-                                       *, reviewed_body_facts=(), reviewed_body_entry_contract=None):
+                                       *, reviewed_body_facts=(), reviewed_body_entry_contract=None, concurrency=2):
+    if concurrency < 1:
+        raise ValueError('native requirement concurrency must be positive')
     from docreader.tender.native_requirement_sources import SourceLedger, plan_native_packs, require_native_budget
     from docreader.tender.native_requirement_flow import JointRequirements, JointClassification, require_classification_budget
     requirement_chapters = deepcopy(chapters)
@@ -558,15 +562,32 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
         request_factory=lambda view, payload: _request(budget, task, payload))
     for pending in packs['pending_ranges']:
         joint.pending(compiled, pending['range_ordinals'], pending['reason'])
-    for view in packs['views']:
+    async def request_native_pack(view):
         payload = joint.payload(view)
         try:
             require_native_budget(budget, view, payload, '', request=_request(budget, task, payload))
-            prepared = await _ask(execute, budget, task, payload, lambda raw: joint.accept(view, raw, compiled))
+            return await _ask(execute, budget, task, payload, lambda raw: joint.accept(view, raw, compiled))
         except _LOCAL_FAILURES:
-            joint.pending(compiled, view.range_ordinals, 'joint_B_unfinished')
-            continue
-        joint.apply(compiled, prepared)
+            return None
+
+    views = packs['views']
+    for offset in range(0, len(views), concurrency):
+        batch = views[offset:offset + concurrency]
+        tasks = [asyncio.create_task(request_native_pack(view)) for view in batch]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for pending_task in tasks:
+                pending_task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        # Validation only reads the directory guards. Apply in inventory order,
+        # because assigning a range can change which later ranges are already used.
+        for view, prepared in zip(batch, results, strict=True):
+            if prepared is None:
+                joint.pending(compiled, view.range_ordinals, 'joint_B_unfinished')
+            else:
+                joint.apply(compiled, prepared)
     joint.unknown_geometry(compiled)
     joint.reviewed_partial_geometry(compiled)
     classification = JointClassification(ledger, compiled, documents, proof=joint.proof,
@@ -2410,6 +2431,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 source_options['source_carrier_contract'] = source_carrier_contract
             if native_requirement_contract is not None:
                 source_options['native_requirement_contract'] = native_requirement_contract
+                source_options['native_requirement_concurrency'] = concurrency
             if source_options:
                 source_options['artifacts'] = artifacts
             compiled = await _request_directory_details(

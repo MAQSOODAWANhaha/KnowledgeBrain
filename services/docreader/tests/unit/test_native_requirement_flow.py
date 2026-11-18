@@ -320,3 +320,102 @@ def test_B_failed_pack_preserves_legacy_only_page_for_word_and_manual_C(tmp_path
     delivery = export_authoring_document(artifacts, outline, [])
     paragraphs = [p.text for p in Document(BytesIO(artifacts.read_bytes(delivery['docx_ref']))).paragraphs]
     assert source['source_text'] in '\n'.join(paragraphs[paragraphs.index('适用性与来源待核'):])
+
+
+@pytest.mark.parametrize("fatal", [False, True])
+async def test_native_packs_overlap_and_commit_in_inventory_order(tmp_path, monkeypatch, fatal):
+    import asyncio
+
+    from docreader.llm.request import ModelWorkUnitExhausted
+
+    from docreader.tender.authoring_pipeline import _request_native_requirements
+    from docreader.tender.native_requirement_flow import JointRequirements
+    from docreader.tender import native_requirement_sources as sources
+    from test_native_requirement_sources import budget
+
+    ledger, store, _, frozen = synthetic(tmp_path)
+    source_id = frozen['document_id']
+    documents = [{'document_id': source_id, 'role': 'main', 'pages': ['Technical', 'Second page'],
+                  'line_units': [['page:0:table:0'], ['page:1:table:0']]}]
+    compiled = {'chapters': [{'id': 'source-node-real-id-A', 'title': 'Technical', 'lines': []}], 'issues': []}
+    chapters = [{'id': 'source-node-real-id-A', 'title': 'Technical', 'response_kind': 'narrative'}]
+    identity = {'frozen_ref': store.put_json({'documents': [{**frozen, 'role': 'main'}]})}
+    monkeypatch.setattr(sources, 'plan_native_packs', lambda source, *a, **kw: {
+        'views': [source.view([i]) for i in range(len(source.ranges))], 'pending_ranges': []})
+    assert len(ledger.ranges) == 2
+    active = peak = 0
+    finished = []
+    committed = []
+    requests = {}
+    barrier = asyncio.Event()
+    cancelled = asyncio.Event()
+    original_pending = JointRequirements.pending
+    original_apply = JointRequirements.apply
+
+    def record_pending(owner, state, ordinals, reason):
+        committed.append('first pending')
+        return original_pending(owner, state, ordinals, reason)
+
+    def record_apply(owner, state, prepared):
+        committed.append('second accepted')
+        return original_apply(owner, state, prepared)
+
+    monkeypatch.setattr(JointRequirements, 'pending', record_pending)
+    monkeypatch.setattr(JointRequirements, 'apply', record_apply)
+
+    async def execute(task, request, validate):
+        nonlocal active, peak
+        body = json.loads(request['messages'][1]['content'][0]['text'])
+        if task == 'directory_classification':
+            requests[task] = json.dumps(request, sort_keys=True)
+            return validate({'items': [], 'basis_groups': [], 'requirement_adjudications': [
+                {'item_ids': [case['id']], 'scope': 'unassigned', 'chapter_ids': [], 'basis_id': None}
+                for case in body['requirement_cases']]})
+        page = body['block'][0]['page']
+        requests[page] = json.dumps(request, sort_keys=True)
+        active += 1
+        peak = max(peak, active)
+        try:
+            if fatal:
+                if page == 0:
+                    await barrier.wait()
+                    raise RuntimeError('execution lost')
+                barrier.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            await asyncio.sleep(0)
+            if page == 0:
+                await asyncio.sleep(0)
+                raise ModelWorkUnitExhausted(task)
+            return validate(reply(ledger, ledger.view([1]), selected=[], context=False))
+        finally:
+            active -= 1
+            finished.append(page)
+
+    if fatal:
+        with pytest.raises(RuntimeError, match='execution lost'):
+            await _request_native_requirements(compiled, documents, budget(), execute, identity, store, chapters, [],
+                                               concurrency=2)
+        assert cancelled.is_set() and active == 0
+        assert peak == 2 and not committed
+        assert set(requests) == {0, 1}
+        return
+
+    baseline = deepcopy(compiled)
+    results = []
+    for concurrency, finish_order in [(1, [0, 1]), (2, [1, 0])]:
+        state = deepcopy(baseline)
+        active = peak = 0
+        finished.clear()
+        committed.clear()
+        requests.clear()
+        await _request_native_requirements(state, documents, budget(), execute, identity, store, chapters, [],
+                                           concurrency=concurrency)
+        assert peak == concurrency and active == 0
+        assert finished == finish_order
+        assert committed == ['first pending', 'second accepted']
+        results.append((dict(requests), json.dumps(state, ensure_ascii=False, separators=(',', ':'))))
+    assert results[0] == results[1]
