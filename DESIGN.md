@@ -51,7 +51,7 @@ PingFang SC / -apple-system / Noto Sans SC。禁止 runtime Google Fonts。
 
 ## 4. Components
 
-Vite + React 19 + Tailwind v4 + shadcn。图标 Tabler。正文 ONLYOFFICE。
+Vite + React 19。壳用 Astryx（`@astryxdesign/core`、`theme-neutral`）。正文 ONLYOFFICE。
 
 - 壳：grid 顶栏 48、左栏 240、主列 1fr
 - 按钮高 32、圆角 6。主按钮 Steel 填实。次按钮白底发丝线。危险只用 Stop 字色
@@ -121,7 +121,7 @@ testid：`wizard-files|authoring|export`、`login-*`、`new-bid`、`upload-drop`
 
 ## 9. Framework
 
-- 壳：Tailwind + shadcn
+- 壳：Astryx
 - 图标：Tabler
 - 不用：Mantine、Ant、Lucide 换图标、Markdown textarea 当正式正文
 - token 只写在 `web/src/app.css` 的 `@theme` 与 `:root`。工作台 CSS 引用这些变量，不写另一套蓝

@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | 领域归属已确认；运行时基础已进入独立实施方案 |
+| 状态 | 领域归属已确认；运行时基础已实施，以代码和测试为准 |
 | 服务对象 | 知识库与招投标 |
 
 共享平台只提供两类业务都需要的基础能力，不拥有知识库或招投标业务状态机。
@@ -12,7 +12,7 @@
 ## 共享平台拥有
 
 - LDAP/本地登录、JWT 与 API Key 身份认证；业务服务按创建人校验资源归属，Key 沿用其所属用户身份；
-- API/worker/docreader 进程拓扑、队列注册；Oxana 负责 transport retry/resurrection/dead queue；显式 Agent-bound Request 的业务副作用由领域 AgentRun token/lease 与 logical-call ledger fence，不能镜像 Oxana phase；
+- API/worker/docreader 进程拓扑、队列注册；Oxana 负责 transport retry/resurrection/dead queue；招标模型调用的租约与回执由 Python 工作流维护，不镜像 Oxana 状态；
 - 通用 actor identity 与审计；实际命令的幂等结果归各业务持久化模块；
 - `ObjectRegistry`、不可变 deletion identity、Oxana typed retention job 与 owner-fenced 完成 tombstone；
 - 维护门、健康检查、日志、tracing、metrics 与部署验收基础；
@@ -33,9 +33,7 @@
 
 ## 当前参考
 
-- 配置与单数据库账号收敛：[待实施方案](../../plans/platform/configuration-simplification.md)（仅全新部署；用户配置账号密码、JWT、模型和最大上下文，其余默认或部署派生）
-- 招标文件驱动的投标文件编制工作区：[目标契约](../bidding/authoring.md)（来源、候选、证据与身份边界；[正文/保存目标](../bidding/onlyoffice.md)仍归招投标领域）
-- 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
-- 共享机制计划：[`../../plans/platform/README.md`](../../plans/platform/README.md)
-- fresh baseline、actor/idempotency/audit、ObjectRegistry 与 retention：[`../../plans/platform/runtime-foundation.md`](../../plans/platform/runtime-foundation.md)
-- 可观测性计划：[`../../plans/platform/tracing-observability.md`](../../plans/platform/tracing-observability.md)
+- 配置：只支持全新部署，一套应用数据库账号。用户必须提供的配置见 [AGENTS.md](../../AGENTS.md)「本机开发栈」和 [deploy/README.md](../../deploy/README.md)。
+- 招标分析与编制：[Python 招标](../design/python-tender-phase1/README.md)。正文保存见 [ONLYOFFICE](../bidding/onlyoffice.md)。
+- 数据库结构：[数据库设计](../design/database-initialization.md)、[命名约定](../design/database-naming.md)
+- 日志：API 和 worker 用 `platform::init_tracing()` 初始化 `tracing`。`api/routes.rs`、`worker/main.rs`、`platform/jobs.rs`、`platform/s3.rs` 等生产路径仍有少量 `eprintln!`，尚未统一。

@@ -5,7 +5,7 @@
 | 状态 | 当前业务语义保持 |
 | 服务对象 | 知识资产管理、问答、招投标证据检索 |
 
-本文是知识库领域与跨域检索端口的唯一权威定义。crate 怎么切、job 怎么读写见 [`crate.md`](crate.md)。实现现状快照见 [`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)，不从快照反推新业务规则。
+本文是知识库领域与跨域检索端口的唯一权威定义。crate 怎么切、job 怎么读写见 [`crate.md`](crate.md)。
 
 ## 1. 领域模型
 
@@ -105,7 +105,7 @@ media: KnowledgeEvidenceMediaV1?
 - company hit 不构成产品排名；
 - quote 是 chunk 的连续 UTF-8 byte slice，offset/digest/length 可验证；
 - 文件显示名和 chunk bytes 是检索时快照，便于调用方立即冻结；
-- 知识库不接收也不保存招投标 Candidate、EvidenceBundle、MatchingReport 或人工选择；编制侧如何采用检索结果见 [`../bidding/authoring.md`](../bidding/authoring.md)；
+- 知识库不接收也不保存招投标 Candidate、EvidenceBundle、MatchingReport 或人工选择。编制侧如何采用检索结果见 [Python 招标](../design/python-tender-phase1/README.md)。
 - 端口返回以后 live Document 的修改或删除，不改写调用方已冻结 artifact。
 
 ### 2.1 knowledge-owned scope attestation
@@ -120,7 +120,7 @@ attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256�
 
 图片ingestion在同一事务发布chunk、embedding、`knowledge_image_artifact_revisions`、`knowledge_image_ocr_chunk_artifact_mappings`和`knowledge_image_artifact`对象owner reference；输入中的OCR图片身份固定为`objects/{sha256}`，digest、实际图片格式、尺寸、ObjectRegistry byte length及幂等冲突全部fail closed。live资料退休时图片artifact owner继续保留不可变对象。
 
-唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。该快照用于初稿/候选证据，用户确认后定点写入 DOCX 并保存；media/asset 存在不代表实际正文已包含图片。对象最终存储身份遵循平台 ObjectRegistry 合同，本节摄取 key 不另建存储真源。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。接缝与验证清单见[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
+唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。该快照用于初稿/候选证据，用户确认后定点写入 DOCX 并保存；media/asset 存在不代表实际正文已包含图片。对象最终存储身份遵循平台 ObjectRegistry 合同，本节摄取 key 不另建存储真源。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。
 
 ## 3. 招投标边界
 
@@ -146,4 +146,4 @@ attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256�
 
 ## 5. 语义变更纪律
 
-本文不改变 Workspace、Product、ProductVersion、Document、解析、索引、问答或检索算法的业务语义。后续语义调整必须先在 [`../../plans/knowledge-base/README.md`](../../plans/knowledge-base/README.md) 下独立评审。
+本文不改变 Workspace、Product、ProductVersion、Document、解析、索引、问答或检索算法的业务语义。后续语义调整先改本页并独立评审，再改代码。

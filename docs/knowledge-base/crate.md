@@ -7,7 +7,6 @@
 
 领域语义与招标端口仍以 [`domain.md`](domain.md) 为准。本文只约束 crate 内部怎么切、job 怎么读写。不改 Workspace / Product / Document 业务规则，不改 `KnowledgeRetrievalPortV3`。
 
-实施记录见 [`../../plans/knowledge-base/crate-module-boundaries.md`](../../plans/knowledge-base/crate-module-boundaries.md)。
 
 ## 1. 真源
 

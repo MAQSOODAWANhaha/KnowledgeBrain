@@ -35,7 +35,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 - Web 编制面：顶栏切换产品，左栏列项目并把 **文件 / 编制 / 导出** 挂在当前标下；编制步主列是 ONLYOFFICE，检查器可选。解析是文件状态；freeze 是文件页动作，不是第四导航，也不是「确认后才能改」的闸门。
 - 结构规划与章节导航保留，招标文件指定目录/表格优先；标题、顺序、层级和表格由 DOCX 承载，外部业务索引不能强制回写覆盖人工修改。人员独立数据不等于强制增加专章。
 - 文件未变且有可用结果则复用；只处理新增、变化或无结果文件，汇总当前完整集合。招标集合变化后新轮整稿，不局部修补或自动合并旧稿；仅改正文不重跑源解析。
-- AI 只出候选；用户接受后校验版本/目标和未保存编辑，定点入稿并确认保存，永不覆盖并发人工编辑。
+- 整稿重新生成产出新稿，不合并旧稿，用户自己选用哪一稿。编辑后由 AI 出候选并定点入稿的能力推迟，当前交付「整稿加人工编辑」。接入后的规则：AI 只出候选；用户接受后校验版本/目标和未保存编辑，定点入稿并确认保存，永不覆盖并发人工编辑。
 - 未覆盖要求、stale、缺件只提示，不禁止编辑或导出。出件等待正确回调持久化后冻结 DOCX，PDF 由同一文件经 ONLYOFFICE 转换，独立报告绑定该版本。
 - 金额仅 CNY，价格由人确认；最高限价必须明确含税 / 未税口径。报价精编、台账精编、文档设置面板不是黄金路径必经步。
 - 业务时区固定 `Asia/Shanghai`。
@@ -49,14 +49,14 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 - 名称：KnowledgeBrain / 投标。
 - 视觉钉死：冷灰仪器盘（画布 `#F4F5F7`、发丝线、钢蓝 `#1E3A5F` 只用于选中、主按钮和焦点）。中文 UI 字体 PingFang SC / Noto Sans SC，禁止运行时 Google Fonts。规范见 `DESIGN.md`。
-- 组件钉死：Tailwind CSS + shadcn/ui 做壳，图标 Tabler。正文编辑由 ONLYOFFICE 承担；外壳字体/颜色规范不强加到 DOCX 招标版式或编辑器内部界面。
+- 组件以 Astryx（`@astryxdesign/core` 与 `theme-neutral`）做壳。正文编辑由 ONLYOFFICE 承担；外壳字体和颜色规范不强加到 DOCX 招标版式或编辑器内部界面。
 - 禁止把招标文件或人补图写回产品库。
 
 ## Evidence on Hand
 
 生成合同在 `docs/bidding/`。本页是工作台的产品设想。
 
-- [业务 PRD](docs/bidding/README.md)、[大纲运行时](docs/design/evidence-runtime-contract.md)、[ONLYOFFICE 技术契约](docs/bidding/onlyoffice.md)、[领域边界](docs/bidding/authoring.md)、[编辑与出件顺序](plans/bidding/onlyoffice-integration.md)、[未完成缺口](docs/design/check-execution-plan.md)
+- [业务入口](docs/bidding/README.md)、[招标工作流](docs/design/python-tender-phase1/README.md)、[ONLYOFFICE](docs/bidding/onlyoffice.md)
 - `docs/knowledge-base/domain.md`（知识库领域与证据检索端口）
 - `1.png`：Plannotator 三栏编辑器仅作结构参照（左树 / 中文稿 / 右检查器）。外壳以 `DESIGN.md` 的冷灰仪器盘为准：不仿 iCloud，不用暖纸，也不把侧栏做成暗色
 - 无客户照片、无真实标书样张可当品牌图

@@ -40,7 +40,7 @@ semantic_acceptance均为false，不能据此宣称模型准确率或完整流�
   `/tmp/kb-semantic-v2/`。预期文字做了合同适配，但没有改成人工ground truth。
 
 condition-scope的明确绑定只是合成输入前提，不表示真实文件已完成范围裁决。
-本批测试独立review，尚未覆盖locate/associate的整链生成，也不能代替Extract逐项完整性、
+本批只覆盖 review，不能代替 Extract 逐项完整性、
 评分规则/否决边界的完整业务评测或真实文件人工验收。
 
 校验/导出和人工判定见[评测流程](semantic-evaluation.md)。导出时case_id、category、
