@@ -417,7 +417,8 @@ def test_equal_unbound_text_does_not_infer_or_erase_a_different_source(tmp_path)
     reviewed().apply_reviewed_body_dispositions(compiled, documents, decisions, facts)
     outline = outline_from_compiled(snapshot, compiled)
     reviewed().bind_reviewed_outline_facts(outline, compiled, facts)
-    targets = [t for c in outline['chapters'] for t in c['targets'] if t['purpose'] == body_fact['_source_text']]
+    targets = [t for c in outline['chapters'] for t in c['targets'] if t['purpose'] == body_fact['_source_text']
+               and not t['target_id'].endswith(':answer')]
     assert len(targets) == 3 and sum(bool(t.get('source_excerpts')) for t in targets) == 1
 
 

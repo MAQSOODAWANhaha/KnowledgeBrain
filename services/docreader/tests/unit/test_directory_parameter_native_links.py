@@ -12,7 +12,7 @@ from docreader.tender import authoring_pipeline as pipeline
 from docreader.tender import directory_compile as compiler
 from docreader.tender.authoring_coverage import pending_outline_issues
 from test_authoring_pipeline_boundaries import budget, snapshot
-from test_directory_compile import entry, item, node, plan, point, window
+from test_directory_compile import entry, item, node, plan, window
 
 
 CONTRACT = 'source_bound_parameter_tables_v1'
@@ -212,19 +212,21 @@ def test_same_source_part_in_an_independent_original_is_not_used_instead_of_the_
 
 async def test_native_originals_appear_once_in_word_and_child_has_one_response_without_column_fragments(tmp_path):
     artifacts = ArtifactStore(tmp_path/'artifacts')
-    grid = lambda label: {'row_count': 3, 'column_count': 3, 'cells': [
-        {'row': 0,'column': 0,'row_span': 1,'col_span': 3,'text': '采购规格'},
-        {'row': 1,'column': 0,'row_span': 1,'col_span': 1,'text': '产品'},
-        {'row': 1,'column': 1,'row_span': 2,'col_span': 1,'text': label},
-        {'row': 1,'column': 2,'row_span': 2,'col_span': 1,'text': ''},
-        {'row': 2,'column': 0,'row_span': 1,'col_span': 1,'text': '数量1'}]}
+    def grid(label):
+        return {'row_count': 3, 'column_count': 3, 'cells': [
+            {'row': 0,'column': 0,'row_span': 1,'col_span': 3,'text': '采购规格'},
+            {'row': 1,'column': 0,'row_span': 1,'col_span': 1,'text': '产品'},
+            {'row': 1,'column': 1,'row_span': 2,'col_span': 1,'text': label},
+            {'row': 1,'column': 2,'row_span': 2,'col_span': 1,'text': ''},
+            {'row': 2,'column': 0,'row_span': 1,'col_span': 1,'text': '数量1'}]}
     fixed = snapshot(artifacts, [{'text': '\n'.join(['服务方案', '软件授权采购', '9个月授权，7×24服务，1/4/12小时响应。',
                                                      *[f'服务范围{number}' for number in range(25)]])},
                                  {'grid': grid('源数')}, {'grid': grid('态势感知与安')}, {'grid': grid('全运营平台')},
                                  {'text': '完整交付授权证明，未知企业值仍留空。'}])
     documents = compiler.documents_from_frozen(artifacts, artifacts.read_json(fixed['frozen_ref']))
     pages = documents[0]['pages']
-    for part in documents[0]['template_parts'].values():part['header_row_count'] = 1
+    for part in documents[0]['template_parts'].values():
+        part['header_row_count'] = 1
     parent = {**node('service', 0, 0, document_id='document'), 'response_kind': 'narrative',
               'body_windows': [window(page, 0, len(text.splitlines())-1, document_id='document') for page,text in enumerate(pages)]}
     compiled = compiler.compile_directory(plan([parent], [item('service')]), documents)

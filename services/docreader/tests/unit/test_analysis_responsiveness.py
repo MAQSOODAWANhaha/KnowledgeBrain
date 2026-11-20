@@ -13,7 +13,7 @@ from test_analysis_checks import Model, Receipts, all_source_candidate, budget, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("planning_step", [
-    "review_requests", "locate_requests", "association_requests", "descriptors",
+    "review_requests", "route_problems", "descriptors",
 ])
 async def test_planning_keeps_loop_responsive_and_preserves_request_receipts(tmp_path, monkeypatch, planning_step):
     data = await scenario(tmp_path)
@@ -21,7 +21,7 @@ async def test_planning_keeps_loop_responsive_and_preserves_request_receipts(tmp
     expected_model = Model(locate=all_source_candidate)
     expected = await run(data, expected_model, admission)
     assert expected["blocking"] is False
-    assert {payload["operation"] for payload in expected_model.calls} == {"review", "locate", "associate"}
+    assert {payload["operation"] for payload in expected_model.calls} == {"review"}
     loop = asyncio.get_running_loop()
     responses = []
 

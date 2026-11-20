@@ -81,7 +81,7 @@ async def test_saved_review_worker_receives_actual_saved_ref_without_generating_
                         lambda *args, **kwargs: pytest.fail("review must never compile a new Word"))
     monkeypatch.setattr("docreader.integrations.web.ModelConfig", object(), raising=False)
     from docreader.llm.config import ModelConfig
-    monkeypatch.setattr(ModelConfig, "from_env", classmethod(lambda cls: type("Config", (), {"chat": type("Chat", (), {"context_tokens": 131072, "model": "test"})()})()))
+    monkeypatch.setattr(ModelConfig, "from_env", classmethod(lambda cls: type("Config", (), {"chat": type("Chat", (), {"context_tokens": 131072, "model": "test", "reasoning_effort": None})()})()))
     await execute_authoring_job(started["review"]["execution_id"], runtime.settings)
     assert captured["version_id"] == request["version_id"] and captured["reason"] == request["reason"]
     assert runtime.bridge.artifacts.read_bytes(captured["saved_ref"]) == data

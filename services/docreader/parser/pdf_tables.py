@@ -38,6 +38,9 @@ class PdfTableGrid:
     cells: list[PdfTableCell] = field(default_factory=list)
     merged_ranges: list[tuple[int, int, int, int]] = field(default_factory=list)
     column_edges: list[float] = field(default_factory=list)
+    # Ruled geometry can continue across a page. Glyph alignment cannot.
+    ruled: bool = False
+    split_row: bool = False
 
     def contains_point(self, x: float, y: float) -> bool:
         return self.left <= x <= self.right and self.bottom <= y <= self.top
@@ -267,7 +270,66 @@ def _usable_ruled_tables(
         candidates = _tables_from_rules(horizontal, vertical, chars)
     except TableExtractionLimitError:
         return []
-    return [grid for grid in candidates if _grid_usable(grid)]
+    usable = [grid for grid in candidates if _grid_usable(grid)]
+    for grid in usable:
+        grid.ruled = True
+        if _edge_is_open(grid, vertical):
+            grid.split_row = True
+    return usable
+
+
+def _edge_is_open(grid: PdfTableGrid, vertical: list[tuple[float, float, float]]) -> bool:
+    """A vertical rule past the first or last horizontal edge is a cut row."""
+    for x_pos, start, end in vertical:
+        low, high = (start, end) if start <= end else (end, start)
+        if x_pos < grid.left - 4 or x_pos > grid.right + 4:
+            continue
+        if low < grid.bottom - 3.5 and high >= grid.bottom - 1:
+            return True
+        if high > grid.top + 3.5 and low <= grid.top + 1:
+            return True
+    return False
+
+
+def grid_rows(grid: PdfTableGrid) -> list[list[str]]:
+    rows = []
+    for row in range(grid.row_count):
+        cells = sorted((cell for cell in grid.cells if cell.row == row), key=lambda cell: cell.column)
+        rows.append([cell.text for cell in cells])
+    return rows
+
+
+def grids_from_rule_segments(horizontal, vertical, chars) -> list[PdfTableGrid]:
+    """Ruled grids from already collected line segments. Sets ruled and split_row."""
+    return _usable_ruled_tables(horizontal, vertical, chars)
+
+
+def continuations_for_extracted_pages(pages: list[dict]) -> tuple[list[list[PdfTableGrid]], list[dict]]:
+    """Extract each page, then link only closed ruled tables. Grids stay page-local."""
+    from docreader.parser.continuation import ruled_table_continuations
+
+    extracted = []
+    described = []
+    for spec in pages:
+        grids = grids_from_rule_segments(spec.get("horizontal") or [], spec.get("vertical") or [], spec.get("chars") or [])
+        extracted.append(grids)
+        described.append({
+            "page": spec["page"],
+            "height": spec.get("height") or 0,
+            "scanned": bool(spec.get("scanned")),
+            "body_spans": list(spec.get("body_spans") or []),
+            "tables": [{
+                "table_id": f"page:{spec['page']}:table:{index}",
+                "ruled": grid.ruled,
+                "top": grid.top,
+                "bottom": grid.bottom,
+                "column_edges": list(grid.column_edges),
+                "column_count": grid.column_count,
+                "split_row": grid.split_row,
+                "rows": grid_rows(grid),
+            } for index, grid in enumerate(grids)],
+        })
+    return extracted, ruled_table_continuations(described)
 
 
 def extract_tables_from_page(page, raw, chars: list[dict]) -> list[PdfTableGrid]:

@@ -9,7 +9,6 @@ import asyncio
 from collections import Counter
 from copy import deepcopy
 import hashlib
-import itertools
 import json
 import re
 
@@ -298,7 +297,9 @@ class _Analysis:
                 break
             ids, selected = expanded, sources
         fields = dict(source_views=views, items=items, relations=relations,
-                      dispositions=[self.dispositions[r] for r in ranges], issues=_public_issues(problems))
+                      # Loaded page/section siblings without a disposition are reading context only.
+                      dispositions=[self.dispositions[r] for r in ranges if r in self.dispositions],
+                      issues=_public_issues(problems))
         if work_unit is None:
             return self.stable_payload("review", "review", **fields)
         return self.payload("review", work_unit, **fields)
@@ -604,10 +605,45 @@ class _Analysis:
             results.append(value)
         return plan_ref, results
 
+    def _flag_unreadable_page(self, key):
+        unit = _stable_unit("review-page", {"document_id": key[0], "page_ordinal": key[1]})
+        if unit in self.incomplete_requests:
+            return
+        problems = assign_issues([issue("analysis_page_source_unavailable",
+            "The selected complete physical PDF page has missing or partial source; source revision is required.")],
+            unit)
+        self.problems.extend(problems)
+        self.protected.update(problem["issue_id"] for problem in problems)
+        self.host_issue_ids.update(problem["issue_id"] for problem in problems)
+        self.incomplete_requests.append(unit)
+
+    def _expand_review_ranges(self, ranges):
+        """Load frozen page and section siblings into the same review. Do not ask the model to name them."""
+        selected = set(ranges)
+        for range_id in list(selected):
+            for key, page_ranges in self.pages.items():
+                if range_id not in page_ranges:
+                    continue
+                if key in self.unreadable_pages:
+                    self._flag_unreadable_page(key)
+                else:
+                    selected.update(page_ranges)
+            source = self.sources.get(range_id)
+            if source is not None:
+                selected.update(self.sections.get((source["document_id"], source.get("section_id")), ()))
+        # Set order differs between processes; packing and paid request bytes must not.
+        return sorted((range_id for range_id in selected if range_id in self.sources),
+                      key=lambda range_id: self.source_order(self.sources[range_id]))
+
     def review_requests(self):
+        documents = {source["document_id"] for source in self.sources.values()}
+        for key in self.unreadable_pages:
+            if key[0] in documents:
+                self._flag_unreadable_page(key)
         payloads = []
         for pack in self.packs.values():
-            ranges = [r["range_id"] for r in pack["body"] if r["range_id"] not in host_reviewed_ranges(pack)]
+            ranges = self._expand_review_ranges(
+                [r["range_id"] for r in pack["body"] if r["range_id"] not in host_reviewed_ranges(pack)])
             current = []
             for range_id in ranges:
                 trial = self.review_payload([*current, range_id])
@@ -663,83 +699,17 @@ class _Analysis:
                 issues=_public_issues(self.problems)))
         return payloads
 
-    def locate_requests(self):
-        """Cover every item pair with block unions; never keyword filtering."""
-        def discovery(items, work_unit=None):
-            ids = {item["item_id"] for item in items}
-            relations = [r for r in self.relations.values() if {r["from_item_id"], r["to_item_id"]} <= ids]
-            selected = {}
-            for entry in [*items, *relations]:
-                for evidence in entry["evidence"]:
-                    source = self.sources[evidence["range_id"]]
-                    key = (source["document_id"], source.get("section_id"))
-                    selected.setdefault(key, {})[evidence["range_id"]] = None
-            catalog = []
-            for document in self.catalog:
-                sections = [{**section, "range_ids": list(selected[key])}
-                            for section in document["sections"]
-                            if (key := (document["document_id"], section["section_id"])) in selected]
-                if sections:
-                    catalog.append({**document, "sections": sections})
-            if work_unit is None:
-                return self.stable_payload("locate", "discovery", items=items, relations=relations, catalog=catalog)
-            return self.payload("locate", work_unit, items=items, relations=relations, catalog=catalog)
-
-        all_items = list(self.items.values())
-        if all_items and self.budget.measure("verify", discovery(all_items))["fits"] is not False:
-            requests = [discovery(all_items)]
-        else:
-            blocks, current = [], []
-            for item in all_items:
-                # Initial estimate reserves both sides' items and navigation;
-                # actual unions below also account for cross-block relations.
-                trial = discovery([*current, item], "discovery-capacity")
-                trial["items"] *= 2
-                trial["catalog"] *= 2
-                if current and self.budget.measure("verify", trial)["fits"] is False:
-                    blocks.append(current)
-                    current = []
-                current.append(item)
-            if current:
-                blocks.append(current)
-            requests = []
-            while blocks:
-                # Repartition globally so splitting an oversized union never
-                # loses pairs between the two halves of a split block.
-                groups = (itertools.combinations(range(len(blocks)), 2) if len(blocks) > 1
-                          else [(0,)])
-                requests = []
-                for group in groups:
-                    payload = discovery([item for index in group for item in blocks[index]])
-                    splittable = [index for index in group if len(blocks[index]) > 1]
-                    if self.budget.measure("verify", payload)["fits"] is False and splittable:
-                        index = max(splittable, key=lambda index: len(blocks[index]))
-                        block = blocks[index]
-                        middle = len(block) // 2
-                        blocks[index:index + 1] = [block[:middle], block[middle:]]
-                        break
-                    requests.append(payload)
-                else:
-                    break
-        def reference(problems):
-            ids = {identity for problem in problems for identity in problem.get("item_ids", [])}
-            ranges = {problem["range_id"] for problem in problems if problem.get("range_id")}
-            items = [i for i in all_items if i["item_id"] in ids or any(e["range_id"] in ranges for e in i["evidence"])]
-            ranges.update(e["range_id"] for i in items for e in i["evidence"])
-            return self.stable_payload("locate", "reference", source_views=self.views(ranges), items=items,
-                                       issues=_public_issues(problems))
-
-        # Freeze routing before localization. Later findings cannot recursively
-        # reschedule the phase; successful receipts rebuild this exact plan.
+    def route_problems(self):
+        """Host bookkeeping for existing problems; it builds no model request."""
+        # Freeze routing once. Later findings cannot recursively reschedule it.
         self.local_candidates, self.problem_routing, self.problem_dependencies = [], [], {}
-        reference_groups = []
         for group in _issue_groups(assign_issues(self.problems, "analysis")):
             identities = [p["issue_id"] for p in group]
             for identity in identities:
                 self.problem_dependencies[identity] = set(identities)
             needs = [p["needs_source"] for p in group if "needs_source" in p]
             route = "reference"
-            reason = "需要额外原文或尚未判断，定位一次。"
+            reason = "需要额外原文或尚未判断，保留待核对。"
             if True not in needs and not any(p["blocking"] for p in group):
                 route, reason = "note", "非阻断提示保留展示。"
             elif True not in needs and False in needs:
@@ -754,102 +724,8 @@ class _Analysis:
                     local = _stable_unit("local", {"issue_ids": identities, "range_ids": ranges, "item_ids": ids})
                     self.local_candidates.append({"candidate_id": f"{local}:c1",
                         "issue_ids": identities, "range_ids": ranges, "item_ids": ids, "reason": reason})
-            if route == "reference":
-                reference_groups.append(group)
             self.problem_routing.append({"issue_ids": identities, "route": route, "reason": reason})
 
-        # Independent groups may share a request. An indivisible continuation
-        # group is never cut to satisfy the eight-record batching preference.
-        current, batch = [], None
-        for group in reference_groups:
-            if current and len(current) + len(group) > 8:
-                requests.append(batch)
-                current = []
-            trial = reference([*current, *group])
-            if current and self.budget.measure("verify", trial)["fits"] is False:
-                requests.append(batch)
-                current = []
-                trial = reference(group)
-            current.extend(group)
-            batch = trial
-        if current:
-            requests.append(batch)
-        return requests
-
-    def association_requests(self, candidates):
-        groups = []
-        for candidate in candidates:
-            # Jointly resolve one concrete question's alternative targets. A
-            # shared source or item alone does not make separate candidates one.
-            keys = {linked for identity in candidate["issue_ids"]
-                    for linked in self.problem_dependencies.get(identity, {identity})}
-            group = [candidate]
-            rest = []
-            for previous, previous_keys in groups:
-                if keys & previous_keys:
-                    group.extend(previous)
-                    keys |= previous_keys
-                else:
-                    rest.append((previous, previous_keys))
-            # A newly merged component can connect an earlier component too.
-            while any(keys & prior_keys for _, prior_keys in rest):
-                previous, prior_keys = next((g, k) for g, k in rest if keys & k)
-                rest.remove((previous, prior_keys))
-                group.extend(previous)
-                keys |= prior_keys
-            groups = [*rest, (group, keys)]
-        requests = []
-        for group, issue_ids in groups:
-            ranges = {r for c in group for r in c["range_ids"]}
-            selected_pages = [(ref["document_id"],ref["page_ordinal"])
-                              for candidate in group for ref in candidate.get("page_refs", [])]
-            if any(page not in self.pages or page in self.unreadable_pages for page in selected_pages):
-                unit = _stable_unit("associate", {"candidates": [c["candidate_id"] for c in group],
-                                                 "pages": selected_pages})
-                problems = assign_issues([issue("analysis_page_source_unavailable",
-                    "The selected complete physical PDF page has missing or partial source; source revision is required.")],
-                    unit)
-                self.problems.extend(problems)
-                self.protected.update(problem["issue_id"] for problem in problems)
-                self.host_issue_ids.update(problem["issue_id"] for problem in problems)
-                self.incomplete_requests.append(unit)
-                continue
-            ranges.update(range_id for page in selected_pages for range_id in self.pages[page])
-            selected_sections = [self.sections.get((ref["document_id"], ref["section_id"]), set())
-                                 for candidate in group for ref in candidate.get("section_refs", [])]
-            if any(not selected for selected in selected_sections):
-                unit = _stable_unit("associate", {"candidates": [c["candidate_id"] for c in group],
-                                                 "sections": [ref for c in group for ref in c.get("section_refs", [])]})
-                problems = assign_issues([issue("analysis_section_source_unavailable",
-                    "The selected complete section has no readable frozen source; source revision is required.")],
-                    unit)
-                self.problems.extend(problems)
-                self.protected.update(problem["issue_id"] for problem in problems)
-                self.host_issue_ids.update(problem["issue_id"] for problem in problems)
-                self.incomplete_requests.append(unit)
-                continue
-            ranges.update(range_id for selected in selected_sections for range_id in selected)
-            ids = {i for c in group for i in c["item_ids"]}
-            problems = [p for p in self.problems if p["issue_id"] in issue_ids]
-            ranges.update(p["range_id"] for p in problems if p.get("range_id"))
-            ids.update(i for p in problems for i in p.get("item_ids", []))
-            canonical = {self.sources[r].get("source_range_id", r) for r in ranges if r in self.sources}
-            items = [i for i in self.items.values() if i["item_id"] in ids or any(
-                self.sources[e["range_id"]].get("source_range_id", e["range_id"]) in canonical for e in i["evidence"])]
-            ids.update(i["item_id"] for i in items)
-            ranges.update(e["range_id"] for i in items for e in i["evidence"])
-            relations = [r for r in self.relations.values() if {r["from_item_id"], r["to_item_id"]} <= ids]
-            ranges.update(e["range_id"] for r in relations for e in r["evidence"])
-            views = self.views(ranges, complete=True)
-            supplied = _view_ids(views)
-            # Context does not carry a complete item inventory. Never expose a
-            # disposition whose item identities are absent from this request.
-            dispositions = [d for r, d in self.dispositions.items()
-                            if r in ranges and r in supplied and set(d["item_ids"]) <= ids]
-            requests.append(self.stable_payload("associate", "associate", source_views=views,
-                items=items, relations=relations, candidates=group, issues=_public_issues(problems),
-                dispositions=dispositions))
-        return requests
 
 
 async def verify_analysis(source_plan, items_index, artifacts, model, budget, *, identity, save) -> dict:
@@ -876,45 +752,13 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     if not isinstance(source_reviews, list):
         raise ValueError("Cached source review requests must be an array")
     review_plan_ref, source_reviewed = await context.execute("review", source_reviews, model, save)
-    locate_requests = await asyncio.to_thread(context.locate_requests)
-    locate_plan_ref, located = await context.execute("locate", locate_requests, model, save)
-    candidates = [c for result in located if result for c in result["candidates"]] + context.local_candidates
-    associations = await asyncio.to_thread(context.association_requests, candidates)
-    batched = hasattr(model, "call_groups_validated")
-    if batched:
-        from docreader.tender.checks.analysis_batch_execution import execute_batches, joint_batches
-        from docreader.tender.checks.analysis_batches import make_batches
-
-        batches = await asyncio.to_thread(make_batches, associations, budget,
-            source_order=lambda identity: context.source_order(context.sources[identity]),
-            document_order=context.document_order.__getitem__)
-        association_plan_ref, associations, associated = await execute_batches(
-            context, "associate", batches, model, save)
-    else:
-        association_plan_ref, associated = await context.execute("associate", associations, model, save)
-    joint, decisions, relations = [], [], list(context.relations.values())
-    unverified, associated_only = set(), set()
-    for payload, result in zip(associations, associated, strict=True):
-        if result is None:
-            continue
-        decisions.extend(result["decisions"])
-        relations.extend(result["relations"])
-        if not result["decisions"]:
-            # No proposal to accept: its relations stay visible but unverified, and its findings go to a human.
-            unverified.update(r["relation_id"] for r in result["relations"])
-            associated_only.update(c["candidate_id"] for c in payload["candidates"])
-            continue
-        joint.append({**payload, "operation": "review", "work_unit_id": payload["work_unit_id"].replace("associate-", "joint-"),
-                      "dispositions": [],
-                      "relations": [*payload["relations"], *result["relations"]], "decisions": result["decisions"],
-                      "issues": _public_issues(assign_issues([*payload["issues"], *result["findings"]],
-                                                             payload["work_unit_id"]))})
-    if batched:
-        joint_requests = await asyncio.to_thread(joint_batches, context, batches,
-            {payload["work_unit_id"]: result for payload, result in zip(associations, associated, strict=True)})
-        joint_plan_ref, joint, reviewed = await execute_batches(context, "joint", joint_requests, model, save)
-    else:
-        joint_plan_ref, reviewed = await context.execute("joint", joint, model, save)
+    # Routing is host bookkeeping. It must not become another locate model round.
+    await asyncio.to_thread(context.route_problems)
+    locate_plan_ref = association_plan_ref = joint_plan_ref = None
+    candidates = list(context.local_candidates)
+    joint, reviewed = [], []
+    decisions, relations = [], list(context.relations.values())
+    unverified, associated_only = set(), {candidate["candidate_id"] for candidate in candidates}
     completed = [result for result in [*source_reviewed, *reviewed] if result]
     required_ranges = {r["range_id"] for pack in context.packs.values() for r in pack["body"]
                        if r["range_id"] not in host_reviewed_ranges(pack)}

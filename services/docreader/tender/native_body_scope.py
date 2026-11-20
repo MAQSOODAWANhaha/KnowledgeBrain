@@ -332,13 +332,13 @@ class NativeBodyScope:
                         or target['target_id'] not in app.get('affected_target_ids', [])
                         or app.get('original_ref') != self.frozen[row['document_id']]['original_ref']):
                     continue
-                for fragment in app.get('original_fragments', []):
-                    if (fragment['page'], fragment['line']) != point[1:]:
+                for original in app.get('original_fragments', []):
+                    if (original['page'], original['line']) != point[1:]:
                         continue
-                    low, high = fragment['start'], fragment['end']
+                    low, high = original['start'], original['end']
                     if (app['original_ref'] != self.frozen[row['document_id']]['original_ref']
-                            or fragment['line_text'] != text or not 0 <= low < high <= len(text)
-                            or _sha(text[low:high]) != fragment['text_sha256']):
+                            or original['line_text'] != text or not 0 <= low < high <= len(text)
+                            or _sha(text[low:high]) != original['text_sha256']):
                         raise ArtifactIntegrityError('decoration application does not match its frozen source')
                     if max(start, low) < min(end, high):
                         fragments.append((low, high))

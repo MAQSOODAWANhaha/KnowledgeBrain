@@ -86,7 +86,8 @@ def test_whitespace_equivalence_only_creates_candidate_not_exact_binding(tmp_pat
 def test_ambiguous_or_unmatched_prose_stays_source_pending(tmp_path, kind):
     values, _, _ = prose_case(tmp_path, copies=2 if kind == 'native_duplicate' else 1,
                              grid_duplicate=kind == 'grid_duplicate')
-    if kind == 'layout_duplicate': values[2][0]['pages'][0] += '\n第一职责。'
+    if kind == 'layout_duplicate':
+        values[2][0]['pages'][0] += '\n第一职责。'
     if kind == 'no_match':
         values[2][0]['pages'][0] = '另一职责。'
         target = values[4]['chapters'][0]['targets'][0]

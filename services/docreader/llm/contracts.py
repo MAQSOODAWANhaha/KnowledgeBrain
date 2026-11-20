@@ -3,7 +3,7 @@ from functools import lru_cache
 import hashlib
 import json
 
-from pydantic import Field, create_model
+from pydantic import Field
 
 from docreader.llm.request import ModelConfigurationError
 from docreader.tender.status import AuthoringTask
@@ -20,7 +20,7 @@ from docreader.tender.native_requirement_sources import (
     native_requirement_model,
 )
 from docreader.tender.schema import (
-    AnalysisIssue, AnalysisReviewResponse, AnalysisSharedFinding, AnalysisVersion,
+    AnalysisIssue, AnalysisReviewResponse, AnalysisVersion,
     AssociationResult, AuthoringBasisResponse, AuthoringContentReviewResponse, AuthoringReviewResponse,
     AuthoringStructureResponse, Contract,
     Evidence, Extraction, ItemDispositionOutput, LocateResult, OCRResponse, OutlineAssemblyResponse,
@@ -43,21 +43,7 @@ class ExtractionOutput(Contract):
     issues: list[AnalysisIssue]
 
 
-def _batch_response(name, response):
-    # Reuse the semantic result fields without a second per-member version or
-    # the host's reviewed_* coverage. The receiver still recovers members singly.
-    member = create_model(name + 'WorkUnit', __base__=Contract,
-        work_unit_id=(Text, ...), **{
-            key: (field.annotation, field) for key, field in response.model_fields.items()
-            if key != 'schema_version'})
-    return create_model(name + 'Batch', __base__=Contract,
-        schema_version=(AnalysisVersion, ...), work_units=(list[member], ...),
-        shared_findings=(list[AnalysisSharedFinding], ...))
-
-
 _VERIFY = {'locate': LocateResult, 'associate': AssociationResult, 'review': AnalysisReviewResponse}
-_BATCHES = {operation: _batch_response(response.__name__, response)
-            for operation, response in _VERIFY.items() if operation != 'locate'}
 _DIRECT = {
     'ocr': OCRResponse, 'plan': Plan, 'authoring_basis': AuthoringBasisResponse,
     'authoring_write': WritingResponse, 'authoring_review': AuthoringContentReviewResponse,
@@ -69,6 +55,9 @@ def response_model(task, payload):
     if task == 'authoring_review' and payload.get('operation') == 'review_saved_word':
         return AuthoringReviewResponse
     if task == AuthoringTask.DIRECTORY_PLAN:
+        if payload.get('operation') == 'select_bid_format_outline_v1':
+            from docreader.tender.bid_format_outline import BidFormatOutline
+            return BidFormatOutline
         if payload.get('operation') == 'select_directory_refs_v2':
             return RefDirectoryPlanV2
         return RefDirectoryPlan if payload.get('operation') == 'select_directory_refs_v1' else DirectoryPlan
@@ -99,9 +88,8 @@ def response_model(task, payload):
         if payload.get('schema_version') != 2:
             return Verification
         operation = payload.get('operation', 'review')
-        models = _BATCHES if 'work_units' in payload else _VERIFY
-        if operation in models:
-            return models[operation]
+        if operation in _VERIFY:
+            return _VERIFY[operation]
     elif task in _DIRECT:
         return _DIRECT[task]
     raise ModelConfigurationError('model task or operation has no generation contract')
@@ -119,7 +107,7 @@ def output_schema(task, payload):
 
 
 def output_contract_spec():
-    models = {*_DIRECT.values(), *_VERIFY.values(), *_BATCHES.values(), ExtractionOutput,
+    models = {*_DIRECT.values(), *_VERIFY.values(), ExtractionOutput,
               Extraction, Verification, OutlineResponse, OutlineAssemblyResponse,
               AuthoringReviewResponse, AuthoringContentReviewResponse,
               DirectoryPlan, RefDirectoryPlan, RefDirectoryPlanV2, MaterialPlan, NativeMaterialPlan, RequirementPlan, ClassificationPlan, ParameterPlan,

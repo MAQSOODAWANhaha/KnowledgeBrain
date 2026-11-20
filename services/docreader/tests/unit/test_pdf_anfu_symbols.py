@@ -126,6 +126,12 @@ def test_layout_never_restores_a_bullet_without_complete_matching_pdf_proof(prob
             evidence.append({**proof(index=6), 'normalized_symbol': '○'})
     before = deepcopy(evidence)
     layout, issues = _normalize_layout_symbols([original], {'source_contract': {'glyph_normalizations': evidence}})
-    assert layout == [original] and len(issues) == 1
+    # A conflicting claimed meaning stays private. The occurrence whose font proof
+    # still matches is substituted on its own; the page is not all-or-nothing.
+    if problem == 'mixed_meaning':
+        assert layout == ['●服务要求\n\uf06c另一要求']
+    else:
+        assert layout == [original]
+    assert len(issues) == 1
     assert issues[0]['code'] == 'outline_directory_symbol_unconfirmed'
     assert evidence == before

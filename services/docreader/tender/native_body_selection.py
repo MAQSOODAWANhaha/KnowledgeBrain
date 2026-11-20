@@ -115,10 +115,13 @@ class NativeBodySelectionView:
             else (c.get('document_id'), c['table_id']) in tables)], units)
 
     def response_schema(self):
-        integer = lambda maximum: {'type': 'integer', 'minimum': 1, 'maximum': max(maximum, 1)}
-        obj = lambda properties: {'type': 'object', 'properties': properties,
-                                 'required': list(properties), 'additionalProperties': False}
-        array = lambda items, maximum: {'type': 'array', 'items': items, 'maxItems': maximum}
+        def integer(maximum):
+            return {'type': 'integer', 'minimum': 1, 'maximum': max(maximum, 1)}
+        def obj(properties):
+            return {'type': 'object', 'properties': properties,
+                    'required': list(properties), 'additionalProperties': False}
+        def array(items, maximum):
+            return {'type': 'array', 'items': items, 'maxItems': maximum}
         islands = [i for u in self.units for i in u['islands']]
         interval = {'type': 'array', 'prefixItems': [integer(max(self.by_cell, default=1)),
             integer(max(map(len, self.parts.values()), default=1)),
@@ -164,9 +167,7 @@ class NativeBodySelectionView:
     def accept(self, raw):
         if not isinstance(raw, dict) or set(raw) != {'native_choices'} or type(raw['native_choices']) is not list:
             _reject('Return only the complete native_choices array.')
-        choices = raw['native_choices']
-        if len(choices) != len(self.units):
-            _reject('Return every supplied unit exactly once, in source order.')
+        choices = self._align_choices(raw['native_choices'])
         units, pending = [], []
         for expected, choice in zip(self.units, choices):
             if (not isinstance(choice, dict) or set(choice) != {'unit_id', 'islands'} or
@@ -232,13 +233,63 @@ class NativeBodySelectionView:
                 for cell_id, intervals in contexts.items():
                     if any(low < end and start < high for low, high in intervals for start, end in selected.get(cell_id, [])):
                         _reject('Source body and explicit context must be disjoint.')
-                if all(i['state'] == 'selected' for i in materialized):
-                    self._anchor_coverage(expected, selected, contexts)
+                if all(i['state'] == 'selected' for i in materialized) and not self._anchor_covered(expected, selected, contexts):
+                    for island in materialized:
+                        island['state'] = 'unresolved'
+                        island['body'] = []
+                        pending.append({'unit_id': expected['unit_id'], 'island_id': island['island_id'],
+                            'reason': 'native_body_anchor_uncovered', 'outlet': 'manual_source_review',
+                            'enterprise_confirmed': False})
+                    context_pieces = []
             units.append({'unit_id': expected['unit_id'], 'islands': materialized,
                           'context': context_pieces if prose else self._context(selected)})
         return {'units': units, 'pending': pending, 'complete': not pending}
 
-    def _anchor_coverage(self, unit, body, context):
+    def _align_choices(self, choices):
+        if type(choices) is not list:
+            _reject('Return every supplied unit exactly once, in source order.')
+        by_unit = {}
+        for choice in choices:
+            if not isinstance(choice, dict) or type(choice.get('unit_id')) is not int or choice['unit_id'] in by_unit:
+                _reject('Return every supplied unit exactly once, in source order.')
+            by_unit[choice['unit_id']] = choice
+        ordered = []
+        for expected in self.units:
+            prose = self._is_prose(expected)
+            choice = by_unit.pop(expected['unit_id'], None)
+            if choice is None:
+                choice = {'unit_id': expected['unit_id'], 'islands': [
+                    self._unresolved_island(island, prose) for island in expected['islands']]}
+            else:
+                choice = {**choice, 'islands': self._align_islands(expected, choice.get('islands'), prose)}
+            ordered.append(choice)
+        if by_unit:
+            _reject('Return every supplied unit exactly once, in source order.')
+        return ordered
+
+    def _align_islands(self, unit, islands, prose):
+        if type(islands) is not list:
+            _reject('Return every supplied island once; source text must not be echoed.')
+        by_island = {}
+        for island in islands:
+            if not isinstance(island, dict) or type(island.get('island_id')) is not int or island['island_id'] in by_island:
+                _reject('Return every supplied island once; source text must not be echoed.')
+            by_island[island['island_id']] = island
+        ordered = []
+        for expected in unit['islands']:
+            ordered.append(by_island.pop(expected['island_id'], self._unresolved_island(expected, prose)))
+        if by_island:
+            _reject('Return every supplied island once; source text must not be echoed.')
+        return ordered
+
+    @staticmethod
+    def _unresolved_island(island, prose):
+        unresolved = {'island_id': island['island_id'], 'state': 'unresolved', 'body': []}
+        if prose:
+            unresolved['context'] = []
+        return unresolved
+
+    def _anchor_covered(self, unit, body, context):
         for cell, start, end in unit['anchor_spans']:
             text, cursor = self.by_cell[cell]['text'], start
             for low, high in sorted([*body.get(cell, []), *context.get(cell, [])]):
@@ -246,10 +297,11 @@ class NativeBodySelectionView:
                 if low >= high:
                     continue
                 if text[cursor:low].strip():
-                    _reject('Keep every prior nonblank anchor character in body or explicit context.')
+                    return False
                 cursor = max(cursor, high)
             if text[cursor:end].strip():
-                _reject('Keep every prior nonblank anchor character in body or explicit context.')
+                return False
+        return True
 
     def _slice(self, cell, start, end):
         return {'cell_id': cell, 'start': start, 'end': end, 'text': self.by_cell[cell]['text'][start:end]}

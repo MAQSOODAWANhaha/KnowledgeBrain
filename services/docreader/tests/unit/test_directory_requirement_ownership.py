@@ -99,7 +99,9 @@ def test_clause_only_form_carrier_does_not_claim_a_narrative_response():
     apply_requirements(compiled, documents, [assignment(0, ids=('clause-1',))])
     assert compiled['chapters'][0]['requirements'] == ['须说明履约服务方案。']
     targets = outline_from_compiled(SNAPSHOT, compiled)['chapters'][0]['targets']
-    assert [target['kind'] for target in targets] == ['form', 'narrative']
+    tender = [target for target in targets if not target['target_id'].endswith(':answer')]
+    assert [target['kind'] for target in tender] == ['form', 'narrative']
+    assert [t.get('related_target_ids') for t in targets if t not in tender] == [[tender[1]['target_id']]]
 
 
 def test_clause_equal_to_form_body_is_not_owned_without_a_separate_narrative_outlet():
@@ -110,4 +112,6 @@ def test_clause_equal_to_form_body_is_not_owned_without_a_separate_narrative_out
     apply_requirements(compiled, documents, [assignment()])
     assert compiled['chapters'][0]['requirements'] == ['须说明履约服务方案。']
     targets = outline_from_compiled(SNAPSHOT, compiled)['chapters'][0]['targets']
-    assert [target['kind'] for target in targets] == ['form', 'narrative']
+    tender = [target for target in targets if not target['target_id'].endswith(':answer')]
+    assert [target['kind'] for target in tender] == ['form', 'narrative']
+    assert [t.get('related_target_ids') for t in targets if t not in tender] == [[tender[1]['target_id']]]

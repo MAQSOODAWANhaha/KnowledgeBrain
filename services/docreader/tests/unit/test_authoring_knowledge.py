@@ -52,6 +52,59 @@ async def test_retrieval_deduplicates_queries_and_freezes_excerpts_as_references
     assert "test-secret" not in json.dumps(result)
 
 
+async def test_ordinary_hit_uses_document_metadata_sha_even_when_the_id_differs(tmp_path):
+    tender = 'ab' * 32
+    document_id = '11111111-1111-1111-1111-111111111111'
+    version_id = '22222222-2222-2222-2222-222222222222'
+
+    async def handler(request):
+        if request.url.path == '/api/v1/search':
+            return httpx.Response(200, json={'hits': [hit(
+                document_id=document_id, version_id=version_id, product_id=PRODUCT)], 'warnings': []})
+        if request.url.path == f'/api/v1/documents/{document_id}':
+            return httpx.Response(200, json={
+                'id': document_id, 'product_version_id': version_id, 'file_name': 'tender.pdf',
+                'object_ref': 'objects/' + tender})
+        return httpx.Response(404)
+
+    artifacts = ArtifactStore(tmp_path)
+    result = await provider(handler).search([{'target_id': 't1', 'query': '权限管理'}], artifacts)
+    material = result['materials'][0]
+    assert material['locator']['document_id'] == document_id
+    assert material['locator']['source_sha256'] == tender
+    assert material['content_ref']['sha256'] != tender
+
+
+async def test_metadata_failure_quarantines_a_hit_when_a_tender_hash_is_excluded(tmp_path, monkeypatch):
+    async def sleep(_delay):
+        return None
+    monkeypatch.setattr('docreader.integrations.authoring_knowledge.asyncio.sleep', sleep)
+    from docreader.tender.authoring_coverage import apply_retrieved_knowledge
+
+    document_id = '11111111-1111-1111-1111-111111111111'
+    version_id = '22222222-2222-2222-2222-222222222222'
+    tender = 'cd' * 32
+
+    async def handler(request):
+        if request.url.path == '/api/v1/search':
+            return httpx.Response(200, json={'hits': [hit(
+                document_id=document_id, version_id=version_id, product_id=PRODUCT,
+                content='同字节招标文件片段')], 'warnings': []})
+        return httpx.Response(404)
+
+    artifacts = ArtifactStore(tmp_path)
+    searched = await provider(handler).search([{'target_id': 'clause:answer', 'query': '资格'}], artifacts)
+    assert searched['materials'][0]['locator']['source_identity'] == 'unconfirmed'
+    assert 'source_sha256' not in searched['materials'][0]['locator']
+    consumed = await apply_retrieved_knowledge(
+        provider(handler), [{'target_id': 'clause:answer', 'query': '资格'}], artifacts,
+        {'document_ids': [], 'source_shas': [tender]},
+        [{'target_id': 'clause:answer', 'support_origins': ['knowledge']}])
+    assert consumed['materials'] == []
+    assert consumed['answers'][0]['blank'] is True
+    assert any(issue['code'] == 'knowledge_source_unconfirmed' for issue in consumed['issues'])
+
+
 async def test_absent_configuration_and_empty_results_are_nonblocking(tmp_path):
     calls = []
 

@@ -1,5 +1,4 @@
 from copy import deepcopy
-import hashlib
 import json
 
 import pytest
@@ -15,7 +14,8 @@ from docreader.tender.native_requirement_sources import (
     plan_native_packs, native_output_bound, require_native_budget,
 )
 
-J=lambda value:json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+def J(value):
+    return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
 
 
 def synthetic(tmp_path, *, first='Alpha ', second=' Beta  0.5 / 5', label='name ', tail='tag', version='1'):
@@ -48,12 +48,26 @@ def reply(ledger, view=None, *, selected=None, scope='unassigned', chapter_ids=(
     if context:
         score=[r for r in refs(ledger,0,2) if r in view.refs]
         names=[r for r in refs(ledger,0,1)+refs(ledger,1,1) if r in view.refs]
-        if score:groups.append({'refs':score,'source_join':'paragraphs','parent_id':None});ctx+=score
-        if names:groups.append({'refs':names,'source_join':'continuation','parent_id':1 if score else None});ctx+=names
+        if score:
+            groups.append(
+                {'refs': score, 'source_join': 'paragraphs', 'parent_id': None}
+            )
+            ctx += score
+        if names:
+            groups.append(
+                {
+                    'refs': names,
+                    'source_join': 'continuation',
+                    'parent_id': 1 if score else None,
+                }
+            )
+            ctx += names
     rest=[r for r in view.refs if r not in selected+ctx]
     ds=[{'refs':selected,'kind':'requirement'}]
-    if ctx:ds.append({'refs':ctx,'kind':'context'})
-    if rest:ds.append({'refs':rest,'kind':'unresolved'})
+    if ctx:
+        ds.append({'refs': ctx, 'kind': 'context'})
+    if rest:
+        ds.append({'refs': rest, 'kind': 'unresolved'})
     return {'assignments':[],'contexts':groups,'native_assignments':[{'body_refs':selected,'context_id':len(groups) or None,
       'source_join':'continuation','scope':scope,'chapter_ids':list(chapter_ids)}],'native_dispositions':ds}
 
@@ -62,19 +76,22 @@ def native_source(accepted):return accepted['native_records'][0]['source']
 
 
 def test_new_models_extend_old_without_changing_legacy_schema():
-    r=J(RequirementPlan.model_json_schema());c=J(ClassificationPlan.model_json_schema())
+    r = J(RequirementPlan.model_json_schema())
+    c = J(ClassificationPlan.model_json_schema())
     assert issubclass(NativeRequirementPlan,RequirementPlan)
     assert issubclass(NativeClassificationPlan,ClassificationPlan)
     assert NativeRequirementPlan.model_validate({'assignments':[]}).assignments==[]
     assert J(RequirementPlan.model_json_schema())==r and J(ClassificationPlan.model_json_schema())==c
     assert 'native_assignments' not in RequirementPlan.model_fields
-    with pytest.raises(ValidationError):RequirementPlan.model_validate({'native_assignments':[]})
+    with pytest.raises(ValidationError):
+        RequirementPlan.model_validate({'native_assignments': []})
 
 
 @pytest.mark.parametrize(('first','second'), [('Alpha ',' Beta  0.5 / 5'),('接口（甲、乙','丙），每类0.25分，最多8分。'),('a  b  ',' c   d  42')])
 def test_exact_body_context_and_original_spacing(tmp_path,first,second):
     ledger,_,index,_=synthetic(tmp_path,first=first,second=second)
-    before=J(index.raw);accepted=ledger.view().accept(reply(ledger))
+    before = J(index.raw)
+    accepted = ledger.view().accept(reply(ledger))
     source=native_source(accepted)
     assert source['body']['text']==first+second
     assert [g['text'] for g in source['contexts']]==['5.00','name tag']
@@ -93,51 +110,83 @@ def test_native_does_not_depend_on_used_layout_lines(tmp_path):
     assert native_source(ledger.view().accept(reply(ledger)))['body']['text']=='Alpha  Beta  0.5 / 5'
 
 
-@pytest.mark.parametrize('bad',['missing','duplicate','unknown','context_as_body','unused_context','copy_text','unknown_chapter','cycle','carried_without_proof'])
+@pytest.mark.parametrize('bad',['duplicate','unknown','context_as_body','unused_context','copy_text','unknown_chapter','cycle','carried_without_proof'])
 def test_rejects_invalid_source_graph_without_mutation(tmp_path,bad):
-    ledger,_,_,_=synthetic(tmp_path);view=ledger.view();raw=reply(ledger);before=J(ledger.atoms)
-    if bad=='missing':raw['native_dispositions'].pop()
-    if bad=='duplicate':raw['native_dispositions'].append(deepcopy(raw['native_dispositions'][0]))
-    if bad=='unknown':raw['native_assignments'][0]['body_refs']=[max(view.refs)+1]
-    if bad=='context_as_body':raw['native_assignments'][0]['body_refs']=refs(ledger,0,2)
-    if bad=='unused_context':raw['native_assignments'][0]['context_id']=None
-    if bad=='copy_text':raw['native_assignments'][0]['source_text']='known source must not be echoed'
-    if bad=='unknown_chapter':raw['native_assignments'][0].update(scope='chapter',chapter_ids=['source-node-real-id-A'])
-    if bad=='cycle':raw['contexts'][0]['parent_id']=2
-    if bad=='carried_without_proof':raw['native_dispositions'][-1]['kind']='already_carried'
-    with pytest.raises((ModelContractError,ValidationError)):view.accept(raw)
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
+    raw = reply(ledger)
+    before = J(ledger.atoms)
+    if bad == 'missing':
+        raw['native_dispositions'].pop()
+    if bad == 'duplicate':
+        raw['native_dispositions'].append(deepcopy(raw['native_dispositions'][0]))
+    if bad == 'unknown':
+        raw['native_assignments'][0]['body_refs'] = [max(view.refs) + 1]
+    if bad == 'context_as_body':
+        raw['native_assignments'][0]['body_refs'] = refs(ledger, 0, 2)
+    if bad == 'unused_context':
+        raw['native_assignments'][0]['context_id'] = None
+    if bad == 'copy_text':
+        raw['native_assignments'][0]['source_text'] = 'known source must not be echoed'
+    if bad == 'unknown_chapter':
+        raw['native_assignments'][0].update(
+            scope='chapter', chapter_ids=['source-node-real-id-A']
+        )
+    if bad == 'cycle':
+        raw['contexts'][0]['parent_id'] = 2
+    if bad == 'carried_without_proof':
+        raw['native_dispositions'][-1]['kind'] = 'already_carried'
+    with pytest.raises((ModelContractError, ValidationError)):
+        view.accept(raw)
     assert J(ledger.atoms)==before
 
 
 def test_source_reversal_and_tampering_rejected(tmp_path):
-    ledger,_,_,_=synthetic(tmp_path);source=native_source(ledger.view().accept(reply(ledger)))
-    with pytest.raises((ModelContractError,ArtifactIntegrityError)):ledger.source(list(reversed(refs(ledger,0,3)+refs(ledger,1,3))),[],source_join='continuation')
+    ledger, _, _, _ = synthetic(tmp_path)
+    source = native_source(ledger.view().accept(reply(ledger)))
+    with pytest.raises((ModelContractError, ArtifactIntegrityError)):
+        ledger.source(
+            list(reversed(refs(ledger, 0, 3) + refs(ledger, 1, 3))),
+            [],
+            source_join='continuation',
+        )
     for field in ['text','identity','source_ref']:
         bad=deepcopy(source)
-        if field=='text':bad['body']['text']='changed'
-        if field=='identity':bad['source_id']='native-source-'+('0'*64)
-        if field=='source_ref':bad['body']['source_excerpts'][0]['source_ref']['source_index_ref']['sha256']='0'*64
-        with pytest.raises((ModelContractError,ArtifactIntegrityError)):ledger.validate_source(bad)
+        if field == 'text':
+            bad['body']['text'] = 'changed'
+        if field == 'identity':
+            bad['source_id'] = 'native-source-' + ('0' * 64)
+        if field == 'source_ref':
+            bad['body']['source_excerpts'][0]['source_ref']['source_index_ref'][
+                'sha256'
+            ] = '0' * 64
+        with pytest.raises((ModelContractError, ArtifactIntegrityError)):
+            ledger.validate_source(bad)
 
 
 def test_records_from_another_frozen_document_cannot_merge(tmp_path):
-    ledger,_,_,_=synthetic(tmp_path/'one');other,_,_,_=synthetic(tmp_path/'two',version='2')
+    ledger, _, _, _ = synthetic(tmp_path / 'one')
+    other, _, _, _ = synthetic(tmp_path / 'two', version='2')
     first=ledger.case(native_source(ledger.view().accept(reply(ledger))),origin='one')
     second=other.case(native_source(other.view().accept(reply(other))),origin='two')
-    with pytest.raises((ModelContractError,ArtifactIntegrityError)):NativeCaseView(ledger,[first,second])
+    with pytest.raises((ModelContractError, ArtifactIntegrityError)):
+        NativeCaseView(ledger, [first, second])
 
 
 def test_cross_pack_cases_require_explicit_C_and_preserve_original_ids(tmp_path):
     ledger,_,_,_=synthetic(tmp_path)
     one,two=ledger.view([0]),ledger.view([1])
-    with pytest.raises(ModelContractError):one.accept(reply(ledger,one,scope='chapter',chapter_ids=['c1'],context=False))
+    forced = one.accept(reply(ledger,one,scope='chapter',chapter_ids=['c1'],context=False))
+    assert forced['cases'] and all(record['scope'] == 'unassigned' for record in forced['native_records'])
     a=one.accept(reply(ledger,one,context=False))['cases'][0]
     b=two.accept(reply(ledger,two,context=False))['cases'][0]
     a=ledger.case(a['source'],origin=a['origin'],candidate_chapter_ids=['source-node-real-id-A'])
     b=ledger.case(b['source'],origin=b['origin'],candidate_chapter_ids=['source-node-real-id-B'])
     # Candidate owners are provenance, not an implicit merge decision.
-    c=NativeCaseView(ledger,[a,b]);before=J([a,b])
-    with pytest.raises(ModelContractError):c.accept({'items':[],'requirement_adjudications':[]})
+    c = NativeCaseView(ledger, [a, b])
+    before = J([a, b])
+    pending = c.accept({'items':[],'requirement_adjudications':[]})
+    assert [decision['scope'] for decision in pending['native_decisions']] == ['unassigned', 'unassigned']
     raw={'items':[],'requirement_adjudications':[{'item_ids':['q1','q2'],'scope':'chapter','chapter_ids':['c2'],
        'basis_windows':[],'source_join':'continuation'}]}
     out=c.accept(raw)
@@ -146,13 +195,17 @@ def test_cross_pack_cases_require_explicit_C_and_preserve_original_ids(tmp_path)
     assert resolved['chapter_ids']==['source-node-real-id-B']
     assert resolved['item_ids']==[a['id'],b['id']]
     assert resolved['enterprise_confirmed'] is False and J([a,b])==before
-    tampered=deepcopy(a);tampered['source']['body']['text']='changed'
-    with pytest.raises((ModelContractError,ArtifactIntegrityError)):NativeCaseView(ledger,[tampered,b])
+    tampered = deepcopy(a)
+    tampered['source']['body']['text'] = 'changed'
+    with pytest.raises((ModelContractError, ArtifactIntegrityError)):
+        NativeCaseView(ledger, [tampered, b])
 
 
 def test_shared_context_pool_serializes_source_once_and_keeps_numeric_context(tmp_path):
     ledger,_,_,_=synthetic(tmp_path)
-    raw=reply(ledger);body=raw['native_assignments'][0];first,second=body['body_refs']
+    raw = reply(ledger)
+    body = raw['native_assignments'][0]
+    first, second = body['body_refs']
     raw['native_assignments']=[{**body,'body_refs':[first]},{**body,'body_refs':[second]}]
     accepted=ledger.view().accept(raw)
     assert len(accepted['native_records'])==2
@@ -163,13 +216,15 @@ def test_shared_context_pool_serializes_source_once_and_keeps_numeric_context(tm
 
 @pytest.mark.parametrize('kind',['evaluator_procedure','reference','unresolved'])
 def test_non_response_dispositions_have_honest_outlet(tmp_path,kind):
-    ledger,_,_,_=synthetic(tmp_path);view=ledger.view()
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
     accepted=view.accept({'assignments':[],'contexts':[],'native_assignments':[],
       'native_dispositions':[{'refs':list(view.refs),'kind':kind}]})
     assert not accepted['native_records']
     assert accepted['guidance'] or accepted['cases']
     assert all(not r['enterprise_confirmed'] for r in accepted['guidance']+accepted['cases'])
-    if kind=='unresolved':assert accepted['complete'] is False
+    if kind == 'unresolved':
+        assert accepted['complete'] is False
 
 
 def budget(context=131072):
@@ -177,14 +232,18 @@ def budget(context=131072):
 
 
 def test_complete_request_schema_and_actual_K_are_counted(tmp_path):
-    ledger,_,_,_=synthetic(tmp_path);view=ledger.view()
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
     small=native_output_bound(view)
     more=SourceLedger(ledger.artifacts,ledger.documents,chapters=[{'id':f'real-{i}','title':f'Chapter {i}'} for i in range(40)]).view()
     assert native_output_bound(more)['token_upper_bound']>small['token_upper_bound']
     measured=require_native_budget(budget(),view,{'chapters':view.chapter_payload},'Read exact source; no enterprise facts.')
     assert measured['input_tokens']>0 and measured['worst_accepted_output_tokens']==small['token_upper_bound']
     assert measured['schema_sha256']
-    with pytest.raises(ModelBudgetError):require_native_budget(budget(1024),view,{'chapters':view.chapter_payload},'x'*5000)
+    with pytest.raises(ModelBudgetError):
+        require_native_budget(
+            budget(1024), view, {'chapters': view.chapter_payload}, 'x' * 5000
+        )
 
 
 def test_B_output_reserve_does_not_charge_body_atoms_twice(tmp_path):
@@ -251,22 +310,26 @@ def test_unresolved_dispositions_rebuild_sources_in_frozen_order(tmp_path):
     assert not actual['complete']
 
 
-@pytest.mark.parametrize(('mutation', 'error'), [
-    ('duplicate', 'exactly one disposition'),
-    ('missing', 'complete supplied source denominator'),
-])
-def test_disposition_coverage_still_rejects_duplicate_or_missing_refs(tmp_path, mutation, error):
+def test_disposition_coverage_still_rejects_duplicate_refs(tmp_path):
     ledger, _, _, _ = synthetic(tmp_path)
     raw = reply(ledger, context=False)
     unresolved = raw['native_dispositions'][-1]['refs']
-    if mutation == 'duplicate':
-        raw['native_dispositions'].append({'refs': [unresolved[0]], 'kind': 'unresolved'})
-    else:
-        unresolved.pop()
+    raw['native_dispositions'].append({'refs': [unresolved[0]], 'kind': 'unresolved'})
 
     with pytest.raises(ModelContractError) as rejected:
         ledger.view().accept(raw)
-    assert error in rejected.value.errors[0]['detail']
+    assert 'exactly one disposition' in rejected.value.errors[0]['detail']
+
+
+def test_omitted_source_atom_stays_pending_without_another_model_round(tmp_path):
+    ledger, _, _, _ = synthetic(tmp_path)
+    raw = reply(ledger, context=False)
+    omitted = raw['native_dispositions'].pop()['refs']
+    before = J(ledger.atoms)
+    accepted = ledger.view().accept(raw)
+    unresolved = [ref for item in accepted['native_dispositions'] if item['kind'] == 'unresolved' for ref in item['refs']]
+    assert set(omitted) <= set(unresolved)
+    assert not accepted['complete'] and J(ledger.atoms) == before
 
 
 def test_full_synthetic_inventory_keeps_83_atoms_explicitly_unresolved(tmp_path):
@@ -302,14 +365,28 @@ def test_C_single_case_keeps_its_existing_explicit_join(tmp_path):
     view=NativeCaseView(ledger,[case])
     result=view.accept({'items':[],'requirement_adjudications':[{'item_ids':['q1'],'scope':'chapter','chapter_ids':['c1'],'basis_windows':[]}]})
     assert result['native_decisions'][0]['source']==source
-    with pytest.raises(ModelContractError):view.accept({'items':[],'requirement_adjudications':[{'item_ids':['q1'],'scope':'chapter',
-       'chapter_ids':['c1'],'basis_windows':[],'source_join':'paragraphs'}]})
+    with pytest.raises(ModelContractError):
+        view.accept(
+            {
+                'items': [],
+                'requirement_adjudications': [
+                    {
+                        'item_ids': ['q1'],
+                        'scope': 'chapter',
+                        'chapter_ids': ['c1'],
+                        'basis_windows': [],
+                        'source_join': 'paragraphs',
+                    }
+                ],
+            }
+        )
 
 
 def test_source_context_body_cannot_overlap_even_through_case_materializer(tmp_path):
     ledger,_,_,_=synthetic(tmp_path)
     body=refs(ledger,0,3)
-    with pytest.raises(ModelContractError):ledger.source(body,[{'refs':body,'source_join':'paragraphs'}])
+    with pytest.raises(ModelContractError):
+        ledger.source(body, [{'refs': body, 'source_join': 'paragraphs'}])
 
 
 def test_legacy_case_cannot_be_reinterpreted_as_native(tmp_path):
@@ -317,12 +394,15 @@ def test_legacy_case_cannot_be_reinterpreted_as_native(tmp_path):
     legacy={'id':'requirement-legacy','source_windows':[{'document_id':'source-document-uuid','page':0,'start_line':0,'end_line':0}],
             'source_text':'Alpha '}
     before=J(legacy)
-    with pytest.raises(ModelContractError):NativeCaseView(ledger,[legacy])
+    with pytest.raises(ModelContractError):
+        NativeCaseView(ledger, [legacy])
     assert J(legacy)==before
 
 
 def test_new_B_restores_bounded_legacy_prose_for_existing_placement(tmp_path):
-    ledger,_,_,_=synthetic(tmp_path);view=ledger.view();raw=reply(ledger)
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
+    raw = reply(ledger)
     block=[{'document_id':'d1','page':2,'lines':[{'line':0,'text':'Need a plan.','source_role':'prose'},{'line':1,'text':'Keep original source.','source_role':'prose'}]}]
     raw['assignments']=[{'document_id':'d1','page':2,'start_line':0,'end_line':1,'continuation_windows':[],
                          'scope':'chapter','chapter_ids':['c1']}]
@@ -332,16 +412,22 @@ def test_new_B_restores_bounded_legacy_prose_for_existing_placement(tmp_path):
     assert native_source(accepted)['body']['text']=='Alpha  Beta  0.5 / 5'
     measured=require_native_budget(budget(),view,{'block':block,'allow_legacy_assignments':True,'chapters':view.chapter_payload},'Select exact sources.')
     assert measured['output_shape']['legacy_window_limit']==2
-    wrong=deepcopy(raw);wrong['assignments'][0]['end_line']=10**100
-    with pytest.raises(ModelContractError):view.accept(wrong,legacy_block=block)
-    duplicate=deepcopy(raw);duplicate['assignments']*=2
-    with pytest.raises(ModelContractError):view.accept(duplicate,legacy_block=block)
+    wrong = deepcopy(raw)
+    wrong['assignments'][0]['end_line'] = 10**100
+    with pytest.raises(ModelContractError):
+        view.accept(wrong, legacy_block=block)
+    duplicate = deepcopy(raw)
+    duplicate['assignments'] *= 2
+    with pytest.raises(ModelContractError):
+        view.accept(duplicate, legacy_block=block)
 
 
 def test_boolean_ref_is_not_a_source_integer(tmp_path):
     ledger,_,_,_=synthetic(tmp_path)
-    raw=reply(ledger);raw['native_dispositions'][-1]['refs']=[True]
-    with pytest.raises(ModelContractError):ledger.view().accept(raw)
+    raw = reply(ledger)
+    raw['native_dispositions'][-1]['refs'] = [True]
+    with pytest.raises(ModelContractError):
+        ledger.view().accept(raw)
 
 
 def test_C_capsule_has_physical_locator_without_original_UUIDs(tmp_path):
@@ -355,7 +441,9 @@ def test_C_capsule_has_physical_locator_without_original_UUIDs(tmp_path):
 
 
 def test_output_contract_factory_uses_only_actual_wire_payload(tmp_path,monkeypatch):
-    ledger,_,_,_=synthetic(tmp_path);view=ledger.view();payload={**view.payload,'chapters':view.chapter_payload}
+    ledger, _, _, _ = synthetic(tmp_path)
+    view = ledger.view()
+    payload = {**view.payload, 'chapters': view.chapter_payload}
     before=J(payload)
     factory=getattr(__import__('docreader.tender.native_requirement_sources', fromlist=['native_requirement_model']),'native_requirement_model')
     monkeypatch.setattr(ledger.artifacts,'read_json',lambda _:pytest.fail('Schema factory performed source I/O'))
@@ -371,7 +459,8 @@ def test_selected_page_edge_is_not_misrepresented_as_original_file_edge(tmp_path
     view=selected.view()
     assert view.payload['open_before'] is True
     assert view.payload['open_after'] is False
-    with pytest.raises(ModelContractError):view.accept(reply(selected,view,scope='chapter',chapter_ids=['c1'],context=False))
+    accepted = view.accept(reply(selected,view,scope='chapter',chapter_ids=['c1'],context=False))
+    assert accepted['cases'] and all(record['scope'] == 'unassigned' for record in accepted['native_records'])
 
 
 def with_prose(tmp_path, *, middle=False, selected_pages=None):
@@ -555,26 +644,30 @@ def test_proven_literal_body_in_B_and_C_keeps_original_lines_and_bounds(tmp_path
             'source_join': 'continuation'}]})
 
 
-@pytest.mark.parametrize(('failure', 'field'), [
-    ('unused_context', 'contexts'), ('missing_assignment', 'native_assignments'), ('needs_c', 'native_assignments'),
-])
-def test_native_assignment_recovery_points_to_failed_field_without_echo(tmp_path, failure, field):
+def test_unused_context_still_rejects_without_echo(tmp_path):
+    ledger, _, _, _ = synthetic(tmp_path)
+    raw = reply(ledger)
+    raw['native_assignments'][0]['context_id'] = None
+    with pytest.raises(ModelContractError) as rejected:
+        ledger.view().accept(raw)
+    assert rejected.value.errors[0]['path'][0] == 'contexts'
+    assert rejected.value.feedback_fragments == []
+
+
+def test_missing_assignment_and_open_edge_stay_pending_without_another_round(tmp_path):
     ledger, _, _, _ = synthetic(tmp_path)
     view = ledger.view()
-    raw = reply(ledger)
-    if failure == 'unused_context':
-        raw['native_assignments'][0]['context_id'] = None
-    elif failure == 'missing_assignment':
-        raw['native_assignments'].clear()
-        raw['contexts'].clear()
-        raw['native_dispositions'][1]['kind'] = 'unresolved'
-    else:
-        raw['native_dispositions'][0]['kind'] = 'external_action'
-        raw['native_assignments'][0].update(scope='chapter', chapter_ids=[next(iter(ledger.chapter_map))])
-    with pytest.raises(ModelContractError) as rejected:
-        view.accept(raw)
-    assert rejected.value.errors[0]['path'][0] == field
-    assert rejected.value.feedback_fragments == []
+    missing = reply(ledger)
+    missing['native_assignments'].clear()
+    missing['contexts'].clear()
+    missing['native_dispositions'][1]['kind'] = 'unresolved'
+    accepted = view.accept(missing)
+    assert accepted['cases'] and not accepted['complete']
+    needs_c = reply(ledger)
+    needs_c['native_dispositions'][0]['kind'] = 'external_action'
+    needs_c['native_assignments'][0].update(scope='chapter', chapter_ids=[next(iter(ledger.chapter_map))])
+    accepted = view.accept(needs_c)
+    assert accepted['cases'] and all(record['scope'] == 'unassigned' for record in accepted['native_records'])
 
 
 @pytest.mark.parametrize(('position', 'edge'), [(0, 'open_after'), (1, 'open_before')])
@@ -582,17 +675,8 @@ def test_native_boundary_recovery_identifies_ref_and_preserves_pending_case(tmp_
     ledger, _, _, _ = synthetic(tmp_path)
     view = ledger.view([position])
     raw = reply(ledger, view, scope='chapter', chapter_ids=['c1'], context=False)
-    assignment = raw['native_assignments'][0]
-    ref = assignment['body_refs'][0]
-    with pytest.raises(ModelContractError) as rejected:
-        view.accept(raw)
-    error, = rejected.value.errors
-    assert error['path'] == ['native_assignments', 0, 'scope']
-    assert f'ref {ref} ({edge})' in error['detail']
-    assert 'scope=unassigned and chapter_ids=[]' in error['detail']
-    assert rejected.value.feedback_fragments == []
-    assignment.update(scope='unassigned', chapter_ids=[])
     accepted = view.accept(raw)
+    assert all(record['scope'] == 'unassigned' for record in accepted['native_records'])
     retained = next(case for case in accepted['cases'] if case['source']['body']['text'] in ('Alpha ', ' Beta  0.5 / 5'))
     assert retained['source']['body']['text'] == ('Alpha ', ' Beta  0.5 / 5')[position]
     assert not retained['enterprise_confirmed']

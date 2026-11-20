@@ -45,11 +45,16 @@ def test_explicit_current_body_receipt_preserves_joins_and_context(tmp_path):
 @pytest.mark.parametrize('bad', ['missing_receipt', 'wrong_hash', 'wrong_reference', 'wrong_target', 'unresolved', 'conflict'])
 def test_no_join_is_inferred_from_matching_strings_without_a_consistent_receipt(tmp_path, bad):
     values, target, app = explicit_case(tmp_path)
-    if bad == 'missing_receipt': values[3]['_reviewed_source_fact_applications'] = []
-    if bad == 'wrong_hash': app['source_text_sha256'] = '0' * 64
-    if bad == 'wrong_reference': app['source_excerpts'] = app['source_excerpts'][:1]
-    if bad == 'wrong_target': app['target_ids'] = ['unrelated']
-    if bad == 'unresolved': app['state'] = 'unresolved'
+    if bad == 'missing_receipt':
+        values[3]['_reviewed_source_fact_applications'] = []
+    if bad == 'wrong_hash':
+        app['source_text_sha256'] = '0' * 64
+    if bad == 'wrong_reference':
+        app['source_excerpts'] = app['source_excerpts'][:1]
+    if bad == 'wrong_target':
+        app['target_ids'] = ['unrelated']
+    if bad == 'unresolved':
+        app['state'] = 'unresolved'
     if bad == 'conflict':
         other = deepcopy(app)
         other['source_join'] = 'paragraphs'
@@ -89,8 +94,10 @@ def test_default_body_context_cannot_override_public_context_or_conflicting_rece
         other = deepcopy(app)
         other['context_source_excerpts'] = []
         values[3]['_reviewed_source_fact_applications'].append(other)
-    if bad == 'wrong_hash': app['source_text_sha256'] = '0' * 64
-    if bad == 'overlap': app['context_source_excerpts'] = deepcopy(target['source_excerpts'][:1])
+    if bad == 'wrong_hash':
+        app['source_text_sha256'] = '0' * 64
+    if bad == 'overlap':
+        app['context_source_excerpts'] = deepcopy(target['source_excerpts'][:1])
     scope = NativeBodyScope(*values[:5])
     assert scope.records[0]['classification'] == 'unmapped_pending'
     assert target['target_id'] not in scope.exact_bindings and scope.pending

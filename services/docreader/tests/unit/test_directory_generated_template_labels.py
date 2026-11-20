@@ -17,9 +17,12 @@ def chapter():
 @pytest.mark.parametrize('branch', ['template_segment', 'body_parts', 'material_segment'])
 def test_only_actual_title_fallback_has_generated_source_receipt(branch):
     source = chapter()
-    if branch == 'template_segment': source['template_segments'] = [{'text': '', 'part': PART}]
-    if branch == 'body_parts': source['template_parts'] = [PART]
-    if branch == 'material_segment': source['material_segments'] = [{'text': None, 'part': PART}]
+    if branch == 'template_segment':
+        source['template_segments'] = [{'text': '', 'part': PART}]
+    if branch == 'body_parts':
+        source['template_parts'] = [PART]
+    if branch == 'material_segment':
+        source['material_segments'] = [{'text': None, 'part': PART}]
     original = deepcopy(source)
     node = _outline_chapter(source)
     target = node['targets'][0]
@@ -38,9 +41,12 @@ def test_only_actual_title_fallback_has_generated_source_receipt(branch):
 def test_real_source_text_without_rows_is_never_reclassified_as_generated(branch, same_as_title):
     source = chapter()
     text = source['title'] if same_as_title else '本表之外还须单独提交承诺。'
-    if branch == 'template_segment': source['template_segments'] = [{'text': text, 'part': PART}]
-    if branch == 'body_parts': source.update(text=text, template_parts=[PART])
-    if branch == 'material_segment': source['material_segments'] = [{'text': text, 'part': PART}]
+    if branch == 'template_segment':
+        source['template_segments'] = [{'text': text, 'part': PART}]
+    if branch == 'body_parts':
+        source.update(text=text, template_parts=[PART])
+    if branch == 'material_segment':
+        source['material_segments'] = [{'text': text, 'part': PART}]
     target = _outline_chapter(source)['targets'][0]
     assert target['purpose'] == text and not target.get('_source_generated')
 

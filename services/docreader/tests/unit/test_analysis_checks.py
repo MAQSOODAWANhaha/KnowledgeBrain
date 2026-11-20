@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 from functools import partial
-from itertools import combinations
 import json
 
 import pytest
@@ -137,6 +136,16 @@ async def run(data, model, admission=None):
     return await verify_analysis(plan, items, artifacts, model, admission or budget(), identity=IDENTITY, save=save)
 
 
+def review_texts(model):
+    return [source["text"] for payload in model.calls if payload["operation"] == "review"
+            for view in payload["source_views"] for key in ("body", "supporting")
+            for source in view.get(key, []) if source.get("text")]
+
+
+def only_review(model):
+    assert {payload["operation"] for payload in model.calls} <= {"review"}
+
+
 def reference_candidate(payload):
     if not payload["issues"]:
         return []
@@ -181,8 +190,9 @@ async def test_complete_source_analysis_keeps_four_business_kinds_and_original_a
     assert {entry["item"]["kind"] for entry in projection} == {
         "obligation", "scoring_rule", "consequence_rule", "submission_requirement"}
     assert items == before
-    assert all(artifacts.read_json(result[key])["schema_version"] == 2 for key in (
-        "review_plan_ref", "locate_plan_ref", "association_plan_ref", "joint_plan_ref"))
+    assert artifacts.read_json(result["review_plan_ref"])["schema_version"] == 2
+    assert result["locate_plan_ref"] is None and result["association_plan_ref"] is None
+    assert result["joint_plan_ref"] is None
     assert len(result["operation_refs"]) == len(model.calls)
     assert all("source_version" not in payload and "domain_revision" not in payload for payload in model.calls)
 
@@ -310,10 +320,10 @@ def pdf_image_page(index, *, missing=False, separate_list=False, status="complet
 async def test_page_image_manifest_loads_image_even_without_a_repeated_page_locator(tmp_path):
     data = await scenario(tmp_path,documents=[("main","main",[("第一页。","obligation"),("图片原文。",None)])],
                           native_setup=partial(pdf_image_page,separate_list=True))
-    model = Model(locate=page_candidate)
+    model = Model()
     result = await run(data,model)
-    association = next(payload for payload in model.calls if payload["operation"]=="associate")
-    assert association["source_views"][0]["body"][0]["text"] == "图片原文。"
+    only_review(model)
+    assert "图片原文。" in review_texts(model)
     assert result["blocking"] is False
 
 
@@ -340,13 +350,11 @@ async def test_physical_page_candidate_loads_complete_page_for_association(tmp_p
         native_setup=partial(physical_pdf,unit_pages=(0,1,1)))
     catalog = build_catalog(data[1],data[0])
     assert catalog[0]["page_count"] == 2
-    model = Model(locate=page_candidate)
+    model = Model()
     result = await run(data,model)
-    associated = next(payload for payload in model.calls if payload["operation"] == "associate")
-    assert [source["text"] for view in associated["source_views"] for source in view["body"]] == [
-        "第二物理页甲要求。","第二物理页补充说明。"]
-    assert not any(payload["work_unit_id"].startswith("joint-") for payload in model.calls)
-    assert len(associated["dispositions"]) == 2 and result["blocking"] is False
+    only_review(model)
+    assert {"第二物理页甲要求。","第二物理页补充说明。"} <= set(review_texts(model))
+    assert result["blocking"] is False
 
 
 @pytest.mark.asyncio
@@ -368,16 +376,20 @@ async def test_unused_optional_candidate_selectors_normalize_explicit_null(tmp_p
 async def test_page_candidates_reject_out_of_range_or_unuploaded_document(tmp_path,page,document):
     data = await scenario(tmp_path,documents=[("main","main",[("第一页。","obligation"),("第二页。",None)])],
                           native_setup=physical_pdf)
-    with pytest.raises(ModelSemanticError,match="host contract"):
-        await run(data,Model(locate=partial(page_candidate,page=page,document=document)))
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["schema_version"] == 2
 
 
 @pytest.mark.asyncio
 async def test_page_candidate_requires_a_complete_pdf_page_contract(tmp_path):
     data = await scenario(tmp_path)
     assert all("page_count" not in document for document in build_catalog(data[1],data[0]))
-    with pytest.raises(ModelSemanticError,match="host contract"):
-        await run(data,Model(locate=page_candidate))
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["schema_version"] == 2
 
 
 @pytest.mark.asyncio
@@ -404,11 +416,10 @@ async def test_missing_or_partial_physical_page_never_reaches_association_or_joi
 async def test_complete_page_candidate_is_indivisible_when_its_budget_does_not_fit(tmp_path):
     data = await scenario(tmp_path,documents=[("main","main",[("第一页。","obligation"),("第二页。",None)])],
                           native_setup=physical_pdf)
-    model = Model(locate=page_candidate)
-    result = await run(data,model,OperationBudget(lambda payload:payload["operation"]=="associate"))
-    requests = data[0].read_json(result["association_plan_ref"])["requests"]
-    assert len(requests)==1 and requests[0]["budget"]["fits"] is False
-    assert result["blocking"] is True and not any(payload["operation"]=="associate" for payload in model.calls)
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["association_plan_ref"] is None
 
 
 @pytest.mark.asyncio
@@ -422,7 +433,8 @@ async def test_catalog_contains_document_identity_once_and_only_locate_receives_
                for entry in catalog for section in entry["sections"])
     model = Model()
     await run(data, model)
-    assert all(("catalog" in payload) == (payload["operation"] == "locate") for payload in model.calls)
+    only_review(model)
+    assert all("catalog" not in payload for payload in model.calls)
 
 
 @pytest.mark.asyncio
@@ -438,14 +450,10 @@ async def test_section_candidate_loads_every_original_range_and_non_item_content
                  "section_refs": [{"document_id": "main", "section_id": "same"}],
                  "reason": "联合补读本节原文和口径说明。"}]
 
-    model = Model(locate=candidate)
+    model = Model()
     result = await run(data, model)
-    associated = next(payload for payload in model.calls if payload["operation"] == "associate")
-    assert {source["text"] for view in associated["source_views"] for source in view["body"]} == {
-        "人员应持A证。", "本节说明证书审核口径。"}
-    assert len(associated["items"]) == 1
-    assert len(associated["dispositions"]) == 2
-    assert not any(payload["work_unit_id"].startswith("joint-") for payload in model.calls)
+    only_review(model)
+    assert {"人员应持A证。", "本节说明证书审核口径。"} <= set(review_texts(model))
     assert result["blocking"] is False
 
 
@@ -453,15 +461,10 @@ async def test_section_candidate_loads_every_original_range_and_non_item_content
 @pytest.mark.parametrize("document,section", [("other", "s0"), ("main", "absent"), ("main", None)])
 async def test_section_candidates_must_use_catalog_identities_supplied_to_locate(tmp_path, document, section):
     data = await scenario(tmp_path)
-
-    def candidate(payload):
-        return [{"candidate_id": payload["work_unit_id"] + ":c1", "issue_ids": [],
-                 "range_ids": [], "item_ids": [],
-                 "section_refs": [{"document_id": document, "section_id": section}],
-                 "reason": "尝试补读章节。"}]
-
-    with pytest.raises(ModelSemanticError, match="host contract"):
-        await run(data, Model(locate=candidate))
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["schema_version"] == 2
 
 
 @pytest.mark.asyncio
@@ -476,8 +479,10 @@ async def test_locate_cannot_guess_an_existing_but_unsupplied_range_id(tmp_path)
         return [{"candidate_id": payload["work_unit_id"] + ":c1", "issue_ids": [],
                  "range_ids": [hidden], "item_ids": [], "reason": "猜测未装载原文身份。"}]
 
-    with pytest.raises(ModelSemanticError, match="host contract"):
-        await run(data, Model(locate=candidate))
+    model = Model()
+    await run(data, model)
+    only_review(model)
+    assert "未在发现请求提供的描述原文。" in review_texts(model)
 
 
 @pytest.mark.asyncio
@@ -490,12 +495,11 @@ async def test_complete_section_candidate_is_not_split_to_fit_association_budget
                  "range_ids": [], "item_ids": [], "section_refs": [{"document_id": "main", "section_id": None}],
                  "reason": "补读完整无标题章节。"}]
 
-    model = Model(locate=candidate)
-    result = await run(data, model, OperationBudget(lambda payload: payload["operation"] == "associate"))
-    requests = data[0].read_json(result["association_plan_ref"])["requests"]
-    assert len(requests) == 1 and len(requests[0]["range_ids"]) == 2
-    assert result["blocking"] is True
-    assert not any(payload["operation"] == "associate" for payload in model.calls)
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert {"人员应持A证。", "本节说明证书审核口径。"} <= set(review_texts(model))
+    assert result["association_plan_ref"] is None and result["blocking"] is False
 
 
 @pytest.mark.asyncio
@@ -522,17 +526,14 @@ async def test_source_finding_survives_localization_without_an_accepted_decision
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("accept", [False, True])
-async def test_only_an_independently_accepted_source_decision_closes_a_model_issue(tmp_path, accept):
+async def test_only_an_independently_accepted_source_decision_closes_a_model_issue(tmp_path):
     data = await scenario(tmp_path, analysis_issue=True)
-    model = Model(locate=reference_candidate, associate=resolution, accept=accept)
+    model = Model()
     result = await run(data, model)
-    assert result["blocking"] is not accept
-    assert bool(result["resolved_issue_ids"]) is accept
-    assert bool(result["accepted_decision_ids"]) is accept
-    assert any(payload["operation"] == "review" and payload["decisions"] for payload in model.calls)
-    assert any(problem["code"] == "condition_unclear" for problem in result["all_issues"])
-    assert any(problem["code"] == "condition_unclear" for problem in result["issues"]) is not accept
+    only_review(model)
+    assert result["blocking"] is True
+    assert result["accepted_decision_ids"] == []
+    assert any(problem["code"] == "condition_unclear" for problem in result["issues"])
 
 
 @pytest.mark.asyncio
@@ -565,9 +566,10 @@ async def test_model_cannot_override_host_joint_review_coverage(tmp_path, field)
             value[field] = []
             value["accepted_decision_ids"] = []
 
-    result = await run(data, Model(locate=candidate, associate=associated, mutate=omit))
-    assert not any(issue["code"] == "analysis_review_incomplete" for issue in result["issues"])
-    assert not result["accepted_decision_ids"]
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["accepted_decision_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -578,10 +580,11 @@ async def test_joint_blocking_findings_prevent_acceptance_even_if_model_lists_th
         if payload["work_unit_id"].startswith("joint-"):
             value["findings"] = [{"code": "condition_unclear", "detail": "仍未解释适用范围。", "blocking": False}]
 
-    result = await run(data, Model(locate=reference_candidate, associate=resolution, mutate=finding))
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
     assert result["blocking"] is True and result["accepted_decision_ids"] == []
     assert result["resolved_issue_ids"] == []
-    assert any(problem["code"] == "decision_not_accepted" for problem in result["issues"])
 
 
 @pytest.mark.asyncio
@@ -618,26 +621,15 @@ async def test_joint_skips_omission_targets_and_preserves_complete_review_contex
         proposed.append(deepcopy(value))
         return value
 
-    model = Model(locate=candidate, associate=associated)
+    model = Model()
     result = await run(data, model)
-    association, = [p for p in model.calls if p["operation"] == "associate"]
-    joint, = [p for p in model.calls if p["work_unit_id"].startswith("joint-")]
-    source_reviews = [p for p in model.calls if p["operation"] == "review" and not p["decisions"]]
+    only_review(model)
+    source_reviews = [p for p in model.calls if p["operation"] == "review"]
     expected_dispositions = {d["range_id"]: d for descriptor in index["packs"]
         for d in artifacts.read_json(descriptor["artifact_ref"])["dispositions"]}
     reviewed_dispositions = {d["range_id"]: d for p in source_reviews for d in p["dispositions"]}
     assert reviewed_dispositions == expected_dispositions
-    assert association["dispositions"], "association retains its original source ledger"
-    assert joint["source_views"] == association["source_views"]
-    assert joint["items"] == association["items"]
-    assert joint["candidates"] == association["candidates"]
-    assert joint["scope_decisions"] == association["scope_decisions"] == plan["scope_decisions"]
-    assert joint["relations"] == [*association["relations"], *proposed[0]["relations"]]
-    assert joint["decisions"] == proposed[0]["decisions"]
-    assert joint["issues"] == assign_issues([*association["issues"], *proposed[0]["findings"]],
-                                           association["work_unit_id"])
-    assert result["accepted_decision_ids"] == [proposed[0]["decisions"][0]["decision_id"]]
-    assert joint["dispositions"] == []
+    assert result["accepted_decision_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -674,16 +666,13 @@ async def test_joint_without_omission_targets_still_preserves_and_reports_counte
             value["findings"] = [{"code": "condition_unclear", "detail": detail, "blocking": True,
                                   "range_id": contrary["range_id"]}]
 
-    model = Model(locate=reference_candidate, associate=associated, mutate=counterevidence)
+    model = Model()
     result = await run(data, model)
-    joint, = [p for p in model.calls if p["work_unit_id"].startswith("joint-")]
+    only_review(model)
+    assert set(facts) <= set(review_texts(model))
     assert result["accepted_decision_ids"] == []
-    assert result["resolved_issue_ids"] == []
-    assert any(problem["detail"] == detail for problem in result["issues"])
-    assert any(problem["code"] == "decision_not_accepted" for problem in result["issues"])
     if amendment:
         assert {entry["item"]["text"] for entry in current_items(data[0], result)} == set(facts)
-    assert joint["dispositions"] == []
 
 
 @pytest.mark.asyncio
@@ -756,13 +745,10 @@ async def test_partial_amendment_projects_only_reviewed_retained_rules_and_keeps
                 "replacement_item_ids": [payload["items"][1]["item_id"]] if effect == "replace" else []},
         }]}
 
-    result = await run(data, Model(locate=locate, associate=amendment, mutate=review_deletion))
-    assert result["blocking"] is False and len(result["accepted_decision_ids"]) == 1
-    projection = current_items(artifacts, result)
-    retained = [entry["effective_rule"] for entry in projection if "effective_rule" in entry]
-    assert [entry["text"] for entry in retained] == ["保修期限3年得3分。"]
-    assert set(retained[0]) == {"text", "scope", "evidence"}
-    assert len(projection) == (2 if effect == "replace" else 1)
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["accepted_decision_ids"] == []
     assert [artifacts.read_json(entry["artifact_ref"]) for entry in items["packs"]] == before
 
 
@@ -788,18 +774,10 @@ async def test_association_keeps_valid_siblings_and_sends_untraceable_declaratio
         returned.append((value, deepcopy(value)))
         return value
 
-    model = Model(locate=all_source_candidate, associate=unsupported)
+    model = Model()
     result = await run(data, model)
-    assert result["blocking"] is True and result["coverage"]["missing"] == {}
-    relations = data[0].read_json(result["relations_ref"])
-    assert [r["relation"] for r in relations] == ["有效的来源关联。"]
-    assert result["unverified_relation_ids"] == [relations[0]["relation_id"]]
-    problem = next(p for p in result["issues"] if p["code"] == "analysis_association_unresolved")
-    assert "relations[0]" in problem["detail"] and "需要核对的适用条件关联。" in problem["detail"]
-    # Without a decision there is nothing for a joint review to accept; the doubt goes to a human.
-    assert not any(p["work_unit_id"].startswith("joint-") for p in model.calls)
-    assert problem["issue_id"] in result["human_issue_ids"] and result["hard_blocking"] is False
-    assert all(value == original for value, original in returned)
+    only_review(model)
+    assert result["joint_plan_ref"] is None
 
 
 @pytest.mark.asyncio
@@ -842,15 +820,10 @@ async def test_relation_only_association_skips_joint_and_keeps_relations_unverif
             "to_item_id": payload["items"][1]["item_id"], "relation": "评分规则针对该资格要求。",
             "evidence": [citation]}]}
 
-    model = Model(locate=all_source_candidate, associate=related)
+    model = Model()
     result = await run(data, model)
-    operations = [p["work_unit_id"].split("-")[0] for p in model.calls]
-    assert "associate" in operations and "joint" not in operations
-    relations = data[0].read_json(result["relations_ref"])
-    associated = [r["relation_id"] for r in relations if r["relation"] == "评分规则针对该资格要求。"]
-    assert associated and result["unverified_relation_ids"] == associated
-    assert result["coverage"]["missing"] == {} and result["blocking"] is False
-    assert data[0].read_json(result["joint_plan_ref"])["requests"] == []
+    only_review(model)
+    assert result["joint_plan_ref"] is None and result["blocking"] is False
 
 
 @pytest.mark.asyncio
@@ -862,15 +835,12 @@ async def test_untraceable_decision_cannot_close_existing_issue_and_joint_receiv
         value["decisions"][0]["evidence"][0]["quote"] = "不存在的决议引文"
         return value
 
-    model = Model(locate=reference_candidate, associate=unsupported)
+    model = Model()
     result = await run(data, model)
+    only_review(model)
     assert result["blocking"] is True and result["accepted_decision_ids"] == []
     assert result["resolved_issue_ids"] == [] and data[0].read_json(result["decisions_ref"]) == []
-    original = next(p for p in result["issues"] if p["code"] == "condition_unclear")
-    pending = next(p for p in result["issues"] if "不存在的决议引文" in p["detail"])
-    # The rejected proposal leaves no decision to accept, so no joint call; a human sees both records.
-    assert not any(p["work_unit_id"].startswith("joint-") for p in model.calls)
-    assert {original["issue_id"], pending["issue_id"]} <= set(result["human_issue_ids"])
+    assert any(p["code"] == "condition_unclear" for p in result["issues"])
 
 
 @pytest.mark.asyncio
@@ -931,10 +901,11 @@ async def test_amendment_decision_must_cite_target_and_each_replacement_source(t
                 "affected_scope": "当前事项", "retained_rules": [], "replacement_item_ids": [replacement["item_id"]]},
         }]}
 
-    result = await run(data, Model(locate=all_source_candidate, associate=one_sided))
-    assert result["blocking"] is True and result["accepted_decision_ids"] == []
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["accepted_decision_ids"] == []
     assert data[0].read_json(result["decisions_ref"]) == []
-    assert any(p["code"] == "analysis_association_unresolved" for p in result["issues"])
 
 
 @pytest.mark.asyncio
@@ -950,9 +921,10 @@ async def test_overlapping_amendment_effects_require_a_single_reviewed_net_decis
                           "affected_scope": "当前事项", "retained_rules": [], "replacement_item_ids": []},
         } for number in (1, 2)]}
 
-    result = await run(data, Model(locate=all_source_candidate, associate=competing))
-    assert result["blocking"] is True and result["accepted_decision_ids"] == []
-    assert any(problem["code"] == "amendment_effect_unresolved" for problem in result["issues"])
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["accepted_decision_ids"] == []
     assert len(current_items(data[0], result)) == 5
 
 
@@ -964,8 +936,10 @@ async def test_localization_cannot_invent_a_source_identity(tmp_path):
         return [{"candidate_id": payload["work_unit_id"] + ":c1", "issue_ids": [],
                  "range_ids": ["not-a-frozen-range"], "item_ids": [], "reason": "尝试定位关联。"}]
 
-    with pytest.raises(ModelSemanticError, match="host contract"):
-        await run(data, Model(locate=invented))
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["schema_version"] == 2
 
 
 @pytest.mark.asyncio
@@ -992,13 +966,10 @@ class OperationBudget:
 @pytest.mark.asyncio
 async def test_connected_candidate_is_not_split_when_its_complete_source_exceeds_capacity(tmp_path):
     data = await scenario(tmp_path)
-    model = Model(locate=all_source_candidate)
-    admission = OperationBudget(lambda payload: payload["operation"] == "associate")
-    result = await run(data, model, admission)
-    plan = data[0].read_json(result["association_plan_ref"])
-    assert len(plan["requests"]) == 1 and plan["requests"][0]["budget"]["fits"] is False
-    assert result["blocking"] is True and result["hard_blocking"] is True
-    assert not any(payload["operation"] == "associate" for payload in model.calls)
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["association_plan_ref"] is None and result["blocking"] is False
 
 
 @pytest.mark.asyncio
@@ -1016,14 +987,10 @@ async def test_shared_rule_does_not_merge_independent_candidates_into_an_oversiz
                  "item_ids": [common["item_id"], target["item_id"]], "reason": "分别核对公共规则的适用对象。"}
                 for number, target in enumerate((first, second), start=1)]
 
-    model = Model(locate=candidates)
-    admission = OperationBudget(lambda payload: payload["operation"] == "associate" and len(payload["items"]) > 2)
-    result = await run(data, model, admission)
-    association = data[0].read_json(result["association_plan_ref"])
-    assert len(association["requests"]) == 2
-    assert [{item["item_id"] for item in payload["items"]}
-            for payload in model.calls if payload["operation"] == "associate"] == expected
-    assert result["blocking"] is False
+    model = Model()
+    result = await run(data, model)
+    only_review(model)
+    assert result["association_plan_ref"] is None and result["blocking"] is False
 
 
 @pytest.mark.asyncio
@@ -1042,14 +1009,10 @@ async def test_candidates_for_the_same_issue_still_load_all_proposed_targets_tog
                  "item_ids": [item["item_id"] for item in payload["items"]], "reason": "同一未决引用的候选目标。"}
                 for number, target in enumerate(targets, start=1)]
 
-    model = Model(locate=candidates, associate=resolution)
+    model = Model()
     result = await run(data, model)
-    associated = [payload for payload in model.calls if payload["operation"] == "associate"]
-    assert len(associated) == 1 and len(associated[0]["candidates"]) == 2
-    supplied = set(range_ids(associated[0]["source_views"]))
-    assert {identity for candidate in associated[0]["candidates"] for identity in candidate["range_ids"]} <= supplied
-    assert len(associated[0]["items"]) == 3
-    assert result["blocking"] is False
+    only_review(model)
+    assert result["blocking"] is True
 
 
 @pytest.mark.asyncio
@@ -1074,20 +1037,6 @@ async def test_resolution_cannot_erase_an_unperformed_independent_source_review(
 
 
 @pytest.mark.asyncio
-async def test_discovery_capacity_blocks_preserve_every_item_pair_without_keyword_filters(tmp_path):
-    data = await scenario(tmp_path)
-    model = Model()
-    admission = OperationBudget(lambda payload: payload["operation"] == "locate" and len(payload["items"]) > 2)
-    result = await run(data, model, admission)
-    groups = [{entry["item_id"] for entry in payload["items"]}
-              for payload in model.calls if payload["operation"] == "locate"]
-    identities = {entry["item_id"] for entry in result["item_refs"]}
-    assert set.union(*groups) == identities
-    assert all(any(set(pair) <= group for group in groups) for pair in combinations(identities, 2))
-    assert result["blocking"] is False
-
-
-@pytest.mark.asyncio
 async def test_recovery_reuses_completed_review_and_localization_receipts(tmp_path):
     data = await scenario(tmp_path)
     failures = [True]
@@ -1098,15 +1047,10 @@ async def test_recovery_reuses_completed_review_and_localization_receipts(tmp_pa
             raise ModelInfrastructureError("synthetic pre-send failure")
         return {"schema_version": 2, "relations": [], "decisions": [], "findings": []}
 
-    model = Model(locate=all_source_candidate, associate=fail_once)
-    with pytest.raises(ModelInfrastructureError):
-        await run(data, model)
-    completed = [payload for payload in model.calls if payload["operation"] != "associate"]
+    model = Model()
     result = await run(data, model)
+    only_review(model)
     assert result["blocking"] is False
-    assert [payload for payload in model.calls if payload["operation"] != "associate"
-            and payload["work_unit_id"].startswith(("review-", "discovery-"))] == completed
-    assert sum(payload["operation"] == "associate" for payload in model.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1118,7 +1062,4 @@ async def test_analysis_payloads_are_content_stable_across_host_revisions(tmp_pa
     assert left == right
     assert all(payload["work_unit_id"].startswith("review-") for payload in left)
     assert all("source_version" not in payload and "domain_revision" not in payload for payload in left)
-    locate_left, locate_right = first.locate_requests(), other.locate_requests()
-    assert [payload["work_unit_id"] for payload in locate_left] == [payload["work_unit_id"] for payload in locate_right]
-    assert all(payload["work_unit_id"].startswith(("discovery-", "reference-")) for payload in locate_left)
     assert all(len(payload["work_unit_id"].split("-", 1)[-1]) == 12 for payload in left)

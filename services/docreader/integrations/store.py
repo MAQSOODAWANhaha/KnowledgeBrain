@@ -845,23 +845,6 @@ class Store:
                 raise ValueError("model audit requires a lowercase SHA-256 logical_request_digest")
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
-            if attempt_id := metadata.get("group_attempt_id"):
-                attempt = await (await conn.execute(
-                    "SELECT metadata FROM tender_analysis_artifacts WHERE run_id = %s AND source_version = %s "
-                    "AND domain_revision = %s AND stage = 'model-group-attempt' AND scope = %s",
-                    (lease.run_id, lease.source_version, lease.domain_revision, attempt_id),
-                )).fetchone()
-                if not attempt or attempt["metadata"]["group_work_unit_keys"] != metadata.get("group_work_unit_keys"):
-                    raise Conflict("group request has no matching reserved attempt")
-                previous = await (await conn.execute(
-                    "SELECT * FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s "
-                    "AND domain_revision = %s AND metadata->>'group_attempt_id' = %s ORDER BY created_at LIMIT 1",
-                    (lease.run_id, lease.source_version, lease.domain_revision, attempt_id),
-                )).fetchone()
-                if previous:
-                    if previous["metadata"]["request_digest"] != digest:
-                        raise Conflict("a reserved group attempt cannot change its physical request")
-                    return status_row(previous, ModelRequestStatus)
             prior = await self._matching_model_requests(
                 conn, lease.run_id, lease.source_version, lease.domain_revision, task, digest,
             )
@@ -893,86 +876,19 @@ class Store:
                 (request_id, lease.run_id, lease.source_version, lease.domain_revision, lease.epoch, model, task, Jsonb(_safe_metadata(metadata or {}))),
             )).fetchone(), ModelRequestStatus)
 
-    async def group_receipts(self, lease: Lease, basis_digest: str) -> list[dict[str, Any]]:
-        """Read the small attempt/result journal for one immutable shared basis."""
+    async def request_not_before(self, lease, task, logical_digest):
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
-            return await (await conn.execute(
-                "SELECT * FROM tender_analysis_artifacts WHERE run_id = %s AND source_version = %s "
-                "AND domain_revision = %s AND metadata->>'group_basis_digest' = %s "
-                "AND stage LIKE 'model-group-%%' ORDER BY committed_at, stage, scope",
-                (lease.run_id, lease.source_version, lease.domain_revision, basis_digest),
-            )).fetchall()
-
-    async def reserve_group_attempt(self, lease: Lease, attempt_id: str, artifact_ref: dict,
-                                    basis_digest: str, work_unit_keys: list[str]) -> dict[str, Any]:
-        """Atomically reserve one of four attempts for every target, before any preflight.
-
-        Reservations live in the existing artifact journal. They are not paid
-        sends: model_requests remains the immutable transport/billing audit.
-        """
-        if not work_unit_keys or len(set(work_unit_keys)) != len(work_unit_keys):
-            raise ValueError("group attempt requires distinct logical targets")
-        async with self.transaction() as conn:
-            await self.assert_fence(lease, conn)
-            rows = await (await conn.execute(
-                "SELECT * FROM tender_analysis_artifacts WHERE run_id = %s AND source_version = %s "
-                "AND domain_revision = %s AND stage IN ('model-group-attempt', 'model-group-outcome')",
-                (lease.run_id, lease.source_version, lease.domain_revision),
-            )).fetchall()
-            finished = {row["scope"] for row in rows if row["stage"] == "model-group-outcome"}
-            counts = dict.fromkeys(work_unit_keys, 0)
-            for row in rows:
-                if row["stage"] != "model-group-attempt":
-                    continue
-                if row["scope"] == attempt_id:
-                    if row["artifact_ref"] != artifact_ref or row["input_digest"] != basis_digest:
-                        raise Conflict("group attempt already reserves different immutable inputs")
-                    return row
-                overlap = set(work_unit_keys) & set(row["metadata"]["group_work_unit_keys"])
-                if overlap and row["scope"] not in finished:
-                    raise RequestReplayBlocked(row["scope"], ModelRequestStatus.PREPARED)
-                if row["metadata"]["command_id"] == lease.command_id:
-                    for key in overlap:
-                        counts[key] += 1
-            if any(count >= 4 for count in counts.values()):
-                raise ModelWorkUnitExhausted("verify")
-            active = await (await conn.execute(
-                "SELECT request_id, status FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s "
-                "AND domain_revision = %s AND status = 'sent' AND metadata->'group_work_unit_keys' ?| %s LIMIT 1",
-                (lease.run_id, lease.source_version, lease.domain_revision, work_unit_keys),
-            )).fetchone()
-            if active:
-                raise RequestReplayBlocked(active["request_id"], active["status"])
-            metadata = {"group_basis_digest": basis_digest, "group_work_unit_keys": work_unit_keys,
-                        "command_id": lease.command_id}
-            return await (await conn.execute(
-                "INSERT INTO tender_analysis_artifacts(run_id, source_version, domain_revision, stage, scope, "
-                "artifact_ref, input_digest, metadata, epoch) VALUES (%s, %s, %s, 'model-group-attempt', %s, %s, %s, %s, %s) RETURNING *",
-                (lease.run_id, lease.source_version, lease.domain_revision, attempt_id, Jsonb(artifact_ref),
-                 basis_digest, Jsonb(metadata), lease.epoch),
-            )).fetchone()
-
-    async def request_not_before(self, lease, task, logical_digest, *, group_work_unit_keys=None, group_attempt_id=None):
-        async with self.transaction() as conn:
-            await self.assert_fence(lease, conn)
-            match = ("metadata->'group_work_unit_keys' ?| %s" if group_work_unit_keys else
-                     "metadata->>'logical_request_digest' = %s AND NOT metadata ? 'group_attempt_id'")
+            # Legacy group requests from retired joint batches never count toward a single request.
             rows = await (await conn.execute(
                 "SELECT * FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s "
                 "AND domain_revision = %s AND task = %s AND metadata->>'command_id' = %s "
-                "AND sent_at IS NOT NULL AND " + match + " ORDER BY created_at, request_id",
-                (lease.run_id, lease.source_version, lease.domain_revision, task, lease.command_id,
-                 group_work_unit_keys or logical_digest),
+                "AND sent_at IS NOT NULL AND metadata->>'logical_request_digest' = %s "
+                "AND NOT metadata ? 'group_attempt_id' ORDER BY created_at, request_id",
+                (lease.run_id, lease.source_version, lease.domain_revision, task, lease.command_id, logical_digest),
             )).fetchall()
-            deadlines, counts = [], {}
-            for row in rows:
-                keys = row["metadata"].get("group_work_unit_keys") or [logical_digest]
-                attempt = max(counts.get(key, 0) for key in keys)
-                for key in keys:
-                    counts[key] = counts.get(key, 0) + 1
-                if group_attempt_id is not None and row["metadata"].get("group_attempt_id") != group_attempt_id:
-                    continue
+            deadlines = []
+            for attempt, row in enumerate(rows):
                 if row["status"] not in {"failed", "uncertain"}:
                     continue
                 deadline = _request_deadline(row, attempt)

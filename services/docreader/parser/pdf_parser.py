@@ -50,8 +50,8 @@ from docreader.parser.pdf_tables import (
     chars_outside_tables,
     extract_tables_from_page,
     grid_markdown,
+    grid_rows,
     reading_order_lines,
-    reading_order_text,
     text_with_table_markers,
     widths_mm,
 )
@@ -1639,14 +1639,43 @@ def _merge_short_index_continuations(texts: list, classes: list) -> list:
     return out
 
 
+def _continuation_page(page_ordinal, page, tables, lines, *, scanned):
+    try:
+        height = float(page.get_size()[1])
+    except Exception:
+        height = 0.0
+    body = [{"top": y, "bottom": y} for y, text in lines if str(text).strip()]
+    described = []
+    for index, grid in enumerate(tables or []):
+        described.append({
+            "table_id": f"page:{page_ordinal}:table:{index}",
+            "ruled": bool(getattr(grid, "ruled", False)),
+            "top": grid.top,
+            "bottom": grid.bottom,
+            "column_edges": list(grid.column_edges or []),
+            "column_count": grid.column_count,
+            "split_row": bool(getattr(grid, "split_row", False)),
+            "rows": grid_rows(grid),
+        })
+    return {"page": page_ordinal, "scanned": scanned, "height": height, "tables": described, "body_spans": body}
+
+
+def _table_continuations(pages):
+    from docreader.parser.continuation import ruled_table_continuations
+
+    return ruled_table_continuations(pages)
+
+
 def _sectionize_pages(
     texts: list[str],
+    page_ends_section: list[bool] | None = None,
 ) -> tuple[list[str], list[list[tuple[int, str, str]]]]:
     """Split page texts into sections that continue until the next heading.
 
     Each fragment is ``(section_ordinal, heading_path, text)`` for one page.
     The same ``section_ordinal`` repeats on the following page when the heading
-    does not. Empty pages produce no fragment.
+    does not. A scanned page ends the open section, so later text is not
+    attached to the heading before the scan. Empty pages produce no fragment.
     """
     allow_numbered, allow_deep = outline_flags(texts)
     promoted = [
@@ -1727,6 +1756,8 @@ def _sectionize_pages(
             normalized.append(line)
         promoted[page] = "\n".join(normalized)
         flush(page)
+        if page_ends_section and page < len(page_ends_section) and page_ends_section[page]:
+            current = None
     return promoted, fragments
 
 
@@ -1926,6 +1957,7 @@ class PDFParser(BaseParser):
             page_symbols: list = []
             vector_clips: dict = {}
             page_tables: dict = {}
+            continuation_pages: list = []
             for i in range(page_count):
                 page = pdf[i]
                 try:
@@ -1955,6 +1987,7 @@ class PDFParser(BaseParser):
                         text = plain
                     if cls == "text":
                         tables, lines = _extract_page_lines(page, pdfium_r)
+                        continuation_pages.append(_continuation_page(i, page, tables, lines, scanned=False))
                         if tables:
                             page_tables[i] = tables
                             # Cell glyphs belong to TABLE_REGION. SECTION is the
@@ -1986,6 +2019,8 @@ class PDFParser(BaseParser):
                         )
                     if not self._output_inventory and cls == "text" and layout_titles:
                         text = _apply_layout_heading_marks(text, layout_titles)
+                    if cls != "text" and not any(item["page"] == i for item in continuation_pages):
+                        continuation_pages.append(_continuation_page(i, page, [], [], scanned=True))
                 finally:
                     _close_pdfium_resource(page)
                 texts.append(text)
@@ -2035,12 +2070,13 @@ class PDFParser(BaseParser):
         finally:
             _close_pdfium_resource(pdf)
 
-        # Sections follow headings across pages. Scanned pages contribute an
-        # image, not a fake text section, and do not reset the open section.
+        # Sections follow headings across text pages. A scanned page ends the
+        # open section instead of letting the next text inherit its heading.
         readable = [
             texts[i] if classes[i] == "text" else "" for i in range(page_count)
         ]
-        promoted, section_fragments = _sectionize_pages(readable)
+        promoted, section_fragments = _sectionize_pages(
+            readable, [cls == "scanned" for cls in classes])
 
         # Assemble markdown in reading order. ATX headings are the section
         # boundaries the knowledge chunker and the bidding outline both read.
@@ -2079,6 +2115,7 @@ class PDFParser(BaseParser):
             # Edge lines the parser already judged as cross-page furniture.
             # Caption selection treats a surviving copy as the same signal.
             "repeating_lines": repeating_lines,
+            "table_continuations": _table_continuations(continuation_pages),
         }
 
         logger.info(

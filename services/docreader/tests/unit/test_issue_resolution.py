@@ -10,7 +10,7 @@ from docreader.tender.evidence.references import EvidenceRepository
 from docreader.llm.request import ModelContractError
 from docreader.tender.requirements import extract_items, validate_item_correction
 from test_analysis_checks import (
-    ExtractModel, IDENTITY, Model, OperationBudget, reference_candidate, resolution, run, scenario,
+    ExtractModel, IDENTITY, Model, OperationBudget, run, scenario,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -227,19 +227,12 @@ async def test_recovered_disposition_needs_semantic_acceptance_after_complete_so
                if p["code"] == "extraction_disposition_unresolved"}
     assert pending
     items["packs"][0]["artifact_ref"] = artifacts.put_json(normalized)
-    model = Model(locate=reference_candidate, associate=resolution if decision != "none" else None,
-                  accept=decision == "accepted")
+    model = Model()
 
     checked = await run(data, model)
     assert checked["coverage"]["missing"] == {} and checked["hard_blocking"] is False
     assert checked["counts"]["items"] == 1
-    if decision == "accepted":
-        assert pending <= set(checked["resolved_issue_ids"])
-        assert checked["blocking"] is False and checked["human_issue_ids"] == []
-        assert any(p["work_unit_id"].startswith("joint-") for p in model.calls)
-    else:
-        assert pending <= set(checked["human_issue_ids"])
-        assert not pending & set(checked["resolved_issue_ids"])
-        assert checked["blocking"] is True
-        if decision == "none":
-            assert not any(p["work_unit_id"].startswith("joint-") for p in model.calls)
+    assert pending <= set(checked["human_issue_ids"])
+    assert not pending & set(checked["resolved_issue_ids"])
+    assert checked["blocking"] is True
+    assert {payload["operation"] for payload in model.calls} == {"review"}

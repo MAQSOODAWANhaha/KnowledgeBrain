@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
 from docreader.parser import pdf_tables
-from docreader.parser.pdf_parser import PDFParser, _extract_page_tables
+from docreader.parser.pdf_parser import _extract_page_tables
 from docreader.parser.pdf_tables import (
     MAX_PDF_TABLE_COLUMNS,
     PdfTableCell,
@@ -19,9 +18,7 @@ from docreader.parser.pdf_tables import (
     widths_mm,
 )
 from docreader.models.document import (
-    PageTableLocator,
     PdfTableCell as ModelCell,
-    StructuredSourceUnitKind,
     sparsify_table_cells,
 )
 

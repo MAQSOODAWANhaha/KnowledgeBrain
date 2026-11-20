@@ -38,11 +38,11 @@ package.__package__ = "docreader.parser"
 package.__spec__ = importlib.machinery.ModuleSpec("docreader.parser", loader=None, is_package=True)
 sys.modules["docreader.parser"] = package
 
-from docx import Document as DocxDocument
-from docx.oxml import OxmlElement
-from openpyxl import Workbook
-from docreader.parser.docx_parser import DocxParser
-from docreader.parser.excel_parser import ExcelParser
+from docx import Document as DocxDocument  # noqa: E402 - imports need the stub package registered above
+from docx.oxml import OxmlElement  # noqa: E402 - imports need the stub package registered above
+from openpyxl import Workbook  # noqa: E402 - imports need the stub package registered above
+from docreader.parser.docx_parser import DocxParser  # noqa: E402 - imports need the stub package registered above
+from docreader.parser.excel_parser import ExcelParser  # noqa: E402 - imports need the stub package registered above
 
 
 def deterministic_archive(raw):

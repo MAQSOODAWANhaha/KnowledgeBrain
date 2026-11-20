@@ -3,7 +3,6 @@ from copy import deepcopy
 import pytest
 
 from docreader.tender.directory_compile import _FrozenLayout, documents_from_frozen
-from docreader.tender.directory_sources import SourceRefs
 from docreader.tender.evidence.references import EvidenceRepository
 from test_pdf_literal_freeze import freeze_pdf
 

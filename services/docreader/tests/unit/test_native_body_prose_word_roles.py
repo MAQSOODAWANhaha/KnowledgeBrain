@@ -2,7 +2,6 @@ from copy import deepcopy
 from io import BytesIO
 
 from docx import Document
-import pytest
 
 from docreader.llm.request import ModelContractError
 from docreader.tender.authoring_export import export_authoring_document
@@ -22,14 +21,16 @@ def word_for(values, scope, body, context):
     parts = [{'source_excerpt': scope.cell_excerpt(p['cell_id'], p['start'], p['end']), 'join': p['source_join']}
              for selected in unit['islands'] for p in selected['body']]
     bound = bind_source_body(values[0], values[1], target, parts)
-    outline = deepcopy(values[4]);outline['chapters'][0]['targets'][0] = bound
+    outline = deepcopy(values[4])
+    outline['chapters'][0]['targets'][0] = bound
     result = export_authoring_document(values[0], outline, [])
     return [p.text for p in Document(BytesIO(values[0].read_bytes(result['docx_ref']))).paragraphs]
 
 
 def test_next_independent_requirement_is_not_automatically_inserted_into_current_word(tmp_path):
     values, _, _ = prose_case(tmp_path, native='第一职责。另行提交银行保函。')
-    scope = NativeBodyScope(*values[:5]);cid = scope.selection_view().cells[0]['cell_id']
+    scope = NativeBodyScope(*values[:5])
+    cid = scope.selection_view().cells[0]['cell_id']
     paragraphs = word_for(values, scope, [[cid, 1, 1, 0]], [])
     assert '第一职责。' in paragraphs
     assert all('另行提交银行保函' not in p for p in paragraphs)
@@ -38,7 +39,8 @@ def test_next_independent_requirement_is_not_automatically_inserted_into_current
 def test_only_explicit_context_is_rendered_before_the_blank_response(tmp_path):
     values, _, _ = prose_case(tmp_path, purpose='来源说明。第一职责。',
                                native='来源说明。第一职责。另行提交银行保函。')
-    scope = NativeBodyScope(*values[:5]);cid = scope.selection_view().cells[0]['cell_id']
+    scope = NativeBodyScope(*values[:5])
+    cid = scope.selection_view().cells[0]['cell_id']
     paragraphs = word_for(values, scope, [[cid, 2, 2, 0]], [[cid, 1, 1]])
     assert '第一职责。' in paragraphs and '来源说明。' in paragraphs
     assert '原文上下文（非企业应答）：' in paragraphs
@@ -47,9 +49,15 @@ def test_only_explicit_context_is_rendered_before_the_blank_response(tmp_path):
 
 def test_missing_prior_requirement_cannot_be_hidden_by_omitting_context(tmp_path):
     values, _, _ = prose_case(tmp_path, purpose='来源说明。第一职责。', native='来源说明。第一职责。邻项。')
-    scope = NativeBodyScope(*values[:5]);cid = scope.selection_view().cells[0]['cell_id']
-    with pytest.raises(ModelContractError):
-        word_for(values, scope, [[cid, 2, 2, 0]], [])
+    scope = NativeBodyScope(*values[:5])
+    view = scope.selection_view()
+    cid = view.cells[0]['cell_id']
+    accepted = view.accept({'native_choices': [{'unit_id': view.units[0]['unit_id'], 'islands': [
+        {'island_id': view.units[0]['islands'][0]['island_id'], 'state': 'selected',
+         'body': [[cid, 2, 2, 0]], 'context': []}]}]})
+    assert not accepted['complete']
+    assert accepted['pending'][0]['reason'] == 'native_body_anchor_uncovered'
+    assert accepted['units'][0]['islands'][0]['body'] == []
 
 
 def test_prose_output_bound_includes_explicit_context_and_coverage_states():

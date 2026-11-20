@@ -63,7 +63,8 @@ def test_cell_relative_selection_becomes_exact_native_excerpt_not_whole_row(tmp_
     result = scope(case(tmp_path))
     excerpt = result.cell_excerpt(3, 5, 12)
     assert source_excerpts_text(result.artifacts, [excerpt]) == '第二职责尾句。'
-    with pytest.raises(ArtifactIntegrityError): result.cell_excerpt(3, 0, 1000)
+    with pytest.raises(ArtifactIntegrityError):
+        result.cell_excerpt(3, 0, 1000)
 
 
 def test_unmapped_line_on_native_page_is_pending_and_fully_retained(tmp_path):
@@ -83,10 +84,14 @@ def test_unmapped_sources_have_named_manual_exit(tmp_path, bad):
     if bad == 'row_bytes':
         values[3]['_source_renderings'][0]['rows'][0]['text'] += '伪造'
         values[3]['_source_renderings'][0]['rows_sha256'] = digest(values[3]['_source_renderings'][0]['rows'])
-    if bad == 'row_hash': values[3]['_source_renderings'][0]['rows_sha256'] = '0' * 64
-    if bad == 'purpose': values[4]['chapters'][0]['targets'][0]['purpose'] += '未知来源'
-    if bad == 'owner': values[4]['chapters'][0]['chapter_id'] = 'chapter-99'
-    if bad == 'origin_missing': values[3]['_source_renderings'] = []
+    if bad == 'row_hash':
+        values[3]['_source_renderings'][0]['rows_sha256'] = '0' * 64
+    if bad == 'purpose':
+        values[4]['chapters'][0]['targets'][0]['purpose'] += '未知来源'
+    if bad == 'owner':
+        values[4]['chapters'][0]['chapter_id'] = 'chapter-99'
+    if bad == 'origin_missing':
+        values[3]['_source_renderings'] = []
     result = scope(values)
     assert result.records[0]['classification'].endswith('pending')
     assert result.pending and all(p['outlet'] == 'manual_source_review' and not p['enterprise_confirmed'] for p in result.pending)
@@ -254,7 +259,8 @@ def test_request_cannot_substitute_cell_text_or_change_unit_scope(tmp_path):
     result = scope(case(tmp_path))
     view = result.selection_view()
     view.cells[2]['text'] = '另一段未批准正文。'
-    with pytest.raises(ArtifactIntegrityError): result.request_payload(view)
+    with pytest.raises(ArtifactIntegrityError):
+        result.request_payload(view)
 
 
 def test_negative_source_coordinates_do_not_alias_the_last_page(tmp_path):

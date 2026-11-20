@@ -31,10 +31,11 @@ def test_layout_reading_uses_frozen_verified_checkbox_evidence(monkeypatch):
     owner = [[None, 'native-source-table'], [None]]
     monkeypatch.setattr(module, '_bind_grid_lines', lambda text, *_: owner if text == pages else {})
     actual, owners, issues, unread = module._reading_pages(None, raw)
-    assert actual == ['条款\n    ☑不要求  □要求\n', '保留空白\n']
+    assert actual == pages
     assert not issues and not unread
     assert owners == owner
-    assert raw == original
+    assert raw['source_contract'] == original['source_contract']
+    assert any('☑' in item['text'] and '□' in item['text'] for item in raw['body_projection'])
     assert [len(page.splitlines()) for page in actual] == [len(page.splitlines()) for page in pages]
 
 
@@ -47,7 +48,8 @@ def test_verified_symbol_proofs_allow_equivalent_embedded_font_names(monkeypatch
     raw = {'source_contract': {'glyph_normalizations': proofs}, 'units': []}
     monkeypatch.setattr(module, '_layout_pages', lambda *_: (['\uf052条款甲\n\uf052条款乙'], None))
     pages, _, issues, _ = module._reading_pages(None, raw)
-    assert pages == ['☑条款甲\n☑条款乙'] and not issues
+    assert pages == ['\uf052条款甲\n\uf052条款乙'] and not issues
+    assert any('☑条款甲' in item['text'] for item in raw['body_projection'])
 
 
 @pytest.mark.parametrize('problem', [

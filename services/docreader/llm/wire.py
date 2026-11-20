@@ -30,17 +30,11 @@ class WirePayload:
         self.enabled = task in {'extract', 'verify', 'outline'} and payload.get('schema_version') == 2
         self.mapping = {}
         self.original_work_unit = payload.get('work_unit_id')
-        self.original_work_units = {unit['work_unit_id'] for unit in payload.get('work_units', [])}
-        if self.original_work_unit:
-            self.original_work_units.add(self.original_work_unit)
+        self.original_work_units = {self.original_work_unit} if self.original_work_unit else set()
         self.payload = deepcopy(payload)
         if not self.enabled:
             return
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-        batched = task == 'verify' and 'work_units' in payload
-        if batched:
-            # CAS sorts object keys before recovery; preparation must produce the same wire bytes.
-            self.payload = json.loads(canonical)
         self.payload['request_ref'] = hashlib.sha256(canonical.encode()).hexdigest()
         self.payload.pop('run_id', None)
         for view in self.payload.get('source_views', []):
@@ -48,12 +42,6 @@ class WirePayload:
                 for entry in view.get(field, []):
                     for key in ('source_range_id', 'parent_range_id', 'start', 'end'):
                         entry.pop(key, None)
-        if batched:
-            # Joint review adds proposals/findings; they must not renumber the frozen basis.
-            # Corrections keep all members and sources, even when only one remains a target.
-            for field in ('source_views', 'work_units', 'items', 'candidates', 'issues',
-                          'dispositions', 'scope_decisions', 'relations'):
-                self._collect(self.payload.get(field, []))
         self._collect({key: value for key, value in self.payload.items() if key != 'contract_feedback'})
         self.payload = self._walk(self.payload, self._encode)
 

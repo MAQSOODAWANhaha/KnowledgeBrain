@@ -75,7 +75,7 @@ from docreader.tender.authoring_coverage import (
 )
 from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY, AUTHORING_UNIT_BINDING_CONTRACT,
-    AuthoringBasis, AuthoringBasisContent, AuthoringBasisResponse, AuthoringCoverage, AuthoringDocument, AuthoringDocumentPlan,
+    AuthoringBasis, AuthoringBasisContent, AuthoringBlock, AuthoringBasisResponse, AuthoringCoverage, AuthoringDocument, AuthoringDocumentPlan,
     AuthoringInput, AuthoringOutline, AuthoringQueryPlan, AuthoringReviewRecord, AuthoringReviewResponse, AuthoringUsage,
     KnowledgeMaterial, OutlineAssemblyResponse, OutlineResponse, SourceUnitRef, WritingResponse,
     WritingTask, WritingUnit,
@@ -252,7 +252,9 @@ def _prompt(budget, task):
 
 def _request(budget, task, payload):
     prompt_name = 'outline_assemble' if task == 'outline' and payload.get('operation') == 'assemble' else task
-    if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') in {'select_directory_refs_v1', 'select_directory_refs_v2'}:
+    if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') == 'select_bid_format_outline_v1':
+        prompt_name = 'bid_format_outline'
+    elif task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') in {'select_directory_refs_v1', 'select_directory_refs_v2'}:
         prompt_name = 'directory_ref_plan'
     prompt = _prompt(budget, prompt_name)
     if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') == 'select_directory_refs_v2':
@@ -737,7 +739,7 @@ async def _request_directory_plans(documents, budget, execute, identity=None, *,
     for slot in (1, 2):
         try:
             if contract == DIRECTORY_REF_CONTRACT:
-                # A valid v11 response is a strict subset of the new reading-ref
+                # A valid v1 response is a strict subset of the new reading-ref
                 # contract. Reuse only its exact original request and revalidate;
                 # rejected or merely similar old replies never become successes.
                 legacy = {**payload, 'operation': 'select_directory_refs_v1', 'plan_slot': slot}
@@ -2143,6 +2145,10 @@ def plan_writing_tasks(outline):
                         and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'template_refs'))
                         and related and all(identity in identities and identity != target['target_id']
                                             for identity in related)):
+                    if target.get('support_origins') == ['knowledge'] and str(target.get('target_id', '')).endswith(':answer'):
+                        emit()
+                        group.append(target)
+                        emit()
                     continue
                 if target['kind'] != 'narrative' or target.get('manual_fill', False):
                     emit()
@@ -2516,6 +2522,16 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         if outline is not None:
             raise ValueError('directory compilation replaces a model outline')
         directory_facts = tuple(f for f in reviewed_source_facts if f['kind'] != 'credential_slot')
+        if directory_plans is None and directory_contract == 'bid_format_source_outline_v1':
+            if execute is None:
+                raise ModelConfigurationError('bid-format semantic selection requires a model')
+            from docreader.tender.bid_format_outline import select_bid_format_plan
+            selected = await select_bid_format_plan(directory_documents, budget, execute, snapshot)
+            directory_plans = [selected] if selected else []
+        elif directory_plans is None and execute is None:
+            from docreader.tender.directory_compile import bid_format_plan
+            host = bid_format_plan(directory_documents)
+            directory_plans = [host] if host else []
         fetch_details = directory_plans is None and bool(directory_documents)
         if directory_plans is None:
             directory_plans, plan_failures = ([], [])
@@ -2646,13 +2662,21 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     query_plan = {'queries': [], 'search': [], 'gaps': []}
     knowledge_issues = []
     if knowledge is not None:
-        scope = knowledge.spec()
+        from docreader.tender.authoring_coverage import apply_retrieved_knowledge, tender_source_identity
+        identity = tender_source_identity(artifacts, snapshot)
+        scope = {**knowledge.spec(), 'exclude_content_hashes': identity['source_shas'],
+                 'exclude_document_ids': identity['document_ids']}
         texts = await asyncio.to_thread(_excerpt_texts, artifacts, outline)
         query_plan = plan_queries(outline, tasks, entries, requirements, texts, scope)
         gaps.extend(query_plan['gaps'])
         if query_plan['search']:
-            retrieved = await knowledge.search(query_plan['search'], artifacts)
-            combined, issues = prepare_materials(artifacts, [*materials, *retrieved['materials']])
+            answer_targets = [target for task in tasks for target in task['targets']
+                              if target.get('support_origins') == ['knowledge']]
+            consumed = await apply_retrieved_knowledge(
+                knowledge, query_plan['search'], artifacts, identity, answer_targets)
+            retrieved = {'materials': consumed['materials'], 'issues': consumed['issues']}
+            retrieved_materials = consumed['materials']
+            combined, issues = prepare_materials(artifacts, [*materials, *retrieved_materials])
             materials = combined
             gaps.extend(issues)
             knowledge_issues = retrieved['issues']
@@ -2830,8 +2854,10 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             unit['gaps'].extend(source_issues)
             return done(unit, None)
         if not _has_allowed_support(payload):
+            answer_only = all(str(t.get('target_id', '')).endswith(':answer') for t in task['targets'])
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
+                blocks=[AuthoringBlock(kind='paragraph') for _ in task['targets']] if answer_only else [],
                 gaps=['未取得本位置允许使用的可读依据，不生成无依据应答；原模板及响应位置保留空白。']).model_dump()
             unit['gaps'].extend(source_issues)
             return done(unit, None)

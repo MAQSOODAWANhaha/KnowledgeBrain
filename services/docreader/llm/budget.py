@@ -47,8 +47,6 @@ class RequestBudget:
     # Accurate input admits larger whole-ledger discovery requests whose output
     # grows with items; capped at a quarter of smaller provider windows.
     TOKENIZED_OUTPUT_RESERVE = 32768
-    ANALYSIS_BATCH_OUTPUT_PER_TARGET = 24576
-    ANALYSIS_BATCH_OUTPUT_MINIMUM = 32768
 
     def __init__(
         self,
@@ -161,10 +159,6 @@ class RequestBudget:
                 for task, prompt in sorted(self.prompts.items())
             },
         }
-        spec["analysis_batch_output"] = {
-            "minimum": self.ANALYSIS_BATCH_OUTPUT_MINIMUM,
-            "per_target": self.ANALYSIS_BATCH_OUTPUT_PER_TARGET,
-        }
         if self.reasoning_effort is not None:
             spec["reasoning_effort"] = self.reasoning_effort
         if self.tokenizer is not None:
@@ -226,16 +220,6 @@ class RequestBudget:
         output_reserve = (
             self.tokenized_output_reserve if tokenized else self.output_reserve
         )
-        if task == "verify" and isinstance(payload, dict) and "work_units" in payload:
-            targets = payload.get("target_work_unit_ids")
-            if not isinstance(targets, list) or not targets:
-                raise ModelConfigurationError(
-                    "analysis batch requires explicit nonempty answering targets"
-                )
-            output_reserve = max(
-                self.ANALYSIS_BATCH_OUTPUT_MINIMUM,
-                self.ANALYSIS_BATCH_OUTPUT_PER_TARGET * len(targets),
-            )
         image_count = 0
         text_tokens = 0
         for message in request["messages"]:

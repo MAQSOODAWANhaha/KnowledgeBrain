@@ -28,6 +28,26 @@ from docreader.tender.word_navigation import add_bookmark, bookmark_name
 
 
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]")
+
+
+def xml_text(value):
+    """Drop characters XML 1.0 cannot store. Frozen source bytes stay unchanged."""
+    if not isinstance(value, str):
+        return value
+    return _XML_ILLEGAL.sub("", value)
+
+
+def _prepare_document():
+    document = Document()
+    write = document.add_paragraph
+
+    def add_paragraph(text="", style=None):
+        text = xml_text(text) if isinstance(text, str) else text
+        return write(text) if style is None else write(text, style=style)
+
+    document.add_paragraph = add_paragraph
+    return document
 PENDING_ANALYSIS_NOTE = "分析整理（待确认）：摘要及适用范围仍需结合原文和有效补遗核对。"
 
 
@@ -347,22 +367,27 @@ def _page_width(document):
 
 
 def _table_layout(document, table, widths=None, header_count=0):
-    available = _page_width(document)
-    widths = widths or [available / len(table.columns)] * len(table.columns)
-    factor = min(1, available / sum(widths))
-    widths = [int(width * factor) for width in widths]
-    table.autofit = False
-    for column, width in zip(table.columns, widths):
-        column.width = width
+    # Widths come only from the source grid. Missing widths stay unset.
+    if widths:
+        available = _page_width(document)
+        factor = min(1, available / sum(widths)) if sum(widths) else 1
+        widths = [int(width * factor) for width in widths]
+        table.autofit = False
+        for column, width in zip(table.columns, widths):
+            column.width = width
     for number, row in enumerate(table.rows):
         if number < header_count:
             header = OxmlElement("w:tblHeader")
             header.set(qn("w:val"), "true")
             row._tr.get_or_add_trPr().append(header)
+        if not widths:
+            for cell in row.cells:
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            continue
         for cell, width in zip(row.cells, widths):
             cell.width = width
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-    return widths
+    return widths or []
 
 
 def _heading_numbering(document, starting_path):
@@ -422,7 +447,7 @@ def _toc(document, entries, display_paths):
                 link.set(qn('w:history'), '1')
                 run, text = OxmlElement('w:r'), OxmlElement('w:t')
                 number = '.'.join(map(str, display_paths[chapter['chapter_id']]))
-                text.text = number + ' ' + _display_title(chapter['title'])
+                text.text = xml_text(number + ' ' + _display_title(chapter['title']))
                 run.append(text)
                 link.append(run)
                 entry._p.append(link)
@@ -649,7 +674,7 @@ def _block(document, block, *, width_ratios=None):
     _table_layout(document, table, widths, 1 if block.get("headers") else 0)
     for row_index, values in enumerate(rows):
         for column_index, text in enumerate(values):
-            table.cell(row_index, column_index).text = text
+            table.cell(row_index, column_index).text = xml_text(text)
 
 
 class _Assembler:
@@ -859,9 +884,13 @@ class _Assembler:
                 for paragraph in _template_paragraphs(unit["text"], breaks, start):
                     document.add_paragraph(paragraph)
             if grid:
+                if document.paragraphs:
+                    document.paragraphs[-1].paragraph_format.keep_with_next = True
                 count = part.get("header_row_count")
                 if count is None:
-                    count = _native_header_count(unit) or 0
+                    count = _native_header_count(unit)
+                if count is None:
+                    count = 0
                 locator = unit.get('locator') or {}
                 heights = None
                 if locator.get('locator_kind') == 'page_table':
@@ -909,8 +938,9 @@ class _Assembler:
             for row, height in zip(table.rows, row_heights):
                 row.height = Pt(min(height, available))
                 row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+        supplied = grid.get("widths_mm")
         widths = _table_layout(document, table,
-            [Mm(width) for width in grid["widths_mm"]] if grid.get("widths_mm") else None, header_count)
+            [Mm(width) for width in supplied] if supplied else None, header_count)
         choices = defaultdict(set)
         for fill in fills:
             choices[(fill["row"], fill["column"])].add(fill["text"])
@@ -923,7 +953,8 @@ class _Assembler:
             row_span, col_span = cell.get("row_span", 1), cell.get("col_span", 1)
             if row_span > 1 or col_span > 1:
                 target = target.merge(table.cell(row + row_span - 1, column + col_span - 1))
-            target.width = sum(widths[column:column + col_span])
+            if widths:
+                target.width = sum(widths[column:column + col_span])
             text = cell.get("text", "")
             values = choices.get((row, column), set())
             if text.strip():
@@ -935,7 +966,7 @@ class _Assembler:
                          chapter_id, target_id)
             elif values:
                 text = next(iter(values))
-            target.text = text
+            target.text = xml_text(text)
             if typography:
                 margins = OxmlElement('w:tcMar')
                 for side in ('left', 'right'):
@@ -961,6 +992,13 @@ class _Assembler:
                 for cell in row.cells:
                     for paragraph in cell.paragraphs:
                         paragraph.paragraph_format.keep_with_next = True
+        if not grid.get("widths_mm"):
+            for element in list(table._tbl.findall('.//' + qn('w:tcW'))):
+                parent = element.getparent()
+                if parent is not None:
+                    parent.remove(element)
+            for element in table._tbl.findall('.//' + qn('w:gridCol')):
+                element.attrib.pop(qn('w:w'), None)
 
     def _native_row(self, excerpt, loaded):
         selected = self._selected_grid(excerpt, loaded)
@@ -1058,9 +1096,9 @@ class _Assembler:
         _table_layout(document, table, [_page_width(document) * 0.65, _page_width(document) * 0.35], 1)
         table.cell(0, 0).text, table.cell(0, 1).text = "招标要求", "投标响应"
         for ordinal, (text, answer) in enumerate(entries, 1):
-            table.cell(ordinal, 0).text = text
+            table.cell(ordinal, 0).text = xml_text(text)
             if answer:
-                table.cell(ordinal, 1).text = answer
+                table.cell(ordinal, 1).text = xml_text(answer)
 
     def _write_native_response(self, document, grid, entries):
         """Draw selected native rows, plus one blank answer column. Do not reprint the reading string."""
@@ -1077,8 +1115,8 @@ class _Assembler:
         _table_layout(document, table, None, 1 if body and body[0][0] == 0 else 0)
         for ordinal, (source_row, values, answer) in enumerate(body):
             for column, text in enumerate(values):
-                table.cell(ordinal, column).text = text
-            table.cell(ordinal, columns - 1).text = "投标响应" if source_row == 0 and answer is None else (answer or "")
+                table.cell(ordinal, column).text = xml_text(text)
+            table.cell(ordinal, columns - 1).text = "投标响应" if source_row == 0 and answer is None else xml_text(answer or "")
 
     def response_table(self, document, target, units, chapter_id):
         rows = target.get("response_table", {}).get("rows", [])
@@ -1392,7 +1430,7 @@ class _Assembler:
 
     def render(self, entries, title, *, include_pending=False):
         entries = _body_entries(entries)
-        document = Document()
+        document = _prepare_document()
         section = document.sections[0]
         section.page_width, section.page_height = Mm(210), Mm(297)
         section.left_margin = section.right_margin = Mm(25)

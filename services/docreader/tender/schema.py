@@ -1294,28 +1294,6 @@ class AssociationResult(_AnalysisContract):
     findings: list[_AnalysisIssue]
 
 
-class AnalysisWorkUnit(_AnalysisContract):
-    """One unchanged semantic dependency group within a shared physical request."""
-
-    work_unit_id: Text
-    candidate_ids: list[Text]
-    issue_ids: list[Text]
-    decision_ids: list[Text] | None = None
-
-
-class AnalysisBatchResponse(_AnalysisContract):
-    """Validate the complete envelope; route and validate each member separately."""
-
-    schema_version: AnalysisVersion
-    work_units: list[Any]
-    shared_findings: list[Any]
-
-
-class AnalysisSharedFinding(_AnalysisContract):
-    work_unit_ids: list[Text] = Field(min_length=1)
-    finding: _AnalysisIssue
-
-
 class PlanItem(Contract):
     requirement_id: StrictStr = Field(min_length=1)
     target_kind: Literal["body", "table_field", "attachment", "manual_action"]

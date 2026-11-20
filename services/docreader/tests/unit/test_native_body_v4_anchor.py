@@ -71,9 +71,9 @@ def test_anchor_coverage_ignores_native_whitespace_but_never_original_unicode_gl
     selected = response([[1, 2, 2, 0]], [])
     result = prose(text, start, body_end).accept(selected)
     assert result['complete'] and result['units'][0]['context'] == []
-    with pytest.raises(ModelContractError) as rejected:
-        prose(text, start, len(text)).accept(selected)
-    assert rejected.value.feedback_fragments == []
+    uncovered = prose(text, start, len(text)).accept(selected)
+    assert not uncovered['complete']
+    assert uncovered['pending'][0]['reason'] == 'native_body_anchor_uncovered'
 
 
 def test_grid_context_remains_host_owned_and_cannot_be_replaced_by_model_context():

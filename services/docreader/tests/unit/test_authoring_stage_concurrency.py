@@ -100,7 +100,8 @@ async def test_source_concurrency_preserves_requests_and_plan_order(monkeypatch,
     assert serial[3] == ["第一段原文。", "第二段原文。", "另一完整章节原文。"]
     assert concurrent[3].index("第二段原文。") < concurrent[3].index("第一段原文。")
     assert serial[4] == 1 and concurrent[4] == 2
-    digest = lambda value: hashlib.sha256(pipeline._json(value).encode()).hexdigest()
+    def digest(value):
+        return hashlib.sha256(pipeline._json(value).encode()).hexdigest()
     assert digest(serial[0]) == digest(concurrent[0])
 
 

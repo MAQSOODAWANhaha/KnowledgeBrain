@@ -16,6 +16,31 @@ from docreader.parser.pdf_symbols import collect_page_symbols, is_private_symbol
 CONTRACT = 'tender_pdf_literal_v1'
 
 
+def present_literal_characters(characters):
+    """Body presentation of one literal run. Character text stays the raw receipt."""
+    presented = []
+    pieces = []
+    raw_code_points = []
+    pending = False
+    for character in characters:
+        text = character.get('text') or ''
+        if text == '\ufffe':
+            raw_code_points.append(0xFFFE)
+            if 'hyphen_evidence' in (character.get('flags') or []):
+                presented.append('-')
+                pieces.append('-')
+            else:
+                pending = True
+                pieces.append('')
+            continue
+        presented.append(text)
+        pieces.append(text)
+        if len(text) == 1:
+            raw_code_points.append(ord(text))
+    return {'text': ''.join(presented), 'pending': pending, 'raw_code_points': raw_code_points,
+            'pieces': pieces}
+
+
 def _page_literal(page, page_ordinal, raw):
     width, height = page.get_size()
     if not all(math.isfinite(value) and value > 0 for value in (width, height)):
@@ -70,6 +95,9 @@ def _page_literal(page, page_ordinal, raw):
                 problem('pdf_literal_character_box_unreadable', index, error)
             if character['text'] in ('\r', '\n', '\r\n') or character['pdfium_unicode'] in (10, 13):
                 character['flags'].append('line_break')
+            # PDFium reports unicode 2 when a line-end hyphen has no glyph.
+            if character['text'] == '\ufffe' and character.get('pdfium_unicode') == 2:
+                character['flags'].append('hyphen_evidence')
             characters.append(character)
     finally:
         textpage.close()

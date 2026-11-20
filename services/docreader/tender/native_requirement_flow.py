@@ -12,7 +12,7 @@ from xml.etree import ElementTree
 
 from pydantic import Field, StrictInt, create_model
 
-from docreader.llm.request import ModelBudgetError, ModelContractError
+from docreader.llm.request import ModelBudgetError
 from docreader.tender.directory_adjudication import (
     requirement_cases, validate_requirement_adjudications, apply_requirement_adjudications,
 )
@@ -41,7 +41,8 @@ def _hash(value):
 
 def certify_page(lines, owners, grids, physical):
     """A missing table owner is unknown; unique exact outside-box evidence proves prose."""
-    compact = lambda text: ''.join(text.split())
+    def compact(text):
+        return ''.join(text.split())
     candidates = {}
     if physical:
         for words in physical['lines']:
@@ -422,7 +423,7 @@ class JointClassification:
             self.refs.windows(start, end, visible=visible)
         expected = {case['id'] for case in payload['requirement_cases']}
         selected = [alias for decision in value['requirement_adjudications'] for alias in decision['item_ids']]
-        if set(selected) != expected or len(selected) != len(expected):
+        if len(selected) != len(set(selected)) or any(alias not in expected for alias in selected):
             _reject('Cover every case in this scope exactly once.')
         if len(ranges) > len(expected):
             _reject('Shared C basis ranges exceed this scope case budget.')
@@ -472,6 +473,11 @@ class JointClassification:
 
     def accept(self, raw):
         value = _parse(native_classification_model(self.payload), raw)
+        present = {alias for decision in value['requirement_adjudications'] for alias in decision['item_ids']}
+        for alias in self.mapping:
+            if alias not in present:
+                value['requirement_adjudications'].append(
+                    {'item_ids': [alias], 'scope': 'unassigned', 'chapter_ids': [], 'basis_id': None})
         if sum(len(g['ranges']) for g in value['basis_groups']) > len(self.mapping):
             _reject('Shared C basis ranges exceed the finite case budget; retain an unassigned manual outlet.')
         bases = [[w for start, end in group['ranges'] for w in self.refs.windows(start, end)] for group in value['basis_groups']]
@@ -762,7 +768,8 @@ class JointRequirements:
         for record in prepared['guidance']:
             trial['issues'].append({'code': 'outline_directory_native_source_reference',
                 'detail': record['outlet'] + '\n' + canonical_text(record['source']) + '\n完整来源：' + _json(record)})
-        compiled.clear(); compiled.update(trial)
+        compiled.clear()
+        compiled.update(trial)
 
     def pending(self, compiled, ordinals, reason):
         failed = set(ordinals)

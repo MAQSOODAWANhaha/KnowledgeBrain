@@ -149,7 +149,8 @@ def load_decoration(artifacts, source, frozen, fact, occupied):
 def validate_decoration_duties(artifacts, repository, facts, indexes, source):
     from docreader.tender.authoring_excerpts import load_source_excerpt
 
-    compact = lambda value: re.sub(r'\s+', '', value)
+    def compact(value):
+        return re.sub(r'\s+', '', value)
     for fact in (f for f in facts if f['kind'] == 'source_decoration'):
         for fragment in fact['_fragments']:
             left, bottom, right, top = fragment['bbox']

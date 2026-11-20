@@ -62,7 +62,7 @@ def test_operation_samples_exclude_failed_outputs_and_unplanned_stages_are_unkno
     assert result["operations"]["reference"]["successful_completion"] == {"observations": 1, "max": 100, "p95": 100}
     assert result["operations"]["joint"]["requests"] == 1
     assert result["operations"]["verify_unattributed"]["requests"] == 1
-    assert result["planning"]["unplanned_phases"] == ["extract", "locate", "associate", "joint"]
+    assert result["planning"]["unplanned_phases"] == ["extract"]
     assert result["planning"]["total_planned_requests"] is None
     assert result["planning"]["known_planned_requests"] == 0
 

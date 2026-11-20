@@ -368,9 +368,9 @@ async def test_durable_request_wait_precedes_the_sent_fence(monkeypatch, deadlin
     waits, lookups, sent = [], [], []
     audit = Audit()
 
-    async def request_not_before(lease, task, logical_digest, *, group_work_unit_keys=None):
+    async def request_not_before(lease, task, logical_digest):
         assert [event["status"] for event in audit.events] == ["prepared"]
-        lookups.append((task, logical_digest, group_work_unit_keys))
+        lookups.append((task, logical_digest))
         return deadline
 
     async def sleep(seconds):
@@ -383,7 +383,7 @@ async def test_durable_request_wait_precedes_the_sent_fence(monkeypatch, deadlin
     async with client:
         assert await client.call("extract", {}) == {"result": "ok"}
     assert waits == ([expected_wait] if expected_wait else [])
-    assert lookups == [("extract", audit.events[0]["metadata"]["logical_request_digest"], None)]
+    assert lookups == [("extract", audit.events[0]["metadata"]["logical_request_digest"])]
     assert len(sent) == 1 and [event["status"] for event in audit.events] == ["prepared", "sent", "succeeded"]
 
 

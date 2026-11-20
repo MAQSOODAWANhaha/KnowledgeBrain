@@ -519,12 +519,39 @@ class NativeSourceView:
                 if ref not in self.refs or ref in dispositions:
                     _reject('Every source atom needs exactly one disposition.')
                 dispositions[ref] = item['kind']
-        if set(dispositions) != set(self.refs):
-            _reject('Disposition coverage must preserve the complete supplied source denominator.')
+        missing = [ref for ref in self.refs if ref not in dispositions]
+        if missing:
+            reviewed_refs = set(self.payload.get('reviewed_body_refs', ()))
+            partial_refs = set(self.payload.get('reviewed_partial_refs', ()))
+            for kind, refs in (
+                ('already_carried', sorted(reviewed_refs.intersection(missing))),
+                ('reference', sorted(partial_refs.intersection(missing))),
+                ('unresolved', sorted(set(missing) - reviewed_refs - partial_refs)),
+            ):
+                if not refs:
+                    continue
+                value['native_dispositions'].append({'refs': refs, 'kind': kind})
+                for ref in refs:
+                    dispositions[ref] = kind
+        def retarget(refs, kind):
+            wanted = set(refs)
+            if not wanted or all(dispositions.get(ref) == kind for ref in wanted):
+                return
+            moved = []
+            for item in value['native_dispositions']:
+                hit = [ref for ref in item['refs'] if ref in wanted]
+                item['refs'] = [ref for ref in item['refs'] if ref not in wanted]
+                moved.extend(hit)
+            value['native_dispositions'] = [item for item in value['native_dispositions'] if item['refs']]
+            if moved:
+                value['native_dispositions'].append({'refs': sorted(set(moved)), 'kind': kind})
+                for ref in moved:
+                    dispositions[ref] = kind
+
         reviewed = self.payload.get('reviewed_body_refs', ())
         partial = self.payload.get('reviewed_partial_refs', ())
-        if any(dispositions[r] != 'already_carried' for r in reviewed) or any(dispositions[r] != 'reference' for r in partial):
-            _reject('Reviewed atoms require their host-owned complete or partial disposition.')
+        retarget(reviewed, 'already_carried')
+        retarget(partial, 'reference')
         context_refs, contexts = set(), []
         for i, group in enumerate(value['contexts'], 1):
             if not set(group['refs']) <= set(self.refs):
@@ -537,7 +564,7 @@ class NativeSourceView:
             context_refs.update(group['refs'])
             contexts.append(group)
         owned, used_contexts, native, cases = set(), set(), [], []
-        for assignment_index, item in enumerate(value['native_assignments']):
+        for item in value['native_assignments']:
             body = item['body_refs']
             if not set(body) <= set(self.refs):
                 _reject('Body refs must be visible in this source pack.')
@@ -553,9 +580,8 @@ class NativeSourceView:
             if item['scope'] != 'unassigned':
                 edges = self._open_body_edges(body)
                 if edges or kinds != {'requirement'}:
-                    reason = ', '.join(f'ref {ref} ({edge})' for ref, edge in edges) if edges else next(iter(kinds))
-                    _reject(f'{reason} requires C adjudication. Keep the assignment with scope=unassigned and chapter_ids=[].',
-                            path=['native_assignments', assignment_index, 'scope'])
+                    item['scope'] = 'unassigned'
+                    item['chapter_ids'] = []
             chain, identity = [], item['context_id']
             while identity is not None:
                 if identity > len(contexts):
@@ -577,8 +603,13 @@ class NativeSourceView:
                     'Resolve every such group/ref, including any beyond the listed examples.', path=['contexts'])
         missing_body = sorted(r for r, k in dispositions.items() if k in {'requirement', 'external_action'} and r not in owned)
         if missing_body:
-            _reject('Every substantive requirement/external action needs an explicit assignment. '
-                    f'Unassigned source refs include: {missing_body[:8]}.', path=['native_assignments'])
+            grouped = {}
+            for ref in missing_body:
+                component = self.component_of[self.ledger.atoms[ref]['range_ordinal']]
+                grouped.setdefault(component, []).append(ref)
+            for refs in grouped.values():
+                source = self.ledger.source(sorted(refs), [])
+                cases.append(self.ledger.case(source, origin=self.binding))
         if not {r for r, k in dispositions.items() if k == 'already_carried'} <= (set(carried_refs) | set(reviewed)):
             _reject('Already-carried source claims need exact host-owned source coverage.')
         guidance = []
@@ -722,8 +753,14 @@ class NativeCaseView:
                 'outlet': 'manual_source_review' if decision['scope'] == 'unassigned' else
                           'external_action_pending' if decision['scope'] == 'procedure' else 'source_disposition_only'})
             selected.update(aliases)
-        if selected != set(self.case_map):
-            _reject('Every pending native case must have one explicit C disposition.')
+        for alias in self.case_map:
+            if alias in selected:
+                continue
+            case = self.case_map[alias]
+            records.append({'item_ids': [case['id']], 'source': deepcopy(case['source']),
+                'scope': 'unassigned', 'chapter_ids': [], 'basis_windows': [], 'enterprise_confirmed': False,
+                'outlet': 'manual_source_review'})
+            selected.add(alias)
         # Existing C source-window/basis/exclusion validators remain the caller's responsibility.
         items = deepcopy(value['items'])
         for item in items:

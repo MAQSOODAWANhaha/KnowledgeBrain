@@ -12,6 +12,9 @@ def _rejected(detail):
     return ModelContractError([{'path': [], 'code': 'directory_source_ref_invalid', 'detail': detail}])
 
 
+_DERIVED_FIELDS = frozenset({'layout_decoration', 'continuations', 'body_projection'})
+
+
 class SourceRefs:
     def __init__(self, documents, identity=None):
         _Source(documents)
@@ -24,7 +27,10 @@ class SourceRefs:
                     point = document['document_id'], page, line
                     self.by_point[point] = len(self.lines)
                     self.lines.append((*point, content))
-        encoded = json.dumps(self.documents, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        # Derived presentation fields are not source identity; keep saved projections and receipts valid.
+        projection = [{key: value for key, value in document.items() if key not in _DERIVED_FIELDS}
+                      for document in self.documents]
+        encoded = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
         self.digest = hashlib.sha256(encoded.encode()).hexdigest()
 
     def reading(self, pages=None):

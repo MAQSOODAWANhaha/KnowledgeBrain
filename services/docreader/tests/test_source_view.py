@@ -2,7 +2,6 @@
 import hashlib
 import io
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import grpc
 import pytest

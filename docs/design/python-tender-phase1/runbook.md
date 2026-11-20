@@ -2,36 +2,7 @@
 
 故障根因、解决方案及实际验证状态统一见[问题与修复记录](bug-fix.md)，新发现的问题先记录再修复。
 
-## 当前 v2 主线与部署边界
-
-本期目标已收敛为完整分析招标文件：义务、评分规则、不利后果和原文明示的填表、签章、
-附件及证明材料提交要求。当前源码五节点为 `register → freeze → extract → verify → confirm`，
-确认后到达 `analysis-ready`；条目统一为 `TenderItem(item_id, kind, text, evidence)`，四种
-`kind` 为 `obligation`、`scoring_rule`、`consequence_rule`、`submission_requirement`。
-业务含义交由 LLM 独立审阅，宿主保留结构、证据、覆盖、预算和执行保护。跨包引用一轮
-补读后仍未解决的内容转人工证据裁决，不能以确认清除阻断。
-
-本期不采集企业响应数据、不生成响应计划或材料准备待办、不选择是否争取评分机会。
-“提交证明材料”是招标原文要求，分析只记录这项要求，不宣称企业已有材料或已经满足资格。
-
-五节点、v2事项协议、默认3次重试、身份容错和定位压缩已部署，并发2，复用现有PG/Redis。
-用户已授权真实验证且费用不设上限。旧run `eedcf1b0-40f4-42f2-b6c7-ef47ea723ec8`
-在原文review17/17、locate49/202后首数据超时，uncertain及全部原回执保留。
-用户明确选择用新版本重新付费跑同一文件，已通过正式submit建立独立运行
-`6f0a29a2-8f45-4725-bebb-70485d8a75ba`；动态进度统一见[最新交接](handoff.md)。
-不得通过改写命令状态、原回包、版本、摘要或清缓存来续跑；旧checkpoint/抽取/Plan不
-冒充新协议产物。业务blocked使用已有证据裁决入口，确认不能清除未决问题。
-
-源码的status输出新增`budget_observation`：计划请求数/输入估算与实际Token分列，按任务
-统计输出max/p95、超过预留次数、实际总量与上下文容量对照以及缺失usage。
-该报告已随05:07 UTC短引用修复版部署，区分计划估算和实际报告用量。
-报告是观测，不自动调整容量、追加门限或把未知用量算作0；当前校准证据见BUG-021。
-
-本轮源码增加合同拒收反馈、请求短引用及宿主核验执行覆盖；normalization_version=2，
-预算builder为chat_json_object_stream_short_refs_v1。旧run已按用户要求正式取消，05:07 UTC修复版已部署。
-不能在同一修订中更换Prompt/发送协议后直接retry。先完成或明确处置在途任务，再升级服务；
-新协议真实验证使用独立新运行，保留旧运行和全部回执。模型纠正只针对未接受的合同失败，
-不自动修正既有业务结论，不替用户确认。
+## 存储边界
 
 本入口不会接入 Rust，也不会切换现有任务。Python 可与同一安装共用 PostgreSQL 数据库及
 Redis，保留自己的运行表、checkpoint 和队列命名空间。所有 worker、dispatcher、CLI
@@ -111,6 +82,16 @@ resume 命令，完成后 status=`analysis-ready`。`results.current_items` 从�
 已接受决议投影有效事项，`results.verify` 保留核验问题、关系及决议回执；不输出 `results.plan`。
 `results` 给出业务 JSON；artifacts 数组给出内容摘要和相对文件引用、阶段耗时。usage 中
 每请求的真实用量缺失时保留 null；uncertain 表示可能已执行/计费，绝不伪造精确一次。
+
+## 编制阶段报表
+
+一次编制执行按阶段的调用数、Token、待核和覆盖情况，在 `services/docreader` 下查看：
+
+```sh
+uv run --frozen python -m docreader.integrations.cli authoring-report <execution_id>
+```
+
+只读，不发模型请求、不写产物。字段见[字段字典](field-dictionary.md)的 `authoring-report`。
 
 ## 失败执行恢复
 

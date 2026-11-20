@@ -32,9 +32,11 @@ def test_verified_normalization_preserves_raw_glyph_receipt_and_unknown_is_parti
 
 
 def test_same_page_ambiguous_font_does_not_get_global_pua_replacement():
-    source = unit('\uf052 两个不同字体的相同私用码')
-    receipt = normalize_pdf_units([source], [dict(page_ordinal=0, char_index=1, raw_symbol='\uf052', normalized_symbol='☑'),
-                                             dict(page_ordinal=0, char_index=2, raw_symbol='\uf052')])
-    assert receipt == []
-    assert source.text.startswith('\uf052')
+    source = unit('\uf052已核对 \uf052未核对')
+    verified = dict(page_ordinal=0, char_index=0, raw_symbol='\uf052', normalized_symbol='☑', glyph_name='boxcheck',
+                    font_name='ABCDEF+Wingdings2', font_sha256='a' * 64)
+    unverified = dict(page_ordinal=0, char_index=6, raw_symbol='\uf052')
+    receipt = normalize_pdf_units([source], [verified, unverified])
+    assert receipt == [verified, unverified]
+    assert source.text == '\uf052已核对 \uf052未核对'
     assert source.source_issues

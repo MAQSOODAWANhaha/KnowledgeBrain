@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from docreader.llm.request import build_request
-from docreader.tender.schema import AnalysisBatchResponse, AnalysisExtractionResponse
+from docreader.tender.schema import AnalysisExtractionResponse
 
 
 def sent_schema(request):
@@ -133,27 +133,9 @@ def test_extraction_relations_request_semantics_without_host_owned_identity():
     assert 'relation_id' in Relation.model_json_schema()['required']
 
 
-@pytest.mark.parametrize('operation,fields', [
-    ('review', {'accepted_decision_ids': [], 'findings': []}),
-    ('associate', {'relations': [], 'decisions': [], 'findings': []}),
-])
-def test_batch_members_have_operation_fields_without_host_review_coverage(operation, fields):
-    from docreader.llm.contracts import output_schema, response_model
-    payload = {'schema_version': 2, 'operation': operation, 'work_units': []}
-    schema = output_schema('verify', payload)
-    member_ref = schema['properties']['work_units']['items']['$ref'].split('/')[-1]
-    member = schema['$defs'][member_ref]
-    assert set(member['properties']) == {'work_unit_id', *fields}
-    assert not any(name.startswith('reviewed_') for name in member['properties'])
-    raw = {'schema_version': 2, 'work_units': [{'work_unit_id': 'w1', **fields}], 'shared_findings': []}
-    assert response_model('verify', payload).model_validate(raw).model_dump(exclude_unset=True) == raw
-    damaged = {**raw, 'work_units': [raw['work_units'][0], {'unexpected': 'member'}]}
-    assert AnalysisBatchResponse.model_validate(damaged).work_units == damaged['work_units']
-
-
 def test_contract_feedback_does_not_change_the_selected_return_schema():
     from docreader.llm.contracts import output_schema
-    initial = {'schema_version': 2, 'operation': 'review', 'work_units': []}
+    initial = {'schema_version': 2, 'operation': 'review', 'work_unit_id': 'review-1'}
     assert output_schema('verify', initial) == output_schema('verify', {
         **initial, 'contract_feedback': {'errors': [{'code': 'missing'}]}})
 

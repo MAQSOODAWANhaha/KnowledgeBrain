@@ -250,10 +250,13 @@ def plan_queries(outline, tasks, entries, requirements=None, excerpt_texts=None,
             raw.append({"query": text, "origin": origin, "coverage_id": entry["coverage_id"],
                         "target_id": target["target_id"], "include_original": original})
 
+    excluded = list(scope.get("exclude_content_hashes") or [])
     for task in tasks:
         for target in task["targets"]:
             origins = target.get("support_origins") or ["knowledge"]
             if target.get("manual_fill") or "knowledge" not in origins:
+                continue
+            if any(target.get(flag) for flag in ("pending_line", "unread_image", "attachment_applicability_pending")):
                 continue
             related = [entry for entry in by_target.get(target["target_id"], []) if entry["resolution"] == "content"]
             rows = ((target.get("response_table") or {}).get("rows") or [])
@@ -284,7 +287,10 @@ def plan_queries(outline, tasks, entries, requirements=None, excerpt_texts=None,
                                         "coverage_id": entry["coverage_id"], "target_id": target["target_id"],
                                         "include_original": target.get("kind") == "attachment"})
                 else:
-                    consider(_row_text(target, excerpt_texts), "source_excerpt", bare, target)
+                    text = _row_text(target, excerpt_texts)
+                    if not str(text or "").strip() and target.get("related_target_ids"):
+                        text = target.get("purpose")
+                    consider(text, "source_excerpt", bare, target)
             for entry in related:
                 if not entry.get("rule_ref"):
                     continue
@@ -317,8 +323,137 @@ def plan_queries(outline, tasks, entries, requirements=None, excerpt_texts=None,
                         "scope": scope, "include_original": bucket["include_original"]})
         for target_id in bucket["targets"]:
             search.append({"target_id": target_id, "query": bucket["query"], "query_id": query_id,
-                           "include_original": bucket["include_original"]})
+                           "include_original": bucket["include_original"],
+                           "exclude_content_hashes": list(excluded)})
     return {"queries": queries, "search": search, "gaps": gaps}
+
+
+def attach_knowledge_answer_slots(outline):
+    """Add a knowledge answer beside a read-only tender slot. Do not rewrite the tender text."""
+    for chapter in outline.get("chapters") or []:
+        _attach_chapter_answers(chapter)
+    return outline
+
+
+def _attach_chapter_answers(chapter):
+    added = []
+    for target in chapter.get("targets") or []:
+        if not target.get("enterprise_response"):
+            continue
+        clause = target.get("purpose") or ""
+        target.pop("enterprise_response", None)
+        if target.get("manual_fill") is not True or target.get("support_origins") != ["tender"] or not clause.strip():
+            continue
+        added.append({
+            "target_id": target["target_id"] + ":answer",
+            "kind": "narrative",
+            "purpose": clause,
+            "rule_refs": [],
+            "source_refs": [],
+            "manual_fill": False,
+            "support_origins": ["knowledge"],
+            "related_target_ids": [target["target_id"]],
+        })
+    chapter.setdefault("targets", []).extend(added)
+    for child in chapter.get("children") or []:
+        _attach_chapter_answers(child)
+
+
+def tender_content_hashes(artifacts, snapshot):
+    """Original file hashes of the frozen tender. Knowledge hits with these hashes are not evidence."""
+    identity = tender_source_identity(artifacts, snapshot)
+    return identity["source_shas"]
+
+
+def tender_source_identity(artifacts, snapshot):
+    """Document ids and original hashes. A fragment hash is not this identity."""
+    frozen_ref = (snapshot or {}).get("frozen_ref")
+    identity = {"document_ids": [], "source_shas": []}
+    if not isinstance(frozen_ref, dict) or artifacts is None:
+        return identity
+    try:
+        frozen = artifacts.read_json(frozen_ref)
+    except (OSError, ValueError, KeyError, TypeError):
+        return identity
+    for document in frozen.get("documents") or []:
+        document_id = document.get("document_id")
+        digest = (document.get("original_ref") or {}).get("sha256")
+        if isinstance(document_id, str) and document_id not in identity["document_ids"]:
+            identity["document_ids"].append(document_id)
+        if isinstance(digest, str) and digest not in identity["source_shas"]:
+            identity["source_shas"].append(digest)
+    return identity
+
+
+def _as_identity(identity):
+    if isinstance(identity, dict):
+        return {
+            "document_ids": set(identity.get("document_ids") or []),
+            "source_shas": set(identity.get("source_shas") or []) | set(identity.get("content_hashes") or []),
+        }
+    return {"document_ids": set(), "source_shas": {item for item in identity or [] if isinstance(item, str)}}
+
+
+def exclude_tender_materials(materials, identity):
+    """Drop hits that are the current tender, including fragments of its original file."""
+    blocked = _as_identity(identity)
+    if not blocked["document_ids"] and not blocked["source_shas"]:
+        return list(materials or [])
+    kept = []
+    for material in materials or []:
+        locator = material.get("locator") or {}
+        source_ids = {
+            locator.get("document_id"),
+            locator.get("source_document_id"),
+        }
+        source_shas = {
+            material.get("content_sha256"),
+            locator.get("source_sha256"),
+            locator.get("original_sha256"),
+            locator.get("document_sha256"),
+        }
+        original = material.get("original_ref")
+        if isinstance(original, dict):
+            source_shas.add(original.get("sha256"))
+        if source_ids & blocked["document_ids"] or source_shas & blocked["source_shas"]:
+            continue
+        if blocked["source_shas"] and locator.get("source_identity") == "unconfirmed":
+            continue
+        kept.append(material)
+    return kept
+
+
+async def apply_retrieved_knowledge(knowledge, search, artifacts, identity, answer_targets):
+    """Search, drop the current tender, and leave an answer blank when nothing usable remains."""
+    retrieved = await knowledge.search(search, artifacts)
+    found = list((retrieved or {}).get("materials") or [])
+    blocked = _as_identity(identity)
+    quarantined = []
+    if blocked["source_shas"] or blocked["document_ids"]:
+        for material in found:
+            locator = material.get("locator") or {}
+            if locator.get("source_identity") == "unconfirmed":
+                for target_id in locator.get("target_ids") or [None]:
+                    quarantined.append({"code": "knowledge_source_unconfirmed",
+                        "detail": "检索命中没有原件身份，不能确认它不是本次招标文件，已隔离待核。",
+                        "target_id": target_id})
+    materials = exclude_tender_materials(found, identity)
+    answers = []
+    for target in answer_targets or []:
+        if target.get("support_origins") != ["knowledge"]:
+            continue
+        usable = [item for item in materials if str(item.get("text") or "").strip()]
+        answers.append({"target_id": target.get("target_id"), "text": "" if not usable else None, "blank": not usable})
+    return {"materials": materials, "issues": [*list((retrieved or {}).get("issues") or []), *quarantined],
+            "answers": answers}
+
+
+def blank_knowledge_answer(tender_target, answer_target):
+    """No usable knowledge leaves the answer empty and the tender wording unchanged."""
+    tender_text = tender_target.get("purpose")
+    answer_target["text"] = ""
+    tender_target["purpose"] = tender_text
+    return answer_target
 
 
 def fair_select(groups, limit):

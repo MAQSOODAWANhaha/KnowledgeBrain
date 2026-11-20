@@ -29,6 +29,11 @@ def hit(**changes):
             "product_id": PRODUCT, "version_id": VERSION, "version_label": "已选固定版本", **changes}
 
 
+def document(command):
+    return httpx.Response(200, json={"id": command["document_id"], "product_version_id": command["version_id"],
+        "file_name": "资料.pdf", "object_ref": "objects/" + "0" * 64})
+
+
 def provider(handler, **options):
     return build_web_knowledge(execution_id="job-fixed", selections=[SELECTION], base_url="https://api.invalid",
         service_secret=SECRET, transport=httpx.MockTransport(handler), **options)
@@ -105,6 +110,8 @@ async def test_selected_versions_reject_out_of_scope_hits_and_keep_valid_sibling
 
     async def handler(request):
         command = json.loads(request.content)
+        if command["operation"] == "document":
+            return document(command)
         sent.append(command)
         if command["product_id"] == OTHER_PRODUCT:
             return httpx.Response(200, json={"hits": [hit()]})
@@ -151,6 +158,9 @@ async def test_decoded_internal_responses_are_not_decompressed_twice(tmp_path, m
     monkeypatch.setattr("docreader.integrations.authoring_knowledge.asyncio.sleep", no_sleep)
 
     async def handler(request):
+        command = json.loads(request.content)
+        if command["operation"] == "document":
+            return document(command)
         calls.append(request)
         content = gzip.compress(json.dumps({"hits": [hit()]}).encode())
         return httpx.Response(200, content=content, headers={"content-encoding": "gzip",

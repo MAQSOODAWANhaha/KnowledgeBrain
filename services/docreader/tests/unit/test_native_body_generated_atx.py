@@ -27,12 +27,18 @@ def source_case(tmp_path, *, invalid=None, whole_suffix=False):
     raw['tree'] = {'title': '', 'keys': [], 'children': [
         {'title': 'HEADER', 'heading_path': 'HEADER', 'keys': ['unit:0'], 'children': []}]}
     original = index.document['original_ref']
-    if invalid == 'version': raw['source_contract']['parser_version'] = 'docreader-source-v2/' + '0' * 64
-    if invalid == 'unit_heading': raw['units'][0]['locator']['heading_path'] = 'OTHER'
-    if invalid == 'tree_heading': raw['tree']['children'][0]['title'] = 'OTHER'
-    if invalid == 'text_sha': identity['text_sha256'] = '0' * 64
-    if invalid == 'no_pdf': original = values[0].put_bytes(b'no original PDF proof')
-    if invalid == 'literal_hash': original = values[0].put_bytes(_pdf('# HEADER'))
+    if invalid == 'version':
+        raw['source_contract']['parser_version'] = 'docreader-source-v2/' + '0' * 64
+    if invalid == 'unit_heading':
+        raw['units'][0]['locator']['heading_path'] = 'OTHER'
+    if invalid == 'tree_heading':
+        raw['tree']['children'][0]['title'] = 'OTHER'
+    if invalid == 'text_sha':
+        identity['text_sha256'] = '0' * 64
+    if invalid == 'no_pdf':
+        original = values[0].put_bytes(b'no original PDF proof')
+    if invalid == 'literal_hash':
+        original = values[0].put_bytes(_pdf('# HEADER'))
     if invalid == 'noninitial_hash':
         raw['units'][0]['text'] = 'HEADER\n## Business sentence.'
         identity['text_sha256'] = hashlib.sha256(raw['units'][0]['text'].encode()).hexdigest()
@@ -57,7 +63,8 @@ def source_case(tmp_path, *, invalid=None, whole_suffix=False):
 
 def test_producer_generated_atx_exits_the_range_but_original_heading_stays(tmp_path):
     values, index = source_case(tmp_path)
-    scope = NativeBodyScope(*values[:5]);view = scope.selection_view()
+    scope = NativeBodyScope(*values[:5])
+    view = scope.selection_view()
     assert scope.records[0]['classification'] == 'native_resolution'
     cell = view.cells[0]
     assert cell['text'] == 'HEADER\nBusiness sentence.'

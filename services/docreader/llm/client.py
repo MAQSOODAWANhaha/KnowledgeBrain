@@ -46,7 +46,6 @@ from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
 class OpenAIModel:
-    supports_group_attempts = True
 
     def __init__(
         self,
@@ -177,7 +176,6 @@ class OpenAIModel:
         images: Sequence[str | ImageInput] = (),
         *,
         correction: bool = False,
-        group_attempt: dict | None = None,
     ) -> dict:
         from docreader.llm.wire import WirePayload
 
@@ -190,12 +188,6 @@ class OpenAIModel:
             operation=payload.get("operation", task),
             work_unit_id=payload.get("work_unit_id", ""),
         )
-        if payload.get("work_units") and payload.get("operation") == "review":
-            context["operation"] = (
-                "joint"  # Host progress; wire operation remains independent review.
-            )
-        if group_attempt is not None:
-            context.update(group_attempt)
         digest = request_digest(endpoint.base_url, request)
         logical_digest = digest
         if "contract_feedback" in payload:
@@ -295,16 +287,8 @@ class OpenAIModel:
         request_id = row["request_id"]
         if row["status"] == ModelRequestStatus.SUCCEEDED:
             return await self._cached_response(row, digest)
-        if context.get("group_attempt_id") and row["status"] in {
-            ModelRequestStatus.FAILED,
-            ModelRequestStatus.UNCERTAIN,
-        }:
-            await self._replay_group_failure(row, digest)
         if request_not_before := getattr(self.store, "request_not_before", None):
-            not_before = await request_not_before(
-                self.lease, task, logical_digest,
-                group_work_unit_keys=context.get("group_work_unit_keys"),
-            )
+            not_before = await request_not_before(self.lease, task, logical_digest)
             if not_before is not None and (remaining := not_before - time.time()) > 0:
                 await asyncio.sleep(remaining)
         # Durable attempt limits and active-send fencing happen before HTTP.
@@ -511,46 +495,6 @@ class OpenAIModel:
             request_id, ModelRequestStatus.SUCCEEDED, stream, digest, None, started
         )
         return result
-
-    async def _replay_group_failure(self, row, digest):
-        """A crashed attempt replays its recorded failure; a new reservation may retry it."""
-        recorded_error = row.get("error") or {}
-        rate_limited = recorded_error.get("type") == "http_429"
-        retry_after = recorded_error.get("retry_after_seconds")
-        not_before = _nonnegative_seconds((row.get("metadata") or {}).get("not_before"))
-        if self.artifacts is not None and row.get("response_ref") is not None:
-            envelope = await asyncio.to_thread(
-                self.artifacts.read_json, row["response_ref"]
-            )
-            if envelope.get("request_digest") != digest:
-                raise ModelCorrectionStalled(
-                    "recorded group failure belongs to another request"
-                )
-            if envelope.get("protocol") == StreamResponse.PROTOCOL:
-                stream = StreamResponse()
-                stream.feed(envelope["raw_body"].encode("utf-8"))
-                try:
-                    stream.result()
-                except ModelJSONError as error:
-                    error.not_before = not_before
-                    raise
-                except (ModelSemanticError, UncertainModelResponse):
-                    pass
-            elif envelope.get("protocol") == "http.rejection.v1" and envelope.get("status_code") == 429:
-                rate_limited = True
-                retry_after = envelope.get("retry_after_seconds")
-        if row["status"] == ModelRequestStatus.UNCERTAIN:
-            error = UncertainModelResponse(
-                "recorded group attempt has an uncertain provider outcome"
-            )
-        elif rate_limited:
-            error = ModelRateLimitError(_nonnegative_seconds(retry_after))
-        else:
-            error = ModelInfrastructureError(
-                "recorded group attempt failed before a complete response"
-            )
-        error.not_before = not_before
-        raise error
 
     async def _cached_response(self, row: dict, digest: str) -> dict:
         # ArtifactStore verifies size, path and SHA256 before decoding. Recovery

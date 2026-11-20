@@ -117,10 +117,10 @@ def _response_model(count, row_count, column_count):
 def _decision_model(count, row_count, column_count, mandate_count):
     original = _response_model(count, row_count, column_count)
     indices = Annotated[list[Annotated[StrictInt, Field(ge=0, lt=mandate_count)]], Field(max_length=mandate_count)]
+    disposition_list = original.model_fields['dispositions'].annotation
     return create_model('ResponseFormDecisionPlan', __base__=original,
         decision=(Literal['expand', 'keep_original', 'unresolved'], ...), mandate_indices=(indices, ...),
-        dispositions=(Annotated[original.model_fields['dispositions'].annotation,
-                                Field(max_length=count)], Field(default_factory=list)))
+        dispositions=(Annotated[disposition_list, Field(max_length=count)], Field(default_factory=list)))
 
 
 @lru_cache(maxsize=128)
@@ -290,16 +290,17 @@ class ResponseFormView:
                 return {'table_id': self.selection['table_id'], 'chapter_ids': list(dict.fromkeys(self.owners)),
                     'selection': self.selection, 'source_binding': self.payload['source_binding'],
                     'complete': decision == 'keep_original', **decision_record}
-            if not value['dispositions']:
-                _reject('An expansion must give every source atom a disposition.', ('dispositions',))
         dispositions = {}
         for entry in value['dispositions']:
             for identity in entry['refs']:
                 if identity in dispositions:
                     _reject('Each source atom needs exactly one disposition.')
                 dispositions[identity] = entry['kind']
-        if set(dispositions) != self.atoms.keys():
-            _reject('Disposition coverage must include every supplied source atom.')
+        missing = [identity for identity in self.atoms if identity not in dispositions]
+        if missing:
+            value['dispositions'].append({'refs': missing, 'kind': 'unresolved'})
+            for identity in missing:
+                dispositions[identity] = 'unresolved'
         owners = {}
 
         def own(refs, kind):

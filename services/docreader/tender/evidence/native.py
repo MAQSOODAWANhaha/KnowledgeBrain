@@ -174,6 +174,8 @@ def bind_pdf_literal(raw: dict, literal: dict) -> None:
     """Index original glyph selections; keep the converter's sections as display data."""
     from hashlib import sha256
 
+    from docreader.tender.evidence.pdf_literal import present_literal_characters
+
     if literal['source_sha256'] != raw['original_ref']['sha256']:
         raise ValueError('PDF literal snapshot belongs to another original')
     rendered = [unit for unit in raw['units'] if unit['kind'] == 'section' and not unit.get('grid')]
@@ -232,6 +234,11 @@ def bind_pdf_literal(raw: dict, literal: dict) -> None:
             mapping[identity] = {'page_ordinal': page_number, 'char_indices': indices,
                                  'text_order': 'pdfium_character_stream',
                                  'flags': sorted({flag for glyph in selected for flag in glyph['flags']})}
+            presented = present_literal_characters(selected)
+            mapping[identity]['presentation'] = presented['text']
+            mapping[identity]['presentation_pending'] = presented['pending']
+            mapping[identity]['raw_code_points'] = presented['raw_code_points']
+            mapping[identity]['character_pieces'] = presented['pieces']
             identities[identity] = {'unit_id': identity, 'kind': 'section',
                 'text_sha256': sha256(text.encode()).hexdigest(), 'grid_sha256': None,
                 'section_id': f'literal:page:{page_number}', 'parent_section_id': None,

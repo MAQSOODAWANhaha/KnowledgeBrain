@@ -1,13 +1,27 @@
 """Batch relationship reviews without losing endpoints, evidence or replay identity."""
 
 from copy import deepcopy
+from itertools import combinations
 
 import pytest
 
 from docreader.llm.budget import RequestBudget
 from docreader.tender.checks.analysis import _Analysis
 from test_analysis_checks import IDENTITY, Model, budget, range_ids, scenario
-from test_analysis_discovery_relations import add_relations
+
+
+def add_relations(data, *, pairs=None, evidence=None):
+    artifacts, _, index, _ = data
+    entries = [artifacts.read_json(pack["artifact_ref"]) for pack in index["packs"]]
+    items = [item for entry in entries for item in entry["items"]]
+    existing = sum(len(entry["relations"]) for entry in entries)
+    relations = [{"relation_id": f"original:l{number}", "from_item_id": left["item_id"],
+                  "to_item_id": right["item_id"], "relation": "原有规则需结合各自适用条件核对。",
+                  "evidence": deepcopy(evidence or left["evidence"])}
+                 for number, (left, right) in enumerate(pairs or combinations(items, 2), existing + 1)]
+    entries[0]["relations"].extend(relations)
+    index["packs"][0]["artifact_ref"] = artifacts.put_json(entries[0])
+    return items, relations
 
 
 class ReviewBudget:

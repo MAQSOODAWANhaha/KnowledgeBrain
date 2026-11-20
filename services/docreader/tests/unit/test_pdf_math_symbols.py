@@ -89,11 +89,16 @@ def test_math_source_and_layout_remain_private_without_complete_unambiguous_font
     item = source(original)
     receipts = pdf_symbols.normalize_pdf_units([item], evidence)
     layout, issues = _normalize_layout_symbols([original], {'source_contract': {'glyph_normalizations': evidence}})
-    assert item.text == original and layout == [original]
-    assert receipts == []
+    assert item.text == original
     assert item.source_issues == ['unresolved_private_use_symbol_requires_visual_review']
     assert len(issues) == 1 and issues[0]['code'] == 'outline_directory_symbol_unconfirmed'
     assert evidence == before
+    if problem == 'ambiguous':
+        assert receipts == evidence
+        assert layout == ['原式=1\n另一字体\uf03d2']
+    else:
+        assert layout == [original]
+        assert receipts == []
 
 
 def test_checkbox_old_contract_is_not_extended_by_the_math_font_registry():

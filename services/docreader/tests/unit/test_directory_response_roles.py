@@ -81,7 +81,10 @@ async def test_two_subjects_share_one_chapter_but_have_independent_native_forms_
     originals = [target for target in targets if target.get('template_refs')]
     assert [target.get('subject') for target in originals] == ['投标人', '原厂']
     assert len({target['target_id'] for target in originals}) == 2
-    assert sum(target['purpose'] == '共同要求：审计材料须完整。' for target in targets) == 1
+    answers = [target for target in targets if target['target_id'].endswith(':answer')]
+    tender = [target for target in targets if target not in answers]
+    assert sum(target['purpose'] == '共同要求：审计材料须完整。' for target in tender) == 1
+    assert sum(target['purpose'] == '共同要求：审计材料须完整。' for target in answers) == 1
     assert sum(target['purpose'] == '适用范围须人工核定。' for target in targets) == 1
     assert any(issue['code'] == 'outline_directory_applicability_unconfirmed' for issue in compiled['issues'])
     result = artifacts.read_json(await pipeline.generate_document(

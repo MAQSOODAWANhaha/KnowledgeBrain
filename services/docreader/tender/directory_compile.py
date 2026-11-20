@@ -315,7 +315,10 @@ def documents_from_frozen(artifacts, frozen):
         pages, line_units, ocr_issues, unread_pages = _reading_pages(artifacts, index.raw)
         document = {'document_id': record['document_id'], 'role': record['role'], 'pages': pages,
                     'line_units': line_units, 'ocr_issues': ocr_issues, 'unread_pages': unread_pages,
-                    'template_parts': _grid_parts(index, record['source_index_ref']), 'grids': _grid_catalog(index)}
+                    'template_parts': _grid_parts(index, record['source_index_ref']), 'grids': _grid_catalog(index),
+                    'layout_decoration': _layout_decoration(pages),
+                    'continuations': _document_continuations(index.raw, pages, unread_pages),
+                    'body_projection': list(index.raw.get('body_projection') or [])}
         if index.raw.get('literal_source_ref') and not any(
                 issue['code'] == 'outline_directory_layout_rejected' for issue in ocr_issues):
             document = _FrozenLayout(document)
@@ -349,12 +352,32 @@ def _frozen_source_reviews(record, raw):
         ref = raw.get('images', {}).get(locator.get('image_key'), {})
         identity = ref.get('sha256') or unit_id
         images.setdefault(identity, []).append(locator.get('page_ordinal'))
-    for identity, positions in images.items():
-        pages = '、'.join(str(page + 1) for page in sorted({p for p in positions if isinstance(p, int)}))
+    for group in group_unread_images(raw):
+        pages = '、'.join(str(page + 1) for page in group['pages'])
         place = f'第{pages}页' if pages else '无页码定位'
         issues.append({'code': 'outline_directory_image_unconfirmed',
-                       'detail': f'{name} {place}，图片 {identity[:16]} 共 {len(positions)} 处，内容或用途待核。'})
+                       'detail': f'{name} {place}，图片 {group["identity"][:16]} 共 {group["count"]} 处，内容或用途待核。'})
     return issues
+
+
+def group_unread_images(raw):
+    """One pending item per image hash, listing every unread page."""
+    images = {}
+    for unit in raw.get('units') or []:
+        if unit.get('kind') != 'image_region':
+            continue
+        unit_id, locator = unit['unit_id'], unit.get('locator') or {}
+        ocr = (raw.get('ocr') or {}).get(unit_id, {})
+        if ocr.get('status') == 'complete' and not ocr.get('issues'):
+            continue
+        ref = (raw.get('images') or {}).get(locator.get('image_key'), {})
+        identity = ref.get('sha256') or unit_id
+        images.setdefault(identity, []).append(locator.get('page_ordinal'))
+    groups = []
+    for identity, positions in images.items():
+        pages = sorted({page for page in positions if isinstance(page, int)})
+        groups.append({'identity': identity, 'pages': pages, 'count': len(positions)})
+    return groups
 
 
 def reading_payload(documents, identity=None):
@@ -397,9 +420,13 @@ def _reading_pages(artifacts, raw):
     layout, problem = _layout_pages(artifacts, raw)
     if layout is not None:
         pages, issues, unread = _ocr_unreadable_pages(artifacts, raw, layout)
-        owners = _bind_grid_lines(pages, raw.get('units') or [], _pdf_bytes(artifacts, raw))
-        pages, symbol_issues = _normalize_layout_symbols(pages, raw)
-        return pages, owners, symbol_issues + issues, unread
+        pdf_bytes = _pdf_bytes(artifacts, raw)
+        owners = _bind_grid_lines(pages, raw.get('units') or [], pdf_bytes)
+        # Request lines stay on the layout text. Symbol and literal presentation
+        # are body projections, so a saved directory receipt still matches.
+        projection, body_issues = _body_projections(pages, raw, _layout_word_pages(pdf_bytes))
+        raw['body_projection'] = projection
+        return pages, owners, body_issues + issues, unread
     texts, issues, unread = _image_texts(artifacts, raw)
     attachments = raw.get('embedded_sources') or {}
     units = [unit for unit in raw.get('units') or [] if unit['unit_id'] not in attachments]
@@ -409,10 +436,174 @@ def _reading_pages(artifacts, raw):
     return pages, owners, issues, unread
 
 
+def _layout_word_pages(pdf_bytes):
+    """Poppler word boxes in top-left coordinates, one entry per page."""
+    if not pdf_bytes:
+        return None
+    from pathlib import Path
+    from subprocess import run
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / 'source.pdf'
+        path.write_bytes(pdf_bytes)
+        extracted = run(['pdftotext', '-bbox', '-enc', 'UTF-8', str(path), '-'], capture_output=True, check=False)
+    if extracted.returncode != 0:
+        return None
+    xhtml = extracted.stdout.decode('utf-8', errors='replace')
+    pages = []
+    for part in xhtml.split('<page ')[1:]:
+        tag, _, rest = part.partition('>')
+        height = _attribute(tag, 'height')
+        if height is None:
+            return None
+        pages.append((_bbox_word_boxes(rest.split('</page>')[0]), float(height)))
+    return pages or None
+
+
+def _visual_word_lines(word_boxes):
+    """Group Poppler words into top-to-bottom lines. Whitespace inside a word is already gone."""
+    pending = []
+    for word in word_boxes or []:
+        if not isinstance(word, tuple) or len(word) < 5 or not word[4]:
+            continue
+        left, top, right, bottom = word[:4]
+        if not all(isinstance(value, (int, float)) for value in (left, top, right, bottom)):
+            continue
+        if right < left or bottom < top:
+            continue
+        pending.append((float(left), float(top), float(right), float(bottom), word[4]))
+    pending.sort(key=lambda word: ((word[1] + word[3]) / 2, word[0]))
+    rows = []
+    for word in pending:
+        center = (word[1] + word[3]) / 2
+        if rows and abs(rows[-1][0] - center) <= _SAME_LINE:
+            rows[-1][1].append(word)
+        else:
+            rows.append([center, [word]])
+    return [sorted(words, key=lambda word: word[0]) for _center, words in rows]
+
+
+def _word_match_key(text):
+    """Poppler drops a literal U+FFFE, so it cannot separate two otherwise identical lines."""
+    return ''.join(char for char in _compact(text) if char != '\ufffe')
+
+
+def _align_word_spans(line, words):
+    """Map compacted words onto the original layout line, keeping its spaces and marks."""
+    def skip(cursor, marks):
+        while cursor < len(line) and (line[cursor].isspace() or (marks and line[cursor] == '\ufffe')):
+            cursor += 1
+        return cursor
+
+    cursor, spans = 0, []
+    for word in words:
+        if not isinstance(word, str) or not word:
+            return None
+        if word == '\ufffe':
+            cursor = skip(cursor, False)
+            if cursor >= len(line) or line[cursor] != '\ufffe':
+                return None
+            spans.append((cursor, cursor + 1))
+            cursor += 1
+            continue
+        cursor = skip(cursor, True)
+        if line[cursor:cursor + len(word)] != word:
+            return None
+        spans.append((cursor, cursor + len(word)))
+        cursor += len(word)
+    if any(not char.isspace() and char != '\ufffe' for char in line[cursor:]):
+        return None
+    return spans
+
+
+def _pair_layout_words(lines, visual_lines):
+    from collections import defaultdict
+
+    layout_keys, visual_keys = defaultdict(list), defaultdict(list)
+    for index, line in enumerate(lines):
+        key = _word_match_key(line)
+        if key:
+            layout_keys[key].append(index)
+    for index, words in enumerate(visual_lines):
+        visual_keys[_word_match_key(''.join(word[4] for word in words))].append(index)
+    pairs = {}
+    for key, layout_ids in layout_keys.items():
+        visual_ids = visual_keys.get(key, [])
+        if len(layout_ids) != len(visual_ids):
+            continue
+        for layout_id, visual_id in zip(layout_ids, visual_ids):
+            spans = _align_word_spans(lines[layout_id], [word[4] for word in visual_lines[visual_id]])
+            if spans is None:
+                continue
+            pairs[layout_id] = list(zip(visual_lines[visual_id], spans))
+    return pairs
+
+
+def _glyph_poppler_box(glyph, page_height):
+    if not isinstance(glyph, dict):
+        return None
+    if any(not isinstance(glyph.get(key), (int, float)) for key in ('left', 'bottom', 'right', 'top')):
+        return None
+    left, bottom, right, top = (float(glyph[key]) for key in ('left', 'bottom', 'right', 'top'))
+    if right < left or top < bottom:
+        return None
+    return left, page_height - top, right, page_height - bottom
+
+
+def _box_contains(word, x_coord, y_coord, slack=2.0):
+    left, top, right, bottom, _text = word
+    return left - slack <= x_coord <= right + slack and top - slack <= y_coord <= bottom + slack
+
+
+def _glyph_layout_offset(lines, glyph, pairs, page_height):
+    box = _glyph_poppler_box(glyph, page_height)
+    raw = glyph.get('raw_symbol') if isinstance(glyph, dict) else None
+    if box is None or not isinstance(raw, str) or len(raw) != 1:
+        return None
+    center_x, center_y = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    hits = []
+    for line_no, items in pairs.items():
+        for word, (start, _end) in items:
+            if not _box_contains(word, center_x, center_y):
+                continue
+            indexes = [index for index, char in enumerate(word[4]) if char == raw]
+            offset = start + indexes[0] if len(indexes) == 1 else None
+            if offset is None or not 0 <= offset < len(lines[line_no]) or lines[line_no][offset] != raw:
+                continue
+            hits.append((line_no, offset))
+    return hits[0] if len(hits) == 1 else None
+
+
+def bind_symbol_edits(lines, glyphs, word_boxes, page_height, raw=None):
+    """Bind a verified glyph to one original layout offset. Stream order is not a position."""
+    if not isinstance(page_height, (int, float)) or page_height <= 0:
+        return []
+    pairs = _pair_layout_words(lines, _visual_word_lines(word_boxes))
+    placed, blocked = {}, set()
+    for glyph in glyphs or []:
+        found = _glyph_layout_offset(lines, glyph, pairs, page_height)
+        if found is None:
+            continue
+        if found in placed or found in blocked:
+            placed.pop(found, None)
+            blocked.add(found)
+            continue
+        placed[found] = glyph
+    edits = []
+    source = raw or {}
+    for (line_no, offset), glyph in placed.items():
+        char = glyph.get('raw_symbol')
+        meaning = _verified_symbol_meaning(glyph, char, source) if isinstance(char, str) else None
+        if meaning and meaning != char:
+            edits.append((line_no, offset, meaning))
+    return sorted(edits)
+
+
 def _normalize_layout_symbols(pages, raw):
     """Reuse frozen embedded-font proof; a private code point alone has no meaning."""
     from collections import defaultdict
-    from docreader.parser.pdf_symbols import is_private_symbol, verified_symbol
+    from docreader.parser.pdf_symbols import is_private_symbol
 
     proofs = defaultdict(list)
     for item in (raw.get('source_contract') or {}).get('glyph_normalizations', []) or []:
@@ -427,29 +618,281 @@ def _normalize_layout_symbols(pages, raw):
         if (any(type(index) is not int or index < 0 for index in indices)
                 or len(set(indices)) != len(items) or pages[page].count(char) != len(items)):
             continue
-        meanings = set()
-        for item in items:
-            if not isinstance(item.get('font_name'), str) or not isinstance(item.get('glyph_name'), str):
-                break
-            font_sha = item.get('font_sha256', '')
-            binding = item.get('pdf_glyph_binding')
-            revision = (raw.get('source_contract') or {}).get('document_revision')
-            if binding is not None and (not isinstance(binding, dict)
-                                        or revision and binding.get('source_document_sha256') != revision):
-                break
-            mapped = verified_symbol(item.get('font_name', ''), ord(char), [item.get('glyph_name')], font_sha,
-                                     glyph_binding=binding)
-            if (not mapped or mapped[1] != item.get('normalized_symbol')
-                    or not isinstance(font_sha, str) or not _compile(r'[0-9a-f]{64}').fullmatch(font_sha)):
-                break
-            meanings.add(mapped[1])
-        else:
-            if len(meanings) == 1:
-                result[page] = result[page].replace(char, next(iter(meanings)))
+        items = sorted(items, key=lambda item: item.get('char_index') if type(item.get('char_index')) is int else 10**9)
+        if len(items) != pages[page].count(char):
+            continue
+        replacements = {}
+        for occurrence, item in enumerate(items):
+            mapped = _verified_symbol_meaning(item, char, raw)
+            if mapped:
+                replacements[occurrence] = mapped
+        if replacements:
+            result[page] = _replace_occurrences(result[page], char, replacements)
     issues = [{'code': 'outline_directory_symbol_unconfirmed',
                'detail': f'第{page + 1}页的私用符号未通过来源字体证据核对，原字保留；请对照原件确认符号含义并修正Word显示。'}
               for page, text in enumerate(result) if any(is_private_symbol(char) for char in text)]
     return result, issues
+
+
+def _literal_character_pieces(raw_text, presentation, stored):
+    """One contribution per source code point. A stored list comes from the glyph flags."""
+    if (isinstance(stored, list) and len(stored) == len(raw_text)
+            and all(isinstance(piece, str) for piece in stored)):
+        return stored
+    return _align_literal_pieces(raw_text, presentation)
+
+
+def _align_literal_pieces(raw_text, presentation):
+    """Pair each source character with the text it contributes.
+
+    An old receipt has no per-glyph pieces. U+FFFE may contribute a hyphen or nothing.
+    A source hyphen stays a hyphen. The match has to consume the whole presentation.
+    The search is iterative so a long legal line cannot exhaust the call stack.
+    """
+    if not isinstance(raw_text, str) or not isinstance(presentation, str):
+        return None
+    cursors = {0}
+    steps = []
+    for char in raw_text:
+        step = {}
+        for cursor in cursors:
+            options = []
+            if char == '\ufffe':
+                if cursor < len(presentation) and presentation[cursor] == '-':
+                    options.append((cursor + 1, '-'))
+                options.append((cursor, ''))
+            elif cursor < len(presentation) and presentation[cursor] == char:
+                options.append((cursor + 1, char))
+            for new_cursor, piece in options:
+                if new_cursor not in step:
+                    step[new_cursor] = (cursor, piece)
+        if not step:
+            return None
+        steps.append(step)
+        cursors = set(step)
+    if len(presentation) not in cursors:
+        return None
+    pieces = []
+    cursor = len(presentation)
+    for step in reversed(steps):
+        cursor, piece = step[cursor]
+        pieces.append(piece)
+    pieces.reverse()
+    return pieces
+
+
+def _compose_original_line(original, spans, symbols):
+    """Apply literal and symbol edits from the original character offsets, then render once."""
+    from docreader.parser.pdf_symbols import is_private_symbol
+
+    pieces = list(original)
+    for start, literal_pieces in spans:
+        if not isinstance(start, int) or start < 0 or start + len(literal_pieces) > len(original):
+            continue
+        for offset, piece in enumerate(literal_pieces):
+            pieces[start + offset] = piece
+    for offset, meaning in symbols.items():
+        if isinstance(offset, int) and 0 <= offset < len(original) and is_private_symbol(original[offset]):
+            pieces[offset] = meaning
+    return ''.join(pieces)
+
+
+def _body_projections(pages, raw, word_pages=None):
+    """One body line: symbols and literal presentation merge. Layout pages stay intact."""
+    from docreader.parser.pdf_symbols import is_private_symbol
+
+    issues = []
+    geometry = bool(word_pages)
+    literal_pieces = {}
+    if geometry:
+        bodies = [page.splitlines() for page in pages]
+    else:
+        replaced, symbol_issues = _normalize_layout_symbols(list(pages), raw)
+        issues.extend(symbol_issues)
+        bodies = []
+        for original, shown in zip(pages, replaced):
+            before, after = original.splitlines(), shown.splitlines()
+            bodies.append(list(after if len(after) == len(before) else before))
+    units = {unit.get('unit_id'): unit for unit in raw.get('units') or []}
+    grouped = {}
+    for unit_id, mapping in (raw.get('literal_units') or {}).items():
+        if not isinstance(mapping, dict) or 'presentation' not in mapping:
+            continue
+        unit = units.get(unit_id) or {}
+        page = mapping.get('page_ordinal')
+        raw_text = unit.get('text') or ''
+        if not isinstance(page, int) or page < 0 or page >= len(pages) or not raw_text:
+            continue
+        grouped.setdefault((page, raw_text), []).append((unit, mapping))
+    for (page, raw_text), pairs in grouped.items():
+        lines = pages[page].splitlines()
+        exact, partial = [], []
+        for index, line in enumerate(lines):
+            whole = _whole_line_offset(line, raw_text)
+            if whole is not None:
+                exact.append((index, whole))
+            else:
+                found = line.find(raw_text)
+                if found >= 0:
+                    partial.append((index, found))
+        # A whole source line, ignoring layout indent, is claimed before a shorter copy inside a longer line.
+        if len(exact) == len(pairs):
+            hits = exact
+        elif len(exact) < len(pairs) and len(exact) + len(partial) == len(pairs):
+            hits = sorted(exact + partial)
+        else:
+            hits = None
+        pairs.sort(key=lambda pair: _literal_position(pair[0], pair[1]))
+        if hits is None:
+            for line_no, _start in exact + partial:
+                issues.append({'code': 'outline_directory_literal_pending',
+                               'detail': f'第{page + 1}页第{line_no + 1}行的重复原字无法按来源位置对应，正文保留版式行并待核。'})
+            continue
+        for (line_no, start), (unit, mapping) in zip(hits, pairs):
+            presentation = mapping.get('presentation') or ''
+            if geometry:
+                pieces = _literal_character_pieces(raw_text, presentation, mapping.get('character_pieces'))
+                if pieces is not None:
+                    literal_pieces.setdefault((page, line_no), []).append((start, pieces))
+            else:
+                presentation = _present_verified_symbols(
+                    presentation, page, raw, mapping.get('char_indices') or [])
+                symbol = bodies[page][line_no]
+                bodies[page][line_no] = symbol[:start] + presentation + symbol[start + len(raw_text):]
+            if mapping.get('presentation_pending'):
+                issues.append({'code': 'outline_directory_literal_pending',
+                               'detail': f'第{page + 1}页第{line_no + 1}行含未证实的原字占位，正文已省略该字符，请对照原件核对。'})
+    if geometry:
+        glyphs = [item for item in (raw.get('source_contract') or {}).get('glyph_normalizations', []) or []
+                  if isinstance(item, dict)]
+        originals = [page.splitlines() for page in pages]
+        for page, lines in enumerate(bodies):
+            boxes, height = word_pages[page] if page < len(word_pages) else ([], None)
+            source_lines = originals[page] if page < len(originals) else []
+            symbols = {}
+            for line_no, offset, meaning in bind_symbol_edits(
+                    source_lines, [item for item in glyphs if item.get('page_ordinal') == page], boxes, height, raw):
+                symbols.setdefault(line_no, {})[offset] = meaning
+            for line_no, source in enumerate(source_lines):
+                spans = literal_pieces.get((page, line_no), [])
+                edits = symbols.get(line_no, {})
+                if spans or edits:
+                    lines[line_no] = _compose_original_line(source, spans, edits)
+        issues.extend({'code': 'outline_directory_symbol_unconfirmed',
+                       'detail': f'第{page + 1}页的私用符号未通过来源字体证据核对，原字保留；请对照原件确认符号含义并修正Word显示。'}
+                      for page, lines in enumerate(bodies) if any(is_private_symbol(char) for line in lines for char in line))
+    projection = []
+    for page, (original, shown_lines) in enumerate(zip(pages, bodies)):
+        for line, (raw_line, body_line) in enumerate(zip(original.splitlines(), shown_lines)):
+            pending = any(issue['code'] == 'outline_directory_literal_pending' and f'第{page + 1}页第{line + 1}行' in issue['detail']
+                          for issue in issues)
+            if raw_line != body_line or pending:
+                projection.append({'page': page, 'line': line, 'text': body_line, 'pending': pending})
+    return projection, issues
+
+
+def _whole_line_offset(line, raw_text):
+    """Offset of a whole source line. Extra leading layout spaces are allowed; source spaces stay in the match."""
+    if not raw_text or not isinstance(line, str) or not line.endswith(raw_text):
+        return None
+    prefix = line[:-len(raw_text)]
+    if prefix.strip(' ') != '':
+        return None
+    return len(prefix)
+
+
+def _literal_position(unit, mapping):
+    """Visual order, independent of the frozen object-key sort."""
+    locator = (unit or {}).get('physical_locator') or (unit or {}).get('locator') or {}
+    top = locator.get('top')
+    left = locator.get('left')
+    chars = mapping.get('char_indices') or []
+    return (
+        -(float(top) if isinstance(top, (int, float)) else 0.0),
+        float(left) if isinstance(left, (int, float)) else 0.0,
+        min(chars) if chars else 0,
+    )
+
+
+def _verified_symbol_meaning(item, char, raw):
+    from docreader.parser.pdf_symbols import verified_symbol
+
+    if not isinstance(item.get('font_name'), str) or not isinstance(item.get('glyph_name'), str):
+        return None
+    font_sha = item.get('font_sha256', '')
+    binding = item.get('pdf_glyph_binding')
+    revision = (raw.get('source_contract') or {}).get('document_revision')
+    if binding is not None and (not isinstance(binding, dict)
+                                or revision and binding.get('source_document_sha256') != revision):
+        return None
+    if not isinstance(font_sha, str) or not _compile(r'[0-9a-f]{64}').fullmatch(font_sha):
+        return None
+    mapped = verified_symbol(item.get('font_name', ''), ord(char), [item.get('glyph_name')], font_sha,
+                             glyph_binding=binding)
+    if not mapped or mapped[1] != item.get('normalized_symbol'):
+        return None
+    return mapped[1]
+
+
+def _replace_occurrences(text, char, replacements):
+    occurrence = 0
+    characters = []
+    for item in text:
+        if item == char:
+            characters.append(replacements.get(occurrence, item))
+            occurrence += 1
+        else:
+            characters.append(item)
+    return ''.join(characters)
+
+
+def _present_verified_symbols(text, page, raw, char_indices):
+    """Decode only the private glyph whose character index is inside this span."""
+    from docreader.parser.pdf_symbols import is_private_symbol
+
+    owned = {index for index in char_indices if type(index) is int}
+    evidence = [item for item in (raw.get('source_contract') or {}).get('glyph_normalizations', []) or []
+                if isinstance(item, dict) and item.get('page_ordinal') == page and item.get('char_index') in owned]
+    shown = text
+    for char in sorted({symbol for item in evidence if isinstance(symbol := item.get('raw_symbol'), str)}):
+        if not is_private_symbol(char) or char not in shown:
+            continue
+        items = sorted((item for item in evidence if item.get('raw_symbol') == char),
+                       key=lambda item: item['char_index'])
+        if len(items) != shown.count(char):
+            continue
+        replacements = {}
+        for occurrence, item in enumerate(items):
+            meaning = _verified_symbol_meaning(item, char, raw)
+            if meaning:
+                replacements[occurrence] = meaning
+        shown = _replace_occurrences(shown, char, replacements)
+    return shown
+
+
+def _layout_decoration(pages):
+    from docreader.parser.continuation import mark_layout_decoration
+
+    marked = mark_layout_decoration(pages)
+    # Decoration is a parallel flag. The layout strings are the directory lines.
+    if [len(flags) for flags in marked] != [len(page.splitlines()) for page in pages]:
+        return [[] for _ in pages]
+    return marked
+
+
+def _document_continuations(raw, pages, unread_pages):
+    from docreader.parser.continuation import mark_layout_decoration, paragraph_continuations
+
+    table_links = list((raw.get('metadata') or {}).get('table_continuations') or [])
+    unread = set(unread_pages or [])
+    decoration = mark_layout_decoration(pages)
+    described = []
+    for number, page in enumerate(pages):
+        flags = decoration[number] if number < len(decoration) else []
+        described.append({'page': number, 'scanned': number in unread, 'lines': [
+            {'text': text, 'decoration': bool(flags[index]) if index < len(flags) else False}
+            for index, text in enumerate(page.splitlines())]})
+    return [*table_links, *paragraph_continuations(described)]
 
 
 def _layout_pages(artifacts, raw):
@@ -664,7 +1107,7 @@ def _own(owners, page, offsets, unit_id):
 
 def _pdf_bytes(artifacts, raw):
     ref = raw.get('original_ref')
-    if not isinstance(ref, dict):
+    if artifacts is None or not isinstance(ref, dict):
         return None
     try:
         data = artifacts.read_bytes(ref)
@@ -1044,7 +1487,9 @@ def outline_from_compiled(snapshot, compiled, *, artifacts=None):
                                                    'outline_directory_response_form_row_roles'} else {})}
                           for issue in source_issues]}
     from docreader.tender.source_presentation import collect_source_renderings
+    from docreader.tender.authoring_coverage import attach_knowledge_answer_slots
     collect_source_renderings(chapters, compiled)
+    attach_knowledge_answer_slots(outline)
     return AuthoringOutline.model_validate(outline).model_dump()
 
 
@@ -1113,8 +1558,8 @@ def apply_requirements(compiled, documents, assignments, *, complete_basis=False
             continue
         selected = {(document_id, page, line) for document_id, page, start, end in windows
                     for line in range(start, end + 1)}
-        full_rows = _source_rows(source, [dict(document_id=d, page=p, line=l)
-            for d, p, start, end in windows for l in range(start, end + 1)])
+        full_rows = _source_rows(source, [dict(document_id=d, page=p, line=number)
+            for d, p, start, end in windows for number in range(start, end + 1)])
         text_rows = full_rows if complete_basis or len(windows) > 1 else [r for r in full_rows
             if (r['document_id'], r['page'], r['line']) not in used]
 
@@ -1177,8 +1622,8 @@ def _record_requirement_case(compiled, source, raw, windows, issue):
     case = next((case for case in cases if case['id'] == case_id), None)
     if case is None:
         case = {'id': case_id, 'source_windows': source_windows, 'source_text': source_text,
-                '_source_rows': _source_rows(source, [dict(document_id=d, page=p, line=l)
-                    for d, p, start, end in windows for l in range(start, end + 1)]),
+                '_source_rows': _source_rows(source, [dict(document_id=d, page=p, line=number)
+                    for d, p, start, end in windows for number in range(start, end + 1)]),
                 'raw_assignment': deepcopy(raw), 'issue_indices': []}
         cases.append(case)
     case['issue_indices'].append(len(compiled['issues']))
@@ -1515,6 +1960,670 @@ def note_missing_requirements(compiled):
     return compiled
 
 
+_FORMAT_CHAPTER = re.compile(r'^第[0-9０-９一二三四五六七八九十百千]+章')
+_FORMAT_ITEM = re.compile(
+    r'^(?:(?P<annex>附件\s*[0-9０-９]+\s*[A-Za-z]?)|(?P<label>[一二三四五六七八九十百千]+、))')
+_FORMAT_TOC = re.compile(r'[.．…]{3,}|…{2,}')
+
+
+def _format_lines(documents):
+    rows = []
+    for document in documents or []:
+        if document.get('role') not in (None, 'main'):
+            continue
+        for page, text in enumerate(document.get('pages') or []):
+            for line, raw in enumerate(str(text).splitlines()):
+                rows.append((document.get('document_id'), page, line, raw, raw.strip()))
+    return rows
+
+
+def _format_heading(text):
+    compact = text.replace(' ', '').replace('\u3000', '')
+    return compact == '投标文件格式' or (
+        compact.endswith('投标文件格式') and _FORMAT_CHAPTER.match(text) is not None)
+
+
+def _chapter_boundary(text):
+    """A chapter heading. A sentence that only quotes 第X章 does not end the format section."""
+    if not text or '投标文件格式' in text.replace(' ', '').replace('\u3000', ''):
+        return False
+    match = _FORMAT_CHAPTER.match(text)
+    if match is None:
+        return False
+    rest = text[match.end():].strip(' \t')
+    if any(mark in text for mark in ('。', '；', '，', '“', '”', '"')):
+        return False
+    if re.search(r'第\s*[0-9０-９]', rest):
+        return False
+    return len(rest) <= 24
+
+
+def _format_item(text, raw):
+    """A format-list line used only to find the bid-format section. It is not a chapter rule."""
+    if not text or _FORMAT_TOC.search(raw) or '。' in text:
+        return False
+    match = _FORMAT_ITEM.match(text)
+    if match is None:
+        return False
+    rest = text[match.end():].strip(' \t：:')
+    return bool(rest) and len(rest) <= 80
+
+
+def _format_anchor(rows):
+    anchors = [index for index, row in enumerate(rows) if _format_heading(row[4])]
+    best, score = None, -1
+    for index in anchors:
+        count = 0
+        for follow in rows[index + 1:]:
+            if _chapter_boundary(follow[4]):
+                break
+            if _format_item(follow[4], follow[3]):
+                count += 1
+        if count >= score:
+            best, score = index, count
+    return best
+
+
+_ANNEX_ONLY = re.compile(r'^附件\s*[0-9０-９]+\s*[A-Za-z]?\s*$')
+_ANNEX_CODE = re.compile(r'^附件\s*([0-9０-９]+)\s*([A-Za-z]?)')
+_SUBCODE_TITLE = re.compile(
+    r'^(?P<name>.+?)(?:的格式|格式)?\s*[（(]\s*(?P<num>[0-9０-９]+)\s*(?P<letter>[A-Za-z]?)\s*[)）]\s*$')
+_LABEL_NOTE = re.compile(
+    r'（(?:本次不适用|如有|适用于[^）]*|投标人可根据[^）]*)）'
+    r'|\((?:本次不适用|如有|适用于[^)]*|投标人可根据[^)]*)\)')
+_VOLUME_LINE = re.compile(
+    r'^(?:[0-9]+(?:\.[0-9]+)+\s*)?(?P<name>商务文件|技术文件|报价文件)(?:（[^）]{0,16}）)?(?:应包括)?')
+_VOLUME_ITEM = re.compile(r'^[（(]\s*[0-9]+[）)]')
+_VOLUME_CODE = re.compile(r'附件\s*([0-9０-９]+)\s*([A-Za-z]?)')
+_METRIC = re.compile(r'万元|％|%')
+
+
+def _join_wrapped_heading(rows, index):
+    """Join a layout wrap. Stop once the line is already one file label."""
+    parts = [rows[index][4]]
+    if _single_form_title(parts[0]) or _ANNEX_ONLY.match(parts[0]):
+        return parts[0], 1
+    step = 1
+    while index + step < len(rows):
+        nxt = rows[index + step][4]
+        if (not nxt or _chapter_boundary(nxt) or _format_heading(nxt)
+                or _FORMAT_ITEM.match(nxt) or nxt.startswith('附件') or _single_form_title(nxt)):
+            break
+        prev = ''.join(parts)
+        if _single_form_title(prev) or prev.endswith(('。', '；')) or (_title_closed(prev) and not _unclosed(prev)):
+            break
+        if len(nxt) > 24 and not _unclosed(prev):
+            break
+        parts.append(nxt)
+        step += 1
+        if _single_form_title(''.join(parts)):
+            break
+    return ''.join(parts), step
+
+
+def _title_closed(text):
+    return text.endswith(('表', '函', '书', '料', '式', '明', '议', '案', '件', '划', '）', ')'))
+
+
+def _single_form_title(text):
+    """A file name written on this line. A顿号 list after the label is a mapping, not one chapter."""
+    if not text or _FORMAT_TOC.search(text):
+        return None
+    text = re.sub(r'[；;]+$', '', text.strip())
+    if any(mark in text for mark in ('。', '；', '，', ';')):
+        return None
+    subcode = _SUBCODE_TITLE.match(text)
+    if subcode and '、' not in subcode.group('name') and 1 < len(subcode.group('name')) <= 40:
+        return subcode.group('name').strip()
+    match = _FORMAT_ITEM.match(text)
+    if match is None:
+        return None
+    rest = text[match.end():].strip(' \t：:')
+    if not rest or '、' in rest or _ANNEX_ONLY.match(text):
+        return None
+    if rest.startswith(('（', '(')) and rest.endswith(('）', ')')):
+        inner = rest[1:-1].strip()
+        return inner if inner and '、' not in inner and '。' not in inner and len(inner) <= 30 else None
+    core = _LABEL_NOTE.sub('', rest).strip()
+    if not core or '、' in core or _METRIC.search(core) or not 1 < len(core) <= 30:
+        return None
+    return rest
+
+
+def _line_code(text):
+    """Annex or parenthetical form code. The code is a locator, not a title."""
+    if not text:
+        return None
+    annex = _ANNEX_CODE.match(text.strip())
+    if annex:
+        return _digits(annex.group(1)), (annex.group(2) or '').upper()
+    subcode = _SUBCODE_TITLE.match(re.sub(r'[；;]+$', '', text.strip()))
+    if subcode:
+        return _digits(subcode.group('num')), (subcode.group('letter') or '').upper()
+    return None
+
+
+def _digits(text):
+    return int(text.translate(str.maketrans('０１２３４５６７８９', '0123456789')))
+
+
+_TABLE_CAPTION = re.compile(r'表\s*(?P<name>[\u4e00-\u9fff]{2,20})\s*$')
+_NAME_FRAGMENT = re.compile(r'(?=([\u4e00-\u9fff]{4,12}(?:证书|证明文件|证明|名单|截图)))')
+
+
+def _annex_without_file_name(text):
+    """附件号单独一行，或后面只有括号说明。文件名要到后文里找。"""
+    if not text or not text.startswith('附件'):
+        return False
+    match = _ANNEX_CODE.match(text.strip())
+    if match is None:
+        return False
+    rest = text.strip()[match.end():].strip()
+    return not rest or (rest.startswith(('（', '(')) and rest.endswith(('）', ')')))
+
+
+def _starts_annex(text):
+    return bool(text) and text.startswith('附件') and _line_code(text) is not None
+
+
+def _next_annex(section, index):
+    while index < len(section) and not _starts_annex(section[index][4]):
+        index += 1
+    return index
+
+
+def _resolve_annex_title(section, index, code):
+    """Name a bare annex from its table caption or the words printed under the code."""
+    end = _next_annex(section, index + 1)
+    name, name_at = _following_file_name(section, index + 1)
+    if (name and name_at is not None and name_at < end
+            and not _TABLE_CAPTION.search(section[name_at][4] or '')):
+        raw = section[name_at][4]
+        if any(mark in raw for mark in '（(，,') or not _unfinished_label(section, name_at, name):
+            return name, name_at
+    caption = _table_caption(section, index, end, code)
+    if caption:
+        return caption
+    for cursor in range(index + 1, end):
+        prefix = _prefix_name(section[cursor][4])
+        if prefix and _compact(prefix) in _compact(section[cursor][4]):
+            return prefix, cursor
+    best = None
+    for cursor in range(index + 1, end):
+        for match in _NAME_FRAGMENT.finditer(section[cursor][4] or ''):
+            name = match.group(1)
+            if not _usable_name(name) or name[0] in '入中的和或及被' or any(mark in name for mark in ('是否', '列入', '中', '的')):
+                continue
+            if best is None or len(name) > len(best[0]):
+                best = name, cursor
+    return best
+
+
+def _table_caption(section, index, end, code):
+    letter = code[1] if code else ''
+    found = None
+    for cursor in range(index + 1, end):
+        text = section[cursor][4]
+        match = _TABLE_CAPTION.search(text or '')
+        if match is None:
+            continue
+        if letter and letter not in text:
+            continue
+        if not _usable_name(match.group('name')):
+            continue
+        found = match.group('name'), cursor
+        break
+    return found
+
+
+def _usable_name(name):
+    compact = ''.join(str(name).split())
+    return len(compact) >= 2 and not compact.isdigit() and re.search(r'[\u4e00-\u9fff]', compact) is not None
+
+
+def _prefix_name(text):
+    if not text or text.startswith('附件') or '是否' in text or '。' in text or '；' in text:
+        return None
+    cut = re.split(r'[（(]', text, maxsplit=1)[0].strip()
+    if cut and _usable_name(cut) and '、' not in cut and '，' not in cut and len(cut) <= 20:
+        return cut
+    return None
+
+
+def _name_on_next_line(text):
+    """The file name printed under a bare annex code, before the instruction."""
+    if not text or text.startswith('附件') or any(mark in text for mark in ('。', '；')):
+        return None
+    cut = re.split(r'[（(，,]', text, maxsplit=1)[0].strip()
+    if cut and '、' not in cut and 1 < len(cut) <= 36:
+        return cut
+    return None
+
+
+def _label_key(title):
+    key = _LABEL_NOTE.sub('', title)
+    if key.endswith('的格式'):
+        key = key[:-3]
+    elif key.endswith('格式'):
+        key = key[:-2]
+    return re.sub(r'\s+', '', key)
+
+
+def _volume_name(text):
+    """A bid-volume heading. The sentence that merely lists every volume is not one."""
+    stripped = text.strip()
+    if stripped.startswith('投标文件应包括') or stripped.startswith('第一卷'):
+        return None
+    match = _VOLUME_LINE.match(stripped)
+    if match is None:
+        return None
+    if not stripped[:1].isdigit() and '应包括' not in stripped:
+        return None
+    return match.group('name')
+
+
+def _bid_volumes(documents):
+    """商务文件、技术文件、报价文件，只在招标文件自己这样分册时才建立。"""
+    rows = _format_lines(documents)
+    groups, current = [], None
+    for row in rows:
+        name = _volume_name(row[4])
+        if name:
+            current = {'name': name, 'point': (row[0], row[1], row[2]), 'names': [], 'codes': set()}
+            groups.append(current)
+            _take_volume_items(row[4], current)
+            continue
+        if current is None:
+            continue
+        if re.match(r'^[0-9]+\.[0-9]+(\.[0-9]+)?\s', row[4]) and _volume_name(row[4]) is None:
+            current = None
+            continue
+        if _VOLUME_ITEM.match(row[4]):
+            _take_volume_items(row[4], current)
+    # A later, more specific list replaces an earlier mention of the same volume.
+    kept = {}
+    for group in groups:
+        kept[group['name']] = group
+    return [kept[name] for name in ('商务文件', '技术文件', '报价文件') if name in kept]
+
+
+def _take_volume_items(text, group):
+    for match in _VOLUME_CODE.finditer(text):
+        group['codes'].add((_digits(match.group(1)), (match.group(2) or '').upper()))
+    body = _VOLUME_ITEM.sub('', text)
+    body = re.sub(r'[（(](?:选填|如有|含)[^）)]*[）)]', '', body)
+    body = re.sub(r'[（(]附件[^）)]*[）)]', '', body)
+    for part in re.split(r'[、；]', body):
+        part = re.sub(r'^[0-9]+(?:\.[0-9]+)*\s*', '', part)
+        part = re.sub(r'^(?:商务文件|技术文件|报价文件)(?:应包括)?\s*[：:]?', '', part)
+        name = part.strip(' ：:，,。')
+        if name and 1 < len(name) <= 40 and '应包括' not in name:
+            group['names'].append(name)
+
+
+def _norm_item(name):
+    key = _label_key(name)
+    return key.replace('规格', '').replace('条款', '')
+
+
+def _volume_for(form, volumes):
+    if isinstance(form.get('key'), tuple) and form['key'][0] == 'req':
+        if any(word in form['name'] for word in ('报价', '价格')) and '偏差' not in form['name']:
+            return next((volume for volume in volumes if volume['name'] == '报价文件'), volumes[-1])
+        return next((volume for volume in volumes if volume['name'] == '技术文件'), volumes[0])
+    code = form.get('code')
+    key = _norm_item(form['name'])
+    for volume in volumes:
+        if code and (code in volume['codes'] or (code[0], '') in volume['codes']):
+            return volume
+        for name in volume['names']:
+            other = _norm_item(name)
+            if key == other or (len(other) >= 4 and (key.endswith(other) or other.endswith(key))):
+                return volume
+    if form['name'].startswith('商务'):
+        found = next((volume for volume in volumes if volume['name'] == '商务文件'), None)
+        if found is not None:
+            return found
+    if any(word in form['name'] for word in ('报价', '价格')) and '偏差' not in form['name']:
+        found = next((volume for volume in volumes if volume['name'] == '报价文件'), None)
+        if found is not None:
+            return found
+    if any(word in form['name'] for word in ('技术', '规格', '服务方案', '实施团队', '需求理解', '质量标准', '服务计划', '售后', '培训', '部署', '实施')):
+        found = next((volume for volume in volumes if volume['name'] == '技术文件'), None)
+        if found is not None:
+            return found
+    return next((volume for volume in volumes if volume['name'] == '商务文件'), None)
+
+
+_RESPONSE_TOPIC = ('供货', '备件', '参数', '规格', '偏差', '售后', '培训', '服务', '包装', '运输', '验收', '试验', '环境', '调试', '实施', '部署', '集成', '应急', '运维', '需求', '团队', '质保', '交付', '进度', '考核', '监理', '预装')
+_RESPONSE_SKIP = ('投标人', '招标人', '如果', '应', '须', '见', '指', '本规范', '本章', '万元')
+_RESPONSE_HEAD = re.compile(
+    r'^(?:(?P<dot>[0-9]+(?:\.[0-9]+)*)[\s、.．]+|(?P<cn>[一二三四五六七八九十]+)、|(?P<plain>[0-9]+)、)\s*(?P<title>\S.{1,24})$'
+)
+_SCHEDULE_HEAD = re.compile(r'^技术附表\s*[A-Z]\s*(?P<title>[\u4e00-\u9fff].{1,18})$')
+
+
+def _response_heading(text):
+    """A short tender heading the bid must answer. Requirement sentences stay in the body."""
+    stripped = text.strip()
+    if not stripped or len(stripped) > 36 or any(mark in stripped for mark in '。；，：:*★/') or re.search(r'\s{2,}', stripped):
+        return None
+    schedule = _SCHEDULE_HEAD.match(stripped)
+    numbered = _RESPONSE_HEAD.match(stripped)
+    if schedule:
+        title, number = schedule.group('title').strip(), None
+    elif numbered:
+        title = numbered.group('title').strip()
+        number = tuple(int(part) for part in numbered.group('dot').split('.')) if numbered.group('dot') else None
+    else:
+        return None
+    if not any(topic in title for topic in _RESPONSE_TOPIC) or any(word in title for word in _RESPONSE_SKIP):
+        return None
+    if '、' in title or any(word in title for word in ('计算', '公式', '得分', '评审', '代理服务费')):
+        return None
+    if not 4 <= len(title) <= 22:
+        return None
+    return title, number
+
+
+def _response_forms(documents, existing):
+    """Chapters for technical and service headings that the format list does not already name."""
+    rows = _format_lines(documents)
+    found = []
+    for row in rows:
+        parsed = _response_heading(row[4])
+        if parsed is None:
+            continue
+        title, number = parsed
+        key = _label_key(title)
+        if any(_label_key(form['name']) == key or (len(key) >= 4 and len(_label_key(form['name'])) >= 4 and (key.endswith(_label_key(form['name'])) or _label_key(form['name']).endswith(key))) for form in existing):
+            continue
+        point = (row[0], row[1], row[2])
+        found.append({'title': title, 'number': number, 'point': point, 'row': row})
+    forms = []
+    for index, item in enumerate(found):
+        stop = found[index + 1]['point'] if index + 1 < len(found) and found[index + 1]['point'][0] == item['point'][0] else None
+        windows, begun = [], False
+        for doc, page, line, _raw, _text in rows:
+            if doc != item['point'][0]:
+                continue
+            current = (doc, page, line)
+            if not begun:
+                if current != item['point']:
+                    continue
+                begun = True
+            if stop is not None and current == stop:
+                break
+            if _chapter_boundary(_text) and current != item['point']:
+                break
+            if windows and windows[-1]['page'] == page and windows[-1]['end_line'] + 1 == line:
+                windows[-1]['end_line'] = line
+            else:
+                windows.append({'document_id': doc, 'page': page, 'start_line': line, 'end_line': line})
+            if sum(window['end_line'] - window['start_line'] + 1 for window in windows) >= 40:
+                break
+        point = item['point']
+        forms.append({
+            'name': item['title'], 'key': ('req', point), 'point': point, 'order_point': point,
+            'list': False, 'slot': point, 'letter': '', 'index': 100000 + index, 'mark': None,
+            'source': item['row'][4], 'body_from': point, 'code': None, 'fixed_windows': windows,
+            'number': item['number'],
+        })
+    return forms
+
+
+def _ensure_volumes(documents, volumes):
+    if volumes:
+        return volumes
+    point = None
+    for row in _format_lines(documents):
+        if '投标文件的组成' in row[4] or _format_heading(row[4]):
+            point = (row[0], row[1], row[2])
+            break
+    if point is None:
+        return []
+    return [{'name': name, 'point': point, 'names': [], 'codes': set(), 'synthetic': True}
+            for name in ('商务文件', '技术文件', '报价文件')]
+
+
+def bid_format_section(documents):
+    """Lines after the bid-format heading, before the next chapter. No semantic selection."""
+    rows = _format_lines(documents)
+    anchor = _format_anchor(rows)
+    if anchor is None:
+        return None
+    section = []
+    for row in rows[anchor + 1:]:
+        if _chapter_boundary(row[4]):
+            break
+        section.append(row)
+    return rows[anchor], section
+
+
+def bid_format_plan(documents):
+    """Chapters whose file name is already on one tender line.
+
+    附件编号和顿号清单是映射，这里不拆、不猜。那种对应交给模型选择原行。
+    """
+    found = bid_format_section(documents)
+    if found is None:
+        return None
+    _anchor, section = found
+    forms, index, number_slot = [], 0, {}
+    while index < len(section):
+        text, step = _join_wrapped_heading(section, index)
+        code = _line_code(section[index][4]) or _line_code(text)
+        if code:
+            number_slot.setdefault(code[0], (section[index][0], section[index][1], section[index][2]))
+        if _annex_without_file_name(section[index][4]):
+            resolved = _resolve_annex_title(section, index, code)
+            if resolved:
+                name, name_at = resolved
+                forms.append(_form(name, code, section[name_at], index, number_slot,
+                                   list_item=False, body_from=(section[index][0], section[index][1], section[index][2])))
+                index = _next_annex(section, index + 1)
+                continue
+        title = _single_form_title(text)
+        if title and (_in_metric_run(section, index) or _unfinished_label(section, index, title)):
+            title = None
+        row = section[index]
+        if title:
+            forms.append(_form(title, code, row, index, number_slot,
+                               list_item=_list_heading(section, index + step)))
+        index += step
+    if not forms:
+        return None
+    chosen, order = {}, []
+    for form in forms:
+        prior = next((key for key, existing in chosen.items() if _same_listed_form(existing, form)), None)
+        if prior is None:
+            order.append(form['key'])
+            chosen[form['key']] = form
+        else:
+            chosen[prior] = _prefer_form(chosen[prior], form)
+    order.sort(key=lambda key: (chosen[key]['slot'], chosen[key]['index']))
+    volumes = _ensure_volumes(documents, _bid_volumes(documents))
+    for extra in _response_forms(documents, chosen.values()):
+        order.append(extra['key'])
+        chosen[extra['key']] = extra
+    if volumes:
+        for key in order:
+            volume = _volume_for(chosen[key], volumes)
+            if volume is not None:
+                chosen[key]['volume'] = volume
+    by_position = sorted(chosen.values(), key=_form_start)
+    stops = {id(form): _form_start(by_position[item + 1]) if item + 1 < len(by_position) else None
+             for item, form in enumerate(by_position)}
+    nodes, entries, adopted = [], [], []
+    volume_ids = {}
+    for volume in volumes:
+        identity = f'volume-{volume["name"]}'
+        volume_ids[volume['name']] = identity
+        point = {'document_id': volume['point'][0], 'page': volume['point'][1], 'line': volume['point'][2]}
+        windows = [] if volume.get('synthetic') else [{'document_id': point['document_id'], 'page': point['page'],
+                                                       'start_line': point['line'], 'end_line': point['line']}]
+        nodes.append({'id': identity, 'heading': point, 'parent_id': None, 'response_kind': 'form',
+                      'name': volume['name'], 'body_windows': windows})
+        entries.append({'name': point})
+        adopted.append({'node_id': identity, 'entry': len(entries) - 1, 'depth': 'self', 'presentation': 'section', 'clause': []})
+    number_ids = {}
+    for key in order:
+        form = chosen[key]
+        document_id, page, line = form['point']
+        identity = f'format-{len(nodes) + 1}'
+        point = {'document_id': document_id, 'page': page, 'line': line}
+        number = form.get('number')
+        parent_number = number[:-1] if number and len(number) > 1 else None
+        parent = number_ids.get(parent_number) if parent_number in number_ids else volume_ids.get((form.get('volume') or {}).get('name'))
+        if number:
+            number_ids[number] = identity
+        node = {'id': identity, 'heading': point, 'parent_id': parent, 'response_kind': 'form', 'name': form['name']}
+        node['body_windows'] = form['fixed_windows'] if form.get('fixed_windows') is not None else _form_windows(section, form, stops.get(id(form)))
+        nodes.append(node)
+        order_id, order_page, order_line = form['order_point']
+        entries.append({'name': {'document_id': order_id, 'page': order_page, 'line': order_line}})
+        adopted.append({'node_id': identity, 'entry': len(entries) - 1, 'depth': 'self', 'presentation': 'section', 'clause': []})
+    first = chosen[order[0]]['point']
+    return {'nodes': nodes,
+            'composition': {'priority_basis': [{'document_id': first[0], 'page': first[1],
+                                                 'start_line': first[2], 'end_line': first[2]}],
+                            'entries': entries},
+            'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
+
+
+def _form_start(form):
+    return form.get('body_from') or form['point']
+
+
+def _form_windows(section, form, stop):
+    """Copy this form until the next form. A format-list line stays one line."""
+    document_id, page, line = form['point']
+    if form['list']:
+        return [{'document_id': document_id, 'page': page, 'start_line': line, 'end_line': line}]
+    start = _form_start(form)
+    windows, begun = [], False
+    for doc, number, index, _raw, _text in section:
+        point = (doc, number, index)
+        if not begun:
+            if point != start:
+                continue
+            begun = True
+        if stop is not None and point == stop:
+            break
+        if windows and windows[-1]['document_id'] == doc and windows[-1]['page'] == number and windows[-1]['end_line'] + 1 == index:
+            windows[-1]['end_line'] = index
+        else:
+            windows.append({'document_id': doc, 'page': number, 'start_line': index, 'end_line': index})
+    return windows
+
+
+def _enum_mark(text):
+    match = _FORMAT_ITEM.match(text or '')
+    return match.group('label') if match is not None and match.group('label') else None
+
+
+def _form(name, code, row, index, number_slot, *, list_item, body_from=None):
+    key = code if code else ('name', _label_key(name))
+    point = (row[0], row[1], row[2])
+    # The first time this annex number appears fixes the outline order. Subforms stay with it.
+    slot = number_slot.get(code[0], point) if code else point
+    return {'name': name, 'key': key, 'point': point, 'order_point': slot, 'list': list_item,
+            'slot': slot, 'letter': code[1] if code else '', 'index': index,
+            'mark': _enum_mark(row[4]), 'source': row[4], 'body_from': body_from or point}
+
+
+def _same_listed_form(old, new):
+    """目录「八、技术性能指标的详细描述」和正文「八、投标产品技术性能指标的详细描述」是同一章。"""
+    if old['key'] == new['key']:
+        return True
+    if not old.get('mark') or old['mark'] != new.get('mark'):
+        return False
+    short, long = sorted((_label_key(old['name']), _label_key(new['name'])), key=len)
+    return len(short) >= 8 and long.endswith(short)
+
+
+def _prefer_form(old, new):
+    """The format list fixes the order. The later template, when there is one, holds the body."""
+    if old['list'] and not new['list']:
+        chosen = new
+    elif new['list'] and not old['list']:
+        chosen = old
+    else:
+        chosen = new if new['index'] >= old['index'] else old
+    earlier = old if old['index'] <= new['index'] else new
+    name = _shorter_listed_name(old, new, chosen)
+    return {**chosen, 'name': name, 'order_point': earlier['order_point'],
+            'slot': earlier['slot'], 'index': earlier['index']}
+
+
+def _shorter_listed_name(old, new, chosen):
+    ranked = sorted((old, new), key=lambda form: len(_label_key(form['name'])))
+    short = ranked[0]['name']
+    if (_label_key(ranked[1]['name']).endswith(_label_key(short)) and len(_label_key(short)) >= 8
+            and _compact(short) in _compact(chosen.get('source', ''))):
+        return short
+    return chosen['name']
+
+
+_COMPLETE_END = ('文件', '资料', '证明', '方案', '计划', '声明', '简介', '情况', '内容', '描述', '理解', '附录', '函', '表', '书', '）', ')')
+
+
+def _unfinished_label(section, index, title):
+    """A long label that still continues on the next line is not a finished file name."""
+    core = _LABEL_NOTE.sub('', title).strip()
+    if len(core) <= 12 or core.endswith(_COMPLETE_END):
+        return False
+    cursor = index + 1
+    while cursor < len(section) and not section[cursor][4]:
+        cursor += 1
+    if cursor >= len(section):
+        return False
+    nxt = section[cursor][4]
+    if _FORMAT_ITEM.match(nxt) or nxt.startswith('附件') or nxt[:1] in '0123456789（(注致':
+        return False
+    return '：' not in nxt[:6]
+
+
+def _in_metric_run(section, index):
+    """一、注册资金万元这一类连排指标不是投标文件。"""
+    if not _enum_label(section[index][4]):
+        return False
+    group = []
+    for step in (-1, 1):
+        cursor = index
+        while True:
+            cursor += step
+            if cursor < 0 or cursor >= len(section):
+                break
+            if not section[cursor][4]:
+                continue
+            if not _enum_label(section[cursor][4]):
+                break
+            group.append(cursor)
+    group.append(index)
+    return any(_METRIC.search(section[item][4]) for item in group)
+
+
+def _enum_label(text):
+    match = _FORMAT_ITEM.match(text or '')
+    return match is not None and match.group('label')
+
+
+def _following_file_name(section, index):
+    while index < len(section) and not section[index][4]:
+        index += 1
+    if index >= len(section):
+        return None, None
+    return _name_on_next_line(section[index][4]), index
+
+
+def _list_heading(section, index):
+    """A heading packed against the next label is a list entry, not the form body."""
+    while index < len(section) and not section[index][4]:
+        index += 1
+    return index < len(section) and _single_form_title(section[index][4]) is not None
+
+
 def compile_plans(plans, documents):
     """Compile at most two plans. An illegal plan yields no directory."""
     if len(plans) > 2:
@@ -1604,6 +2713,7 @@ def compile_directory(plan, documents):
     _decisions(nodes, adopted['seen'], excluded['ids'], plan.get('source_only', []))
     _validate_body_owners(adopted['chapters'])
     _attach_template_parts(adopted['chapters'], source, adopted['issues'])
+    _place_continuation_grids(adopted['chapters'], source)
     _place_wrapped_grids(adopted['chapters'], source, adopted['issues'])
     _segment_template_content(adopted['chapters'], source)
     binding_issues = _apply_format_bindings(plan, source, adopted['chapters'])
@@ -1642,7 +2752,8 @@ class _Source:
         self.documents, self.by_id = [], {}
         for index, document in enumerate(documents):
             _keys(document, frozenset(('document_id', 'role', 'pages', 'line_units', 'template_parts',
-                                       'ocr_issues', 'source_review_issues', 'unread_pages', 'grids')), 'source document')
+                                       'ocr_issues', 'source_review_issues', 'unread_pages', 'grids',
+                                       'continuations', 'layout_decoration', 'body_projection')), 'source document')
             identity, role, pages = document.get('document_id'), document.get('role'), document.get('pages')
             if not isinstance(identity, str) or not identity or identity in self.by_id:
                 raise DirectoryPlanRejected(f'duplicate or empty document {identity}')
@@ -1655,7 +2766,10 @@ class _Source:
                       'template_parts': document.get('template_parts') or {},
                       'grids': document.get('grids') or [],
                       'ocr_issues': document.get('ocr_issues') or [],
-                      'source_review_issues': document.get('source_review_issues') or []}
+                      'source_review_issues': document.get('source_review_issues') or [],
+                      'continuations': list(document.get('continuations') or []),
+                      'layout_decoration': document.get('layout_decoration') or [],
+                      'body_projection': list(document.get('body_projection') or [])}
             self.documents.append(record)
             self.by_id[identity] = record
 
@@ -1666,7 +2780,11 @@ class _Source:
         lines = document['pages'][page].splitlines()
         if line < 0 or line >= len(lines):
             raise DirectoryPlanRejected('source line is outside the document')
-        return lines[line]
+        shown = lines[line]
+        for item in document.get('body_projection') or []:
+            if item.get('page') == page and item.get('line') == line and isinstance(item.get('text'), str):
+                shown = item['text']
+        return shown
 
     def pages(self, document_id):
         return self._document(document_id)['pages']
@@ -2011,7 +3129,9 @@ def _push_chapter(item, node, parent_id, group, text, lines, source, composition
         entry_point = record['name']
         listed = record['title']
         if _compact(title) != _compact(listed):
-            if _compact(listed) in _compact(title):
+            if _compact(title) in _compact(listed):
+                pass
+            elif _compact(listed) in _compact(title):
                 title = listed
             else:
                 issues.append({'code': 'outline_directory_name',
@@ -2034,9 +3154,9 @@ def _push_chapter(item, node, parent_id, group, text, lines, source, composition
     chapter['clause_windows'] = deepcopy(item.get('clause', []))
     chapter['_source_body_rows'] = _source_rows(source, lines)
     chapter['_source_obligation_rows'] = obligation_rows
-    chapter['_source_condition_rows'] = _source_rows(source, [dict(document_id=d, page=p, line=l)
+    chapter['_source_condition_rows'] = _source_rows(source, [dict(document_id=d, page=p, line=number)
         for raw in chapter['condition_windows'] for d, p, start, end in [_window(raw, source, 'source condition')]
-        for l in range(start, end + 1)])
+        for number in range(start, end + 1)])
     if obligation_lines and obligations.strip() != text.strip():
         chapter['obligation_lines'] = obligation_lines
     if entry is not None:
@@ -2200,8 +3320,11 @@ def _nodes(plan, source):
         line = _continued_heading(source, heading)
         name = raw.get('name')
         if name is not None and (not str(name).strip() or _compact(name) not in _compact(line)):
-            raise DirectoryPlanRejected(f'source node {node_id} name is not a fragment of its heading')
+            if not str(node_id).startswith('volume-'):
+                raise DirectoryPlanRejected(f'source node {node_id} name is not a fragment of its heading')
         title = _business_name(line)
+        if isinstance(name, str) and name.strip() and (str(node_id).startswith('volume-') or _compact(name) in _compact(line)):
+            title = name.strip()
         if not title:
             raise DirectoryPlanRejected(f'source node {node_id} heading has no business name')
         response_kind = raw.get('response_kind', 'form')
@@ -2346,6 +3469,86 @@ def _excluded(plan, nodes, parents, source, composition):
     return {'ids': ids, 'issues': issues}
 
 
+def _place_continuation_grids(chapters, source):
+    """Keep both grids of a link in the chapter that already holds one of them.
+
+    A grid that already belongs to another chapter stays there. Unselected
+    prose is not copied into the chapter body.
+    """
+    def holders(document_id, unit_id):
+        found = []
+        for chapter in chapters:
+            for part in chapter.get('template_parts') or []:
+                ref = part.get('source_ref') or {}
+                if ref.get('unit_id') != unit_id:
+                    continue
+                owner = part.get('_document_id')
+                if owner not in (None, document_id):
+                    continue
+                if chapter not in found:
+                    found.append(chapter)
+        return found
+
+    for document in source.documents:
+        for link in document.get('continuations') or []:
+            if link.get('kind') != 'ruled_table':
+                continue
+            before_id, after_id = link.get('before_table_id'), link.get('after_table_id')
+            before_holders, after_holders = holders(document['document_id'], before_id), holders(document['document_id'], after_id)
+            if len(before_holders) == 1 and not after_holders:
+                _append_continuation_part(before_holders[0], source, document['document_id'], after_id, link, later=True)
+            elif len(after_holders) == 1 and not before_holders:
+                _append_continuation_part(after_holders[0], source, document['document_id'], before_id, link, later=False)
+                if link.get('repeated_header_rows'):
+                    _mark_later_header(after_holders[0], document['document_id'], after_id, link['repeated_header_rows'])
+            elif len(before_holders) == 1 and before_holders == after_holders and link.get('repeated_header_rows'):
+                _mark_later_header(before_holders[0], document['document_id'], after_id, link['repeated_header_rows'])
+    for chapter in chapters:
+        parts = chapter.get('template_parts') or []
+        parts.sort(key=lambda part: _continuation_page(source, part))
+
+
+def _continuation_page(source, part):
+    if isinstance(part.get('_source_page'), int):
+        document_id = part.get('_document_id')
+        for document in source.documents:
+            if document_id in (None, document['document_id']):
+                return document['index'], part['_source_page']
+        return 0, part['_source_page']
+    unit_id = (part.get('source_ref') or {}).get('unit_id')
+    owner = part.get('_document_id')
+    for document in source.documents:
+        if owner not in (None, document['document_id']):
+            continue
+        for page, rows in enumerate(document.get('line_units') or []):
+            if unit_id in (rows or []):
+                return document['index'], page
+    return 0, 0
+
+
+def _append_continuation_part(chapter, source, document_id, unit_id, link, *, later):
+    part = source.template_part(document_id, unit_id)
+    if part is None:
+        return
+    added = deepcopy(part)
+    added['_document_id'] = document_id
+    added['_source_page'] = link.get('after_page') if later else link.get('before_page')
+    if later and link.get('repeated_header_rows') and added.get('header_row_count') is None:
+        added['header_row_count'] = link['repeated_header_rows']
+    chapter.setdefault('template_parts', []).append(added)
+
+
+def _mark_later_header(chapter, document_id, unit_id, count):
+    for part in chapter.get('template_parts') or []:
+        ref = part.get('source_ref') or {}
+        if ref.get('unit_id') != unit_id or part.get('_document_id') not in (None, document_id):
+            continue
+        if part.get('_document_id') != document_id:
+            continue
+        if part.get('header_row_count') is None:
+            part['header_row_count'] = count
+
+
 def _attach_template_parts(chapters, source, issues=None):
     for chapter in chapters:
         parts, seen = [], set()
@@ -2363,6 +3566,9 @@ def _attach_template_parts(chapters, source, issues=None):
             part = source.template_part(line['document_id'], unit_id)
             if part is None:
                 continue
+            part = deepcopy(part)
+            part['_document_id'] = line['document_id']
+            part['_source_page'] = line['page']
             parts.append(part)
         if parts:
             chapter['template_parts'] = parts
@@ -2388,7 +3594,7 @@ def _segment_template_content(chapters, source):
                 continue
             start, end = indices[0], indices[-1]
             # An unrelated substantive line inside the span cannot be discarded.
-            if any(source.template_part(refs[index]['document_id'], refs[index].get('unit_id')) != part
+            if any(_part_foreign(source, refs[index], part)
                    and source.line(refs[index]['document_id'], refs[index]['page'], refs[index]['line']).strip()
                    for index in range(start, end + 1)):
                 continue
@@ -2416,12 +3622,41 @@ def _segment_template_content(chapters, source):
             prose_refs.append(ref)
             index += 1
         flush()
-        segments.extend({'part': part} for part in parts if _template_identity(part) not in used)
+        unused = [part for part in parts if _template_identity(part) not in used]
+        for part in sorted(unused, key=lambda item: item.get('_source_page') if isinstance(item.get('_source_page'), int) else 10**9):
+            page = part.get('_source_page') if isinstance(part.get('_source_page'), int) else 10**9
+            inserted = False
+            for index, segment in enumerate(segments):
+                if _segment_page(segment) > page:
+                    segments.insert(index, {'part': part})
+                    inserted = True
+                    break
+            if not inserted:
+                segments.append({'part': part})
         chapter['template_segments'] = segments
+
+
+def _part_foreign(source, ref, part):
+    owner = source.template_part(ref['document_id'], ref.get('unit_id'))
+    if owner is None:
+        return True
+    return _template_identity(owner) != _template_identity(part)
+
+
+def _segment_page(segment):
+    if 'part' in segment and isinstance(segment['part'].get('_source_page'), int):
+        return segment['part']['_source_page']
+    rows = segment.get('_source_rows') or []
+    pages = [row.get('page') for row in rows if isinstance(row.get('page'), int)]
+    return min(pages) if pages else 0
 
 
 def _template_identity(part):
     return json.dumps(part['source_ref'], sort_keys=True, ensure_ascii=False)
+
+
+def _public_part(part):
+    return {key: value for key, value in part.items() if not str(key).startswith('_')}
 
 
 def _place_wrapped_grids(chapters, source, issues=None):
@@ -2529,10 +3764,11 @@ def _body(node, source, nodes):
             unit_id = source.unit_at(start[0], page_index, line_index)
             if not unit_id and (_page_number(line) or _running_header(line, page_index, source.pages(start[0]), node)):
                 continue
-            lines.append(line)
+            lines.append(source.line(start[0], page_index, line_index))
             copied.append({'document_id': start[0], 'page': page_index, 'line': line_index,
                            **({'unit_id': unit_id} if unit_id else {})})
-    return '\n'.join(lines).strip(), copied
+    # Drop blank edges only. A layout indent on the first line is part of that line.
+    return '\n'.join(lines).strip('\n'), copied
 
 
 def _requirement_windows(raw, source):
@@ -3042,13 +4278,13 @@ def _outline_chapter(chapter, *, parameter_parent=False):
             target = source_target(original_kind, segment.get('text') or chapter['title'], segment.get('_source_rows'),
                                    generated=not segment.get('text'))
             if segment.get('part'):
-                target['template_refs'] = [segment['part']]
+                target['template_refs'] = [_public_part(segment['part'])]
             targets.append(target)
     elif body or chapter.get('template_parts'):
         target = source_target(original_kind, body or chapter['title'], chapter.get('_source_body_rows'),
                                generated=not body)
         if chapter.get('template_parts'):
-            target['template_refs'] = chapter['template_parts']
+            target['template_refs'] = [_public_part(part) for part in chapter['template_parts']]
         targets.append(target)
     if original_kind != kind:
         targets.append(source_target('narrative', f"{chapter['title']}（本章整体响应）", generated=True))
@@ -3057,7 +4293,9 @@ def _outline_chapter(chapter, *, parameter_parent=False):
         common.append(source_target('narrative', obligations, chapter.get('_source_obligation_rows')))
     for index, requirement in enumerate(chapter.get('requirements', [])):
         rows = chapter.get('_requirement_rows', [])
-        common.append(source_target('narrative', requirement, rows[index] if index < len(rows) else None))
+        requirement_target = source_target('narrative', requirement, rows[index] if index < len(rows) else None)
+        requirement_target['enterprise_response'] = True
+        common.append(requirement_target)
     materials = []
     for index, material in enumerate(chapter.get('materials', [])):
         rows = chapter.get('_material_rows', [])
@@ -3066,7 +4304,7 @@ def _outline_chapter(chapter, *, parameter_parent=False):
         target = source_target(kind, segment.get('text') or chapter['title'], segment.get('_source_rows'),
                                generated=not segment.get('text'))
         if segment.get('part'):
-            target['template_refs'] = [segment['part']]
+            target['template_refs'] = [_public_part(segment['part'])]
         materials.append(target)
     if chapter.get('subjects'):
         targets = [{**deepcopy(target), 'subject': subject['role']}

@@ -44,7 +44,8 @@ def test_expanded_parent_preserves_independent_obligation_requirement_and_condit
     apply_parameters(compiled, documents, response(parameter())['chapters'])
     parent = outline_from_compiled(SNAPSHOT, compiled)['chapters'][0]
     for text in ('独立投标义务。', '独立章节要求。', '独立适用条件。', '独立材料要求。', '独立材料原文。'):
-        matches = [target for target in parent['targets'] if target['purpose'] == text]
+        matches = [target for target in parent['targets'] if target['purpose'] == text
+                   and not target['target_id'].endswith(':answer')]
         assert len(matches) == 1 and matches[0]['kind'] == 'narrative'
     assert parent['targets'][0]['kind'] == 'form'
 

@@ -107,15 +107,24 @@ def render_target(artifacts, target):
     return Document(BytesIO(artifacts.read_bytes(result['docx_ref']))), result
 
 
-@pytest.mark.parametrize('problem', ['missing_disposition', 'duplicate_body', 'context_as_body', 'unknown_ref'])
+def test_missing_form_atom_stays_unresolved_without_another_round(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    fixed, documents, compiled, selection, _ = source_case(artifacts)
+    view = ResponseFormView(artifacts, compiled, documents, selection, fixed)
+    raw = synthetic_response(view.payload)
+    raw['dispositions'][-1]['refs'].pop()
+    accepted = view.accept(raw)
+    assert not accepted['complete']
+    assert any(entry['kind'] == 'unresolved' for entry in accepted['dispositions'])
+
+
+@pytest.mark.parametrize('problem', ['duplicate_body', 'context_as_body', 'unknown_ref'])
 def test_source_plan_cannot_hide_atoms_or_duplicate_clause_ownership(tmp_path, problem):
     artifacts = ArtifactStore(tmp_path)
     fixed, documents, compiled, selection, _ = source_case(artifacts)
     view = ResponseFormView(artifacts, compiled, documents, selection, fixed)
     raw = synthetic_response(view.payload)
-    if problem == 'missing_disposition':
-        raw['dispositions'][-1]['refs'].pop()
-    elif problem == 'duplicate_body':
+    if problem == 'duplicate_body':
         raw['rows'].append(deepcopy(raw['rows'][0]))
     elif problem == 'context_as_body':
         raw['rows'][0]['refs'].append(raw['contexts'][0]['refs'][0])

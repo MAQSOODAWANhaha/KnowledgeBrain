@@ -334,27 +334,6 @@ async def test_complete_response_cache_reused_without_new_request_or_usage(tmp_p
     assert second.usage.snapshot()["requests"] == 0
 
 
-@pytest.mark.parametrize("with_artifact", [False, True])
-@pytest.mark.parametrize("hint,expected", [(45, 45), (None, None), (float("inf"), None), (True, None)])
-async def test_recorded_group_429_replays_safe_retry_hint_without_sending(tmp_path, with_artifact, hint, expected):
-    artifacts, audit, calls = CountedArtifacts(tmp_path), Audit(), []
-    client, _ = model(lambda request: calls.append(request), audit, artifacts=artifacts)
-    saved = {"protocol": "http.rejection.v1", "request_digest": "known-digest",
-             "status_code": 429, "retry_after_seconds": hint}
-    row = {"status": "failed", "error": {"type": "http_429", "retry_after_seconds": hint},
-           "metadata": {"not_before": 123.0}}
-    if with_artifact:
-        # Real HTTP parsing excludes infinity before writing the immutable envelope.
-        if hint == float("inf"):
-            saved["retry_after_seconds"] = "Infinity"
-        row["response_ref"] = artifacts.put_json(saved)
-    with pytest.raises(ModelRateLimitError) as caught:
-        await client._replay_group_failure(row, "known-digest")
-    assert caught.value.retry_after_seconds == expected
-    assert caught.value.not_before == 123.0
-    assert not calls and not audit.events
-
-
 async def test_http_429_persists_safe_retry_hint_in_terminal_error(tmp_path):
     client, audit = model(lambda _: httpx.Response(429, headers={"retry-after": "45"},
                                                    json={"error": "capacity"}),

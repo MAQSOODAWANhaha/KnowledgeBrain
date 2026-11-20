@@ -82,8 +82,7 @@ def test_expansion_still_requires_complete_dispositions_and_exact_native_layout(
     raw = {**synthetic_response(view.payload), 'decision': 'expand', 'mandate_indices': [0]}
     assert view.accept(raw)['complete']
     raw['dispositions'][-1]['refs'].pop()
-    with pytest.raises(ModelContractError):
-        view.accept(raw)
+    assert not view.accept(raw)['complete']
 
 
 def test_unresolved_decision_preserves_the_form_and_pending_exit(tmp_path):
@@ -101,10 +100,11 @@ def test_old_partial_answer_is_not_a_new_mandate_decision(tmp_path):
         view.accept(synthetic_response(view.payload))
 
 
-def test_expand_without_atom_dispositions_is_a_located_contract_error(tmp_path):
+def test_expand_without_atom_dispositions_stays_pending(tmp_path):
     _, _, _, view = decision_case(tmp_path)
-    with pytest.raises(ModelContractError):
-        view.accept({'decision': 'expand', 'mandate_indices': [0]})
+    accepted = view.accept({'decision': 'expand', 'mandate_indices': [0]})
+    assert not accepted['complete']
+    assert any(entry['kind'] == 'unresolved' for entry in accepted['dispositions'])
 
 
 async def test_new_pipeline_preserves_original_form_after_one_source_decision(tmp_path, monkeypatch):

@@ -129,7 +129,7 @@ async def freeze_sources(registration: dict, artifacts: ArtifactStore, ocr: Call
             "tree": native.tree.model_dump(mode="json") if native.tree else None,
             "metadata": {key: native.metadata[key] for key in (
                 "page_count", "page_classifications", "format", "parser_version", "embedded_image_count",
-                "vector_figure_count", "evidence_issues") if key in native.metadata},
+                "vector_figure_count", "evidence_issues", "table_continuations") if key in native.metadata},
             "images": {}, "image_anchors": native.metadata.get("image_anchors", {}), "ocr": {}, "image_reviews": {},
         }
         if literal is not None:

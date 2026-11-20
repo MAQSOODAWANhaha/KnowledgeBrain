@@ -7,8 +7,16 @@ from docreader.llm.wire import WirePayload
 from docreader.tender.checks.analysis import _Analysis, assign_issues
 from docreader.tender.requirements import extract_items
 from test_analysis_extraction import FixedModel
-from test_analysis_checks import IDENTITY, Model, budget, resolution, run, scenario
-from test_analysis_locate_packing import questions
+from test_analysis_checks import IDENTITY, Model, budget, run, scenario
+
+
+def questions(context, count):
+    item = next(iter(context.items.values()))
+    return assign_issues([{
+        "issue_id": f"question-{number}", "code": "condition_unclear",
+        "detail": f"独立核对第{number}项适用条件，不得与其他问题合并。", "blocking": True,
+        "range_id": item["evidence"][0]["range_id"], "item_ids": [item["item_id"]],
+    } for number in range(count)], "analysis")
 
 
 @pytest.mark.asyncio
@@ -52,49 +60,6 @@ async def test_review_target_ledger_is_complete_without_claiming_context_complet
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("placement", ["body", "supporting"])
-async def test_association_context_does_not_send_disposition_with_absent_item(tmp_path, monkeypatch, placement):
-    data = await scenario(tmp_path)
-    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
-    target, contextual = list(context.items.values())[:2]
-    target_range = target["evidence"][0]["range_id"]
-    context_range = contextual["evidence"][0]["range_id"]
-    extra = context.views([context_range])[0]["body"][0]
-    views = context.views
-
-    def with_context(ranges, **kwargs):
-        result = views(ranges, **kwargs)
-        result[0][placement].append(deepcopy(extra))
-        return result
-
-    monkeypatch.setattr(context, "views", with_context)
-    candidate = {"candidate_id": "discovery-1:c1", "issue_ids": [],
-                 "range_ids": [target_range], "item_ids": [], "reason": "核对选定来源。"}
-    payload, = context.association_requests([candidate])
-    assert [i["item_id"] for i in payload["items"]] == [target["item_id"]]
-    assert [d["range_id"] for d in payload["dispositions"]] == [target_range]
-    assert extra in payload["source_views"][0][placement]
-    assert context.dispositions[context_range]["item_ids"] == [contextual["item_id"]]
-
-
-@pytest.mark.asyncio
-async def test_association_evidence_closure_does_not_claim_complete_context_ledger(tmp_path):
-    data = await scenario(tmp_path)
-    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
-    target, contextual = list(context.items.values())[:2]
-    target["evidence"].append(deepcopy(contextual["evidence"][0]))
-    context_range = contextual["evidence"][0]["range_id"]
-    context.dispositions[context_range]["item_ids"].append(target["item_id"])
-    candidate = {"candidate_id": "discovery-1:c1", "issue_ids": [], "range_ids": [],
-                 "item_ids": [target["item_id"]], "reason": "核对事项及其完整证据。"}
-    payload, = context.association_requests([candidate])
-    assert [i["item_id"] for i in payload["items"]] == [target["item_id"]]
-    assert context_range not in {d["range_id"] for d in payload["dispositions"]}
-    assert any(r["range_id"] == context_range for v in payload["source_views"] for r in v["body"])
-    assert set(context.dispositions[context_range]["item_ids"]) == {target["item_id"], contextual["item_id"]}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("route,expected", [(True, "reference"), (False, "local"), (None, "reference")])
 async def test_continuations_share_one_task_and_preserve_each_record(tmp_path, route, expected):
     data = await scenario(tmp_path)
@@ -104,16 +69,16 @@ async def test_continuations_share_one_task_and_preserve_each_record(tmp_path, r
     if route is not None:
         context.problems[1]["needs_source"] = route
     original = deepcopy(context.problems)
-    requests = context.locate_requests()
-    refs = [p for p in requests if p["issues"]]
-    assert len(refs) == (expected == "reference")
+    context.route_problems()
+    routing = deepcopy(context.problem_routing)
+    assert routing == [{"issue_ids": ["question-0", "question-1"], "route": expected,
+                        "reason": routing[0]["reason"]}]
     assert len(context.local_candidates) == (expected == "local")
-    if refs:
-        assert refs[0]["issues"] == original
-    else:
+    if expected == "local":
         assert context.local_candidates[0]["issue_ids"] == ["question-0", "question-1"]
     assert context.problems == original
-    assert requests == context.locate_requests()
+    context.route_problems()
+    assert context.problem_routing == routing
 
 
 @pytest.mark.asyncio
@@ -124,8 +89,9 @@ async def test_true_wins_and_different_questions_sharing_source_do_not_merge(tmp
     context.problems[0]["needs_source"] = True
     context.problems[1].update(related_issue_ids=["question-0"], needs_source=False)
     context.problems[2]["needs_source"] = False
-    refs = [p for p in context.locate_requests() if p["issues"]]
-    assert [p["issue_id"] for p in refs[0]["issues"]] == ["question-0", "question-1"]
+    context.route_problems()
+    routes = {tuple(r["issue_ids"]): r["route"] for r in context.problem_routing}
+    assert routes == {("question-0", "question-1"): "reference", ("question-2",): "local"}
     assert context.local_candidates[0]["issue_ids"] == ["question-2"]
 
 
@@ -137,7 +103,7 @@ async def test_informational_notes_skip_work_but_missing_local_location_stays_vi
     context.problems[0].update(code="source_formatting_note", blocking=False)
     context.problems[1].update(needs_source=False)
     del context.problems[1]["range_id"], context.problems[1]["item_ids"]
-    assert all(not p["issues"] for p in context.locate_requests())
+    context.route_problems()
     assert context.local_candidates == []
     assert len(context.problems) == 2
     assert any(d["route"] == "unresolved" for d in context.problem_routing)
@@ -188,41 +154,20 @@ def test_issue_link_short_references_and_feedback_roundtrip():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("resolve_all", [True, False])
-async def test_false_routes_to_local_review_and_decision_does_not_clear_unlisted_continuation(tmp_path, resolve_all):
+async def test_false_routes_to_local_review_and_decision_does_not_clear_unlisted_continuation(tmp_path):
     data = await scenario(tmp_path, analysis_issue=True)
     def mutate(payload, value):
         if payload["operation"] == "review" and payload["work_unit_id"].startswith("review-") and payload["issues"]:
             prior = payload["issues"][0]
             value["findings"] = [{"code": "condition_unclear", "detail": "现有原文足以核对。", "blocking": True,
                 "range_id": prior["range_id"], "related_issue_ids": [prior["issue_id"]], "needs_source": False}]
-    def associate(payload):
-        value = resolution(payload)
-        if not resolve_all:
-            value["decisions"][0]["issue_ids"] = value["decisions"][0]["issue_ids"][:1]
-        return value
-    model = Model(associate=associate, mutate=mutate)
+    model = Model(mutate=mutate)
     verified = await run(data, model)
-    assert not any(p["operation"] == "locate" and p["issues"] for p in model.calls)
-    assert sum(p["operation"] == "associate" for p in model.calls) == 1
-    assert verified["blocking"] is (not resolve_all)
-    assert len(verified["all_issues"]) == 2
-    assert len(verified["resolved_issue_ids"]) == (2 if resolve_all else 1)
+    assert {p["operation"] for p in model.calls} == {"review"}
+    assert verified["blocking"] is True
+    assert any(p["detail"] == "现有原文足以核对。" for p in verified["issues"])
     calls = len(model.calls)
     assert await run(data, model) == verified
     assert len(model.calls) == calls
 
 
-@pytest.mark.asyncio
-async def test_local_and_discovered_candidates_join_through_continuation_before_execution(tmp_path):
-    data = await scenario(tmp_path)
-    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
-    context.problems = questions(context, 2)
-    context.problems[1].update(related_issue_ids=["question-0"], needs_source=False)
-    context.locate_requests()
-    remote = {**deepcopy(context.local_candidates[0]), "candidate_id": "discovery-1:c1", "issue_ids": ["question-1"]}
-    requests = context.association_requests([remote, *context.local_candidates])
-    assert len(requests) == 1
-    assert {p["issue_id"] for p in requests[0]["issues"]} == {"question-0", "question-1"}
-    assert len(requests[0]["candidates"]) == 2
-    assert assign_issues(context.problems, "analysis") == context.problems

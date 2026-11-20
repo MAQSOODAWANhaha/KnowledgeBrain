@@ -25,6 +25,8 @@ def parse_args():
     for name in ("status", "cancel"):
         command = commands.add_parser(name)
         command.add_argument("run_id")
+    command = commands.add_parser("authoring-report")
+    command.add_argument("execution_id")
     command = commands.add_parser("confirm")
     command.add_argument("run_id")
     command.add_argument("--source-version", required=True, type=int)
@@ -109,6 +111,17 @@ async def run(args):
             plans.insert(0, {"phase": "extract", "requests": budgets})
         row["budget_observation"] = budget_observation(row["usage"], plans)
         return row
+    if args.command == "authoring-report":
+        from docreader.integrations.authoring_store import AuthoringStore
+        from docreader.tender.authoring_report import authoring_report
+
+        execution = await AuthoringStore(settings.dsn).get_execution(args.execution_id)
+        assert execution is not None  # missing_ok=False raises for an unknown execution
+        result: dict = (await asyncio.to_thread(artifacts.read_json, execution["result_ref"])
+                        if execution.get("result_ref") else {"chapters": [], "issues": []})
+        document = result if "outline_ref" in result else None
+        outline = await asyncio.to_thread(artifacts.read_json, result["outline_ref"]) if document else result
+        return authoring_report(execution, execution["requests"], outline, document)
     if args.command == "cancel":
         row = await store.cancel(args.run_id)
         return {"run_id": row["run_id"], "status": row["status"]}

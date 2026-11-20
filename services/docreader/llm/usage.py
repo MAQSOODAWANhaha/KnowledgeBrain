@@ -150,7 +150,7 @@ def budget_observation(requests: list[dict], plans=()) -> dict:
                         "max_input_estimate": max((b["input_tokens"] for b in budgets), default=0),
                         "output_reserve_total": sum(b["output_reserve"] for b in budgets),
                         "over_budget_requests": sum(b["fits"] is False for b in budgets)})
-    unplanned = [phase for phase in ("extract", "review", "locate", "associate", "joint")
+    unplanned = [phase for phase in ("extract", "review")
                  if phase not in {plan["phase"] for plan in planned}]
     known_requests = sum(plan["planned_requests"] for plan in planned)
     return {"calibration_status": "observations_only", "requests": len(requests),

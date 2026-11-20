@@ -107,11 +107,11 @@ async def test_successful_scope_is_not_retried_while_failed_sibling_uses_four_at
     calls = Counter()
     async def handler(request):
         command = json.loads(request.content)
-        calls[command["version_id"]] += 1
+        calls[command["version_id"], command["operation"]] += 1
         return response(command) if command["version_id"] == VERSION else httpx.Response(503)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
     result = await source(handler, store, artifacts, (VERSION, OTHER)).search(query(), artifacts)
-    assert calls == {VERSION: 1, OTHER: 4}
+    assert calls == {(VERSION, "search"): 1, (VERSION, "document"): 1, (OTHER, "search"): 4}
     assert len(result["materials"]) == 1
     assert any(issue["code"] == "knowledge_unavailable" for issue in result["issues"])
 
@@ -133,15 +133,16 @@ async def test_proof_upgrade_reuses_search_and_only_fetches_original_operations(
 async def test_committed_operation_survives_failure_before_aggregate_snapshot(tmp_path, empty):
     calls = []
     async def handler(request):
-        calls.append(request)
-        return response(json.loads(request.content), empty=empty)
+        command = json.loads(request.content)
+        calls.append(command["operation"])
+        return response(command, empty=empty)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
     store.fail_stage = "knowledge-snapshot"
     with pytest.raises(OSError, match="persistence"):
         await source(handler, store, artifacts).search(query(), artifacts)
     store.fail_stage = None
     result = await source(handler, store, artifacts).search(query(target="resumed"), artifacts)
-    assert len(calls) == 1
+    assert calls == (["search"] if empty else ["search", "document"])
     assert bool(result["materials"]) is not empty
 
 
@@ -171,14 +172,15 @@ async def test_unknown_second_attempt_is_charged_across_resume(tmp_path, kind):
 async def test_same_operation_concurrent_calls_share_one_send(tmp_path):
     calls = []
     async def handler(request):
-        calls.append(request)
+        command = json.loads(request.content)
+        calls.append(command["operation"])
         await asyncio.sleep(0)
-        return response(json.loads(request.content))
+        return response(command)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
     reader = source(handler, store, artifacts)
     first, second = await asyncio.gather(reader.search(query(target="a"), artifacts),
                                          reader.search(query(target="b"), artifacts))
-    assert len(calls) == 1
+    assert calls == ["search", "document"]
     assert first["materials"][0]["locator"]["target_ids"] == ["a"]
     assert second["materials"][0]["locator"]["target_ids"] == ["b"]
 
@@ -200,15 +202,16 @@ async def test_control_and_storage_errors_do_not_become_business_retries(tmp_pat
 async def test_result_not_committed_is_unknown_and_may_be_sent_again(tmp_path):
     calls = []
     async def handler(request):
-        calls.append(request)
-        return response(json.loads(request.content))
+        command = json.loads(request.content)
+        calls.append(command["operation"])
+        return response(command)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
     store.fail_stage, store.fail_suffix = "knowledge-operation", ":outcome"
     with pytest.raises(OSError):
         await source(handler, store, artifacts).search(query(), artifacts)
     store.fail_stage = None
     await source(handler, store, artifacts).search(query(), artifacts)
-    assert len(calls) == 2
+    assert calls == ["search", "search", "document"]
 
 
 async def test_start_committed_before_send_crash_consumes_one_attempt(tmp_path):
@@ -235,8 +238,9 @@ async def test_start_committed_before_send_crash_consumes_one_attempt(tmp_path):
 async def test_excerpt_persistence_failure_keeps_remote_result_without_retrying_http(tmp_path, monkeypatch, failure):
     calls = []
     async def handler(request):
-        calls.append(request)
-        return response(json.loads(request.content))
+        command = json.loads(request.content)
+        calls.append(command["operation"])
+        return response(command)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
     put_bytes = artifacts.put_bytes
     def save(data, media_type="application/octet-stream"):
@@ -248,7 +252,7 @@ async def test_excerpt_persistence_failure_keeps_remote_result_without_retrying_
         with pytest.raises(type(failure)):
             await source(handler, store, artifacts).search(query(), artifacts)
     result = await source(handler, store, artifacts).search(query(), artifacts)
-    assert len(calls) == 1
+    assert calls == ["search", "document"]
     assert result["materials"]
 
 

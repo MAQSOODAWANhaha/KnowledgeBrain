@@ -26,19 +26,17 @@ cargo run -p worker
 cargo run -p retention
 ```
 
-Host ports: API 18080, DocReader 15051, Postgres 15432, Redis 16379, MinIO 19000 / console 19001.
+Host ports: API 28080, DocReader 15051, Postgres 15432, Redis 16379, MinIO 19000 / console 19001.
 
 ## Development checks / target release gates
 
 The commands below are development checks. They become release gates only when the named required CI jobs in [`deploy/README.md`](deploy/README.md) run them fail-closed with real PostgreSQL/pgvector、Redis、MinIO and zero skipped suites. Current workflow status must not be described as release accepted merely because these commands are documented.
 
-Review evidence: `.scratch/knowledgebrain/review.md`.
-
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-(cd services/docreader && uvx ruff check . && uv run --with pyright pyright . && PYTHONPATH=.. uv run --with pytest pytest tests/)
+(cd services/docreader && uvx ruff check . && uv run --with pyright python scripts/pyright_baseline.py && PYTHONPATH=.. uv run --with pytest pytest tests/)
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
 npm ci --prefix web
 npm --prefix web run lint

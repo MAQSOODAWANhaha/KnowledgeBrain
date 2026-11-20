@@ -1,6 +1,5 @@
 """Regressions found by reviewing the exact-source and row-response integration."""
 from io import BytesIO
-import json
 from types import SimpleNamespace
 
 from docx import Document

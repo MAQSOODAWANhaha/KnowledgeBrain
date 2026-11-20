@@ -22,7 +22,8 @@ def _pdf(header='HEADER'):
     data = b'%PDF-1.4\n'
     offsets = [0]
     for number, value in enumerate(objects, 1):
-        offsets.append(len(data));data += f'{number} 0 obj\n'.encode() + value + b'\nendobj\n'
+        offsets.append(len(data))
+        data += f"{number} 0 obj\n".encode() + value + b'\nendobj\n'
     xref = len(data)
     data += b'xref\n0 6\n0000000000 65535 f \n' + b''.join(f'{o:010d} 00000 n \n'.encode() for o in offsets[1:])
     return data + b'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + str(xref).encode() + b'\n%%EOF\n'
@@ -65,7 +66,8 @@ def fixture(tmp_path, *, native='第一职责。\n71', wanted='第一职责。',
 @pytest.mark.parametrize('selection', ['first_sentence', 'all_available_parts'])
 def test_other_target_footer_cannot_reappear_in_body_or_context_or_word(tmp_path, selection):
     values, index, _ = fixture(tmp_path)
-    scope = NativeBodyScope(*values[:5]);view = scope.selection_view()
+    scope = NativeBodyScope(*values[:5])
+    view = scope.selection_view()
     assert view.units
     source = view.cells[0]
     last = 1 if selection == 'first_sentence' else len(view.parts[source['cell_id']])
@@ -77,7 +79,8 @@ def test_other_target_footer_cannot_reappear_in_body_or_context_or_word(tmp_path
     parts = [{'source_excerpt': scope.cell_excerpt(p['cell_id'], p['start'], p['end']), 'join': p['source_join']}
              for island in unit['islands'] for p in island['body']]
     bound = bind_source_body(values[0], values[1], target, parts)
-    outline = deepcopy(values[4]);outline['chapters'][0]['targets'][0] = bound
+    outline = deepcopy(values[4])
+    outline['chapters'][0]['targets'][0] = bound
     output = export_authoring_document(values[0], outline, [])
     paragraphs = [p.text for p in Document(BytesIO(values[0].read_bytes(output['docx_ref']))).paragraphs]
     assert '71' not in paragraphs
@@ -87,7 +90,8 @@ def test_other_target_footer_cannot_reappear_in_body_or_context_or_word(tmp_path
 
 def test_global_prefix_is_an_exact_fragment_and_business_blanks_remain(tmp_path):
     values, index, _ = fixture(tmp_path, native='HEADER\n年 月 日\n第一职责。', decoration='HEADER')
-    scope = NativeBodyScope(*values[:5]);view = scope.selection_view()
+    scope = NativeBodyScope(*values[:5])
+    view = scope.selection_view()
     assert view.cells[0]['text'] == '\n年 月 日\n第一职责。'
     excerpt = scope.cell_excerpt(view.cells[0]['cell_id'], 0, len(view.cells[0]['text']))
     assert excerpt['selectors'][0]['start'] == 6
@@ -102,8 +106,10 @@ def test_unproven_or_internal_global_fact_is_pending_without_clipping_business(t
     native = '第一职责。71第二职责。' if case == 'internal' else '第一职责。\n71'
     wanted = '71' if case == 'anchor_overlap' else '第一职责。'
     values, index, app = fixture(tmp_path, native=native, wanted=wanted)
-    if case == 'unresolved': app['state'] = 'unresolved'
-    if case == 'bad_hash': app['original_fragments'][0]['text_sha256'] = '0' * 64
+    if case == 'unresolved':
+        app['state'] = 'unresolved'
+    if case == 'bad_hash':
+        app['original_fragments'][0]['text_sha256'] = '0' * 64
     scope = NativeBodyScope(*values[:5])
     assert scope.records[0]['classification'].endswith('pending') and scope.pending
     assert not scope.exact_bindings and not scope.selection_view().units
@@ -113,7 +119,8 @@ def test_unproven_or_internal_global_fact_is_pending_without_clipping_business(t
 def test_pdf_original_character_flow_is_a_unique_equivalent_mapping(tmp_path):
     values, index, _ = fixture(tmp_path, native='HEADER\nBusiness sentence.', wanted='Business sentence.',
                                layout='Business sentence.\nHEADER', decoration='HEADER', pdf=True)
-    scope = NativeBodyScope(*values[:5]);view = scope.selection_view()
+    scope = NativeBodyScope(*values[:5])
+    view = scope.selection_view()
     assert view.cells[0]['text'] == '\nBusiness sentence.'
     record = scope.records[0]['native_prose_excluded_decorations'][0]
     assert record['mapping'] == 'pdf_original_chars'
@@ -132,14 +139,17 @@ def test_pdf_original_character_sha_is_required_for_fallback(tmp_path):
 def test_pdf_bytes_and_page_characters_are_cached_for_shared_ranges(tmp_path, monkeypatch):
     values, index, _ = fixture(tmp_path, native='HEADER\nBusiness sentence.', wanted='Business sentence.',
                                layout='Business sentence.\nHEADER', decoration='HEADER', pdf=True)
-    second = deepcopy(values[4]['chapters'][0]['targets'][0]);second['target_id'] = 'chapter-1:target-2'
+    second = deepcopy(values[4]['chapters'][0]['targets'][0])
+    second['target_id'] = 'chapter-1:target-2'
     values[4]['chapters'][0]['targets'].append(second)
-    origin = deepcopy(values[3]['_source_renderings'][0]);origin['target_id'] = second['target_id']
+    origin = deepcopy(values[3]['_source_renderings'][0])
+    origin['target_id'] = second['target_id']
     values[3]['_source_renderings'].append(origin)
     reads = []
     original_read = values[0].read_bytes
     def counted(ref):
-        if ref == index.document['original_ref']: reads.append(ref)
+        if ref == index.document['original_ref']:
+            reads.append(ref)
         return original_read(ref)
     monkeypatch.setattr(values[0], 'read_bytes', counted)
     scope = NativeBodyScope(*values[:5])

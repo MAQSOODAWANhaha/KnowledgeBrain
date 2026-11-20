@@ -210,7 +210,8 @@ async def test_structure_role_records_bind_actual_rows_and_change_review_request
             return validate({'findings': []})
         await review_structure(artifacts, outline, [], ReviewBudget(model='fixture', context_tokens=131072),
                                execute, outline_phase=True)
-    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     assert digest(payloads[0]) != digest(payloads[1])
     assert digest(requests[0]) != digest(requests[1])
 

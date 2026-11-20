@@ -418,6 +418,6 @@ async def test_status_projects_current_items_from_verified_refs(analysis_runtime
     assert all(value["item_ref"]["artifact_ref"] and value["item"]["evidence"] for value in projected)
     observation = status["budget_observation"]
     assert observation["requests"] == len(status["usage"])
-    assert {p["phase"] for p in observation["plans"]} == {"extract", "review", "locate", "associate", "joint"}
+    assert {p["phase"] for p in observation["plans"]} == {"extract", "review"}
     assert observation["plans"][0]["planned_requests"] == len(status["results"]["pack-plan"]["packs"])
     assert observation["calibration_status"] == "observations_only"

@@ -163,6 +163,30 @@ class KnowledgeProvider:
                 originals[key] = None
         return originals[key], {field: meta[field] for field in ("file_name", "object_ref")}
 
+    async def _document_metadata(self, client, api, hit, documents, run_operation):
+        """Read the catalog record. object_ref carries the original bytes' sha256."""
+        try:
+            product, version, document = (str(UUID(hit[field])) for field in
+                                          ("product_id", "version_id", "document_id"))
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return None
+        scope = product, version, document
+        if scope not in documents:
+            async def metadata_once():
+                meta = _response_json(await client.get(f"{api}/documents/{document}"))
+                if (not isinstance(meta, dict) or meta.get("id") != document
+                        or meta.get("product_version_id") != version
+                        or not isinstance(meta.get("file_name"), str)
+                        or not re.fullmatch(r"objects/[0-9a-f]{64}", str(meta.get("object_ref", "")))):
+                    raise KnowledgeResponseError("original document identity unavailable")
+                return meta
+            try:
+                documents[scope] = await run_operation("document", self._operation_key({
+                    "product_id": product, "version_id": version, "document_id": document}), metadata_once)
+            except KnowledgeUnavailable:
+                documents[scope] = None
+        return documents[scope]
+
     async def search(self, queries: list[dict], artifacts, attempts: int = 4, *, run_operation=None) -> dict:
         """Return materials and per-target diagnostics, without issuing LLM calls.
 
@@ -255,6 +279,12 @@ class KnowledgeProvider:
                                                         "text/plain; charset=utf-8")
                     source = {key: hit[key] for key in ("document_id", "product_id", "version_id", "version_label", "is_current",
                                                        "start_at", "end_at", "image_object_ref") if key in hit}
+                    meta = await self._document_metadata(client, api, hit, documents, run_operation)
+                    if meta is not None:
+                        source["source_sha256"] = meta["object_ref"][8:]
+                        source["source_document_id"] = meta["id"]
+                    else:
+                        source["source_identity"] = "unconfirmed"
                     retrieval = {"query_id": query_ids.get(query, query), "rank": rank}
                     score = hit.get("score")
                     if type(score) in {int, float} and not isinstance(score, bool) and score == score and abs(score) != float("inf"):

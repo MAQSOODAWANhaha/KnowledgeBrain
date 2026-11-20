@@ -127,12 +127,6 @@ class TenderNodes:
         return await call_validated(self._ensure_model(), self.store, self.artifacts,
                                     self.lease, task, payload, validate)
 
-    async def call_groups_validated(self, task, payload, validate, *, validate_shared):
-        from docreader.llm.recovery import call_groups_validated
-
-        return await call_groups_validated(self._ensure_model(), self.store, self.artifacts,
-            self.lease, task, payload, validate, validate_shared=validate_shared)
-
     async def close(self):
         if self.model is not None and hasattr(self.model, "close"):
             await self.model.close()

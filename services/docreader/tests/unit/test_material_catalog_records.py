@@ -32,7 +32,8 @@ def test_legacy_complete_payload_and_request_wire_goldens():
                        'directory_material', projected)
     assert hashlib.sha256(wire(projected)).hexdigest() == '9e7092a3620f59a933aa4f04a771233d8bc408fa48e2b665a52d1dc75373e6a2'
     assert hashlib.sha256(wire(request)).hexdigest() == '616375c8e063bd8982f5e4106aeb35ce933e72101419236f07250297f72e6dbb'
-    ordered = lambda value: json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
+    def ordered(value):
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
     assert hashlib.sha256(ordered(projected)).hexdigest() == '1a5874be655e153e7434423d0eb58b9b6630abaeb951d8d39cee9528860f3ef9'
     assert hashlib.sha256(ordered(request)).hexdigest() == 'd1d48a8f7c195efb0283d6a0a4d77e32c2e5a2fd5357225c28e904706645068c'
     assert projected['identity_binding'] == '8facf5554e4dd918347256eae8cd49c44753174b1a1f99d6d8a745cecc7bf049'

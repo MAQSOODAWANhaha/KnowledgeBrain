@@ -93,11 +93,17 @@ def test_bullet_source_and_layout_retain_unknown_or_conflicting_private_symbols(
     item = source(original)
     accepted = pdf_symbols.normalize_pdf_units([item], evidence)
     layout, issues = _normalize_layout_symbols([original], {'source_contract': {'glyph_normalizations': evidence}})
-    assert item.text == original and layout == [original]
-    assert accepted == []
+    assert item.text == original
     assert item.source_issues == ['unresolved_private_use_symbol_requires_visual_review']
     assert len(issues) == 1 and issues[0]['code'] == 'outline_directory_symbol_unconfirmed'
     assert evidence == before
+    if problem == 'mixed_font':
+        # One verified glyph stays in the receipt and is substituted. The other font does not.
+        assert accepted == evidence
+        assert layout == ['技术服务\n●第一项\n\uf06c另一字体']
+    else:
+        assert accepted == []
+        assert layout == [original]
 
 
 def test_layout_requires_a_proof_for_every_occurrence_of_the_bullet():

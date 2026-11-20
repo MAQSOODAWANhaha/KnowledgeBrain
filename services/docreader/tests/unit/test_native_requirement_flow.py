@@ -57,9 +57,23 @@ def test_native_cover_rejected_before_legacy_or_native_mutation(tmp_path):
     source=ledger.source(refs(ledger,0,3),[])
     compiled={'chapters':[{'id':'source-node-real-id-A','title':'Cover','presentation':'cover','lines':[]}],
               'issues':[],'_native_requirement_cases':[ledger.case(source,origin='x')]}
-    before=deepcopy(compiled);joint=JointClassification(ledger,compiled,docs)
-    with pytest.raises(ModelContractError):joint.accept({'items':[],'basis_groups':[],
-      'requirement_adjudications':[{'item_ids':['q1'],'scope':'chapter','chapter_ids':['c1'],'basis_id':None}]})
+    before = deepcopy(compiled)
+    joint = JointClassification(ledger, compiled, docs)
+    with pytest.raises(ModelContractError):
+        joint.accept(
+            {
+                'items': [],
+                'basis_groups': [],
+                'requirement_adjudications': [
+                    {
+                        'item_ids': ['q1'],
+                        'scope': 'chapter',
+                        'chapter_ids': ['c1'],
+                        'basis_id': None,
+                    }
+                ],
+            }
+        )
     assert compiled==before
 
 
@@ -76,7 +90,8 @@ async def test_explicit_native_pipeline_uses_joint_B_and_one_C_then_binds_same_s
     identity = {'frozen_ref': store.put_json({'documents': [{**frozen, 'role': 'main'}]})}
     calls = []
     async def execute(task, request, validate):
-        value = json.loads(request['messages'][1]['content'][0]['text']); calls.append((str(task), value))
+        value = json.loads(request['messages'][1]['content'][0]['text'])
+        calls.append((str(task), value))
         if task == 'directory_material':
             from test_directory_compile import fixture_titles
             return validate({'assignments': [], 'chapter_titles': fixture_titles(value)})
@@ -139,7 +154,8 @@ async def test_no_contract_keeps_old_B_C_wire_and_schema(tmp_path):
     compiled = compile_directory(plan([node('technical', 0, 0, document_id='document')], [item('technical')]), documents)
     calls = []
     async def execute(task, request, validate):
-        value = json.loads(request['messages'][1]['content'][0]['text']); calls.append((str(task), value))
+        value = json.loads(request['messages'][1]['content'][0]['text'])
+        calls.append((str(task), value))
         assert 'native_requirement_contract' not in value
         assert 'grid_body_verified_legacy_prose_v1' not in request['messages'][0]['content']
         if task == 'directory_material':
@@ -179,7 +195,6 @@ async def test_canonical_native_text_renders_once_in_Word_and_keeps_enterprise_b
     from io import BytesIO
     from docx import Document
     from docreader.tender.native_requirement_flow import bind_native_targets
-    from docreader.tender.authoring_export import export_authoring_document
     from test_authoring_pipeline_boundaries import snapshot
     ledger, store, _, _ = synthetic(tmp_path)
     source = native_source(ledger.view().accept(reply(ledger)))

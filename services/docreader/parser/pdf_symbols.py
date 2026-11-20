@@ -219,15 +219,19 @@ def normalize_pdf_units(units, page_symbols):
     for page, symbols in by_page.items():
         maps[page] = {}
         for char, items in symbols.items():
-            normalized = set()
+            verified = []
             for item in items:
                 mapping = verified_symbol(item.get("font_name"), ord(char), [item.get("glyph_name")],
                                           item.get("font_sha256"), glyph_binding=item.get("pdf_glyph_binding"))
-                normalized.add(item.get("normalized_symbol") if mapping
-                               and mapping[1] == item.get("normalized_symbol") else None)
-            if len(normalized) == 1 and None not in normalized:
-                maps[page][char] = next(iter(normalized))
-                accepted.extend(items)
+                meaning = item.get("normalized_symbol") if mapping and mapping[1] == item.get("normalized_symbol") else None
+                if meaning:
+                    verified.append(meaning)
+            if not verified:
+                continue
+            # Keep each glyph. A unanimous page may replace the character; a mixed page must not.
+            accepted.extend(items)
+            if len(verified) == len(items) and len(set(verified)) == 1:
+                maps[page][char] = verified[0]
     for unit in units:
         locator = unit.physical_locator or unit.locator
         page = getattr(locator, "page_ordinal", None)

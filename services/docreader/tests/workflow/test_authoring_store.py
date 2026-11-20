@@ -651,7 +651,10 @@ async def test_real_pg_operation_result_resumes_before_snapshot_commit(authoring
     sent = []
     async def handler(request):
         command = json.loads(request.content)
-        sent.append(command)
+        sent.append(command["operation"])
+        if command["operation"] == "document":
+            return httpx.Response(200, json={"id": command["document_id"], "product_version_id": command["version_id"],
+                                           "file_name": "资料.pdf", "object_ref": "objects/" + "0" * 64})
         return httpx.Response(200, json={"hits": [] if empty else [{
             "id": "chunk", "content": "测试资料", "document_id": "b78d5270-5938-48c2-acb7-e9538910fea7",
             "product_id": command["product_id"], "version_id": command["version_id"]}]})
@@ -667,7 +670,7 @@ async def test_real_pg_operation_result_resumes_before_snapshot_commit(authoring
                 [{"query": "完整要求", "target_id": "before"}], artifacts)
     result = await web_knowledge(store, artifacts, lease, handler).search(
         [{"query": "完整要求", "target_id": "after"}], artifacts)
-    assert len(sent) == 1
+    assert sent == (["search"] if empty else ["search", "document"])
     assert bool(result["materials"]) is not empty
     if not empty:
         assert result["materials"][0]["locator"]["target_ids"] == ["after"]

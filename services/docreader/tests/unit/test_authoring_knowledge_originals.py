@@ -92,7 +92,9 @@ async def test_text_queries_never_request_originals_and_same_query_or_merges_nee
     source = provider(handler)
     artifacts = ArtifactStore(tmp_path)
     text = await source.search([query(original=False)], artifacts)
-    assert len(requests) == 1 and text["materials"][0]["original_ref"] is None
+    assert [path for _method, path in requests] == ["/api/v1/search", f"/api/v1/documents/{DOCUMENT}"]
+    assert text["materials"][0]["original_ref"] is None
+    assert text["materials"][0]["locator"]["source_sha256"] == OBJECT.removeprefix("objects/")
     requests.clear()
     result = await source.search([query(original=False, target="text"), query()], artifacts)
     assert len(requests) == 3 and len(result["materials"]) == 1
