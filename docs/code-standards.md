@@ -1,21 +1,28 @@
 # 工程实现与验收标准
 
 本页收口**全项目**（共享平台、知识库、招投标、DocReader 与 Web）统一的强制实现纪律、文档对齐检查、变更五问与 L0–L3 验收口径。
-所有分支均以本页与 [AGENTS.md](../AGENTS.md)、[LESSONS.md](../LESSONS.md) 为基线；招标业务验收线见 [招标验收](design/python-tender-phase1/acceptance.md)，本机栈与部署配置见 [deploy/README.md](../deploy/README.md)。
+所有分支均以本页与 [AGENTS.md](../AGENTS.md)、[LESSONS.md](../LESSONS.md) 为基线；招标业务验收线见 [招标验收](tender/acceptance.md)，本机栈与部署配置见 [deploy/README.md](../deploy/README.md)。
 
-## 1. 文档与实现强对齐（每次改动必查）
+## 1. 文档目录、命名与实现强对齐（每次改动必查）
 
-1. **先改权威页再改代码，同 Commit 提交**：修改协议、字段、接口、CLI、环境变量、端口、UI 交互或部署方式时，在 [docs/README.md](README.md) 对应的权威页同步更新。
-2. **只写现在时，禁打补丁**：直接改写或删除旧句，禁止写「若旧句要求 X，以本句为准」「本轮尚未部署」「旧方案如下」。
-3. **核对源码事实**：文档中出现的仓库文件路径、环境变量名、端口、CLI 子命令、Python/Rust/Node 版本必须与代码和 CI 一致；不写易过期的行号。
-4. **机器守卫**：所有提交必须通过 `python3 scripts/ci_check_docs.py`。
+1. **目录结构规范**：
+   - 仓库根目录只放项目级全大写入口文档：`README.md`、`CLAUDE.md`、`AGENTS.md`、`LESSONS.md`、`PRODUCT.md`、`DESIGN.md`。
+   - `docs/` 下只允许 `README.md`、`code-standards.md` 和按业务领域划分的扁平目录：`platform/`、`knowledge-base/`、`tender/`；**禁止**新建杂货抽屉目录（如 `design/`、`research/`、`validation/`）或同义分裂目录（如 `bidding/`）。
+   - `plans/` 只放未完成的阶段计划（做完或放弃即删），部署与发布文档统一放在 `deploy/`。
+2. **文件命名规范**：
+   - 除各目录入口固定为 `README.md` 外，`docs/` 与 `plans/` 下所有目录名和文件名统一使用小写 **`kebab-case`**（如 `domain-contract.md`、`word-export.md`）。
+   - **禁止**大写、下划线、中文文件名、语言前缀（如 `python-*`）、历史阶段后缀（如 `-phase1`）、冗余后缀（如 `-design`）和日期戳（如 `20261014`）。
+3. **先改权威页再改代码，同 Commit 提交**：修改协议、字段、接口、CLI、环境变量、端口、UI 交互或部署方式时，在 [docs/README.md](README.md) 对应的权威页同步更新。
+4. **只写现在时，禁打补丁**：直接改写或删除旧句，禁止写「若旧句要求 X，以本句为准」「本轮尚未部署」「架构草案」。
+5. **核对源码事实**：文档中出现的仓库文件路径、环境变量名、端口、CLI 子命令、Python/Rust/Node 版本必须与代码和 CI 一致；不写易过期的行号。
+6. **机器守卫**：所有提交必须通过 `python3 scripts/ci_check_docs.py`。
 
 ## 2. 通用实现、缺陷与安全纪律（全项目适用）
 
 - **单 Commit 单目标**：不同主题或顺手修的无关缺陷拆成独立 Commit，便于审计和回滚。
 - **兄弟点清查**：修缺陷前全仓 `rg` 同类模式、调用方、路由、表或视口，同一次改动修齐。
 - **失败即未知**：解析失败、读文件失败、映射缺失或模型回包不完整必须显式报错或留 `unresolved`，绝不静默降级为空列表或 0 项。
-- **先记问题再修**：发现缺陷先写明现象、影响、根因和改法（根因未查实明确标待查），修复后补齐实际测试、部署与真实流程验收状态；招标缺陷记录在 [bug-fix.md](design/python-tender-phase1/bug-fix.md)，动态运行状态只维护在对应交接页（如 [handoff.md](design/python-tender-phase1/handoff.md)）。
+- **先记问题再修**：发现缺陷先写明现象、影响、根因和改法（根因未查实明确标待查），修复后补齐实际测试、部署与真实流程验收状态；招标缺陷记录在 [bug-fix.md](tender/bug-fix.md)，动态运行状态只维护在对应交接页（如 [handoff.md](tender/handoff.md)）。
 - **证据与密钥边界**：运行证据、抓包与回放素材统一放在仓库外目录（如 `/opt/workspace/kb-tender-evidence/`），禁止放 `/tmp`；严禁提交业务原文、完整请求或密钥。
 - **独立 Worktree + 树完整性自检**：多会话并行时每个任务使用独立 git worktree；每次 `git commit` 后立刻核对 `git show --stat HEAD` 与 `git diff HEAD^ HEAD --stat`，确认改动列表与提交主题一一对应，没有混入无关文件或因旧树覆盖掉他人提交与测试。
 - **管道防吞错**：所有串联测试或日志截断命令必须开启 `set -o pipefail`（如 `set -euo pipefail`），禁止 `test | tail && git push` 掩盖非零退出码。
@@ -23,7 +30,7 @@
 
 ## 3. 协议与 LLM 链路变更五问（全项目适用）
 
-修改**任何模块**（知识库解析/摘要/问答/Wiki/图谱、招投标分析/核验/编制等）的协议、流程、分包、Prompt 或模型调用链路前，必须先回答以下五个问题。**最终生效的规则与调用公式**写入对应领域权威页（如招标写入 [业务工作流](design/python-tender-phase1/business-workflow.md)），**逐条五问答辩**写入 Commit Body / PR 或 `plans/`，不把历史答辩日志永久堆积在权威设计页：
+修改**任何模块**（知识库解析/摘要/问答/Wiki/图谱、招投标分析/核验/编制等）的协议、流程、分包、Prompt 或模型调用链路前，必须先回答以下五个问题。**最终生效的规则与调用公式**写入对应领域权威页（如招标写入 [业务工作流](tender/workflow.md)），**逐条五问答辩**写入 Commit Body / PR 或 `plans/`，不把历史答辩日志永久堆积在权威设计页：
 
 1. 全流程模型调用次数的公式是什么，随文件或数据规模如何增长？
 2. 单次请求最坏情况下的输入和输出边界是什么？
@@ -46,7 +53,7 @@
 | **L0 静态与守卫** | `python3 scripts/ci_check_docs.py`、`bash scripts/ci_check_sources.sh`（加载 `.github/ci.env` 与 `DEFAULT_BRANCH=main`）；Rust `cargo fmt --all -- --check` + `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`；Python `ruff` / 类型检查；Web `npm --prefix web run lint` + `npm --prefix web run build` | **每次提交必跑**（按触碰栈执行 + 文档/CI 守卫） |
 | **L1 离线单测 + 反证** | Rust `cargo test --locked --workspace`；Python `uv run --frozen pytest tests/unit -q`；Web `npm --prefix web test` | **每次提交必跑**（触碰哪一栈跑该栈**全量**单测，禁止只跑 `-k` 代替） |
 | **L2 隔离集成与 E2E** | Rust 隔离 PG/Redis 验收（见 `.github/workflows/ci.yml`）；Python `uv run --frozen pytest tests/workflow tests/acceptance -q`；Web `npm --prefix web run test:e2e`；Word/PDF 变更跑隔离 ONLYOFFICE 探针 | 改 DB/队列/API/跨进程桥接/前端页面/Word 导出时**合并前必跑** |
-| **L3 真实业务验收** | 真实文档与业务链路验收 + 人工原文抽查（招标线见 [验收](design/python-tender-phase1/acceptance.md)），证据落仓库外目录 | 协议/Prompt/检索/核心导出变更、里程碑放行前 |
+| **L3 真实业务验收** | 真实文档与业务链路验收 + 人工原文抽查（招标线见 [验收](tender/acceptance.md)），证据落仓库外目录 | 协议/Prompt/检索/核心导出变更、里程碑放行前 |
 
 **验收铁律**：
 1. **Red → Green 反证测试**：所有 Bug 修复和守卫规则必须提供「回退改动会真实 `FAIL`（编译错或 skip 不算）」的测试，并在 Commit Body 记录失败表现。

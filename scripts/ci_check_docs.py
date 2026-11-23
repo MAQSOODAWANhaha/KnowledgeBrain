@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when repository documentation drifts from standards, structure, or source files."""
+"""Fail closed when repository documentation drifts from standards, naming, structure, or source files."""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +17,17 @@ IGNORED_DIRS = frozenset({
     "testdata",
 })
 
+ALLOWED_DOCS_TOP_LEVEL_DIRS = frozenset({
+    "platform",
+    "knowledge-base",
+    "tender",
+})
+
+ALLOWED_DOCS_TOP_LEVEL_FILES = frozenset({
+    "README.md",
+    "code-standards.md",
+})
+
 RUNTIME_ONLY_PATHS = frozenset({
     "deploy/.env",
     "deploy/release-descriptor-v1.json",
@@ -29,8 +40,8 @@ PATCH_PHRASE_EXEMPT_FILES = frozenset({
     "LESSONS.md",
     "docs/code-standards.md",
     "docs/README.md",
-    "docs/design/python-tender-phase1/bug-fix.md",
-    "docs/design/python-tender-phase1/handoff.md",
+    "docs/tender/bug-fix.md",
+    "docs/tender/handoff.md",
 })
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -41,6 +52,9 @@ TMP_PATH_RE = re.compile(r"/tmp/[A-Za-z0-9._/\-]+")
 PATCH_PHRASE_RE = re.compile(r"若旧句|本轮尚未|架构草案")
 LESSONS_CURSOR_RE = re.compile(r"<!--\s*reviewed-through:\s*\S+.*?-->")
 RETIRED_LINE_RE = re.compile(r"已删除|已废止|retired|removed", re.IGNORECASE)
+KEBAB_DIR_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+KEBAB_FILE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+$")
+FORBIDDEN_DOC_NAME_RE = re.compile(r"(?:^python-|-phase\d+|\d{8})", re.IGNORECASE)
 LESSONS_MAX_LINES = 180
 
 
@@ -63,6 +77,47 @@ def strip_fenced_code(text: str) -> str:
             continue
         out.append("" if in_fence else line)
     return "\n".join(out)
+
+
+def check_layout_and_naming(root: pathlib.Path) -> list[str]:
+    errors: list[str] = []
+    docs_dir = root / "docs"
+    if docs_dir.is_dir():
+        for entry in sorted(docs_dir.iterdir()):
+            name = entry.name
+            if entry.is_dir():
+                if name not in ALLOWED_DOCS_TOP_LEVEL_DIRS:
+                    errors.append(
+                        f"docs/{name}/: disallowed top-level docs directory "
+                        f"(allowed: {', '.join(sorted(ALLOWED_DOCS_TOP_LEVEL_DIRS))})"
+                    )
+            elif entry.is_file():
+                if name not in ALLOWED_DOCS_TOP_LEVEL_FILES:
+                    errors.append(
+                        f"docs/{name}: disallowed top-level file under docs/ "
+                        "(move it into platform/, knowledge-base/, or tender/)"
+                    )
+
+    for base_name in ("docs", "plans"):
+        base_dir = root / base_name
+        if not base_dir.is_dir():
+            continue
+        for entry in sorted(base_dir.rglob("*")):
+            rel = entry.relative_to(root).as_posix()
+            name = entry.name
+            if entry.is_dir():
+                if not KEBAB_DIR_RE.match(name) or FORBIDDEN_DOC_NAME_RE.search(name):
+                    errors.append(
+                        f"{rel}/: directory name must be lowercase kebab-case without language/phase/date tokens"
+                    )
+            elif entry.is_file():
+                if name == "README.md":
+                    continue
+                if not KEBAB_FILE_RE.match(name) or FORBIDDEN_DOC_NAME_RE.search(name):
+                    errors.append(
+                        f"{rel}: file name must be lowercase kebab-case without language/phase/date tokens"
+                    )
+    return errors
 
 
 def check_repo(root: pathlib.Path) -> list[str]:
@@ -102,6 +157,9 @@ def check_repo(root: pathlib.Path) -> list[str]:
             if needle not in docs_readme_text:
                 errors.append(f"docs/README.md must link to {needle}")
 
+    # 2. Enforce normalized docs/ and plans/ directory & kebab-case naming rules
+    errors.extend(check_layout_and_naming(root))
+
     md_files = iter_markdown_files(root)
     resolved_links_by_src: dict[pathlib.Path, set[pathlib.Path]] = {}
 
@@ -110,7 +168,7 @@ def check_repo(root: pathlib.Path) -> list[str]:
         raw_text = path.read_text(encoding="utf-8", errors="ignore")
         prose_text = strip_fenced_code(raw_text)
 
-        # 2. Zero broken relative Markdown links across the entire repository
+        # 3. Zero broken relative Markdown links across the entire repository
         targets: set[pathlib.Path] = set()
         for lineno, line in enumerate(prose_text.splitlines(), 1):
             for match in LINK_RE.finditer(line):
@@ -127,8 +185,8 @@ def check_repo(root: pathlib.Path) -> list[str]:
                     targets.add(target)
         resolved_links_by_src[path.resolve()] = targets
 
-        # 3. Forbid /tmp/ evidence paths outside historical bug-fix archive
-        if rel != "docs/design/python-tender-phase1/bug-fix.md":
+        # 4. Forbid /tmp/ evidence paths outside historical bug-fix archive
+        if rel != "docs/tender/bug-fix.md":
             for lineno, line in enumerate(raw_text.splitlines(), 1):
                 m = TMP_PATH_RE.search(line)
                 if m:
@@ -137,7 +195,7 @@ def check_repo(root: pathlib.Path) -> list[str]:
                         "(use /opt/workspace/kb-tender-evidence/ or mktemp without hardcoded /tmp)"
                     )
 
-        # 4. Active doc hygiene: referenced repo paths, obsolete env vars, and patch phrases
+        # 5. Active doc hygiene: referenced repo paths, obsolete env vars, and patch phrases
         if path.name not in {"bug-fix.md", "handoff.md"}:
             for lineno, line in enumerate(prose_text.splitlines(), 1):
                 if "DOCREADER_PORT" in line:
@@ -163,7 +221,7 @@ def check_repo(root: pathlib.Path) -> list[str]:
                     if not (root / ref).exists():
                         errors.append(f"{rel}:{lineno}: referenced repo path does not exist -> `{ref}`")
 
-    # 5. Every doc under docs/ must be linked from docs/README.md or its directory README.md
+    # 6. Every doc under docs/ must be linked from docs/README.md or its directory README.md
     if docs_readme.is_file():
         linked_from_docs_readme = resolved_links_by_src.get(docs_readme.resolve(), set())
         for path in md_files:
