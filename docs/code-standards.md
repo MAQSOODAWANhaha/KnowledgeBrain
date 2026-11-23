@@ -17,7 +17,8 @@
 - **失败即未知**：解析失败、读文件失败、映射缺失或模型回包不完整必须显式报错或留 `unresolved`，绝不静默降级为空列表或 0 项。
 - **先记问题再修**：发现缺陷先写明现象、影响、根因和改法（根因未查实明确标待查），修复后补齐实际测试、部署与真实流程验收状态；招标缺陷记录在 [bug-fix.md](design/python-tender-phase1/bug-fix.md)，动态运行状态只维护在对应交接页（如 [handoff.md](design/python-tender-phase1/handoff.md)）。
 - **证据与密钥边界**：运行证据、抓包与回放素材统一放在仓库外目录（如 `/opt/workspace/kb-tender-evidence/`），禁止放 `/tmp`；严禁提交业务原文、完整请求或密钥。
-- **独立 Worktree + 边界自检**：多会话并行时每个任务使用独立 git worktree；每次 `git commit` 后立刻检查 `git show --stat HEAD`，确认只包含本任务文件。
+- **独立 Worktree + 树完整性自检**：多会话并行时每个任务使用独立 git worktree；每次 `git commit` 后立刻核对 `git show --stat HEAD` 与 `git diff HEAD^ HEAD --stat`，确认改动列表与提交主题一一对应，没有混入无关文件或因旧树覆盖掉他人提交与测试。
+- **管道防吞错**：所有串联测试或日志截断命令必须开启 `set -o pipefail`（如 `set -euo pipefail`），禁止 `test | tail && git push` 掩盖非零退出码。
 - **棘轮只降不升**：仓库内已建立的静态检查基线、断链白名单与迁移清单只允许缩减或清零，不允许新增豁免或放宽预算。
 
 ## 3. 协议与 LLM 链路变更五问（全项目适用）
@@ -52,7 +53,14 @@
 2. **禁止借口跳过**：`main` 上本来就红或“单跑过、全跑挂”是当前要修的缺陷，不得跳过；离线测试必须经 `python3 scripts/run_local_tests.py -- <cmd>` 剥离真实模型凭证，严禁触网或读真实账号；同机只串行跑一个全量套件。
 3. **跑完再记**：验证结果必须是**当前 HEAD 跑完后的最终结果**，不得记录中途进度或旧树结果；未跑的检查必须显式列出。
 
-## 6. Commit Body 强制验证模板
+## 6. PR 评审、锁头合入与发布判定
+
+1. **PR 语义变更说明**：PR 描述须写清触发条件、Before/After 可观测行为变化、同步更新的权威页链接、实际验证证据及明确未跑项。
+2. **评审必实跑并反证**：只看 diff 不算评审。评审人（含 Agent 评审）须拉取分支在当前 `main` 上实跑对应 L0–L2 检查，并故意回退或破坏关键逻辑（Break it on purpose）确认新测试真实报错。
+3. **锁头合入与留痕**：禁止合入 Draft PR；合入前在 PR 评论或提交记录写明已评审的 HEAD SHA 与实跑结果，并用 `gh pr merge --match-head-commit <reviewed-sha>`（或等价锁头校验）合入；评审后若有新 push 须重审新 HEAD。
+4. **CI 与发布判定**：被后续 push 取消的 CI run 不算通过；`main` 上的 CI run 禁止被取消（由 `.github/workflows/ci.yml` 强制）。仅打 tag、推送镜像或运行 `knowledgebrain-release --check-only` 不算发布完成，须按 [deploy/README.md](../deploy/README.md) 核验运行镜像 RepoDigest、迁移退出 0 与 `/ready` 健康探针。
+
+## 7. Commit Body 强制验证模板
 
 每个非纯拼写修正的 Commit，body 末尾必须包含：
 
@@ -63,7 +71,7 @@ Verification:
 - Not run: <未跑的检查及原因，如 L3 live run>
 ```
 
-## 7. 复盘与规则晋升
+## 8. 复盘与规则晋升
 
 每个里程碑收口或同类缺陷第二次出现时，按 [LESSONS.md](../LESSONS.md) 顶部 `reviewed-through` 游标增量审查期间提交与缺陷记录：
 - 返工提交、验证缺口、文档漂移 → 记入 `LESSONS.md` 并递增 `Seen`；
