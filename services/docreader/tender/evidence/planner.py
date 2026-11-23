@@ -9,9 +9,14 @@ from itertools import groupby
 
 from docreader.tender.evidence.packing import SupportingIndex
 from docreader.tender.evidence.references import SourceIndex, fragment, selector
+from docreader.tender.evidence.view import host_reviewed_ranges
 
 
-PLANNER_VERSION = "native-sections-full-request-v1"
+PLANNER_VERSION = "native-sections-full-request-v2"
+# BUG-261: soft packing targets for multi-range extraction packs; single indivisible
+# ranges remain admitted up to the real RequestBudget ceiling.
+EXTRACT_PACK_INPUT_TARGET = 55000
+MAX_EXTRACT_BODY_RANGES = 200
 
 
 def _groups(entries, key):
@@ -40,6 +45,8 @@ def _split(entry: dict) -> list[dict]:
 
 
 class StructuralPlanner:
+    uses_extraction_targets = True
+
     def __init__(self, source: SourceIndex, budget, scope_decisions=(), *, payload_builder=None, analysis=False):
         self.source, self.budget = source, budget
         if payload_builder is None:
@@ -48,10 +55,12 @@ class StructuralPlanner:
             payload_builder = extract_payload
         self.payload_builder = payload_builder
         self.support = SupportingIndex(source.ranges, scope_decisions, analysis=analysis)
-        self.version = "native-sections-analysis-context-v2" if analysis else PLANNER_VERSION
+        self.version = "native-sections-analysis-context-v3" if analysis else PLANNER_VERSION
         self.probe_count = 0
         self.packs = []
         self.capacity_hint = None
+        self.host_reviewed = (host_reviewed_ranges({"body": source.ranges, "supporting": []})
+                              if self.uses_extraction_targets else set())
         self.weights = {entry["range_id"]: len(json.dumps(source.materialize(selector(entry)), ensure_ascii=False).encode())
                         for entry in source.ranges}
 
@@ -79,12 +88,23 @@ class StructuralPlanner:
         if measurement.get("input_tokens", 0) > 0 and measurement.get("context_tokens"):
             available = max(1, measurement.get("effective_input_budget_tokens",
                             measurement["context_tokens"] - measurement.get("output_reserve", 0) - measurement.get("safety", 0)))
-            self.capacity_hint = max(1, sum(self.weight(entry) for entry in body) * available // measurement["input_tokens"])
+            target = min(available, EXTRACT_PACK_INPUT_TARGET)
+            self.capacity_hint = max(1, sum(self.weight(entry) for entry in body) * target // measurement["input_tokens"])
         return pack
 
-    @staticmethod
-    def admitted(pack: dict) -> bool:
-        return pack["planning_details"]["budget"]["fits"] is True
+    def admitted(self, pack: dict) -> bool:
+        # BUG-261: multi-range extraction packs stay within soft input and model-disposed
+        # range targets (blank table rows still need dispositions, so only host-reviewed
+        # ranges are excluded). A single indivisible range stays admitted up to the real
+        # RequestBudget ceiling so it is never falsely blocked.
+        budget = pack["planning_details"]["budget"]
+        if budget["fits"] is not True:
+            return False
+        if not self.uses_extraction_targets or len(pack["body"]) <= 1:
+            return True
+        model_ranges = sum(entry["range_id"] not in self.host_reviewed for entry in pack["body"])
+        return (budget["input_tokens"] <= EXTRACT_PACK_INPUT_TARGET
+                and model_ranges <= MAX_EXTRACT_BODY_RANGES)
 
     def blocked(self, pack: dict):
         pack["issues"].append({"code": "indivisible_source_context_exceeded", "blocking": True,
@@ -97,12 +117,19 @@ class StructuralPlanner:
         """Probe complete prefixes; hints propose boundaries but never grant fit."""
         offset = 0
         prefix = [0]
+        range_prefix = [0]
         for group in groups:
             prefix.append(prefix[-1] + sum(self.weight(entry) for entry in group))
+            if self.uses_extraction_targets:
+                range_prefix.append(range_prefix[-1] + sum(entry["range_id"] not in self.host_reviewed for entry in group))
         while offset < len(groups):
-            upper = len(groups) - offset + 1
-            count = (max(1, bisect_right(prefix, prefix[offset] + self.capacity_hint, lo=offset + 1) - offset - 1)
-                     if self.capacity_hint else len(groups) - offset)
+            max_by_range = len(groups) - offset
+            if self.uses_extraction_targets:
+                boundary = bisect_right(range_prefix, range_prefix[offset] + MAX_EXTRACT_BODY_RANGES, lo=offset + 1)
+                max_by_range = max(1, boundary - offset - 1)
+            upper = max_by_range + 1
+            count = (min(max_by_range, max(1, bisect_right(prefix, prefix[offset] + self.capacity_hint, lo=offset + 1) - offset - 1))
+                     if self.capacity_hint else max_by_range)
             while True:
                 body = [entry for group in groups[offset:offset + count] for entry in group]
                 pack = self.candidate(body, reason)
@@ -130,8 +157,12 @@ class StructuralPlanner:
                     # A failed complete envelope changes the boundary. Half is
                     # only a proposal; every resulting envelope is checked.
                     hint = self.capacity_hint
-                    count = min(count - 1, max(1, bisect_right(prefix, prefix[offset] + hint, lo=offset + 1,
-                                                                               hi=offset + count + 1) - offset - 1)) if hint else max(1, count // 2)
+                    proposed = (bisect_right(prefix, prefix[offset] + hint, lo=offset + 1,
+                                             hi=offset + count + 1) - offset - 1
+                                if hint else count // 2)
+                    if self.uses_extraction_targets and proposed >= count:
+                        proposed = count // 2
+                    count = min(count - 1, max(1, proposed))
                     continue
                 fallback(groups[offset], pack)
                 offset += 1

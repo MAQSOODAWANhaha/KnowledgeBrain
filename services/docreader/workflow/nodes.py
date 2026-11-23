@@ -6,7 +6,7 @@ import time
 from typing import get_args
 
 from langgraph.types import interrupt
-from docreader.integrations.store import Cancelled, InvalidConfirmation, StaleExecution
+from docreader.integrations.store import Cancelled, Conflict, InvalidConfirmation, StaleExecution
 from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, register_manifest
 from docreader.tender.schema import OCRStatus, validate_issue_resolutions
@@ -87,8 +87,6 @@ class TenderNodes:
 
     async def prepare(self):
         # A completed checkpoint can skip every node, so recovery guards belong here too.
-        from docreader.integrations.store import Conflict
-
         revision = await self.store.get_revision(self.lease)
         row = await self.store.get_run(self.lease.run_id)
         spec = revision["execution_spec"]
@@ -107,11 +105,10 @@ class TenderNodes:
         plan_receipt = next((item for item in row["artifacts"]
                              if item["stage"] == "pack-plan" and not item["scope"]), None)
         if plan_receipt:
-            from docreader.integrations.store import Conflict
-
             digest = hashlib.sha256(json.dumps(self._request_budget().spec(), sort_keys=True,
                                               separators=(",", ":")).encode()).hexdigest()
-            if plan_receipt["metadata"]["budget_digest"] != digest:
+            metadata = plan_receipt["metadata"]
+            if metadata.get("revision_budget_digest", metadata["budget_digest"]) != digest:
                 raise Conflict("request budget changed within an immutable domain revision")
 
     async def call(self, task, payload, images=()):
@@ -134,7 +131,7 @@ class TenderNodes:
     async def _read(self, ref):
         return await asyncio.to_thread(self.artifacts.read_json, ref)
 
-    async def _save(self, stage, operation, *, scope="", is_ref=False, inputs=None, model=False):
+    async def _save(self, stage, operation, *, scope="", is_ref=False, inputs=None, model=False, metadata=None):
         identity = {"upstream": inputs or {}}
         if model:
             identity["execution_spec"] = await self._execution_spec()
@@ -145,10 +142,11 @@ class TenderNodes:
         start = time.monotonic()
         value = await operation()
         ref = value if is_ref else await asyncio.to_thread(self.artifacts.put_json, value)
-        metadata = {"elapsed_seconds": time.monotonic() - start}
+        receipt_metadata = {**(metadata or {}), "elapsed_seconds": time.monotonic() - start}
         if isinstance(value, dict):
-            metadata.update({key: value[key] for key in ("counts", "stats", "blocking", "plan_digest", "budget_digest") if key in value})
-        await self.store.commit_artifact(self.lease, stage, ref, scope=scope, metadata=metadata,
+            receipt_metadata.update({key: value[key] for key in ("counts", "stats", "blocking", "plan_digest", "budget_digest")
+                                     if key in value})
+        await self.store.commit_artifact(self.lease, stage, ref, scope=scope, metadata=receipt_metadata,
                                          input_digest=input_digest)
         return ref
 
@@ -159,6 +157,17 @@ class TenderNodes:
             return await asyncio.to_thread(register_manifest, manifest, self.artifacts)
 
         return {"registered_ref": await self._save("register", produce, inputs=manifest_ref)}
+
+    async def _correction_baseline(self, revision):
+        run = await self.store.get_run(self.lease.run_id)
+        baseline = {item["stage"]: item["artifact_ref"] for item in run["history"]["artifacts"]
+                    if item["source_version"] == self.lease.source_version
+                    and item["domain_revision"] == self.lease.domain_revision - 1
+                    and not item["scope"]}
+        if ("pack-plan" not in baseline or "extract" not in baseline
+                or baseline["extract"]["sha256"] != revision["upstream_digest"]):
+            raise Conflict("correction baseline does not identify the previous extraction plan")
+        return baseline
 
     async def freeze(self, state):
         await self._pin_source_spec()
@@ -210,8 +219,22 @@ class TenderNodes:
         frozen_ref = await self._save("freeze", produce, inputs=state["registered_ref"])
         revision = await self.store.get_revision(self.lease)
         scope_decisions_ref = revision.get("scope_decisions_ref")
+        corrected = revision["corrected_items_ref"] is not None
+        identity = {"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                    "domain_revision": self.lease.domain_revision}
+        budget = self._request_budget()
+        budget_spec = budget.spec()
 
         async def plan_sources():
+            if corrected:
+                baseline = await self._correction_baseline(revision)
+                plan = await self._read(baseline["pack-plan"])
+                if plan["frozen_ref"] != frozen_ref:
+                    raise Conflict("correction plan does not match the frozen source")
+                # Bind the root to this revision for authoring; the original pack
+                # IDs, selectors and extraction budget stay tied to the correction.
+                return {**plan, "run_identity": identity}
+
             from docreader.tender.evidence import plan_sources as build_source_plan
             from docreader.tender.checks.analysis import assign_issues
             from docreader.tender.requirements import item_payload
@@ -219,11 +242,9 @@ class TenderNodes:
             frozen = await self._read(frozen_ref)
             roles = {document["document_id"]: document["role"] for document in frozen["documents"]}
             decisions = await self._read(scope_decisions_ref) if scope_decisions_ref else None
-            identity = {"run_id": self.lease.run_id, "source_version": self.lease.source_version,
-                        "domain_revision": self.lease.domain_revision}
             source_issues = assign_issues(frozen["issues"], "source")
             result = await build_source_plan(
-                frozen, self.artifacts, budget=self._request_budget(),
+                frozen, self.artifacts, budget=budget,
                 analysis=True,
                 scope_decisions=decisions["scope_decisions"] if decisions else [],
                 run_identity=identity,
@@ -233,10 +254,11 @@ class TenderNodes:
             )
             return await self._read(result)
 
+        budget_digest = hashlib.sha256(json.dumps(budget_spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         pack_plan_ref = await self._save("pack-plan", plan_sources, inputs={
             "frozen_ref": frozen_ref, "scope_decisions_ref": scope_decisions_ref,
-            "request_budget": self._request_budget().spec(),
-        })
+            "request_budget": budget_spec,
+        }, metadata={"revision_budget_digest": budget_digest} if corrected else None)
         return {"frozen_ref": frozen_ref, "pack_plan_ref": pack_plan_ref}
 
     async def _packs(self, index, stage, function, upstream=None):
@@ -259,7 +281,8 @@ class TenderNodes:
 
     async def extract(self, state):
         from docreader.tender.checks.analysis import assign_issues
-        from docreader.tender.requirements import extract_items, validate_item_correction
+        from docreader.tender.requirements import extract_items
+        from docreader.tender.requirements.correction import CORRECTION_FIELDS, revise_item_extraction
 
         revision = await self.store.get_revision(self.lease)
         correction = revision["corrected_items_ref"]
@@ -278,25 +301,21 @@ class TenderNodes:
                 corrected = await self._read(correction)
                 if corrected.get("schema_version") != 2:
                     raise ValueError("correction must use the analysis v2 protocol")
-                expected = {entry["pack_id"]: entry for entry in index["packs"]}
-                entries = corrected.get("packs", [])
-                if (len(entries) != len(expected) or
-                        {entry["pack_id"] for entry in entries} != set(expected)):
-                    raise ValueError("correction must cover every current extraction pack")
-                packs = []
-                for entry in entries:
-                    pack = await asyncio.to_thread(self.repo.load_pack, expected[entry["pack_id"]]["artifact_ref"])
-                    value = await self._read(entry["artifact_ref"])
+                baseline = await self._read((await self._correction_baseline(revision))["extract"])
+
+                def verify_correction():
+                    packs = []
+                    for entry in corrected["packs"]:
+                        value = self.artifacts.read_json(entry["artifact_ref"])
+                        if value["pack_id"] != entry["pack_id"]:
+                            raise ValueError("correction artifact refers to another extraction pack")
+                        packs.append({"pack_id": entry["pack_id"], **{key: value[key] for key in CORRECTION_FIELDS}})
                     # Revalidate even callers that bypassed the CLI. Host metadata is
-                    # rebuilt by the validator; it cannot authorize altered source IDs.
-                    payload = {key: value[key] for key in
-                               ("schema_version", "items", "dispositions", "relations", "issues")}
-                    issues = assign_issues([*global_issues, *pack.get("issues", [])], pack["pack_id"])
-                    validated = validate_item_correction(pack, payload, issues=issues)
-                    validated["issues"] = assign_issues(validated["issues"], pack["pack_id"])
-                    ref = await asyncio.to_thread(self.artifacts.put_json, validated)
-                    packs.append({"pack_id": pack["pack_id"], "artifact_ref": ref})
-                return {"schema_version": 2, "packs": packs, "counts": {"packs": len(packs)}}
+                    # taken from the immutable prior revision, not the proposed artifact.
+                    return revise_item_extraction(self.repo, index, baseline, {"schema_version": 2, "packs": packs},
+                                                   issues=global_issues)
+
+                return await asyncio.to_thread(verify_correction)
 
             async def extract(pack):
                 issues = assign_issues([*global_issues, *pack.get("issues", [])], pack["pack_id"])

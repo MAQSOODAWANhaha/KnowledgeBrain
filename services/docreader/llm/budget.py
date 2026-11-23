@@ -47,14 +47,18 @@ class RequestBudget:
     # Accurate input admits larger whole-ledger discovery requests whose output
     # grows with items; capped at a quarter of smaller provider windows.
     TOKENIZED_OUTPUT_RESERVE = 32768
+    # BUG-261: extraction output grows with items and dispositions; match verify's reserve.
+    DEFAULT_OUTPUT_RESERVE = 16384
+    EXTRACT_OUTPUT_RESERVE = 32768
 
     def __init__(
         self,
         context_tokens: int | None = 131072,
         model: str = "gpt-6-luna",
         prompts: Mapping[str, str] | None = None,
-        output_reserve: int = 16384,
+        output_reserve: int | None = None,
         *,
+        extract_output_reserve: int | None = None,
         correction: bool = False,
         tokenizer: str | None = None,
         tokenized_outline_assembly: bool = False,
@@ -67,9 +71,20 @@ class RequestBudget:
             raise ModelConfigurationError(
                 "request context capacity must be a positive integer"
             )
+        explicit_reserve = output_reserve is not None
+        if output_reserve is None:
+            output_reserve = self.DEFAULT_OUTPUT_RESERVE
         if type(output_reserve) is not int or output_reserve < 0:
             raise ModelConfigurationError(
                 "request output reserve must be a nonnegative integer"
+            )
+        if extract_output_reserve is None and explicit_reserve:
+            extract_output_reserve = output_reserve
+        if extract_output_reserve is not None and (
+            type(extract_output_reserve) is not int or extract_output_reserve < 0
+        ):
+            raise ModelConfigurationError(
+                "extract output reserve must be a nonnegative integer"
             )
         if type(correction) is not bool or (correction and context_tokens is None):
             raise ModelConfigurationError(
@@ -105,6 +120,7 @@ class RequestBudget:
             model,
             output_reserve,
         )
+        self._extract_output_reserve = extract_output_reserve
         self.limits = RequestLimits(
             context_tokens=context_tokens, correction=correction
         )
@@ -141,6 +157,26 @@ class RequestBudget:
             else self.TOKENIZED_OUTPUT_RESERVE
         )
 
+    @property
+    def extract_output_reserve(self) -> int:
+        if self._extract_output_reserve is not None:
+            return self._extract_output_reserve
+        return (
+            min(self.EXTRACT_OUTPUT_RESERVE, self.context_tokens // 4)
+            if self.context_tokens is not None
+            else self.EXTRACT_OUTPUT_RESERVE
+        )
+
+    def output_reserve_for(self, task: str | None = None, *, tokenized: bool = False) -> int:
+        if tokenized:
+            return self.tokenized_output_reserve
+        if task == "extract":
+            return self.extract_output_reserve
+        return self.output_reserve
+
+    def input_budget_for(self, task: str | None = None, *, tokenized: bool = False) -> int:
+        return self._input_budget(self.output_reserve_for(task, tokenized=tokenized))
+
     def spec(self) -> dict:
         from docreader.llm.contracts import output_contract_spec
 
@@ -150,6 +186,7 @@ class RequestBudget:
             "model": self.model,
             **self.limits.model_dump(),
             "output_reserve": self.output_reserve,
+            "extract_output_reserve": self.extract_output_reserve,
             "safety": self.safety,
             "image_tokens_each": self.IMAGE_TOKENS,
             "framing_tokens": self.FRAMING_TOKENS,
@@ -159,6 +196,8 @@ class RequestBudget:
                 for task, prompt in sorted(self.prompts.items())
             },
         }
+        if "extract" in self.prompts:
+            spec["extract_response_format"] = "json_schema"
         if self.reasoning_effort is not None:
             spec["reasoning_effort"] = self.reasoning_effort
         if self.tokenizer is not None:
@@ -217,9 +256,7 @@ class RequestBudget:
         )
         count = _o200k_tokens if tokenized else _utf8_bytes
         framing = self.TOKENIZED_FRAMING_TOKENS if tokenized else self.FRAMING_TOKENS
-        output_reserve = (
-            self.tokenized_output_reserve if tokenized else self.output_reserve
-        )
+        output_reserve = self.output_reserve_for(task, tokenized=tokenized)
         image_count = 0
         text_tokens = 0
         for message in request["messages"]:

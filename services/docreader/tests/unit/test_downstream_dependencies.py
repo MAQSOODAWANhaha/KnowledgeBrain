@@ -7,7 +7,7 @@ import pytest
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.tender.evidence.downstream import ResponsePlanner, _range_requirements, plan_downstream
-from docreader.tender.evidence.planner import StructuralPlanner
+from docreader.tender.evidence.planner import EXTRACT_PACK_INPUT_TARGET, StructuralPlanner
 from docreader.tender.evidence.references import SourceIndex, fragment, selector
 from test_structural_packing import source
 
@@ -85,14 +85,14 @@ def test_shared_supporting_condition_without_explicit_reference_does_not_join_ob
     assert [{item["requirement_id"] for item in group} for group in planner.components] == [{"left"}, {"right"}]
 
 
-def persisted_inputs(tmp_path, *, cross_document=False):
+def persisted_inputs(tmp_path, *, cross_document=False, padding=""):
     """Real immutable source/output artifacts; no model or database dependency."""
     artifacts = ArtifactStore(tmp_path)
     budget = RequestBudget(context_tokens=131072)
     entries, outputs, sources = [], [], []
     for document_id in (["main", "other"] if cross_document else ["main"]):
-        draft = source([{"text": "Supplier must provide insurance.", "section": "left"},
-                        {"text": "Supplier must provide a certified licence.", "section": "right"}],
+        draft = source([{"text": "Supplier must provide insurance." + padding, "section": "left"},
+                        {"text": "Supplier must provide a certified licence." + padding, "section": "right"}],
                        document_id=document_id)
         document = {**draft.document, "original_ref": artifacts.put_bytes(document_id.encode())}
         native = SourceIndex(document, draft.raw)
@@ -127,6 +127,21 @@ def plan_outputs(artifacts, budget, index, outputs, *, task, decisions=None):
     result = artifacts.read_json(plan_downstream(index, requirements_ref, artifacts, budget,
                                                 task=task, verification_ref=verification_ref))
     return result, [artifacts.read_json(item["artifact_ref"]) for item in result["packs"]]
+
+
+def test_legacy_verify_keeps_complete_dependencies_above_extraction_soft_target(tmp_path):
+    artifacts, budget, index, outputs, _ = persisted_inputs(tmp_path, padding="a" * 15000)
+    left, right = outputs[0]["requirements"]
+    left["cross_references"] = [right["requirement_id"]]
+
+    _, packs = plan_outputs(artifacts, budget, index, outputs, task="verify")
+
+    pack, = packs
+    measured = pack["planning_details"]["budget"]
+    assert measured["input_tokens"] > EXTRACT_PACK_INPUT_TARGET
+    assert measured["fits"] is True
+    assert len(pack["body"]) == 2
+    assert not any(issue["code"] == "indivisible_verify_input_exceeded" for issue in pack["issues"])
 
 
 @pytest.mark.parametrize("reference_form", ["native", "excerpt"])

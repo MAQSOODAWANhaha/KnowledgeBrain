@@ -14,6 +14,9 @@ PROMPTS = {"extract": 'Return JSON matching schema {"requirements":[],"dispositi
 
 
 def budget(context_tokens=131072, **kwargs):
+    # These tests cover generic capacity rules; extract's 32768 reserve is verified in
+    # test_extraction_completeness.py, so keep an explicit extract reserve here.
+    kwargs.setdefault("extract_output_reserve", kwargs.get("output_reserve", 16384))
     return RequestBudget(context_tokens=context_tokens, model="gpt-6-luna", prompts=PROMPTS, **kwargs)
 
 
@@ -57,6 +60,9 @@ def test_analysis_source_views_report_body_and_support_without_changing_admissio
     request = b.request(task, payload)
     measured = b.measure_request(request)
     exact_text_bytes = len(request["messages"][0]["content"].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
+    if task == "extract":
+        exact_text_bytes += len(json.dumps(request["response_format"]["json_schema"], ensure_ascii=False,
+                                           separators=(",", ":")).encode())
     expected = {
         field: sum(len(json.dumps(view[field], ensure_ascii=False, separators=(",", ":")).encode()) - 2
                    for view in payload["source_views"])

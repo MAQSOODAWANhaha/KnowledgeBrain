@@ -1,15 +1,17 @@
 """Pure source-review preparation reuses exact inputs without changing model requests."""
 
 from copy import deepcopy
+from functools import partial
 import json
 
 import pytest
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
+from docreader.llm import ModelInfrastructureError
 from docreader.llm.budget import RequestBudget
 from docreader.llm.request import request_digest
-from docreader.tender.checks.analysis import _Analysis, verify_analysis
-from test_analysis_checks import IDENTITY, Model, Receipts, budget, scenario
+from docreader.tender.checks.analysis import _Analysis, _digest, verify_analysis
+from test_analysis_checks import IDENTITY, Model, Receipts, budget, pdf_image_page, scenario
 
 
 async def verify(data, model, admission, identity=IDENTITY):
@@ -49,6 +51,56 @@ async def test_source_review_replay_skips_preparation_and_preserves_exact_reques
     replay = Model()
     assert await verify(data, replay, admission) == expected
     assert replay.calls == []
+
+
+async def test_review_recovery_preserves_a_plan_prepared_before_pdf_projection(tmp_path):
+    data = await scenario(tmp_path)
+    artifacts, plan, items, receipts = data
+    admission = budget()
+    context = _Analysis(plan, items, artifacts, IDENTITY, admission)
+    pinned_requests = [context.review_payload([target]) for target in sorted(context.review_targets)]
+    pinned_plan, plan_digest = context.operation_plan("review", pinned_requests)
+    assert context.review_requests() != pinned_requests
+    planning_digest = _digest({"planner": "source-review-requests-v4", "source_plan": plan,
+                               "items_index": items, "identity": IDENTITY, "budget": admission.spec()})
+    prepared_key = ("analysis-review-requests", planning_digest, json.dumps({"planning_digest": planning_digest}))
+    receipts.saved[prepared_key] = artifacts.put_json({"requests_json": json.dumps(pinned_requests)})
+    plan_key = ("analysis-review-plan", "", json.dumps({"plan_digest": plan_digest}))
+    receipts.saved[plan_key] = artifacts.put_json(pinned_plan)
+
+    async def save(stage, producer, *, scope="", inputs=None, model=False):
+        if stage == "analysis-review-plan":
+            assert inputs == {"plan_digest": plan_digest}, "a revision cannot replace its committed review plan"
+        return await receipts(stage, producer, scope=scope, inputs=inputs, model=model)
+
+    model = Model()
+    result = await verify((*data[:3], save), model, admission)
+    assert model.calls == pinned_requests and not result["coverage"]["missing"]
+    assert result["review_plan_ref"] == receipts.saved[plan_key]
+
+
+async def test_source_review_preserves_missing_page_hard_block_on_interrupted_replay(tmp_path):
+    facts = [("第一页。", "obligation"), ("当页图片。", None)]
+    data = await scenario(tmp_path, documents=[("main", "main", facts), ("annex", "attachment", facts)],
+                          native_setup=partial(pdf_image_page, missing=True))
+
+    def fail_annex(payload, value):
+        if payload["source_views"][0]["document_id"] == "annex":
+            raise ModelInfrastructureError("interrupted")
+
+    first = Model(mutate=fail_annex)
+    with pytest.raises(ModelInfrastructureError, match="interrupted"):
+        await verify(data, first, budget())
+    assert len(first.calls) == 2
+
+    resumed = Model()
+    result = await verify(data, resumed, budget())
+    assert [payload["source_views"][0]["document_id"] for payload in resumed.calls] == ["annex"]
+    assert result["hard_blocking"]
+    missing_pages = {issue["issue_id"] for issue in result["issues"]
+                     if issue["code"] == "analysis_page_source_unavailable"}
+    assert len(missing_pages) == 2
+    assert not missing_pages.intersection(result["human_issue_ids"])
 
 
 @pytest.mark.parametrize("changed", ["source", "items", "scope", "prompt", "budget", "identity"])

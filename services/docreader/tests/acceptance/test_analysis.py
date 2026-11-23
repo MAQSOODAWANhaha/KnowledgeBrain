@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+from argparse import Namespace
 from uuid import uuid4
 
 from docx import Document
@@ -15,11 +16,15 @@ import pytest
 from docreader.tests.database import initialize_schema
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.integrations.cli import _correction_ref
+from docreader.integrations.authoring import read_authoring_input
+from docreader.integrations.cli import _correction_ref, run as cli_run
 from docreader.integrations.store import Conflict, InvalidConfirmation, Store
 from docreader.jobs.settings import Settings
 from docreader.llm import ModelInfrastructureError
-from docreader.tender.evidence import register_manifest
+from docreader.llm.budget import RequestBudget
+from docreader.tender.authoring import _OutlineContext
+from docreader.tender.authoring_requirements import preserve_requirements
+from docreader.tender.evidence import EvidenceRepository, planner, register_manifest
 from docreader.workflow.nodes import TenderNodes, WORKFLOW_PROTOCOL
 from docreader.workflow.persistence import initialize_checkpoints
 from docreader.workflow.runner import execute_command
@@ -38,6 +43,9 @@ class AnalysisModel:
 
     def execution_spec(self):
         return {"test_fixture": "analysis-v2"}
+
+    def request_budget(self):
+        return self.options.get("request_budget") or RequestBudget()
 
     async def call(self, task, payload, images=()):
         assert task != "plan", "the analysis workflow must never call legacy Plan"
@@ -66,6 +74,8 @@ class AnalysisModel:
             for source in views[0]["body"]:
                 selected = []
                 for quote, kind in snippets:
+                    if kind == "scoring_rule" and self.options.get("omit_scoring_rule"):
+                        continue
                     if quote in source["text"]:
                         item_id = f"{payload['work_unit_id']}:i{len(items) + 1}"
                         items.append({"item_id": item_id, "kind": kind, "text": quote,
@@ -79,6 +89,8 @@ class AnalysisModel:
                                      "status": "items" if selected else "non_item",
                                      "reason": "本段给出源文规则。" if selected else "本段为章节名称。",
                                      "item_ids": selected})
+                if not selected:
+                    dispositions[-1]["reason_code"] = "informational"
                 if self.options.get("disposition_item_ids") == "omitted":
                     del dispositions[-1]["item_ids"]
                 elif self.options.get("disposition_item_ids") == "redundant" and selected:
@@ -317,9 +329,9 @@ async def test_confirmation_commit_failure_never_reports_ready_and_replays_safel
     assert len(calls) == before
 
 
-async def test_correction_revalidates_all_packs_and_invalidates_old_confirmation(analysis_runtime):
-    store, artifacts, _, run, _ = analysis_runtime
-    waiting = await execute_analysis(analysis_runtime)
+async def test_correction_revalidates_all_packs_and_invalidates_old_confirmation(analysis_runtime, tmp_path, monkeypatch):
+    store, artifacts, settings, run, calls = analysis_runtime
+    waiting = await execute_analysis(analysis_runtime, omit_scoring_rule=True)
     await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "old-confirmation")
     ready = await execute_analysis(analysis_runtime)
     baseline = next(item["artifact_ref"] for item in ready["artifacts"] if item["stage"] == "extract")
@@ -332,9 +344,36 @@ async def test_correction_revalidates_all_packs_and_invalidates_old_confirmation
     partial = {"schema_version": 2, "packs": inline["packs"][:1]}
     with pytest.raises(ValueError, match="every frozen"):
         _correction_ref(artifacts, ready, 1, 1, baseline["sha256"], partial)
-    corrected = _correction_ref(artifacts, ready, 1, 1, baseline["sha256"], inline)
-    await store.correct(run["run_id"], 1, 1, baseline["sha256"], corrected, "correction", "Confirm source interpretation")
-    revised = await execute_analysis(analysis_runtime)
+
+    old_plan = result(artifacts, ready, "pack-plan")
+    main = next(entry for entry in old_plan["packs"] if entry["document_id"] == "main")
+    assert main["range_count"] > 1
+    pack = next(entry for entry in inline["packs"] if entry["pack_id"] == main["pack_id"])
+    quote = "持B证加2分"
+    native = EvidenceRepository(artifacts).load_pack(main["artifact_ref"])
+    source = next(entry for entry in native["body"] if quote in entry["text"])
+    item = {
+        "item_id": f"{pack['pack_id']}:i{len(pack['items']) + 1}",
+        "kind": "scoring_rule",
+        "text": quote,
+        "evidence": [{"range_id": source["range_id"], "quote": quote}],
+    }
+    assert all(entry["kind"] != "scoring_rule" for entry in pack["items"])
+    pack["items"].append(item)
+    disposition = next(entry for entry in pack["dispositions"] if entry["range_id"] == source["range_id"])
+    disposition["item_ids"].append(item["item_id"])
+    path = tmp_path / "corrected.json"
+    path.write_text(json.dumps(inline, ensure_ascii=False))
+    monkeypatch.setattr(Settings, "from_env", lambda: settings)
+    await cli_run(Namespace(command="correct", run_id=run["run_id"], items=path, source_version=1,
+                            expected_revision=1, base_items_digest=baseline["sha256"],
+                            reason="Restore a missing scoring rule against its frozen text", request_key="correction"))
+
+    # Simulate a worker upgrade that would split the original multi-range pack.
+    monkeypatch.setattr(planner, "MAX_EXTRACT_BODY_RANGES", 1)
+    revision_budget = RequestBudget(context_tokens=120000)
+    before = len(calls)
+    revised = await execute_analysis(analysis_runtime, request_budget=revision_budget)
     assert revised["status"] == "waiting-confirmation"
     assert revised["domain_revision"] == 2
     assert not revised["confirmations"] and revised["history"]["confirmations"]
@@ -342,6 +381,27 @@ async def test_correction_revalidates_all_packs_and_invalidates_old_confirmation
     with pytest.raises(InvalidConfirmation):
         await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "stale", domain_revision=1)
     assert result(artifacts, revised, "verify")["items_ref"] == revised["revision"]["corrected_items_ref"]
+    assert {task for task, _ in calls[before:]} == {"verify"}
+    assert any(item in payload["items"] for _, payload in calls[before:])
+
+    snapshot = await read_authoring_input(store, artifacts, run_id=run["run_id"], source_version=1, domain_revision=2)
+    assert snapshot["pack_plan_ref"] and snapshot["verification_ref"]
+    new_plan = artifacts.read_json(snapshot["pack_plan_ref"])
+    assert new_plan["run_identity"] == {"run_id": run["run_id"], "source_version": 1, "domain_revision": 2}
+    assert new_plan["frozen_ref"] == old_plan["frozen_ref"]
+    assert new_plan["plan_digest"] == old_plan["plan_digest"] and new_plan["packs"] == old_plan["packs"]
+    context = _OutlineContext(artifacts, snapshot)
+    requirements = preserve_requirements(context, {"chapters": []})
+    assert requirements["rule_origin"] == "verified_projection"
+    added = next(row for row in requirements["rules"] if row["rule_ref"]["item_ref"]["item_id"] == item["item_id"])
+    assert added["rule"] == item
+
+    await store.confirm(run["run_id"], 1, revised["checklist_digest"], "new-confirmation", domain_revision=2)
+    before_confirm = len(calls)
+    with pytest.raises(Conflict, match="request budget changed within an immutable domain revision"):
+        await execute_analysis(analysis_runtime)
+    assert (await execute_analysis(analysis_runtime, request_budget=revision_budget))["status"] == "analysis-ready"
+    assert len(calls) == before_confirm
 
 
 async def test_cancel_and_real_source_revision_do_not_reuse_old_confirmation(analysis_runtime):

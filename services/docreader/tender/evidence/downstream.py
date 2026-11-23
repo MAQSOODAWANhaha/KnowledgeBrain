@@ -84,6 +84,8 @@ def _range_requirements(source, original, extraction, owned_body):
 
 
 class VerificationPlanner(StructuralPlanner):
+    uses_extraction_targets = False
+
     def __init__(self, source, budget, original, extraction, references, scope_decisions, owned_body, problems):
         super().__init__(source, budget, scope_decisions)
         self.original, self.extraction, self.references = original, extraction, references
@@ -176,6 +178,9 @@ class VerificationPlanner(StructuralPlanner):
 
 class ResponsePlanner(StructuralPlanner):
     """Reuse measured prefix selection; a response obligation is never sliced."""
+
+    uses_extraction_targets = False
+
     def __init__(self, source, budget, original, requirements, references, scope_decisions, problems, range_requirements):
         super().__init__(source, budget, scope_decisions)
         self.original, self.references, self.problems = original, references, problems

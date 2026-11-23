@@ -171,11 +171,14 @@ def _item_issues(pack: dict, issues=(), model_issues=()) -> list[dict]:
     return problems
 
 
-def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositions=(), host_issues=()) -> dict:
+def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositions=(), host_issues=(),
+                     item_support=()) -> dict:
     """Reject malformed declarations; preserve legitimate unresolved analysis."""
     body = {source["range_id"]: source for source in pack["body"]}
     sources = {source["range_id"]: source for source in [*pack["supporting"], *pack["body"]]}
-    sent_texts = supplied_evidence_texts([source_view(pack)], sources)
+    item_sources = {**sources, **{source["range_id"]: source for source in item_support}}
+    view_pack = {**pack, "supporting": [*pack["supporting"], *item_support]} if item_support else pack
+    sent_texts = supplied_evidence_texts([source_view(view_pack)], item_sources)
     host_reviewed = host_reviewed_ranges(pack)
     model_body = body.keys() - host_reviewed
     errors = []
@@ -190,16 +193,17 @@ def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositi
         if not any(evidence["range_id"] in model_body for evidence in item["evidence"]):
             errors.append("missing_body_evidence")
         for number in item.get("numbers", []):
-            if not any(number["quote"] in sources.get(citation["range_id"], {}).get("text", "")
+            if not any(number["quote"] in item_sources.get(citation["range_id"], {}).get("text", "")
                        and any(number["quote"] in text for text in sent_texts.get(citation["range_id"], []))
                        for citation in item["evidence"]):
                 errors.append("number_quote_mismatch")
-    for value in [*response["items"], *response["relations"]]:
-        for evidence in value["evidence"]:
-            source = sources.get(evidence["range_id"])
-            if (source is None or not evidence["quote"].strip() or evidence["quote"] not in source["text"]
-                    or not any(evidence["quote"] in text for text in sent_texts.get(evidence["range_id"], []))):
-                errors.append("evidence_quote_mismatch")
+    for declarations, available in ((response["items"], item_sources), (response["relations"], sources)):
+        for value in declarations:
+            for evidence in value["evidence"]:
+                source = available.get(evidence["range_id"])
+                if (source is None or not evidence["quote"].strip() or evidence["quote"] not in source["text"]
+                        or not any(evidence["quote"] in text for text in sent_texts.get(evidence["range_id"], []))):
+                    errors.append("evidence_quote_mismatch")
     relation_ids = [relation["relation_id"] for relation in response["relations"]]
     if len(relation_ids) != len(set(relation_ids)):
         errors.append("duplicate_relation_id")
@@ -250,7 +254,7 @@ def _normalize_items(pack: dict, response: dict, issues=(), *, pending_dispositi
     return {
         "schema_version": 2, "pack_id": pack["pack_id"], "items": response["items"],
         "dispositions": [dispositions[range_id] for range_id in body], "relations": response["relations"],
-        "issues": problems, "source_ranges": source_ranges(pack),
+        "issues": problems, "source_ranges": source_ranges(view_pack),
         "host_issue_ids": sorted(p["issue_id"] for p in assign_issues(host_problems, pack["pack_id"])),
         **({"pending_scope_context": deepcopy(pack["pending_scope_context"])} if pack.get("pending_scope_context") else {}),
     }
@@ -403,7 +407,10 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
         try:
             declaration = ({key: value for key, value in original.items() if key != "item_ids"}
                            if isinstance(original, dict) else original)
-            value = ItemDispositionResponse.model_validate(declaration).model_dump(exclude_unset=True)
+            parsed = ItemDispositionResponse.model_validate(declaration)
+            value = parsed.model_dump(exclude_unset=True)
+            value.pop("reason_code", None)
+            value["reason"] = parsed.persisted_reason()
         except ValidationError:
             pending("extraction_disposition_unresolved", path, original, "处置声明不完整，对应原文仍需独立核验。")
             continue
@@ -413,6 +420,9 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
             diagnostics.append({"code": "disposition_outside_model_body", "path": path,
                                 "range_id": value["range_id"]})
             continue
+        if parsed.status == "non_item" and parsed.reason_code is None:
+            diagnostics.append({"code": "disposition_reason_code_missing", "path": path,
+                                "range_id": value["range_id"]})
         given.setdefault(value["range_id"], []).append(value)
     dispositions, pending_dispositions = [], set()
     for range_id in body:
@@ -426,6 +436,8 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
             value = {"range_id": range_id, "status": "items",
                      "reason": "宿主按直接正文证据派生本范围处置。"}
         elif len(entries) != 1:
+            if not entries and not supported:
+                diagnostics.append({"code": "disposition_missing", "path": "dispositions", "range_id": range_id})
             pending_dispositions.add(range_id)
             pending("extraction_disposition_unresolved", "dispositions", {"range_id": range_id},
                     "原文既无直接事项证据，也没有唯一的 non_item 或 unresolved 声明，保留已知事项并独立检查遗漏。")
@@ -473,7 +485,33 @@ def _recover_item_response(pack: dict, result: dict, issues=()) -> dict:
     return normalized
 
 
-def validate_item_correction(pack: dict, result: dict, *, issues=()) -> dict:
+def _retained_correction_issues(response, baseline, pack_id):
+    if baseline is None:
+        return [], set()
+    prior = assign_issues(baseline["issues"], pack_id)
+    host_ids = set(baseline.get("host_issue_ids", [problem["issue_id"] for problem in prior]))
+
+    def content_key(problem):
+        return json.dumps({key: value for key, value in enforce_issue_policy(problem).items()
+                           if key != "issue_id" and value is not None}, ensure_ascii=False, sort_keys=True)
+
+    previous = {content_key(problem): problem for problem in prior if problem["issue_id"] in host_ids}
+    submitted = {content_key(problem) for problem in response["issues"]}
+    unresolved = {d["range_id"] for d in response["dispositions"] if d["status"] == "unresolved"}
+    still_pending = unresolved & {d["range_id"] for d in baseline["dispositions"] if d["status"] == "unresolved"}
+    outstanding = {"extraction_disposition_unresolved", "unresolved_source_range"}
+    retained = [problem for key, problem in previous.items()
+                if key in submitted
+                or (problem["code"] in outstanding and problem.get("range_id") in still_pending)
+                or (problem["code"] == "extraction_budget_exceeded" and still_pending)]
+    # Keep the original diagnosis as a declaration too, so its range and item
+    # references must still pass the usual correction boundary.
+    response["issues"] = [*retained, *(p for p in response["issues"] if content_key(p) not in previous)]
+    pending = {p["range_id"] for p in retained if p["code"] in outstanding and p.get("range_id") in unresolved}
+    return retained, pending
+
+
+def validate_item_correction(pack: dict, result: dict, *, issues=(), baseline=None, canonical_sources=None) -> dict:
     """A v2 correction must retain complete source coverage and exact provenance."""
     from docreader.tender.schema import AnalysisExtraction
 
@@ -511,7 +549,17 @@ def validate_item_correction(pack: dict, result: dict, *, issues=()) -> dict:
         response = AnalysisExtraction.model_validate(corrected).model_dump(exclude_unset=True, exclude_none=True)
     except ValidationError:
         raise CorrectionValidationError(["correction_schema_invalid"]) from None
-    return _normalize_items(pack, response, host_issues)
+    retained, pending = _retained_correction_issues(response, baseline, pack["pack_id"])
+    local = {source["range_id"] for source in [*pack["body"], *pack["supporting"]]}
+    extra_ids = {e["range_id"] for item in response["items"] for e in item["evidence"]} - local
+    canonical = canonical_sources or {}
+    item_support = [
+        candidate for range_id in sorted(extra_ids) if (candidate := canonical.get(range_id)) is not None
+        and candidate.get("source_range_id") == candidate["range_id"] == range_id
+        and candidate["document_id"] == pack["document_id"] and candidate["document_version"] == pack["document_version"]
+    ]
+    return _normalize_items(pack, response, host_issues, host_issues=retained,
+                            pending_dispositions=pending, item_support=item_support)
 
 
 async def extract_items(pack: dict, model: Model, *, identity: dict, issues=(), scope_decisions=(), role=None) -> dict:
@@ -532,7 +580,7 @@ async def extract_items(pack: dict, model: Model, *, identity: dict, issues=(), 
         if hasattr(model, "call_validated"):
             return await model.call_validated("extract", payload,
                                               lambda value: _validate_item_response(pack, value, issues))
-        result = await model.call("extract", payload)
+        return _validate_item_response(pack, await model.call("extract", payload), issues)
     return _validate_item_response(pack, result, issues)
 
 

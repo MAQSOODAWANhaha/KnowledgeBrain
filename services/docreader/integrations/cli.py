@@ -173,13 +173,10 @@ async def run(args):
 
 def _correction_ref(artifacts, run, source_version, revision, base_digest, corrected):
     """Rebuild v2 items; all evidence identities come from frozen files."""
-    from docreader.tender.requirements import validate_item_correction
     from docreader.tender.evidence import EvidenceRepository
     from docreader.tender.checks.analysis import assign_issues
+    from docreader.tender.requirements.correction import revise_item_extraction
 
-    if (not isinstance(corrected, dict) or set(corrected) != {"schema_version", "packs"}
-            or corrected["schema_version"] != 2 or not isinstance(corrected["packs"], list)):
-        raise ValueError("correction must contain schema_version 2 and a complete packs list")
     # Include immutable history so a lost CLI response can replay its request key.
     receipts = [*run["artifacts"], *run["history"]["artifacts"]]
     base = next((item for item in receipts if item["source_version"] == source_version and item["domain_revision"] == revision
@@ -189,32 +186,11 @@ def _correction_ref(artifacts, run, source_version, revision, base_digest, corre
     if not base or not frozen or base["artifact_ref"]["sha256"] != base_digest:
         raise ValueError("correction baseline does not identify frozen extracted items")
     index = artifacts.read_json(base["artifact_ref"])
-    if index.get("schema_version") != 2:
-        raise ValueError("legacy extraction is read-only; correction requires analysis v2 items")
     source_index = artifacts.read_json(frozen["artifact_ref"])
     native = artifacts.read_json(source_index["frozen_ref"]) if source_index.get("frozen_ref") else source_index
     global_issues = assign_issues(native.get("issues", []), "source")
-    expected = {item["pack_id"] for item in index["packs"]}
-    sources = {item["pack_id"]: item["artifact_ref"] for item in source_index["packs"]}
-    by_id = {}
-    for item in corrected["packs"]:
-        if not isinstance(item, dict) or not isinstance(item.get("pack_id"), str) or item["pack_id"] in by_id:
-            raise ValueError("correction pack identities must be unique")
-        by_id[item["pack_id"]] = item
-    if set(by_id) != expected or expected != set(sources):
-        raise ValueError("correction must cover exactly every frozen extraction pack")
-    output = []
-    repository = EvidenceRepository(artifacts)
-    # Baseline order makes request replay content addressing independent of JSON list order.
-    for entry in index["packs"]:
-        pack_id = entry["pack_id"]
-        pack = repository.load_pack(sources[pack_id])
-        issues = assign_issues([*global_issues, *pack.get("issues", [])], pack_id)
-        result = validate_item_correction(pack, {key: value for key, value in by_id[pack_id].items() if key != "pack_id"},
-                                          issues=issues)
-        result["issues"] = assign_issues(result["issues"], pack_id)
-        output.append({"pack_id": pack_id, "artifact_ref": artifacts.put_json(result)})
-    return artifacts.put_json({"schema_version": 2, "packs": output, "counts": {"packs": len(output)}})
+    return artifacts.put_json(revise_item_extraction(EvidenceRepository(artifacts), source_index, index, corrected,
+                                                     issues=global_issues))
 
 
 def _scope_review_ref(artifacts, run, source_version, domain_revision, base_plan_digest, submitted):

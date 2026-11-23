@@ -1099,21 +1099,66 @@ class ItemDisposition(_AnalysisContract):
         return self
 
 
+# BUG-261: short reason codes keep per-range decisions without a sentence per range.
+NON_ITEM_REASONS = {
+    "page_number": "页码、页眉或页脚，不含独立要求。",
+    "blank": "空白或空行，不含独立要求。",
+    "heading": "标题、目录或导航，不含独立要求。",
+    "form_field": "表头或填写栏，要求已由所属表头或说明表达。",
+    "repeated": "重复的版式或说明，不含新增要求。",
+    "informational": "项目背景、概况、基本信息标签或名词解释，不含独立要求。",
+}
+
+
 class ItemDispositionOutput(_AnalysisContract):
     range_id: Text
     status: Literal["non_item", "unresolved"]
-    reason: Text
+    reason_code: Literal[
+        "page_number", "blank", "heading", "form_field", "repeated", "informational", "other"
+    ] | None = None
+    reason: Text | None = None
+
+    @model_validator(mode="after")
+    def explained(self):
+        if self.status == "non_item":
+            if self.reason_code is None:
+                raise ValueError("non_item disposition requires reason_code")
+            if self.reason_code == "other" and self.reason is None:
+                raise ValueError("reason_code other requires reason")
+        elif self.reason is None or self.reason_code is not None:
+            raise ValueError("unresolved requires reason and no reason_code")
+        return self
+
+    def persisted_reason(self) -> str:
+        if self.reason is not None:
+            return self.reason
+        assert self.reason_code in NON_ITEM_REASONS
+        return NON_ITEM_REASONS[self.reason_code]
 
 
 class ItemDispositionResponse(ItemDispositionOutput):
     """LLM-response boundary. New extracts declare only non_item or unresolved.
 
     status=items remains accepted so an older complete packet can be replayed.
+    A non_item with an explicit reason but omitted reason_code is tolerated here
+    (with a host diagnostic) instead of discarding a valid disposition.
     The host derives item coverage and item_ids from evidence.
     """
 
     status: Literal["items", "non_item", "unresolved"]
     item_ids: list[Text] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def explained(self):
+        if self.reason_code is None and self.reason is None:
+            raise ValueError("a disposition requires reason_code or reason")
+        if self.reason_code == "other" and self.reason is None:
+            raise ValueError("reason_code other requires reason")
+        if self.status == "unresolved" and (self.reason is None or self.reason_code is not None):
+            raise ValueError("unresolved requires reason and no reason_code")
+        if self.status == "items" and (self.reason is None or self.reason_code is not None):
+            raise ValueError("items disposition requires reason and no reason_code")
+        return self
 
 
 class EffectiveRule(_AnalysisContract):

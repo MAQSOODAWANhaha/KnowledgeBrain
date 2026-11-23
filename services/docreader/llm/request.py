@@ -158,15 +158,23 @@ def build_request(model: str, prompt: str, payload: dict,
                   reasoning_effort: ReasoningEffort | None = None) -> dict:
     """The same complete API body is used for packing probes and sending.
 
-    Tender response schemas are part of this actual prompt, so estimates and
-    request identity include them. Reserves never become provider output limits.
+    Request estimates and identities include the actual response schema.
+    Reserves never become provider output limits.
     """
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     try:
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError):
         raise ModelSemanticError("model payload is not JSON serializable") from None
-    if task is not None:
+    response_format = {"type": "json_object"}
+    if task == "extract" and payload.get("schema_version") == 2 and not images:
+        from docreader.llm.contracts import output_schema
+
+        prompt = prompt.rstrip()
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "tender_extraction", "strict": True, "schema": output_schema(task, payload),
+        }}
+    elif task is not None:
         from docreader.llm.contracts import schema_prompt
 
         prompt = schema_prompt(prompt, task, payload)
@@ -174,7 +182,7 @@ def build_request(model: str, prompt: str, payload: dict,
     content.extend({"type": "image_url", "image_url": {"url": image_data_url(image)}} for image in images)
     request = {"model": model,
             "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}],
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
             "stream": True, "stream_options": {"include_usage": True}}
     if reasoning_effort is not None:
         request["reasoning_effort"] = reasoning_effort

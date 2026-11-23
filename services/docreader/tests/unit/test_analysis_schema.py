@@ -154,11 +154,22 @@ def test_generated_disposition_declares_only_semantic_fields_without_host_item_i
     from docreader.tender.schema import ItemDispositionOutput
 
     schema = ItemDispositionOutput.model_json_schema()
-    assert set(schema['properties']) == {'range_id', 'status', 'reason'}
-    assert set(schema['required']) == {'range_id', 'status', 'reason'}
+    assert set(schema['properties']) == {'range_id', 'status', 'reason_code', 'reason'}
+    assert set(schema['required']) == {'range_id', 'status'}
     assert schema['properties']['status']['enum'] == ['non_item', 'unresolved']
-    declaration = {'range_id': 'r1', 'status': 'non_item', 'reason': '本段为项目背景说明。'}
-    assert ItemDispositionOutput.model_validate(declaration).model_dump() == declaration
+    declaration = {'range_id': 'r1', 'status': 'non_item', 'reason_code': 'informational',
+                   'reason': '本段为项目背景说明。'}
+    parsed = ItemDispositionOutput.model_validate(declaration)
+    assert parsed.model_dump(exclude_unset=True) == declaration
+    assert parsed.persisted_reason() == '本段为项目背景说明。'
+    coded = ItemDispositionOutput.model_validate({'range_id': 'r1', 'status': 'non_item', 'reason_code': 'blank'})
+    assert coded.persisted_reason()
+    for invalid in ({'range_id': 'r1', 'status': 'non_item'},
+                    {'range_id': 'r1', 'status': 'non_item', 'reason': '漏掉代码'},
+                    {'range_id': 'r1', 'status': 'non_item', 'reason_code': 'other'},
+                    {'range_id': 'r1', 'status': 'unresolved', 'reason_code': 'blank'}):
+        with pytest.raises(ValidationError):
+            ItemDispositionOutput.model_validate(invalid)
     for extra in ({'item_ids': []}, {'status': 'items'}):
         with pytest.raises(ValidationError):
             ItemDispositionOutput.model_validate({**declaration, **extra})
@@ -167,7 +178,7 @@ def test_generated_disposition_declares_only_semantic_fields_without_host_item_i
 def test_disposition_receiver_retains_legacy_items_and_ids_for_host_normalization():
     declaration = {'range_id': 'r1', 'status': 'items', 'reason': '本段规定评分标准。',
                    'item_ids': ['p1:i1']}
-    assert ItemDispositionResponse.model_validate(declaration).model_dump() == declaration
+    assert ItemDispositionResponse.model_validate(declaration).model_dump(exclude_unset=True) == declaration
 
 
 def test_generated_ocr_contract_keeps_text_status_and_optional_issues():

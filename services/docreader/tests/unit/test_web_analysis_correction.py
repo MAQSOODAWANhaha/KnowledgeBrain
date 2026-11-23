@@ -20,6 +20,7 @@ def correction_runtime(tmp_path, monkeypatch):
     baseline["items"][0]["conditions"] = ["原条件"]
     source = pack()
     baseline = validate_item_correction(source, baseline)
+    source["source_index_ref"] = artifacts.put_json({row["range_id"]: row for row in source["body"]})
     source_ref = artifacts.put_json(source)
     extracted = artifacts.put_json({"schema_version": 2, "packs": [
         {"pack_id": "p1", "artifact_ref": artifacts.put_json(baseline)}]})
@@ -46,6 +47,8 @@ def correction_runtime(tmp_path, monkeypatch):
     # Only native source hydration is synthetic; the production correction,
     # schema, provenance checks and content-addressed artifacts remain real.
     monkeypatch.setattr(EvidenceRepository, "load_pack", lambda self, reference: self.artifacts.read_json(reference))
+    monkeypatch.setattr(EvidenceRepository, "source_index",
+                        lambda self, reference: SimpleNamespace(by_id=self.artifacts.read_json(reference)))
     bridge = SimpleNamespace(artifacts=artifacts, lock_project=lock_project,
                              store=SimpleNamespace(correct=correct, transaction=transaction))
     body = {"project_id": "project", "run_id": "run", "source_version": 1, "expected_revision": 1,

@@ -38,6 +38,9 @@ meanings. Gains, deductions and no-score rules are scoring_rule, not bid rejecti
 
 text must preserve the full source meaning: governed object, numerical relationships,
 conditions, exceptions, scope, scoring tiers/formulas/caps and relevant shared table rules.
+State each alternative factual trigger explicitly in the item text or consequence.trigger.
+A shared consequence may use one item if every alternative and its scope remain explicit.
+Tie every trigger to its exact source evidence.
 Each evidence entry is {range_id,quote}: quote must be an exact nonempty source substring.
 At least one quote per item must come from this SourceView's body; supporting may supply
 additional evidence. Do not fabricate quotes from empty cells or metadata.
@@ -78,22 +81,35 @@ pending_scope_context is unresolved metadata, not readable condition text; do no
 it or pretend its source/binding has been resolved. Proven blank pages and explicitly
 reviewed decorations are handled separately by the host.
 
-Preserve unresolved cross-references as issues with the original range_id. The host will
-provide chapter navigation to a separate locate operation and load its selected original
-passages for association and independent review. Do not infer missing target text.
+Preserve unresolved cross-references as issues with the original range_id. Do not infer
+missing target text.
 
 Return one JSON object conforming to the host-supplied response JSON Schema for this
 request. Required collections may be empty. Record examples below describe local fields,
 not a complete response.
 
-Declare a disposition only for a body range or template row that is non_item or unresolved.
-The local disposition record is {range_id,status,reason}. Do not emit status=items or item_ids.
+Every body range or template row must be covered exactly once: either cited by an item's
+evidence, or declared once in dispositions. Omitting a range is a contract defect, not a
+shortcut; omitted ranges stay unresolved for human review.
 A range cited by an item's evidence needs no disposition; the host derives that coverage from the evidence.
-A range that is neither cited nor declared stays unresolved for review.
+Do not emit status=items or item_ids.
+non_item record: {range_id,status:"non_item",reason_code}, where reason_code is one of:
+- page_number (page number, header or footer)
+- blank (empty or blank row)
+- heading (title, contents or navigation)
+- form_field (header or fill-in field whose requirement is already stated by its table header or instruction)
+- repeated (repeated layout or instruction)
+- informational (project background, overview, basic identity label or terminology definition only)
+- other (with a short source-specific reason field)
+Never use a shortcut reason_code for general contract clauses, evaluation procedures, or
+applicability conditions: either extract them as items, or if truly non-binding, use
+reason_code="other" with a specific reason. Decide each range on its own; a reason code
+never covers a range you did not read.
+unresolved record: {range_id,status:"unresolved",reason} with a concise source-specific reason
+and no reason_code.
 If a range contains both a clear item and unresolved content, keep the item and add a
 blocking issue; do not also emit a disposition for that range. unresolved means no definite
-item was established. Use a concise source-specific reason. Supporting alone receives no
-disposition.
+item was established. Supporting alone receives no disposition.
 
 Relations declare exactly {from_item_id,to_item_id,relation,evidence}.
 The host assigns relation_id; do not emit it. Endpoints must be actual items in

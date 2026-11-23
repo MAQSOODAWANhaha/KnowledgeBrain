@@ -75,7 +75,9 @@ class AnalysisFixtureModel:
 
     async def call(self, task, payload, images=()):
         self.calls.append((task, deepcopy(payload)))
-        if self.scope_ambiguity and self.lease and self.lease.domain_revision > 1:
+        # Human scope decisions travel only in the explicit scope-review request.
+        if (self.scope_ambiguity and self.lease and self.lease.domain_revision > 1
+                and payload.get("work_unit_id", "").startswith("scope-review-")):
             decisions = payload.get("scope_decisions", [])
             assert decisions and all(decision["rationale"] and decision["evidence"] for decision in decisions)
         documents = {view["document_id"] for view in payload.get("source_views", [])}

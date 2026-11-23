@@ -252,6 +252,93 @@ def test_correction_rebuilds_host_issue_identity_without_trusting_edited_ids():
     assert response["issues"][0]["issue_id"] == "forged-host-id"
 
 
+@pytest.mark.parametrize("case", ["same_source", "wrong_version", "wrong_document", "fragment", "wrong_quote", "no_body"])
+def test_correction_validates_an_item_condition_against_frozen_cross_pack_evidence(case):
+    frozen = pack()
+    anchor = source("r2", "如我方中标", document_version="1", source_range_id="r2")
+    quote = anchor["text"]
+    response = result()
+    if case == "wrong_version":
+        anchor["document_version"] = "2"
+    if case == "wrong_document":
+        anchor["document_id"] = "other"
+    if case == "fragment":
+        anchor["source_range_id"] = "parent-r2"
+    if case == "wrong_quote":
+        quote = "中标前"
+    item = response["items"][0]
+    item["conditions"] = ["如我方中标"]
+    if case == "no_body":
+        item["evidence"] = []
+    item["evidence"].append({"range_id": "r2", "quote": quote})
+    if case != "same_source":
+        with pytest.raises(CorrectionValidationError):
+            validate_item_correction(frozen, response, canonical_sources={"r2": anchor})
+        return
+    corrected = validate_item_correction(frozen, response, canonical_sources={"r2": anchor})
+    assert corrected["items"] == [item]
+    assert corrected["source_ranges"]["r2"]["body"] is False
+    assert corrected["dispositions"] == response["dispositions"]
+    assert frozen["supporting"] == []
+
+
+def test_correction_does_not_use_added_item_context_as_a_relation_or_issue_source():
+    anchor = source("r2", "如我方中标", document_version="1", source_range_id="r2")
+    citing = {"range_id": "r2", "quote": anchor["text"]}
+    response = result(relations=[{
+        "relation_id": "p1:l1", "from_item_id": "p1:i1", "to_item_id": "p1:i1",
+        "relation": "适用条件", "evidence": [citing],
+    }], issues=[{"code": "condition_unclear", "detail": "范围仍需核对。", "blocking": True, "range_id": "r2"}])
+    response["items"][0]["evidence"].append(citing)
+    with pytest.raises(CorrectionValidationError) as failure:
+        validate_item_correction(pack(), response, canonical_sources={"r2": anchor})
+    assert set(failure.value.codes) == {"evidence_quote_mismatch", "unknown_issue_range"}
+
+
+def test_correction_keeps_unchanged_host_diagnostics_and_does_not_duplicate_unresolved():
+    frozen = pack([source(), source("r2", "尚待判断的条款。")])
+    current = result()
+    current["dispositions"].append({"range_id": "r2", "status": "unresolved", "reason": "原抽取处置不完整。", "item_ids": []})
+    prior = {**deepcopy(current), "issues": [
+        {"issue_id": "host-quote", "code": "evidence_quote_mismatch", "detail": "待核另一处证据。",
+         "range_id": "r1", "blocking": True, "item_ids": ["p1:i1"]},
+        {"issue_id": "host-pending", "code": "extraction_disposition_unresolved", "detail": "仍需核对。",
+         "range_id": "r2", "blocking": True},
+    ], "host_issue_ids": ["host-quote", "host-pending"]}
+    current["issues"] = [{**prior["issues"][0], "issue_id": "forged-id"}]
+    current["items"][0]["text"] += " 按原件执行。"
+    corrected = validate_item_correction(frozen, current, baseline=prior)
+    assert corrected["issues"] == prior["issues"]
+    assert corrected["host_issue_ids"] == ["host-pending", "host-quote"]
+    current["dispositions"][1].update(status="non_item", reason="原文为纯标题。")
+    resolved = validate_item_correction(frozen, current, baseline=prior)
+    assert resolved["issues"] == prior["issues"][:1] and resolved["host_issue_ids"] == ["host-quote"]
+
+
+@pytest.mark.parametrize("prior_metadata, expected", [({}, ["prior"]), ({"host_issue_ids": []}, [])])
+def test_correction_cannot_promote_or_forge_host_provenance(prior_metadata, expected):
+    issue = {"issue_id": "prior", "code": "source_partial", "detail": "需要补齐原件。", "blocking": True}
+    baseline = result(issues=[issue], **prior_metadata)
+    submitted = result(issues=[{**issue, "issue_id": "forged"}])
+    corrected = validate_item_correction(pack(), submitted, baseline=baseline)
+    assert corrected["host_issue_ids"] == expected
+    assert all(p.get("issue_id") != "forged" for p in corrected["issues"])
+
+
+@pytest.mark.asyncio
+async def test_correction_cannot_remove_budget_blocker_with_original_range_still_unresolved():
+    frozen = pack(planning_details={"budget": {"fits": False}})
+    baseline = await extract_items(frozen, FixedModel(result()), identity=IDENTITY)
+    payload = result(items=[], dispositions=deepcopy(baseline["dispositions"]))
+    corrected = validate_item_correction(frozen, payload, baseline=baseline)
+    assert any(p["code"] == "extraction_budget_exceeded" and is_hard_blocking(p) for p in corrected["issues"])
+    assert corrected["host_issue_ids"] == baseline["host_issue_ids"]
+
+    payload["dispositions"][0].update(status="non_item", reason="已按原件核对，属于说明。")
+    closed = validate_item_correction(frozen, payload, baseline=baseline)
+    assert not closed["issues"] and not closed["host_issue_ids"]
+
+
 def test_correction_restores_global_host_issues_outside_the_local_model_contract():
     problem = {"issue_id": "source-1", "code": "source_partial", "detail": "另一附件仍缺页。",
                "document_id": "other", "range_id": "outside", "blocking": True}

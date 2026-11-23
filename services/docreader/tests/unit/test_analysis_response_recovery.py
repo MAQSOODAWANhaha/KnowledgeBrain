@@ -154,7 +154,10 @@ async def test_legacy_disposition_index_type_cannot_block_valid_status_and_reaso
     assert extracted["items"] == response["items"] and extracted["issues"] == []
     assert extracted["dispositions"][0] == {**response["dispositions"][0],
                                            "item_ids": ["p1:i1"] if has_items else []}
-    assert {diagnostic["code"] for diagnostic in extracted["diagnostics"]} == {"disposition_index_rebuilt"}
+    expected = {"disposition_index_rebuilt"}
+    if not has_items:
+        expected.add("disposition_reason_code_missing")
+    assert {diagnostic["code"] for diagnostic in extracted["diagnostics"]} == expected
     assert response == before and len(model.calls) == 1
 
 

@@ -148,9 +148,10 @@ scoring.max_points 在保留片段中重新生效，也不为此把 EffectiveRul
 
 | 字段/协议 | 目标定义 |
 | --- | --- |
-| 抽取输出 | `{schema_version: 2, items: TenderItem[], dispositions: Disposition[], relations: Relation[], issues: Issue[]}`，五项均必填。模型只为 `non_item` 和 `unresolved` 返回 `{range_id,status,reason}`；被事项证据引用的范围省略，由宿主派生 `items` 处置 |
+| 抽取输出 | `{schema_version: 2, items: TenderItem[], dispositions: Disposition[], relations: Relation[], issues: Issue[]}`，五项均必填。被事项证据引用的范围不声明，由宿主派生 `items` 处置；其余每个正文范围必须恰好声明一次，`non_item` 或 `unresolved` |
+| 抽取处置声明 | 生成合同要求模型返回 `{range_id, status, reason_code?, reason?}`。`status=non_item` 时要求给 `reason_code`，取值 `page_number`（页码、页眉页脚）、`blank`（空白或空行）、`heading`（标题、目录、导航）、`form_field`（表头或填写栏，要求已由所属表头或说明表达）、`repeated`（重复的版式或说明）、`informational`（纯项目背景、概况、基本信息标签或名词解释，严禁用于一般合同条款或评标程序）、`other`；`other` 必须另给 `reason` 文字。`status=unresolved` 必须给 `reason` 文字且不得给 `reason_code`。宽容接收边界允许省略 `reason_code` 但给出非空 `reason` 的 `non_item`（记低级诊断，不丢弃有效处置）；持久化时若模型给了具体 `reason` 则保留，否则展开为代码对应的固定中文说明，持久化格式不变 |
 | `Disposition` | 持久化为 `{range_id, status, reason, item_ids}`；status 为 `items/non_item/unresolved`，reason 为有来源依据的非空说明。规范产物仍覆盖每个 body 范围 |
-| `item_ids` | 宿主按事项的有效直接 evidence 派生反向索引，模型不再生成。规范产物中 items 处置非空，non_item/unresolved 时为 `[]`。既未被引用也未声明的范围由宿主记问题并交 review |
+| `item_ids` | 宿主按事项的有效直接 evidence 派生反向索引，模型不再生成。规范产物中 items 处置非空，non_item/unresolved 时为 `[]`。既未被引用也未声明的范围是合同缺陷，不是允许的省略：宿主保留已抽取结果，对该范围记 `extraction_disposition_unresolved` 并继续，不整包拒收重发（BUG-250），也不新增第二轮补处置发送，数量进入执行报表 |
 | 核验模型输出 | `{schema_version: 2, accepted_decision_ids: string[], findings: Issue[]}`，三字段必填；接受集合只能选择本次输入决议 |
 | 核验接受回执 | 宿主添加`reviewed_range_ids/reviewed_item_ids/reviewed_relation_ids/reviewed_decision_ids`，来自实际发送的输入；表示执行覆盖，不是模型声明或语义完整性证明 |
 | 核验覆盖 | 宿主按成功接受的请求记录已提供的来源、事项、关系和决议；全局核对必要覆盖并集及候选联合核验回执，共享上下文可重复送审，不计为新增正文归属；ID 覆盖不证明语义正确 |

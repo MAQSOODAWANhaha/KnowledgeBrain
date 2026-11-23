@@ -821,7 +821,7 @@ async def test_exact_sent_body_has_same_measurement_as_planner_and_budget_is_pin
     async with client:
         await client.call("extract", payload)
     assert seen == [budget.request("extract", payload)]
-    assert budget.measure_request(seen[0]) == expected
+    assert budget.measure_request(seen[0], "extract") == expected
     assert audit.spec["budget"]["chat"] == budget.spec()
     for key, value in expected.items():
         assert audit.events[0]["metadata"][key] == value

@@ -10,6 +10,7 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm import ModelInfrastructureError, ModelSemanticError
 from docreader.llm.budget import RequestBudget
 from docreader.tender.checks.analysis import _Analysis, assign_issues, build_catalog, current_items, verify_analysis
+from docreader.tender.evidence import planner
 from docreader.tender.evidence.freeze import plan_sources
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment
 from docreader.tender.requirements import extract_items, item_payload
@@ -887,6 +888,185 @@ async def test_review_payload_includes_other_items_named_by_a_local_source_issue
 
 
 @pytest.mark.asyncio
+async def test_review_owns_overlapping_omission_targets_once_and_preserves_supplements(tmp_path, monkeypatch):
+    monkeypatch.setattr(planner, "MAX_EXTRACT_BODY_RANGES", 1)
+    artifacts, plan, items, _ = await scenario(tmp_path, sections=["same-section"] * 4)
+    assert sum(pack["document_id"] == "main" for pack in plan["packs"]) > 1
+    context = _Analysis(plan, items, artifacts, IDENTITY, budget())
+    values = list(context.items.values())
+    first, last = values[0], values[-1]
+    first_range, last_range = (item["evidence"][0]["range_id"] for item in (first, last))
+    relation = {"relation_id": "review-test:l1", "from_item_id": first["item_id"], "to_item_id": last["item_id"],
+                "relation": "跨文档条件", "evidence": [*first["evidence"], *last["evidence"]]}
+    context.relations[relation["relation_id"]] = relation
+    decision = {"range_id": first_range, "decision": "local_only", "target_range_ids": [],
+                "rationale": "仅适用于本处。", "evidence": first["evidence"]}
+    context.plan["scope_decisions"] = [decision]
+
+    requests = context.review_requests()
+
+    targeted = [entry["range_id"] for payload in requests for entry in payload["dispositions"]]
+    assert len(targeted) == len(set(targeted)) and set(targeted) == set(context.owners)
+    main = [payload for payload in requests if payload["dispositions"]]
+    assert len(main) == 2
+    related, = [payload for payload in requests if relation in payload["relations"]]
+    assert not related["dispositions"]
+    assert {first_range, last_range} <= set(range_ids(related["source_views"]))
+    scope, = [payload for payload in requests if payload["work_unit_id"].startswith("scope-review-")]
+    assert not scope["dispositions"] and decision in scope["scope_decisions"]
+    assert first_range in range_ids(scope["source_views"])
+
+
+async def test_reviewed_cross_section_condition_scopes_only_its_source_document(tmp_path):
+    artifacts, plan, items, _ = await scenario(tmp_path, documents=[
+        ("main", "main", [("前附表：不要求履约保证金。", "obligation"),
+                          ("合同章：按照招标文件规定提交履约保证金。", "obligation")]),
+        ("annex", "attachment", [("报价应包括运输费。", "obligation")]),
+    ])
+    base = _Analysis(plan, items, artifacts, IDENTITY, budget())
+    condition, target = base.indices["main"].ranges
+    unrelated, = base.indices["annex"].ranges
+    decision = {"range_id": condition["range_id"], "decision": "bind",
+                "target_range_ids": [target["range_id"]], "rationale": "前附表适用于此合同条款。",
+                "evidence": [{"range_id": condition["range_id"], "quote": condition["text"]}]}
+    plan["scope_decisions"] = [decision]
+    scope = _Analysis(plan, items, artifacts, IDENTITY, budget())
+
+    request = scope.review_payload([target["range_id"]])
+    assert condition["range_id"] in range_ids(request["source_views"])
+    assert [row["range_id"] for row in request["dispositions"]] == [target["range_id"]]
+    # BUG-299: a request that reads the decision's ranges also reads the human conclusion.
+    assert request["scope_decisions"] == [decision]
+    annex = scope.review_payload([unrelated["range_id"]])
+    assert condition["range_id"] not in range_ids(annex["source_views"])
+    assert "scope_decisions" not in annex
+    requests = scope.review_requests()
+    targeted = [row["range_id"] for payload in requests for row in payload["dispositions"]]
+    assert sorted(targeted) == sorted(scope.review_targets)
+    supplement, = [payload for payload in requests if payload["work_unit_id"].startswith("scope-review-")]
+    assert supplement["scope_decisions"] == [decision] and not supplement["dispositions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["unchecked", "checked", "ambiguous", "other_page", "outside_table", "over_budget"])
+async def test_review_carries_unique_pdf_choice_row_as_support_without_owning_its_target(tmp_path, case):
+    clause = "送样须事先备案。"
+    options = "☑提供\n□不提供" if case == "checked" else "☑不提供\n□提供"
+    choice = f"{options}\n{clause}"
+    other = clause if case == "ambiguous" else "同页其他表项。"
+
+    def native_setup(index):
+        index.document["original_ref"]["media_type"] = "application/pdf"
+        table = {"locator_kind": "page_table", "page_ordinal": 0, "table_ordinal": 0,
+                 "left": 5, "right": 90, "bottom": 10, "top": 95}
+        literal = {"locator_kind": "page", "page_ordinal": int(case == "other_page"),
+                   "left": 1 if case == "outside_table" else 20, "right": 80, "bottom": 20, "top": 25}
+        for number, (unit, identity) in enumerate(zip(index.raw["units"], index.raw["source_contract"]["units"], strict=True)):
+            locator = literal if number == 1 else table
+            unit["locator"] = identity["physical_locator"] = locator
+            if number == 1:
+                unit["text_basis"] = "pdf_literal"
+            else:
+                unit.update(kind="table_region", grid={"row_count": 1, "column_count": 1, "cells": [
+                    {"row": 0, "column": 0, "row_span": 1, "col_span": 1, "text": unit["text"]},
+                ]})
+
+    kind = "obligation" if case == "checked" else None
+    data = await scenario(tmp_path, documents=[("main", "main", [(choice, None), (clause, kind), (other, None)])],
+                          native_setup=native_setup)
+    index = EvidenceRepository(data[0]).source_index(data[1]["documents"][0]["source_index_ref"])
+    choice_id, clause_id, other_id = (row["range_id"] for row in index.ranges)
+    model = Model()
+    admission = OperationBudget(lambda payload: len(payload["dispositions"]) > 1
+                                or case == "over_budget" and any(view["supporting"] for view in payload["source_views"]))
+    result = await run(data, model, admission)
+
+    requested = {p["dispositions"][0]["range_id"]: p for p in model.calls}
+    if case == "over_budget":
+        assert result["hard_blocking"] and result["coverage"]["missing"]["range"] == [clause_id]
+        assert any(issue["code"] == "analysis_budget_exceeded" for issue in result["issues"])
+        assert len(model.calls) == 2 and requested.keys() == {choice_id, other_id}
+        return
+
+    assert not result["coverage"]["missing"]
+    assert len(model.calls) == 3 and requested.keys() == {choice_id, clause_id, other_id}
+    clause_request = requested[clause_id]
+    view, = clause_request["source_views"]
+    assert {e["range_id"] for e in view["body"]} == {clause_id}
+    assert requested[clause_id]["dispositions"][0]["status"] == ("items" if kind else "non_item")
+    if case in {"unchecked", "checked"}:
+        row, = view["supporting"]
+        assert row["range_id"] == choice_id and row["cells"][0]["text"] == choice
+    else:
+        assert view["supporting"] == []
+    assert other_id not in range_ids(clause_request["source_views"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("case", "target_is_row", "matched"), [
+    ("row", True, True),
+    ("literal", False, True),
+    ("joined", True, True),
+    ("duplicate", True, False),
+    ("outside", True, False),
+    ("other_page", True, False),
+    ("different_number", True, False),
+    ("over_budget", True, True),
+])
+async def test_review_carries_items_from_a_unique_same_pdf_table_projection(tmp_path, case, target_is_row, matched):
+    cell_texts = ["3", "须提供 2 份证明。"] if case == "joined" else ["须提供 2 份证明。"]
+    literal = "3 须提供2份证明。" if case == "joined" else "须提供2份证明。"
+    if case == "different_number":
+        cell_texts = ["须提供1 23份证明。"]
+        literal = "须提供12 3份证明。"
+    other = cell_texts if case == "duplicate" else ["独立的其他要求。"]
+
+    def native_setup(index):
+        index.document["original_ref"]["media_type"] = "application/pdf"
+        table = {"locator_kind": "page_table", "page_ordinal": 0, "table_ordinal": 0,
+                 "left": 5, "right": 90, "bottom": 10, "top": 95}
+        line = {"locator_kind": "page", "page_ordinal": int(case == "other_page"),
+                "left": 1 if case == "outside" else 20, "right": 80, "bottom": 20, "top": 25}
+        for number, (unit, identity) in enumerate(zip(index.raw["units"], index.raw["source_contract"]["units"], strict=True)):
+            unit["locator"] = identity["physical_locator"] = line if number == 1 else table
+            if number == 1:
+                unit["text_basis"] = "pdf_literal"
+                continue
+            texts = cell_texts if number == 0 else other
+            unit.update(kind="table_region", grid={"row_count": 1, "column_count": len(texts), "cells": [
+                {"row": 0, "column": column, "row_span": 1, "col_span": 1, "text": text}
+                for column, text in enumerate(texts)]})
+
+    row_kind, line_kind = (None, "obligation") if target_is_row else ("obligation", None)
+    data = await scenario(tmp_path, documents=[("main", "main", [(" | ".join(cell_texts), row_kind),
+                          (literal, line_kind), (" | ".join(other), None)])], native_setup=native_setup)
+    artifacts, plan, items, _ = data
+    index = EvidenceRepository(artifacts).source_index(plan["documents"][0]["source_index_ref"])
+    row_id, line_id, other_id = (source["range_id"] for source in index.ranges)
+    target, alternate = (row_id, line_id) if target_is_row else (line_id, row_id)
+    admission = OperationBudget(lambda payload: len(payload["dispositions"]) > 1
+                                or case == "over_budget" and {target, alternate} <= set(range_ids(payload["source_views"]))
+                                and any(d["range_id"] == target for d in payload["dispositions"]))
+    model = Model()
+    result = await run(data, model, admission)
+    requests = {payload["dispositions"][0]["range_id"]: payload for payload in model.calls}
+    if case == "over_budget":
+        assert result["coverage"]["missing"]["range"] == [target]
+        assert any(issue["code"] == "analysis_budget_exceeded" for issue in result["issues"])
+        assert requests.keys() == {alternate, other_id}
+        return
+
+    assert not result["coverage"]["missing"]
+    assert requests.keys() == {target, alternate, other_id}
+    payload = requests[target]
+    assert payload["dispositions"][0]["status"] == "non_item"
+    assert {e["range_id"] for item in payload["items"] for e in item["evidence"]} == ({alternate} if matched else set())
+    assert range_ids(payload["source_views"]) == sorted({target, alternate} if matched else {target})
+    supplement = _Analysis(plan, items, artifacts, IDENTITY, admission).review_payload([target], check_omissions=False)
+    assert not supplement["dispositions"] and not supplement["items"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["target", "replacement"])
 async def test_amendment_decision_must_cite_target_and_each_replacement_source(tmp_path, missing):
     data = await scenario(tmp_path)
@@ -1034,6 +1214,25 @@ async def test_resolution_cannot_erase_an_unperformed_independent_source_review(
     result = await run(data, Model(locate=candidate, associate=resolution), admission)
     assert result["blocking"] is True
     assert any(problem["code"] == "analysis_budget_exceeded" for problem in result["issues"])
+
+
+@pytest.mark.asyncio
+async def test_successful_scope_context_does_not_cover_rejected_omission_target(tmp_path):
+    data = await scenario(tmp_path)
+    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
+    item = next(iter(context.items.values()))
+    target = item["evidence"][0]["range_id"]
+    data[1]["scope_decisions"] = [{"range_id": target, "target_range_ids": [], "decision": "local_only",
+                                   "rationale": "只适用于本处。", "evidence": item["evidence"]}]
+    admission = OperationBudget(lambda payload: payload["work_unit_id"].startswith("review-"))
+    model = Model()
+
+    result = await run(data, model, admission)
+
+    scope, = model.calls
+    assert scope["work_unit_id"].startswith("scope-review-")
+    assert target in range_ids(scope["source_views"])
+    assert result["hard_blocking"] and target in result["coverage"]["missing"]["range"]
 
 
 @pytest.mark.asyncio

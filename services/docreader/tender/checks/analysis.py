@@ -6,9 +6,10 @@ have their own receipts so recovery never repeats a committed model call.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import Counter, defaultdict
 from copy import deepcopy
 import hashlib
+from itertools import groupby, pairwise
 import json
 import re
 
@@ -51,6 +52,61 @@ def _pdf_pages(source) -> dict:
     if any(type(page) is not int for page in ordinals) or set(ordinals) != set(range(count)):
         return {}
     return {page["page_ordinal"]:page for page in manifest}
+
+
+def _pdf_projection_key(line):
+    # Ignore layout spacing without merging distinct ASCII tokens such as 1 23.
+    return re.sub(r"(?<![A-Za-z0-9]) | (?![A-Za-z0-9])", "", " ".join(line.split()))
+
+
+def _pdf_table_line_rows(ranges, *, projected=False):
+    """Match a unique, complete literal line inside its frozen table."""
+    literals, cells = defaultdict(list), defaultdict(list)
+    for source in ranges:
+        locator = source.get("physical_locator") or source.get("locator") or {}
+        page = locator.get("page_ordinal")
+        if type(page) is not int or not all(isinstance(locator.get(key), (int, float))
+                                           for key in ("left", "bottom", "right", "top")):
+            continue
+        if source.get("text_basis") == "pdf_literal" and source["text"].strip():
+            text = source["text"]
+            if not projected or len(text.splitlines()) == 1:
+                key = _pdf_projection_key(text) if projected else text
+                literals[page, key].append((source["range_id"], locator))
+        elif locator.get("locator_kind") == "page_table":
+            row_cells = source.get("cells", [])
+            for cell in row_cells:
+                text = cell["text"]
+                has_options = any(mark in text for mark in "☑☒□☐")
+                for line in text.splitlines():
+                    if line.strip():
+                        key = _pdf_projection_key(line) if projected else line
+                        cells[page, key].append((source["range_id"], locator, has_options))
+            if projected:
+                # A literal line can span two adjacent cells, e.g. an item
+                # number and the opening line of its description.
+                for left, right in pairwise(sorted(row_cells, key=lambda cell: cell["column"])):
+                    if left["column"] + left["col_span"] != right["column"]:
+                        continue
+                    first = left["text"].splitlines()
+                    second = right["text"].splitlines()
+                    if first and first[0].strip() and second and second[0].strip():
+                        key = _pdf_projection_key(f"{first[0]} {second[0]}")
+                        cells[page, key].append((source["range_id"], locator, False))
+
+    result = {}
+    for key, occurrences in literals.items():
+        if len(occurrences) != 1:
+            continue
+        (range_id, line), = occurrences
+        # PDF grid rows share the table box. The cell's exact line, rather
+        # than the box or the checkbox wording, establishes a unique row.
+        matches = [(row_id, has_options) for row_id, table, has_options in cells.get(key, ())
+                   if table["left"] <= line["left"] <= line["right"] <= table["right"]
+                   and table["bottom"] <= line["bottom"] <= line["top"] <= table["top"]]
+        if len(matches) == 1 and (projected or matches[0][1]):
+            result[range_id] = matches[0][0]
+    return result
 
 
 def build_catalog(index, artifacts) -> list[dict]:
@@ -138,6 +194,8 @@ class _Analysis:
         self.document_order = {document["document_id"]:number for number,document in enumerate(source_plan["documents"])}
         self.sources, self.indices, self.owners = {}, {}, {}
         self.positions, self.pages, self.unreadable_pages = {}, {}, set()
+        self.pdf_choice_rows = {}
+        self.pdf_projected_ranges = defaultdict(set)
         for document in source_plan["documents"]:
             if document.get("source_index_ref"):
                 source = self.repo.source_index(document["source_index_ref"])
@@ -146,6 +204,11 @@ class _Analysis:
                     for number,entry in enumerate(source.ranges)}
                 for entry in source.ranges:
                     self.sources[entry["range_id"]] = entry
+                if source.document["original_ref"].get("media_type") == "application/pdf":
+                    self.pdf_choice_rows.update(_pdf_table_line_rows(source.ranges))
+                    for line, row in _pdf_table_line_rows(source.ranges, projected=True).items():
+                        self.pdf_projected_ranges[line].add(row)
+                        self.pdf_projected_ranges[row].add(line)
         self.packs = {entry["pack_id"]: self.repo.load_pack(entry) for entry in source_plan["packs"]}
         if len(items_index["packs"]) != len(self.packs) or {
             entry["pack_id"] for entry in items_index["packs"]} != self.packs.keys():
@@ -156,13 +219,18 @@ class _Analysis:
         # Registration/freeze/OCR codes can be parser-defined; any of them leaves the analysis incomplete.
         self.source_issue_ids = set(self.protected)
         self.host_issue_ids = set(self.protected)
+        self.review_targets = set()
         for pack in self.packs.values():
             for entry in [*pack["body"], *pack["supporting"]]:
                 self.sources[entry["range_id"]] = entry
+            host_reviewed = host_reviewed_ranges(pack)
             for entry in pack["body"]:
-                if entry["range_id"] in self.owners:
+                range_id = entry["range_id"]
+                if range_id in self.owners:
                     raise ModelSemanticError("Source body occurs in multiple extraction packs")
-                self.owners[entry["range_id"]] = pack
+                self.owners[range_id] = pack
+                if range_id not in host_reviewed:
+                    self.review_targets.add(range_id)
         for entry in items_index["packs"]:
             value = artifacts.read_json(entry["artifact_ref"])
             if value.get("schema_version") != 2:
@@ -215,13 +283,17 @@ class _Analysis:
         self.completed_model_requests = 0
         self.incomplete_requests = []
         self.local_candidates, self.problem_routing, self.problem_dependencies = [], [], {}
+        indexed_documents = {source["document_id"] for source in self.sources.values()}
+        # Source completeness also applies when request preparation is replayed.
+        for key in sorted(self.unreadable_pages):
+            if key[0] in indexed_documents:
+                self._flag_unreadable_page(key)
 
     def payload(self, operation, work_unit, **fields):
         return {"schema_version": 2, "operation": operation, "work_unit_id": work_unit,
                 **({"catalog": self.catalog} if operation == "locate" else {}), "source_views": [],
                 "items": [], "relations": [], "decisions": [], "dispositions": [],
                 "issues": [], "candidates": [],
-                **({"scope_decisions": deepcopy(self.plan["scope_decisions"])} if self.plan.get("scope_decisions") else {}),
                 **fields}
 
     def stable_payload(self, operation, prefix, **fields):
@@ -230,12 +302,12 @@ class _Analysis:
                                                      if key != "work_unit_id"})
         return draft
 
-    def views(self, ranges, *, complete=False):
+    def views(self, ranges, *, complete=False, supporting_ranges=()):
         """Load original targets and their actual bound conditions, never a fake document."""
         by_document, aliases = {}, {}
-        ranges = tuple(set(ranges))
-        for source in sorted((self.sources[identity] for identity in ranges if identity in self.sources),
-                             key=self.source_order):
+        sources = sorted((self.sources[identity] for identity in set(ranges) if identity in self.sources),
+                         key=self.source_order)
+        for source in sources:
             range_id = source["range_id"]
             if complete:
                 canonical = self.indices[source["document_id"]].by_id[source.get("source_range_id", range_id)]
@@ -254,12 +326,16 @@ class _Analysis:
                 self.indices[document_id].ranges, self.plan.get("scope_decisions", []), analysis=True).select(body)
             support = {entry["range_id"]: entry for entry in support}
             support.update(aliases.get(document_id, {}))
-            for range_id in ranges:
-                pack = self.owners.get(range_id)
+            for source in sources:
+                pack = self.owners.get(source["range_id"])
                 if pack and pack["document_id"] == document_id:
                     support.update({entry["range_id"]: entry for entry in pack["supporting"]})
                     pending.extend(pack.get("pending_scope_context", []))
                     bindings.extend(pack.get("scope_bindings", []))
+            for range_id in supporting_ranges:
+                source = self.sources[range_id]
+                if source["document_id"] == document_id:
+                    support.setdefault(range_id, source)
             pack = {"pack_id": "analysis-source:" + document_id,
                     "document_id": document_id,
                     "document_version": self.indices[document_id].document["document_version"],
@@ -277,14 +353,19 @@ class _Analysis:
         return (self.document_order[document],self.positions[document][canonical],
                 source["start"],source["end"],source["range_id"])
 
-    def review_payload(self, ranges, work_unit=None):
+    def review_payload(self, ranges, work_unit=None, *, check_omissions=True):
+        # Matched projections supply existing items, never extra omission targets.
+        dispositions = [self.dispositions[r] for r in ranges
+                        if r in self.review_targets and r in self.dispositions] if check_omissions else []
+        projected = {peer for target in dispositions
+                     for peer in self.pdf_projected_ranges.get(target["range_id"], ())}
         selected = set(ranges)
         ids = set()
         while True:
             views = self.views(selected)
             supplied = _view_ids(views)
             items = [item for item in self.items.values() if item["item_id"] in ids
-                     or any(e["range_id"] in selected for e in item["evidence"])]
+                     or any(e["range_id"] in selected or e["range_id"] in projected for e in item["evidence"])]
             ids.update(item["item_id"] for item in items)
             problems = [p for p in self.problems if (not p.get("range_id") and not p.get("item_ids"))
                         or p.get("range_id") in supplied or set(p.get("item_ids", [])) & ids]
@@ -296,10 +377,20 @@ class _Analysis:
             if expanded == ids and sources == selected:
                 break
             ids, selected = expanded, sources
-        fields = dict(source_views=views, items=items, relations=relations,
-                      # Loaded page/section siblings without a disposition are reading context only.
-                      dispositions=[self.dispositions[r] for r in ranges if r in self.dispositions],
+        choice_context = {self.pdf_choice_rows[original] for target in dispositions
+                          if (original := self.source_identity(target["range_id"])) in self.pdf_choice_rows} - supplied
+        if choice_context:
+            # Scope evidence alone must not pull other items, issues or
+            # relation endpoints into this request's review assignments.
+            views = self.views(selected, supporting_ranges=choice_context)
+        fields = dict(source_views=views, items=items, relations=relations, dispositions=dispositions,
                       issues=_public_issues(problems))
+        # BUG-299: only decisions this request actually reads, so unrelated request identities stay stable.
+        read = {self.source_identity(r) for r in _view_ids(views)}
+        decisions = [deepcopy(decision) for decision in self.plan.get("scope_decisions", [])
+                     if read & {self.source_identity(r) for r in (decision["range_id"], *decision["target_range_ids"])}]
+        if decisions:
+            fields["scope_decisions"] = decisions
         if work_unit is None:
             return self.stable_payload("review", "review", **fields)
         return self.payload("review", work_unit, **fields)
@@ -622,11 +713,7 @@ class _Analysis:
         selected = set(ranges)
         for range_id in list(selected):
             for key, page_ranges in self.pages.items():
-                if range_id not in page_ranges:
-                    continue
-                if key in self.unreadable_pages:
-                    self._flag_unreadable_page(key)
-                else:
+                if range_id in page_ranges and key not in self.unreadable_pages:
                     selected.update(page_ranges)
             source = self.sources.get(range_id)
             if source is not None:
@@ -636,14 +723,11 @@ class _Analysis:
                       key=lambda range_id: self.source_order(self.sources[range_id]))
 
     def review_requests(self):
-        documents = {source["document_id"] for source in self.sources.values()}
-        for key in self.unreadable_pages:
-            if key[0] in documents:
-                self._flag_unreadable_page(key)
         payloads = []
-        for pack in self.packs.values():
-            ranges = self._expand_review_ranges(
-                [r["range_id"] for r in pack["body"] if r["range_id"] not in host_reviewed_ranges(pack)])
+        # Expand once across all extraction packs. Batching the union keeps
+        # adjacent source together without assigning siblings a second review.
+        expanded = self._expand_review_ranges(self.review_targets)
+        for _, ranges in groupby(expanded, key=lambda range_id: self.sources[range_id]["document_id"]):
             current = []
             for range_id in ranges:
                 trial = self.review_payload([*current, range_id])
@@ -667,25 +751,27 @@ class _Analysis:
             # Relationship semantics require both endpoints and all evidence in
             # one request; combine complete supplements within the review budget.
             combined = pending_ranges | ranges
-            trial = self.review_payload(sorted(combined))
+            trial = self.review_payload(sorted(combined), check_omissions=False)
             measured = self.budget.measure("verify", trial)
             if pending is not None and (measured["fits"] is False or (
                     measured["method"] == RequestBudget.TOKENIZED_METHOD
                     and measured["input_tokens"] > self.REVIEW_INPUT_TOKENS)):
                 payloads.append(pending)
                 combined = ranges
-                trial = self.review_payload(sorted(combined))
+                trial = self.review_payload(sorted(combined), check_omissions=False)
             pending_ranges, pending = combined, trial
             # A rejected union may contain extra relations absent from both
             # retained batches; only an accepted complete payload owns coverage.
             reviewed_relations.update(r["relation_id"] for r in pending["relations"])
         if pending is not None:
             payloads.append(pending)
-        for decision in self.plan.get("scope_decisions", []):
+        scope_dependencies = [(decision, {decision["range_id"], *decision["target_range_ids"],
+                                          *(e["range_id"] for e in decision["evidence"])})
+                              for decision in self.plan.get("scope_decisions", [])]
+        for _, dependencies in scope_dependencies:
             # Human scope interpretation, including local_only, must actually
             # reach independent review with its original and target evidence.
-            ranges = {decision["range_id"], *decision["target_range_ids"],
-                      *(e["range_id"] for e in decision["evidence"])}
+            ranges = set(dependencies)
             canonical = {self.source_identity(r) for r in ranges}
             items = [i for i in self.items.values() if any(self.source_identity(e["range_id"]) in canonical
                                                          for e in i["evidence"])]
@@ -693,10 +779,12 @@ class _Analysis:
             ids = {i["item_id"] for i in items}
             relations = [r for r in self.relations.values() if {r["from_item_id"], r["to_item_id"]} <= ids]
             ranges.update(e["range_id"] for r in relations for e in r["evidence"])
+            scope_views = self.views(ranges, complete=True)
+            supplied = _view_ids(scope_views)
+            decisions = [deepcopy(decision) for decision, required in scope_dependencies if required <= supplied]
             payloads.append(self.stable_payload("review", "scope-review",
-                source_views=self.views(ranges, complete=True), items=items, relations=relations,
-                dispositions=[d for r, d in self.dispositions.items() if self.source_identity(r) in canonical],
-                issues=_public_issues(self.problems)))
+                source_views=scope_views, items=items, relations=relations,
+                issues=_public_issues(self.problems), scope_decisions=decisions))
         return payloads
 
     def route_problems(self):
@@ -730,9 +818,10 @@ class _Analysis:
 
 async def verify_analysis(source_plan, items_index, artifacts, model, budget, *, identity, save) -> dict:
     context = await asyncio.to_thread(_Analysis, source_plan, items_index, artifacts, identity, budget)
-    # Version this pure preparation when its source-view/review planning contract changes.
+    # Preparation pins the plan for this revision, including across planner
+    # changes. Regrouping only happens when no preparation exists for the inputs.
     review_inputs = await asyncio.to_thread(_digest, {
-        "planner": "source-review-requests-v1", "source_plan": source_plan, "items_index": items_index,
+        "planner": "source-review-requests-v4", "source_plan": source_plan, "items_index": items_index,
         "identity": identity, "budget": budget.spec(),
     })
 
@@ -760,13 +849,16 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     decisions, relations = [], list(context.relations.values())
     unverified, associated_only = set(), {candidate["candidate_id"] for candidate in candidates}
     completed = [result for result in [*source_reviewed, *reviewed] if result]
-    required_ranges = {r["range_id"] for pack in context.packs.values() for r in pack["body"]
-                       if r["range_id"] not in host_reviewed_ranges(pack)}
-    required = {"range": required_ranges, "item": set(context.items),
+    required = {"range": context.review_targets, "item": set(context.items),
                 "relation": {r["relation_id"] for r in relations} - unverified,
                 "decision": {d["decision_id"] for d in decisions}}
     coverage = {name: {identity for result in completed for identity in result[f"reviewed_{name}_ids"]}
-                for name in required}
+                for name in required if name != "range"}
+    coverage["range"] = set()
+    for payload, result in zip(source_reviews, source_reviewed, strict=True):
+        if result:
+            assigned = {entry["range_id"] for entry in payload["dispositions"]}
+            coverage["range"].update(assigned.intersection(result["reviewed_range_ids"]))
     missing = {name: sorted(ids - coverage[name]) for name, ids in required.items() if ids - coverage[name]}
     joint_candidates = {c["candidate_id"] for payload, result in zip(joint, reviewed, strict=True)
                         if result for c in payload["candidates"]}

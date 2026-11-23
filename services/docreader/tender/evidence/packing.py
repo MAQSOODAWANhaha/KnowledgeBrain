@@ -240,7 +240,7 @@ class SupportingIndex:
             candidates = {candidate["range_id"]: candidate for values in self.conditions.values()
                           for _, candidate in values}
             for decision in scope_decisions:
-                if decision["decision"] != "bind":
+                if decision["decision"] != "bind" or self.by_id.keys().isdisjoint(decision["target_range_ids"]):
                     continue
                 source = self.by_id.get(decision["range_id"], candidates.get(decision["range_id"]))
                 if source is None:

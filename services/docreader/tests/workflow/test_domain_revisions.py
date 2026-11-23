@@ -334,16 +334,22 @@ async def test_expired_worker_cannot_aput_or_aput_writes_after_new_executor_take
             assert not any(value == "stale overwrite" for _, _, value in readback.pending_writes)
 
 
-async def correction_input(store):
+async def correction_input(store, *, cross_pack=False):
     from docx import Document
     from docreader.tender.evidence import EvidenceRepository, freeze_sources, plan_sources, register_manifest
     from docreader.tender.requirements import validate_item_correction
+    from docreader.tender.schema import issue
 
     documents = []
     for number in range(2):
         path = store.test_artifacts.root / f"correction-source-{number}.docx"
         document = Document()
+        if cross_pack and number == 0:
+            document.add_heading("Contract requirements", level=1)
         document.add_paragraph(f"Project name: administrative building {number}.")
+        if cross_pack and number == 0:
+            document.add_heading("Award conditions", level=1)
+            document.add_paragraph("Only if the bidder is awarded the contract.")
         document.save(path)
         documents.append({"document_id": f"document-{number}", "document_version": "submitted",
                           "role": "main" if number == 0 else "attachment", "path": str(path)})
@@ -352,7 +358,7 @@ async def correction_input(store):
     command = (await store.get_run(run["run_id"]))["commands"][0]
     lease = await store.acquire(run["run_id"], command["command_id"], 1)
     frozen = await freeze_sources(registered, store.test_artifacts, plan=False)
-    plan_ref = await plan_sources(frozen, store.test_artifacts)
+    plan_ref = await plan_sources(frozen, store.test_artifacts, analysis=cross_pack)
     plan = store.test_artifacts.read_json(plan_ref)
     repository = EvidenceRepository(store.test_artifacts)
     extractions, inline = [], []
@@ -361,7 +367,9 @@ async def correction_input(store):
         result = {"schema_version": 2, "items": [], "relations": [], "dispositions": [{"range_id": source["range_id"], "status": "non_item",
                   "reason": "The source identifies the project name and contains no supplier obligation.",
                   "item_ids": []} for source in pack["body"]], "issues": []}
-        extractions.append({"pack_id": entry["pack_id"], "artifact_ref": store.test_artifacts.put_json(validate_item_correction(pack, result))})
+        host_issues = [issue("extraction_optional_fields_unresolved", "Existing host concern remains open.")] if cross_pack else []
+        value = validate_item_correction(pack, result, issues=host_issues)
+        extractions.append({"pack_id": entry["pack_id"], "artifact_ref": store.test_artifacts.put_json(value)})
         result["dispositions"][0]["reason"] = "Administrative building is the project name, not an obligation on a bidder."
         inline.append({"pack_id": entry["pack_id"], **result})
     requirements = store.test_artifacts.put_json({"schema_version": 2, "packs": extractions, "counts": {"packs": len(extractions)}})
@@ -370,6 +378,71 @@ async def correction_input(store):
     await store.commit_artifact(lease, "extract", requirements)
     await store.release(lease, "blocked")
     return run, requirements, {"schema_version": 2, "packs": inline}
+
+
+async def test_worker_revalidates_cross_pack_correction_against_immutable_baseline(store, monkeypatch):
+    from docreader.integrations.cli import _correction_ref
+    from docreader.tender.evidence import EvidenceRepository, planner
+    from docreader.tender.requirements.correction import CORRECTION_FIELDS
+    from docreader.workflow.nodes import TenderNodes
+
+    monkeypatch.setattr(planner, "MAX_EXTRACT_BODY_RANGES", 1)
+    run, baseline, _ = await correction_input(store, cross_pack=True)
+    artifacts = store.test_artifacts
+    first = await store.get_run(run["run_id"])
+    refs = {row["stage"]: row["artifact_ref"] for row in first["artifacts"]}
+    plan = artifacts.read_json(refs["pack-plan"])
+    repository = EvidenceRepository(artifacts)
+    source_packs = [repository.load_pack(entry) for entry in plan["packs"] if entry["document_id"] == "document-0"]
+    owner, = [pack for pack in source_packs if any("administrative building" in source["text"] for source in pack["body"])]
+    anchor_pack, = [pack for pack in source_packs if any("awarded the contract" in source["text"] for source in pack["body"])]
+    body, = [source for source in owner["body"] if "administrative building" in source["text"]]
+    anchor, = [source for source in anchor_pack["body"] if "awarded the contract" in source["text"]]
+    assert owner["pack_id"] != anchor_pack["pack_id"]
+    assert anchor["range_id"] not in {source["range_id"] for source in owner["supporting"]}
+
+    old_packs = {entry["pack_id"]: entry["artifact_ref"] for entry in artifacts.read_json(baseline)["packs"]}
+    fields = []
+    for pack_id, ref in old_packs.items():
+        value = artifacts.read_json(ref)
+        fields.append({"pack_id": pack_id, **{key: value[key] for key in CORRECTION_FIELDS}})
+    changed, = [pack for pack in fields if pack["pack_id"] == owner["pack_id"]]
+    item_id = f"{owner['pack_id']}:i1"
+    evidence = [{"range_id": source["range_id"], "quote": source["text"]} for source in (body, anchor)]
+    changed["items"].append({"item_id": item_id, "kind": "obligation", "text": "Applies upon award.", "evidence": evidence})
+    disposition, = [row for row in changed["dispositions"] if row["range_id"] == body["range_id"]]
+    disposition.update(status="items", reason="Cited original body.", item_ids=[item_id])
+    expected = _correction_ref(artifacts, first, 1, 1, baseline["sha256"], {"schema_version": 2, "packs": fields})
+
+    # A caller writing an artifact directly cannot replace host-derived metadata.
+    supplied = artifacts.read_json(expected)
+    for entry in supplied["packs"]:
+        value = artifacts.read_json(entry["artifact_ref"])
+        value.update(host_issue_ids=["forged-host-id"], source_ranges={"forged-range": {}})
+        entry["artifact_ref"] = artifacts.put_json(value)
+    direct_ref = artifacts.put_json(supplied)
+    await store.correct(run["run_id"], 1, 1, baseline["sha256"], direct_ref, "direct-correction", "Add the frozen award condition.")
+    submitted = await store.get_run(run["run_id"])
+    command, = submitted["commands"]
+    lease = await store.acquire(run["run_id"], command["command_id"], 1)
+    output = await TenderNodes(store, artifacts, lease, model=object()).extract(
+        {"pack_plan_ref": refs["pack-plan"], "frozen_ref": refs["freeze"]}
+    )
+
+    assert output["items_ref"] == expected
+    current = {entry["pack_id"]: entry["artifact_ref"] for entry in artifacts.read_json(expected)["packs"]}
+    assert {key: ref for key, ref in current.items() if key != owner["pack_id"]} == {
+        key: ref for key, ref in old_packs.items() if key != owner["pack_id"]
+    }
+    result = artifacts.read_json(current[owner["pack_id"]])
+    assert result["items"][0]["evidence"] == evidence
+    assert result["source_ranges"][anchor["range_id"]]["body"] is False
+    assert result["host_issue_ids"] == artifacts.read_json(old_packs[owner["pack_id"]])["host_issue_ids"]
+    assert "forged-range" not in result["source_ranges"]
+    current_run = await store.get_run(run["run_id"])
+    saved, = [entry for entry in current_run["artifacts"] if entry["stage"] == "extract"]
+    assert saved["artifact_ref"] == expected
+    assert not current_run["usage"]
 
 
 async def test_cli_correction_validates_complete_inline_packs_and_replays_idempotently(store, tmp_path, monkeypatch):

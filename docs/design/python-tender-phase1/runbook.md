@@ -34,6 +34,8 @@ VLM 独立配置 `KNOWLEDGEBRAIN_VLM_BASE_URL/API_KEY/MODEL`，不继承 Chat �
 本轮私有真实 PDF 验收使用父任务已明确的 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=131072`；
 它是单请求窗口，不能替代累计实际 usage，也不允许纠错自行翻倍。
 
+v2 文本抽取要求 Chat 路由支持严格 JSON Schema。请求格式及发送边界见[业务工作流](business-workflow.md#当前发送边界)。
+
 分别启动两个进程：
 
 ```sh
@@ -67,6 +69,8 @@ manifest 示例（路径相对 manifest 文件；首次提交会复制原件）�
 ```
 
 以下 CLI 对当前 v2 源码或已更新为 v2 的镜像执行；`confirm` 不生成响应计划。
+
+业务人员已确认必要但尚未取得的附件，用固定 ID 列在 `expected_document_ids`，在取得原件前不加到 `documents`，用 `revise` 提交。补齐时在 `documents` 以同一个 ID 登记原件及其角色。登记问题和草稿边界见[业务工作流](business-workflow.md#状态修订与恢复)。
 
 ```sh
 uv run --frozen python -m docreader.integrations.cli submit manifest.json --request-key submission-001

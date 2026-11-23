@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from docreader.llm.budget import RequestBudget
 from docreader.tender.prompts import get_prompt
 from docreader.tender.schema import Decision, SourceView, TenderItem
 
@@ -71,6 +72,41 @@ def test_table_quotes_remain_visible_in_literal_cells_and_amendments_keep_retain
     assert correct["payload"]["items"] == wrong["payload"]["items"]
     assert correct["payload"]["decisions"][0]["amendment"]["retained_rules"]
     assert not wrong["payload"]["decisions"][0]["amendment"]["retained_rules"]
+
+
+def test_shared_consequence_names_each_trigger_in_the_extraction_contract(tmp_path):
+    dataset = corpus()
+    template = next(case for case in dataset["cases"] if case["case_id"] == "within-range-omission-incorrect")
+    original = "投标人提交伪造的验收记录或未提交溯源报告的，均取消中选资格。"
+    template["category"] = "shared_consequence_triggers"
+    payload = template["payload"]
+    source = payload["source_views"][0]["body"][0]
+    source["text"] = original
+    evidence = [{"range_id": source["range_id"], "quote": original}]
+    item_id = payload["items"][0]["item_id"]
+    payload["dispositions"][0]["reason"] = "本段列明取消中选资格的两个条件。"
+    dataset["cases"] = []
+    for verdict, trigger, rationale in (
+        ("consistent", "提交伪造的验收记录或未提交溯源报告", "两项独立触发情形均可从事项本身读出。"),
+        ("incorrect", "材料不合规", "引文保留两项触发情形，事项内容省略了具体条件。"),
+    ):
+        case = deepcopy(template)
+        case["case_id"] = f"shared-consequence-triggers-{verdict}"
+        case["payload"]["items"] = [{"item_id": item_id, "kind": "consequence_rule",
+            "text": f"{trigger}时，取消中选资格。", "evidence": evidence,
+            "consequence": {"effect": "取消中选资格", "trigger": trigger}}]
+        case["expected"].update(verdict=verdict, rationale=rationale, source_evidence=evidence,
+                                affected_item_ids=[item_id] if verdict == "incorrect" else [])
+        dataset["cases"].append(case)
+
+    assert evaluation.prepare_evaluation(tmp_path / "shared-triggers", json.dumps(dataset).encode(),
+                                         get_prompt("verify").encode()) == 2
+    budget = RequestBudget(prompts={"extract": get_prompt("extract")})
+    request = budget.request("extract", {"schema_version": 2, "work_unit_id": payload["work_unit_id"],
+                                         "source_views": payload["source_views"], "issues": []})
+    system = " ".join(request["messages"][0]["content"].split())
+    assert "State each alternative factual trigger explicitly in the item text or consequence.trigger." in system
+    assert "A shared consequence may use one item if every alternative and its scope remain explicit." in system
 
 
 @pytest.mark.parametrize("damage", ["duplicate_range", "quote", "item", "annotation", "answer_leak"])
