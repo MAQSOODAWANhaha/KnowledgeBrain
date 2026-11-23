@@ -33,8 +33,7 @@
 新协议真实验证使用独立新运行，保留旧运行和全部回执。模型纠正只针对未接受的合同失败，
 不自动修正既有业务结论，不替用户确认。
 
-本入口不会接入 Rust，也不会切换现有任务。Python 可与同一安装共用 PostgreSQL 数据库及
-Redis，保留自己的运行表、checkpoint 和队列命名空间。所有 worker、dispatcher、CLI
+Python 工作流与 Rust API 共用同一 PostgreSQL 数据库及 Redis，通过 `TenderBridge` gRPC 桥接承接网页端分析与编制命令，保留独立的运行表、checkpoint 和队列命名空间。所有 worker、dispatcher、CLI
 必须看到同一 artifact root。文件存储必须持久化；
 队列 Redis 结果 TTL 不承担业务持久性。
 
@@ -59,9 +58,7 @@ uv run --frozen python -m docreader.integrations.cli init
 `TENDER_DATABASE_URL`/`TENDER_REDIS_URL` 仍供显式隔离测试或运维覆盖，Compose 不要求它们。
 VLM 独立配置 `KNOWLEDGEBRAIN_VLM_BASE_URL/API_KEY/MODEL`，不继承 Chat 的地址、密钥或模型；
 即使使用同一服务，也须显式填写三项。缺少 VLM 配置仅在需要图片处理时阻断。
-不把秘密写入 manifest、git 或命令输出。CHAT 上下文容量必须为实际服务支持值。
-本轮私有真实 PDF 验收使用父任务已明确的 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS=131072`；
-它是单请求窗口，不能替代累计实际 usage，也不允许纠错自行翻倍。
+不把秘密写入 manifest、git 或命令输出。`KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS`（例如 `131072`）必须填实际服务支持的单请求上下文窗口，不能替代累计实际 usage，也不允许纠错自行翻倍。
 
 分别启动两个进程：
 
@@ -179,7 +176,7 @@ uv run --frozen python -m docreader.integrations.cli review-scope <run_id> scope
 旧确认失效。来源/预算变更不得复用旧分包回执。无有效证据、空理由、错误目标、非当前
 问题或过期基线拒绝；人工作用域决议还须连同原文及目标进入独立核验。
 自动化验收仍使用隔离测试数据库/schema，不能在共享业务表上运行测试清理。
-新表结构尚未发布，不对旧未发布 checkpoint 建立迁移兼容。
+表结构演进统一通过 `migrations/` 新增时间戳 SQL 迁移；不对未发布的历史实验 checkpoint 建立兼容。
 
 correct 拒绝过期基线和 cancelled run，已冻结来源保持不变。旧确认立即失效；新修订通过
 独立验证后再次等待确认。相同 request key/相同内容幂等；不能以 unchanged manifest
@@ -199,11 +196,11 @@ Rust、数据库和原 DocReader 服务。当前 overlay 路径如下，换安�
 tender_compose() {
   docker compose --env-file deploy/.env \
     -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml \
-    -f /tmp/kb-workflow-start-g8vpogcy/model-relay.yml \
     --profile python-tender "$@"
+  # 若安装环境有私有网络/模型中继 overlay，在此追加 -f <path/to/private-overlay.yml>
 }
 
-kb_tender_build_dir=$(mktemp -d /tmp/kb-tender-build-XXXXXX)
+kb_tender_build_dir=$(mktemp -d)
 tender_compose build --print --build-arg APT_MIRROR=debian \
   python-tender-worker > "$kb_tender_build_dir/build.json"
 docker buildx bake --allow=network.host -f "$kb_tender_build_dir/build.json" \
@@ -231,7 +228,7 @@ docker compose --env-file deploy/.env \
 
 CLI 的 status、review-scope、correct、confirm 使用同一个服务入口和 artifact 卷。
 镜像构建时已安装锁定依赖，容器角色及 CLI 使用 `--no-sync`，运行时无需访问包索引。
-默认 docreader 镜像 CMD 仍是原 `main.py` gRPC。使用私有网络/凭证控制独立入口，尚无 Rust 权限 API。
+默认 docreader 镜像 CMD 是 `main.py` gRPC（同时承载解析与 `TenderBridge`）。网页端经 Rust `/api/v3/tender-projects` 校验登录与创建人归属后转发；CLI 独立运维入口须限制在私有网络与受控凭证内。
 
 ## 自动验收
 
@@ -254,7 +251,9 @@ uv build --wheel
 生成一份持久合成实际产物供人工检查（仅测试模型，无外部调用）：
 
 ```sh
-uv run --frozen python tests/acceptance/run_sample.py --root /tmp/tender-sample --evidence /tmp/tender-evidence
+uv run --frozen python tests/acceptance/run_sample.py \
+  --root /opt/workspace/kb-tender-evidence/tender-sample \
+  --evidence /opt/workspace/kb-tender-evidence/tender-evidence
 ```
 
 该命令使用 `TENDER_TEST_DATABASE_URL`；确认后终态为 `analysis-ready`，输出运行、事项索引、

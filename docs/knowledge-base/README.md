@@ -26,8 +26,6 @@ Workspace 按创建人隔离，产品、资料与派生成果继承其归属。A
 - 领域与招标端口：[`domain.md`](domain.md)（§1.4 产品问答 vs 招标证据）
 - crate 目录、ingest 真源、embedding 冻结：[`crate.md`](crate.md)
 
-仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)。
+## 与编制验收的关系
 
-## 计划
-
-知识库可靠性工作由[本域计划](../../plans/knowledge-base/README.md)独立管理。招投标的匹配与填充验收状态由 [Python 交接文档](../design/python-tender-phase1/handoff.md) 记录；知识库模块测试不代替完整编制验收。
+招投标的匹配与填充验收状态由 [Python 交接文档](../design/python-tender-phase1/handoff.md) 记录；知识库模块测试不代替完整编制验收。

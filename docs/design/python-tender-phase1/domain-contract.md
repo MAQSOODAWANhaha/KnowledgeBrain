@@ -2,8 +2,7 @@
 
 字段名、类型、可选性及枚举以[唯一字段字典](field-dictionary.md)为准，本文说明接口、职责和
 执行边界，不另定义同义结构。大型 JSON 仅在内容寻址文件中持久化，checkpoint 只存文件引用。
-以下区分工作区v2主线、共享接口和历史独立工具。五节点及新协议已实现，本轮尚未更新
-部署或发起付费调用，旧历史产物保持原义；测试和运行事实以[交接](handoff.md)为准。
+以下区分工作区 v2 主线、共享接口和历史独立工具。五节点及新协议已在工作区实现，旧历史产物保持原义；部署与实测状态以[交接](handoff.md)为准。
 
 ## 最新一期主线：完整分析招标文件（工作区已实现）
 
@@ -59,7 +58,6 @@ associate 只提交有证据的 Decision 提案；独立 review 须逐条审阅�
 自然语言义务、数字归属、比较关系、条件/例外、作用域、冲突及引用含义由带完整来源
 上下文的 LLM 独立核验及必要的人工裁决确定。宿主校验结构、来源定位、覆盖、身份版本、
 预算和执行状态；正则和词表不能作为最终语义裁判。模型空 findings 不能清除既有宿主问题。
-当前语言启发式及其局限见[职责边界与规则审查](semantic-review.md)。
 
 ### 状态、确认与回执
 
@@ -209,7 +207,7 @@ target_kind 为 body/table_field/attachment/manual_action；target 是具体位�
 ## 历史正确性评审合同（2026-10-14，保留依据）
 
 以下保留此前针对六阶段实现的约束目标及依据；计划相关目标不纳入新一期。字面及词表
-检查的局限及分析阶段已实现的独立审阅路径以上文及[规则审查](semantic-review.md)为准；
+检查的局限及分析阶段已实现的独立审阅路径以上文及[业务工作流](business-workflow.md)为准；
 来源解析与旧独立工具的历史启发式仍保留，新流程真实模型语义验收未完成。
 
 - 验证模型的 `blocking` 只能提高阻断级别。宿主对漏项、证据/数字/条件/适用性/冲突等
@@ -228,4 +226,4 @@ target_kind 为 body/table_field/attachment/manual_action；target 是具体位�
 真实 PDF 离线预检的原件、解析正文、图片和冻结包只写私有目录；Git 只收摘要 hash、计数、
 页码、问题类别、覆盖断言与 token 估算方法。估算不是模型实际用量，OCR 未执行不能写成功。
 
-最新结构分包与各层内容去重合同见 [packing-review](packing-review.md)。旧分包inline body/supporting持久格式与verify回显requirements均待按新合同替换，不作为最终实现。
+最新结构分包与各层内容去重合同以[业务工作流](business-workflow.md)和[字段字典](field-dictionary.md)为准。旧分包 inline body/supporting 持久格式与 verify 回显 requirements 不作为当前实现。

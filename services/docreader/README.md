@@ -1,16 +1,14 @@
 # DocReader
 
-KnowledgeBrain 解析进程。协议 **仅 gRPC**（`services/docreader/proto/docreader.proto`）。
+KnowledgeBrain Python 解析与招标桥接进程。协议 **仅 gRPC**（`services/docreader/proto/docreader.proto`）。
 
-- `ReadStream`：默认。第一帧 `meta`（markdown / metadata / error / image_count），之后每帧一张 `ImageRef`。
-- `Read`：一元回退。
-- `ListEngines`
+- `ReadStream`：默认文档解析流。第一帧 `meta`（markdown / metadata / error / image_count），之后每帧一张 `ImageRef`。
+- `Read`：一元解析回退。
+- `ListEngines`：列出可用解析引擎。
+- `TenderBridge.Command`：鉴权后的招标业务桥接命令（要求显式配置 `GRPC_AUTH_TOKEN`，详见 `services/docreader/main.py`）。
 
-本进程 **不分块、不 OCR、不写对象存储、不写业务库**。扫描页只出 JPEG；OCR/caption 在 Rust worker。
-
-同一工程新增显式启动的 [Python 招标第一期独立工作流](../../docs/design/python-tender-phase1/README.md)，
-拥有独立的 OCR/要求抽取/验证/确认/响应计划路径。它使用 LangGraph、PostgreSQL、Dramatiq/Redis，
-不改变上述默认 gRPC 进程或现有 Rust 执行链路。入口与验证见 [独立启动手册](../../docs/design/python-tender-phase1/runbook.md)。
+纯解析路径（`Read` / `ReadStream`）**不分块、不 OCR、不写对象存储、不写业务库**；扫描页只出 JPEG，知识库 OCR/caption 在 Rust worker。
+招标分析与编制由同工程的 [Python 招标工作流](../../docs/design/python-tender-phase1/README.md) 承担（LangGraph + PostgreSQL + Dramatiq/Redis），独立启动与运维见 [运行手册](../../docs/design/python-tender-phase1/runbook.md)。
 
 ## 引擎
 
@@ -26,12 +24,12 @@ KnowledgeBrain 解析进程。协议 **仅 gRPC**（`services/docreader/proto/do
 
 | 变量 | 含义 |
 |---|---|
-| `DOCREADER_PORT` | 默认 `50051` |
-| `GRPC_AUTH_TOKEN` | 可选；客户端带 `Authorization: Bearer` |
+| `DOCREADER_GRPC_PORT` | gRPC 监听端口，容器内默认 `50051`（本地 overlay 宿主端口 `15051`；兼容回退 `PORT`） |
+| `GRPC_AUTH_TOKEN` | 解析可选鉴权；`TenderBridge.Command` 必填，客户端带 `Authorization: Bearer` |
 | `GRPC_TLS_ENABLED` | 可选 TLS |
 | `MAX_FILE_SIZE_MB` | 默认 50 |
 
-Worker 通过 `DOCREADER_ADDR` 拨号。MinerU / Paddle 在 Rust `docparser`，不在本进程。
+Worker 通过 `DOCREADER_ADDR` 拨号。MinerU / Paddle HTTP 引擎配置在 Rust `docparser`，不在本进程。
 
 ## Source contract V2
 
@@ -69,23 +67,7 @@ both gRPC response modes. `parse_into_text` is the internal extraction stage.
 `parser_version` fingerprints the serializer implementations. A source change,
 parser change or later OCR result requires a newly frozen input rather than an
 in-place mutation of evidence. The recorded cross-language fixture is generated
-by `scripts/generate_source_contract_fixtures.py` and validated by Rust tests.
-
-## HTTP engine configuration
-
-The Rust catalog and converter share `resolve_effective_engine_config`:
-
-| Engine | Endpoint override | Optional bearer override |
-| --- | --- | --- |
-| `mineru` | `mineru_endpoint` | `mineru_api_key` |
-| `paddleocr_vl` | `paddleocr_vl_endpoint` | `paddleocr_vl_token` |
-
-Overrides take precedence over the corresponding process configuration, including
-an explicitly empty override which disables fallback. Endpoints require HTTP(S)
-without embedded credentials, queries or fragments. Authentication is never part
-of a source receipt. Cloud engine names are explicitly unsupported until their
-provider-specific protocols are implemented; cloud keys cannot enable or reroute
-the self-hosted protocol.
+by `services/docreader/scripts/generate_source_contract_fixtures.py` and validated by Rust tests.
 
 ## PDF chapter and symbol fidelity
 

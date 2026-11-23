@@ -69,9 +69,9 @@ Python init只读核验业务表并初始化LangGraph checkpoint；DocReader与�
 
 ## 招投标编辑接入状态
 
-OnlyOffice 不属于招标读取／Discover／Organize／Check 的前置条件。需要编辑时显式启用
+ONLYOFFICE 不是招标分析和大纲生成的前置条件。需要编辑时显式启用
 `editing` profile，提供其 JWT/能力密钥及浏览器/API origin；没有固定秘密回退。
-其现有业务与验收边界见 [接入计划](../plans/bidding/onlyoffice-integration.md)。
+编辑、保存和验收要求见 [ONLYOFFICE](../docs/bidding/onlyoffice.md)。
 
 ## 数据库初始化与升级
 
@@ -131,7 +131,7 @@ API、Rust worker及retention；Python角色command严格校验，不注入Rust�
 
 字段 exact、`additionalProperties=false`，images key set 固定，JSON 键顺序由 JCS 规范化。`release_revision` 使用 exact ASCII grammar `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`（1～128 bytes，不 trim/normalize）。`release_descriptor_sha256=SHA256("KB:ReleaseDescriptor:v1\0" || RFC8785_JCS(document))` 是整组组件 identity，不把多个 image 误称为“一个 image digest”。入口复用平台 typed validator/JCS，并核对 Compose 同目录的 checked schema 与编译内嵌合同一致；缺文件、重复字段或合同漂移均拒绝。
 
-宿主发布入口为 `knowledgebrain-release`，边界和当前候选门槛见[发布入口](../docs/bidding/release-entry.md)。旧本机结果不等于候选或生产放行。从审核后的候选构建并将 binary 安装到 PATH：
+宿主发布入口为 `knowledgebrain-release`，边界和当前候选门槛见[发布入口](release-entry.md)。旧本机结果不等于候选或生产放行。从审核后的候选构建并将 binary 安装到 PATH：
 
 ```bash
 cargo build --locked --release -p platform --bin knowledgebrain-release
@@ -156,7 +156,7 @@ DocReader与两个Python角色并确认健康，最后启动API/Worker/Retention
 
 发布工具在宿主侧验证实际镜像及健康探针，不向数据库写入 release receipt；应用不要求 descriptor 环境变量或挂载。已有部署不一致时拒绝自动替换；全部服务符合时只检查，不重新初始化或启动。失败只停止本次标签且 project 一致的容器，保留既有容器与数据卷。
 
-checked-in `release-descriptor-v1.development.json` 仅用于离线工具测试；其 synthetic digest 不证明本地 image 的实际 RepoDigest，标准 Compose 不读取它。旧 `docker-compose.pro.yml` 和 `.env.example` 中的 tag 发布配置已删除。验证范围、可复现命令及剩余验收见[发布入口验证](../docs/bidding/release-entry.md)。
+checked-in `release-descriptor-v1.development.json` 仅用于离线工具测试；其 synthetic digest 不证明本地 image 的实际 RepoDigest，标准 Compose 不读取它。旧 `docker-compose.pro.yml` 和 `.env.example` 中的 tag 发布配置已删除。验证范围、可复现命令及剩余验收见[发布入口验证](release-entry.md)。
 
 `api`、`worker`、`retention` 都等待 `migrate` 成功。应用进程启动时只连接依赖，不执行
 DDL。重启使用：
@@ -222,9 +222,9 @@ OnlyOffice 的浏览器 origin。
 
 ## 健康与验收
 
-以下仅记录已存在、获准保留的实现增量与历史本地验证，不代表本轮重跑或整体运行验收。方案已确认；普通实施与隔离开发验证的任务及授权边界见[实施台账](../plans/implementation-tasks.md)，不含采购、生产部署、现有数据操作或提交。
+以下列出已有的健康接口和验证入口，不代表本轮重跑或整体运行验收。
 
-`schema-contract` 验证全新 DDL 与重复初始化行为，旧 catalog/receipt 漂移测试已删除。业务清理验收继续按 [平台 §6](../plans/platform/runtime-foundation.md#6-retention-consumer) 区分交接、实际消费和最终回收；不得削弱引用保护、幂等和失败恢复断言。
+`schema-contract` 验证全新 DDL 与重复初始化行为，旧 catalog/receipt 漂移测试已删除。对象清理验收区分交接、实际消费和最终回收；不得削弱引用保护、幂等和失败恢复断言。
 
 - `GET /live`：进程存活；
 - `GET /ready`：PostgreSQL、维护门和 queue registry 可用；
@@ -232,4 +232,4 @@ OnlyOffice 的浏览器 origin。
 - `crates/platform/tests/fresh_database_postgres.rs`：显式隔离空库验证当前业务表、无数据库业务授权函数与重复初始化。
 - Python workflow/acceptance：隔离 PostgreSQL 验证租约、回执、归属和编制流程，合成模型测试不等于真实模型质量验收。
 
-Release 必须由 named required jobs `schema-contract`, `queue-faults`, `outline-scripted-e2e`, `web-export-e2e`, `release-descriptor` 执行。依赖缺失、测试为零、ignored/skipped suite 或 cleanup 失败均使 job 失败；目前仅已接入上述 `schema-contract`，其余 required jobs 尚未齐备；只能称 development checks，不得称 release accepted。
+Release 必须由 named required jobs `schema-contract`, `queue-faults`, `outline-scripted-e2e`, `web-export-e2e`, `release-descriptor` 执行。依赖缺失、测试为零、ignored/skipped suite 或 cleanup 失败均使 job 失败；目前 CI 已接入 `schema-contract` 与 `queue-faults`，其余 required jobs 尚未齐备；只能称 development checks，不得称 release accepted。

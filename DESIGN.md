@@ -2,7 +2,7 @@
 
 外壳是冷灰仪器盘：日光下长时间核对招标与稿件用的工作台。密、静、发丝线，钢蓝只标当前选中、主按钮和焦点。本文只约束 Web 外壳，不强加到 ONLYOFFICE 或 DOCX 正文。
 
-已废止并不再保留：TokHub / Apple 高质感白、暖纸原型、`web/prototype`、`docs/design/frontend-workbench-preview.html`。稿件保存、锚点、下载和编制行为仍以 [frontend-workbench-design.md](docs/design/frontend-workbench-design.md) 为准。页面几何与交互只以本文为准。
+稿件保存、锚点、下载和编制行为以 [frontend-workbench-design.md](docs/design/frontend-workbench-design.md) 为准。页面几何与交互以本文为准。
 
 ## 1. Visual Theme
 
@@ -51,7 +51,7 @@ PingFang SC / -apple-system / Noto Sans SC。禁止 runtime Google Fonts。
 
 ## 4. Components
 
-Vite + React 19 + Tailwind v4 + shadcn。图标 Tabler。正文 ONLYOFFICE。
+Vite + React 19。壳用 Astryx（`@astryxdesign/core`、`theme-neutral`）。正文 ONLYOFFICE。
 
 - 壳：grid 顶栏 48、左栏 240、主列 1fr
 - 按钮高 32、圆角 6。主按钮 Steel 填实。次按钮白底发丝线。危险只用 Stop 字色
@@ -121,7 +121,7 @@ testid：`wizard-files|authoring|export`、`login-*`、`new-bid`、`upload-drop`
 
 ## 9. Framework
 
-- 壳：Tailwind + shadcn
+- 壳：Astryx
 - 图标：Tabler
 - 不用：Mantine、Ant、Lucide 换图标、Markdown textarea 当正式正文
 - token 只写在 `web/src/app.css` 的 `@theme` 与 `:root`。工作台 CSS 引用这些变量，不写另一套蓝
