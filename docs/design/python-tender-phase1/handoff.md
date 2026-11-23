@@ -4,6 +4,7 @@
 
 ## 现在
 
+- W0 工作区收口完成（M1）。2026-11-22 按主题提交 `2f7d90e`、`8b2033d`、`e8be168`、`32f1eb0`、`df67c83`。提交前全量回归：DocReader 单测、workflow 与 acceptance 在隔离 PostgreSQL/Redis 上，分析快照 4,239 项、编制快照 4,261 项全部通过；前端单测 80 项、e2e 138 项通过；Rust api、platform 单测及已保存版本 PDF 的隔离 HTTP 用例通过；ruff 通过，pyright 1,920 个，低于基线 1,921。收口中修复 [BUG-299](bug-fix.md#bug-299作用域修订后普通查漏请求看不到人工结论重复报出已审疑点) 和 [BUG-300](bug-fix.md#bug-300窄屏打开的核对栏被-word-工具栏遮住无法收起)，并补齐过期的验收夹具。真实文件未因本次收口重跑。
 - [BUG-289](bug-fix.md#bug-289v3-工作台缺少按已保存-word-版本导出-pdf-的入口) 已接通并在隔离 V3 验证。安服 D5 核对稿打开后实际编辑，ONLYOFFICE 签名保存回调落库为 v2，重开实读 v2。切到 v2 后分别下载 v1 和 v2 的 DOCX 和 PDF，每次转换实读对应 DOCX 字节，测试修改仅在 v2 出现。收据见 `/opt/workspace/kb-tender-evidence/bug-289-anfu-v3-live-WXGimf/run-816650a4dd/result.json`。仅 `docx.outline` 使用隔离桩，模型发送为零，临时资源已清理。API 单测 35 项、相关隔离 PostgreSQL HTTP 回归、平台 60 项及真实 MinIO 回归、前端 80 项单测和 11 项 Chromium 回归通过。生产部署待执行。
 - 安服整稿业务验收继续进行。715 条正式事项全部进入实际 Word 响应位置或 ZIP 待办，11 张原式表与冻结网格的行列、合并和文字一致。确认原件 P107 的标题后半行被错放为正文，已登记 [BUG-298](bug-fix.md#bug-298原式折行标题在-word-目录中被截断)。资格、否决、评分、报价和必交结构仍需按独立原文清单逐项裁决，并完成固定同源旧链对照。证据见 `/opt/workspace/kb-tender-evidence/w2-anfu-d5-minimum-audit-NnN0Y2Nk/source-ledger-word-audit.private.md`。
 - 安服 D5 事项归属核对稿沿用同一台账完成 [BUG-296](bug-fix.md#bug-296pdf-原式导出字号未换算到页面坐标) 和 [BUG-297](bug-fix.md#bug-297pdf-原式无可测行距时表头压住上边框) 复验。P113 字号由 240 磅恢复为 12 磅，25 个表头字形均在顶边内。6 行 5 列原表、项目栏、盖章和三条表注同在出件 PDF 第 18 页，旧稿跨第 44–50 页。第二列仍因列宽换成两行，文字逐格核对完整，五行填写格全空。
