@@ -2,8 +2,17 @@ import { Badge } from "@astryxdesign/core/Badge";
 import { FileInput } from "@astryxdesign/core/FileInput";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
-import { Table } from "@astryxdesign/core/Table";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { HStack } from "@astryxdesign/core/HStack";
+import { IconButton } from "@astryxdesign/core/IconButton";
+import { Link } from "@astryxdesign/core/Link";
+import { pixel, Table } from "@astryxdesign/core/Table";
+import { Text } from "@astryxdesign/core/Text";
+import { TreeList, type TreeListItemData } from "@astryxdesign/core/TreeList";
+import { VStack } from "@astryxdesign/core/VStack";
+import { Plus } from "lucide-react";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -26,8 +35,14 @@ function notify(msg: string, error = false) {
   else toast.success(msg);
 }
 
+const parseLabels: Record<string, string> = {
+  pending: "排队中", processing: "解析中", finalizing: "建立索引", completed: "已解析",
+  failed: "解析失败", cancelled: "已取消", deleting: "删除中", deleted: "已删除",
+};
+
 function parseStatus(s: string | object): string {
-  return typeof s === "string" ? s : Object.keys(s as object)[0] ?? "";
+  const value = typeof s === "string" ? s : Object.keys(s as object)[0] ?? "";
+  return parseLabels[value] ?? value;
 }
 
 type CreateKind = "folder" | "line" | "product" | "version";
@@ -115,6 +130,9 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
       ls.map(async (line) => [line.id, (await api.products(line.id)).filter((p) => p.kind !== "library")] as const),
     );
     setProductsByLine(Object.fromEntries(rows));
+    const ids = [...ps.map((p) => p.id), ...rows.flatMap(([, products]) => products.map((p) => p.id))];
+    const versions = await Promise.all(ids.map(async (id) => [id, (await api.versions(id)).filter((v) => v.status !== "archived")] as const));
+    setVersionsByProduct((cur) => ({ ...cur, ...Object.fromEntries(versions) }));
   }
 
   useEffect(() => {
@@ -179,14 +197,6 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     };
   }, [selectedProductId, selectedVersionId, ensureVersions]);
 
-  function toggle(id: string) {
-    setOpen((cur) => {
-      const next = new Set(cur);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
 
   async function submitCreate() {
     if (!create || !name.trim()) return;
@@ -327,9 +337,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
         ? "新建产品线"
         : route.kind === "line"
           ? "新建产品"
-          : route.kind === "product" || route.kind === "folder"
-            ? "新建版本"
-            : "上传文档";
+          : "新建版本";
 
   function openCreateFromSelection() {
     if (route.kind === "company") setCreate({ kind: "folder" });
@@ -355,121 +363,63 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
   }
 
   const selected = keyOf(route);
+  const add = (label: string, kind: CreateKind, parentId?: string) => (
+    <IconButton size="sm" variant="ghost" label={label} icon={<Plus size={14} />} onClick={(e) => { e.preventDefault(); e.stopPropagation(); setCreate({ kind, parentId }); }} />
+  );
+  const versionItems = (vs: Version[], href: (v: Version) => string, isSelected: (v: Version) => boolean): TreeListItemData[] =>
+    vs.map((v) => ({ id: `version:${v.id}`, label: v.current ? `${v.label} · 当前` : v.label, href: `#${href(v)}`, isSelected: isSelected(v) }));
+  const catalog: TreeListItemData[] = [
+    {
+      id: "company", label: "公司资料", href: "#/library", isSelected: selected === "company", isExpanded: open.has("company"),
+      endContent: add("新建分类", "folder"),
+      children: folders.map((p) => {
+        const vs = versionsByProduct[p.id] ?? [];
+        return {
+          id: `folder:${p.id}`, label: p.name, href: `#/library/${p.id}`,
+          isSelected: selected === `folder:${p.id}`, isExpanded: open.has(`folder:${p.id}`),
+          endContent: add("新建版本", "version", p.id),
+          children: vs.length > 1 ? versionItems(vs, (v) => `/library/${p.id}/${v.id}`, (v) => route.kind === "folder" && route.versionId === v.id) : undefined,
+        };
+      }),
+    },
+    {
+      id: "lines", label: "产品线", href: "#/products", isSelected: selected === "lines", isExpanded: open.has("lines"),
+      endContent: add("新建产品线", "line"),
+      children: lines.map((l) => ({
+        id: `line:${l.id}`, label: l.name, href: `#/products/${l.id}`,
+        isSelected: selected === `line:${l.id}`, isExpanded: open.has(`line:${l.id}`),
+        endContent: <HStack gap={1} vAlign="center">{(productsByLine[l.id] ?? []).length > 0 && <Badge variant="neutral" label={String((productsByLine[l.id] ?? []).length)} />}{add("新建产品", "product", l.id)}</HStack>,
+        children: (productsByLine[l.id] ?? []).map((p) => {
+          const vs = versionsByProduct[p.id] ?? [];
+          return {
+            id: `product:${p.id}`, label: p.name, href: `#/products/${l.id}/${p.id}`,
+            isSelected: selected === `product:${p.id}`, isExpanded: open.has(`product:${p.id}`),
+            endContent: add("新建版本", "version", p.id),
+            children: vs.length ? versionItems(vs, (v) => `/products/${l.id}/${p.id}/${v.id}`, (v) => route.kind === "version" && route.versionId === v.id) : undefined,
+          };
+        }),
+      })),
+    },
+  ];
 
   return (
     <Shell
       root="assets"
       email={email}
       header={<PageHeader crumbs={crumbs} title={title} actions={
-        route.kind === "doc" ? undefined : route.kind === "version" || (route.kind === "folder" && version) ? (
-          <FileInput label="上传" isMultiple value={null} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list).catch((error) => notify(error instanceof Error ? error.message : "上传失败", true)); }} />
-        ) : (
+        route.kind === "doc" || route.kind === "version" || (route.kind === "folder" && version) ? undefined : (
           <Button type="button" label={createHint} variant="primary" onClick={openCreateFromSelection} />
         )
       } />}
       nav={
         <SideNavSection title="资料目录">
-        <nav className="tree" aria-label="资料目录">
-          <TreeRow
-            depth={0}
-            label="公司资料"
-            href="/library"
-            selected={selected === "company"}
-            expanded={open.has("company")}
-            onToggle={() => toggle("company")}
-            onAdd={() => setCreate({ kind: "folder" })}
-            addTitle="新建分类"
-          />
-          {open.has("company") &&
-            folders.map((p) => {
-              const vs = versionsByProduct[p.id] ?? [];
-              const showVersions = vs.length > 1;
-              return (
-                <div key={p.id}>
-                  <TreeRow
-                    depth={1}
-                    label={p.name}
-                    href={`/library/${p.id}`}
-                    selected={selected === `folder:${p.id}` || selected.startsWith(`folder:${p.id}:`)}
-                    expanded={open.has(`folder:${p.id}`)}
-                    onToggle={() => toggle(`folder:${p.id}`)}
-                    onAdd={() => setCreate({ kind: "version", parentId: p.id })}
-                    addTitle="新建版本"
-                  />
-                  {open.has(`folder:${p.id}`) &&
-                    showVersions &&
-                    vs.map((v) => (
-                      <TreeRow
-                        key={v.id}
-                        depth={2}
-                        label={v.current ? `${v.label} · 当前` : v.label}
-                        href={`/library/${p.id}/${v.id}`}
-                        selected={route.kind === "folder" && route.versionId === v.id}
-                        leaf
-                      />
-                    ))}
-                </div>
-              );
-            })}
-          <TreeRow
-            depth={0}
-            label="产品线"
-            href="/products"
-            selected={selected === "lines"}
-            expanded={open.has("lines")}
-            onToggle={() => toggle("lines")}
-            onAdd={() => setCreate({ kind: "line" })}
-            addTitle="新建产品线"
-          />
-          {open.has("lines") &&
-            lines.map((l) => (
-              <div key={l.id}>
-                <TreeRow
-                  depth={1}
-                  label={l.name}
-                  href={`/products/${l.id}`}
-                  selected={selected === `line:${l.id}` || ("lineId" in route && route.lineId === l.id)}
-                  expanded={open.has(`line:${l.id}`)}
-                  onToggle={() => toggle(`line:${l.id}`)}
-                  onAdd={() => setCreate({ kind: "product", parentId: l.id })}
-                  addTitle="新建产品"
-                  count={(productsByLine[l.id] ?? []).length || undefined}
-                />
-                {open.has(`line:${l.id}`) &&
-                  (productsByLine[l.id] ?? []).map((p) => (
-                    <div key={p.id}>
-                      <TreeRow
-                        depth={2}
-                        label={p.name}
-                        href={`/products/${l.id}/${p.id}`}
-                        selected={selected === `product:${p.id}` || (selected.startsWith("version:") && product?.id === p.id)}
-                        expanded={open.has(`product:${p.id}`)}
-                        onToggle={() => toggle(`product:${p.id}`)}
-                        onAdd={() => setCreate({ kind: "version", parentId: p.id })}
-                        addTitle="新建版本"
-                      />
-                      {open.has(`product:${p.id}`) &&
-                        (versionsByProduct[p.id] ?? []).map((v) => (
-                          <TreeRow
-                            key={v.id}
-                            depth={3}
-                            label={v.current ? `${v.label} · 当前` : v.label}
-                            href={`/products/${l.id}/${p.id}/${v.id}`}
-                            selected={route.kind === "version" && route.versionId === v.id}
-                            leaf
-                          />
-                        ))}
-                    </div>
-                  ))}
-              </div>
-            ))}
-        </nav>
+          <TreeList key={[...open].sort().join("|")} aria-label="资料目录" density="compact" variant="noGuides" items={catalog} />
         </SideNavSection>
       }
     >
-      <div className="wrap stack">
+      <VStack gap={4} padding={6} isScrollable height="100%">
         {err && (
-          <div role="alert"><Banner status="error" title={err} endContent={<Button size="sm" label="重试" onClick={() => void reloadTree()} />} /></div>
+          <div role="alert"><Banner status="error" title="资料目录读取失败，已有资料不会因此被清空。" description={err} endContent={<Button size="sm" label="重试" onClick={() => { setErr(""); void reloadTree().catch((e) => setErr(e instanceof Error ? e.message : "加载失败")); }} />} /></div>
         )}
         {route.kind === "company" && (
           <Pane empty={folders.length === 0} emptyTitle="还没有分类">
@@ -479,7 +429,6 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                 key: p.id,
                 href: `/library/${p.id}`,
                 name: p.name,
-                badge: "分类",
               }))}
             />
           </Pane>
@@ -492,7 +441,6 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                 key: l.id,
                 href: `/products/${l.id}`,
                 name: l.name,
-                badge: "产品线",
               }))}
             />
           </Pane>
@@ -505,7 +453,6 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                 key: p.id,
                 href: `/products/${line.id}/${p.id}`,
                 name: p.name,
-                badge: "产品",
               }))}
             />
           </Pane>
@@ -518,8 +465,8 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                 key: v.id,
                 href: route.kind === "folder" ? `/library/${route.folderId}/${v.id}` : `/products/${route.lineId}/${route.productId}/${v.id}`,
                 name: v.label,
-                badge: v.current ? "当前" : "版本",
-                badgeColor: v.current ? "go" : "gray",
+                badge: v.current ? "当前" : undefined,
+                badgeColor: "go",
               }))}
             />
           </Pane>
@@ -529,12 +476,12 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
         ) : null}
         {(route.kind === "version" || (route.kind === "folder" && Boolean(version))) && (
           <>
-            <FileInput label="把文件拖到这里" mode="dropzone" isMultiple value={null} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list).catch((error) => notify(error instanceof Error ? error.message : "上传失败", true)); }} />
-            <div className="panel">
+            <Card>
+              <FileInput label="上传资料文件" mode="dropzone" isMultiple value={null} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list).catch((error) => notify(error instanceof Error ? error.message : "上传失败", true)); }} />
+            </Card>
+            <Card padding={0}>
               {docs.length === 0 ? (
-                <div className="empty">
-                  <h2>还没有文件</h2>
-                </div>
+                <EmptyState title="还没有文件" description="上传后系统会解析并建立检索，状态显示为「可检索」后即可在编制中引用。" />
               ) : (
                 <NameTable
                   nameHeader="文件"
@@ -544,17 +491,17 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                       key: d.id || d.file_name,
                       href: version?.id ? assetDocHref(route, version.id, d.id) : undefined,
                       name: d.file_name || d.title,
-                      desc: d.error_message || undefined,
+                      desc: d.error_message ? `${failed ? "图片内容未能识别" : "处理失败"}：${d.error_message}` : undefined,
                       badge: failed ? "图像失败" : d.index_ready ? "可检索" : parseStatus(d.parse_status) || "解析中",
-                      badgeColor: failed ? "stop" : d.index_ready ? "go" : "wait",
+                      badgeColor: failed || /^failed$/.test(String(d.parse_status)) ? "stop" : d.index_ready ? "go" : "wait",
                     };
                   })}
                 />
               )}
-            </div>
+            </Card>
           </>
         )}
-      </div>
+      </VStack>
       <Dialog isOpen={!!create} onOpenChange={(open) => { if (!open) setCreate(null); }}>
         <DialogHeader title={create?.kind === "folder" ? "新建分类" : create?.kind === "line" ? "新建产品线" : create?.kind === "product" ? "新建产品" : "新建版本"} onOpenChange={(open) => { if (!open) setCreate(null); }} />
           <form
@@ -563,11 +510,13 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
               void submitCreate();
             }}
           >
-            <TextInput id="asset-name" label="名称" value={name} onChange={setName} hasAutoFocus />
-            <div className="mt-5 flex justify-end gap-2">
-              <Button variant="secondary" type="button" label="取消" onClick={() => setCreate(null)} />
-              <Button type="submit" variant="primary" label="建立" />
-            </div>
+            <VStack gap={4}>
+              <TextInput id="asset-name" label="名称" value={name} onChange={setName} hasAutoFocus />
+              <HStack gap={2} hAlign="end">
+                <Button variant="secondary" type="button" label="取消" onClick={() => setCreate(null)} />
+                <Button type="submit" variant="primary" label="建立" />
+              </HStack>
+            </VStack>
           </form>
       </Dialog>
     </Shell>
@@ -583,87 +532,19 @@ function Pane({
   emptyTitle: string;
   children: ReactNode;
 }) {
-  return (
-    <div className="panel">
-      {empty ? (
-        <div className="empty">
-          <h2>{emptyTitle}</h2>
-        </div>
-      ) : (
-        children
-      )}
-    </div>
-  );
+  return <Card padding={0}>{empty ? <EmptyState title={emptyTitle} description="用页头右上角的按钮新建。" /> : children}</Card>;
 }
+
+const badgeVariant = { sky: "info", gray: "neutral", go: "success", wait: "warning", stop: "error" } as const;
 
 function NameTable({
   nameHeader,
   rows,
 }: {
   nameHeader: string;
-  rows: { key: string; href?: string; name: string; desc?: string; badge: string; badgeColor?: "sky" | "gray" | "go" | "wait" | "stop" }[];
+  rows: { key: string; href?: string; name: string; desc?: string; badge?: string; badgeColor?: keyof typeof badgeVariant }[];
 }) {
-  return <Table hasHover data={rows} columns={[
-    { key: "name", header: nameHeader, renderCell: (row) => <div>{row.href ? <a href={`#${row.href}`}>{row.name}</a> : <strong>{row.name}</strong>}{row.desc ? <div>{row.desc}</div> : null}</div> },
-    { key: "badge", header: "状态", renderCell: (row) => <Badge label={row.badge} /> },
-  ]} />;
-
-}
-
-function TreeRow({
-  depth,
-  label,
-  href,
-  selected,
-  expanded,
-  leaf,
-  count,
-  addTitle,
-  onToggle,
-  onAdd,
-}: {
-  depth: number;
-  label: string;
-  href: string;
-  selected: boolean;
-  expanded?: boolean;
-  leaf?: boolean;
-  count?: number;
-  addTitle?: string;
-  onToggle?: () => void;
-  onAdd?: () => void;
-}) {
-  return (
-    <div className={`tree-row ${selected ? "on" : ""}`} style={{ ["--d" as string]: depth }}>
-      {leaf ? (
-        <span className="tree-leaf" />
-      ) : (
-        <Button className={`tree-chev ${expanded ? "open" : ""}`}
-          type="button"
-          aria-label={expanded ? "收起" : "展开"}
-          label={expanded ? "收起" : "展开"}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onToggle?.();
-          }}
-        >
-          <svg viewBox="0 0 24 24">
-            <path d="M9 6l6 6-6 6" />
-          </svg>
-        </Button>
-      )}
-      <a href={`#${href}`}>
-        <em>{label}</em>
-        {count ? <span>{count}</span> : null}
-      </a>
-      {onAdd && (
-        <Button className="tree-add"
-          type="button"
-          aria-label={addTitle ?? "添加"}
-          label="添加"
-          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onAdd(); }} />
-      )}
-    </div>
-  );
+  const name = { key: "name" as const, header: nameHeader, renderCell: (row: (typeof rows)[number]) => <VStack gap={0}>{row.href ? <Link href={`#${row.href}`}>{row.name}</Link> : <Text weight="semibold">{row.name}</Text>}{row.desc ? <Text type="supporting">{row.desc}</Text> : null}</VStack> };
+  const status = { key: "badge" as const, header: "状态", width: pixel(140), renderCell: (row: (typeof rows)[number]) => row.badge ? <Badge variant={badgeVariant[row.badgeColor ?? "sky"]} label={row.badge} /> : null };
+  return <Table hasHover idKey="key" data={rows} columns={rows.some((row) => row.badge) ? [name, status] : [name]} />;
 }

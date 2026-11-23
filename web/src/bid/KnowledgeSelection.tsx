@@ -1,5 +1,11 @@
+import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
 import { Selector } from "@astryxdesign/core/Selector";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 
@@ -41,16 +47,20 @@ export function KnowledgeSelection({ value, onChange, disabled = false }: {
   const chosen = choices.find(choice => keyOf(choice) === picked);
   const duplicate = !!chosen && value.some(item => keyOf(item) === picked);
   const labelOf = (item: KnowledgeSelection) => choices.find(choice => keyOf(choice) === keyOf(item))?.label ?? `资料版本 ${item.version_id}`;
-  return <section className="tender-info-card" aria-label="编制参考资料版本">
-    <h3>编制参考资料版本</h3>
-    <p className="tender-note">选择产品或企业资料的固定版本，供后续编制参考。未选择或资料暂不可读取时，仍可使用项目已上传资料。</p>
-    <div className="tender-filter"><Selector label="选择资料版本" value={picked} isDisabled={disabled || loading || !!error} onChange={setPicked} options={[{ value: "", label: "请选择资料版本" }, ...choices.map(choice => ({ value: keyOf(choice), label: choice.label, disabled: value.some(item => keyOf(item) === keyOf(choice)) }))]} /><Button isDisabled={disabled || loading || !!error || !chosen || duplicate || value.length >= 20} onClick={() => {
-      if (chosen && !duplicate && value.length < 20) { onChange([...value, { product_id: chosen.product_id, version_id: chosen.version_id }]); setPicked(""); }
-    }} label="添加资料版本" /><Button isDisabled={disabled || loading} onClick={() => void load()} label="刷新资料目录" /></div>
-    {loading && <p role="status">正在读取可选资料版本…</p>}
-    {error && <p role="alert">{error} <Button isDisabled={disabled || loading} onClick={() => void load()} label="重试资料目录" /></p>}
-    {!loading && !error && !choices.length && <p className="tender-note">当前没有可选的有效资料版本，可先上传项目资料继续编制。</p>}
-    {value.length ? <ul aria-label="已选资料版本">{value.map(item => <li key={keyOf(item)}>{labelOf(item)} <Button aria-label={`移除 ${labelOf(item)}`} isDisabled={disabled} onClick={() => onChange(value.filter(existing => keyOf(existing) !== keyOf(item)))} label="移除" /></li>)}</ul> : <p className="tender-note">尚未选择参考资料版本。</p>}
-    {value.length >= 20 && <p className="tender-note">最多选择 20 个资料版本，请移除部分选择后再添加。</p>}
-  </section>;
+  return <section aria-label="编制参考资料版本"><VStack gap={3}>
+    <VStack gap={1}><Heading level={2}>编制参考资料版本</Heading>
+      <Text type="supporting">选择产品或企业资料的固定版本，供后续编制参考。未选择或资料暂不可读取时，仍可使用项目已上传资料。</Text></VStack>
+    <HStack gap={2} vAlign="end" wrap="wrap">
+      <Selector label="选择资料版本" value={picked} isDisabled={disabled || loading || !!error} onChange={setPicked} options={[{ value: "", label: "请选择资料版本" }, ...choices.map(choice => ({ value: keyOf(choice), label: choice.label, disabled: value.some(item => keyOf(item) === keyOf(choice)) }))]} />
+      <Button variant="primary" isDisabled={disabled || loading || !!error || !chosen || duplicate || value.length >= 20} onClick={() => {
+        if (chosen && !duplicate && value.length < 20) { onChange([...value, { product_id: chosen.product_id, version_id: chosen.version_id }]); setPicked(""); }
+      }} label="添加资料版本" />
+      <Button variant="secondary" isDisabled={disabled || loading} onClick={() => void load()} label="刷新资料目录" />
+    </HStack>
+    {loading && <Text role="status" type="supporting">正在读取可选资料版本…</Text>}
+    {error && <div role="alert"><Banner status="error" title="资料目录读取失败，可先用项目已上传资料继续编制。" description={error} endContent={<Button size="sm" isDisabled={disabled || loading} onClick={() => void load()} label="重试资料目录" />} /></div>}
+    {!loading && !error && !choices.length && <Text type="supporting">当前没有可选的有效资料版本，可先上传项目资料继续编制。</Text>}
+    {value.length ? <ul aria-label="已选资料版本" style={{ margin: 0, padding: 0, listStyle: "none" }}><VStack gap={2}>{value.map(item => <li key={keyOf(item)}><HStack gap={2} vAlign="center"><Badge variant="info" label="已选" /><Text>{labelOf(item)}</Text><Button size="sm" variant="ghost" aria-label={`移除 ${labelOf(item)}`} isDisabled={disabled} onClick={() => onChange(value.filter(existing => keyOf(existing) !== keyOf(item)))} label="移除" /></HStack></li>)}</VStack></ul> : <Text type="supporting">尚未选择参考资料版本。</Text>}
+    {value.length >= 20 && <Text type="supporting">最多选择 20 个资料版本，请移除部分选择后再添加。</Text>}
+  </VStack></section>;
 }

@@ -91,15 +91,6 @@ html, body, #app {
   background: var(--iris-tint);
 }
 
-.side .tree-row { color: var(--ink); }
-.side .tree-row.on { background: var(--iris-soft); color: var(--iris-ink); }
-.side .tree-row:hover { background: var(--fill); }
-.side .tree-row a { color: inherit; }
-.side .tree-row em { color: inherit; }
-.side .tree-row span { color: var(--faint); }
-.side .tree-chev { color: var(--faint); }
-.side .tree-add { color: var(--faint); }
-
 .panel {
   border: 1px solid var(--line);
   border-radius: var(--r-card);
@@ -381,93 +372,6 @@ table.grid tr:hover td {
 .banner.bad {
   background: var(--rose-soft);
   color: var(--rose);
-}
-
-.tree {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px 18px;
-}
-.tree-row {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 28px;
-  align-items: center;
-  min-height: 32px;
-  padding-right: 6px;
-  padding-left: calc(8px + var(--d, 0) * 16px);
-  border-radius: var(--r-ctl);
-}
-.tree-row.on {
-  background: var(--iris-soft);
-  color: var(--iris-ink);
-}
-.tree-row:hover {
-  background: var(--iris-tint);
-}
-.tree-row a {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  height: 32px;
-  font-size: 13px;
-  font-weight: 500;
-}
-.tree-row.on a {
-  font-weight: 600;
-}
-.tree-row em {
-  font-style: normal;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tree-row span {
-  color: var(--faint);
-  font-size: 12px;
-  font-weight: 550;
-  flex-shrink: 0;
-}
-.tree-chev,
-.tree-add {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--faint);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-}
-.tree-chev svg {
-  width: 16px;
-  height: 16px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.tree-chev.open svg {
-  transform: rotate(90deg);
-}
-.tree-add {
-  opacity: 0;
-  font-size: 16px;
-  line-height: 1;
-}
-.tree-row:hover .tree-add,
-.tree-row.on .tree-add {
-  opacity: 1;
-}
-.tree-leaf {
-  width: 22px;
-  height: 22px;
 }
 
 @media (max-width: 1100px) {
@@ -890,7 +794,7 @@ table.grid tr:hover td {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  a, button, .tree-row, .outline-row, .panel {
+  a, button, .outline-row, .panel {
     transition: background-color 140ms ease-out, color 140ms ease-out, border-color 140ms ease-out;
   }
 }
