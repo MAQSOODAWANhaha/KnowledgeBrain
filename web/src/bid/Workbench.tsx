@@ -438,7 +438,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
           </VStack></Card>}
           {view.gaps.length > 0 && <Card><VStack gap={2}><Heading level={2}>编制时的待补记录</Heading>{view.gaps.map((gap, index) => <Text key={`${gap.code}:${index}`}>{gap.detail}</Text>)}</VStack></Card>}
         </VStack>}
-        <Drawer isOpen={tool === "execution"} onOpenChange={closeTool} hasScrim={false} label="执行详情" width={440}>
+        <Drawer isOpen={tool === "execution"} onOpenChange={closeTool} label="执行详情" width={440}>
           <DrawerHeader title="执行详情" onOpenChange={closeTool} />
           <VStack gap={3}>
             <MetadataList><MetadataListItem label="分析">{executionStatus(view.analysis?.status)}</MetadataListItem><MetadataListItem label="编制">{executionStatus(view.authoring?.status)}</MetadataListItem></MetadataList>
@@ -449,7 +449,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
               : ["failed", "blocked"].includes(view.authoring.status) && <HStack><Button label="继续本次编制" isDisabled={busy || ended} onClick={() => void executionAction(view.authoring!.execution_id, "resume")} /></HStack>)}
           </VStack>
         </Drawer>
-        <Drawer isOpen={tool === "regenerate"} onOpenChange={closeTool} hasScrim={false} label="直接生成整稿" width={440}>
+        <Drawer isOpen={tool === "regenerate"} onOpenChange={closeTool} label="直接生成整稿" width={440}>
           <DrawerHeader title="直接生成整稿" onOpenChange={closeTool} />
           <VStack gap={3}>
             <Text>此入口重新生成大纲和正文。需要沿用人工编排时，请在大纲编排中按已保存修订生成正文。</Text>

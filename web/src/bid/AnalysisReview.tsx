@@ -1,3 +1,10 @@
+import { Banner } from "@astryxdesign/core/Banner";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Section } from "@astryxdesign/core/Section";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import { Button } from "@astryxdesign/core/Button";
 import { Selector } from "@astryxdesign/core/Selector";
 import { TextArea } from "@astryxdesign/core/TextArea";
@@ -110,57 +117,58 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
     } finally { if (active.current) setSaving(false); }
   }
 
-  return <section className="tender-info-card" aria-label="招标分析人工复核">
-    <h3>人工复核与事项纠正</h3>
-    {loading && <p role="status">正在读取复核清单…</p>}
-    {notice && <p className="tender-alert" role="alert">{notice}</p>}
-    <Button isDisabled={saving} onClick={() => void read()} label="刷新复核状态" />
-    {dirty && !pending && <Button isDisabled={saving} onClick={() => {
-      if (window.confirm("放弃当前尚未提交的人工判定和事项纠正？")) {
-        setWorking(remote ? fresh(remote) : base ? fresh(base) : null); setConflict(false); setNotice(null);
-      }
-    }} label="放弃未提交输入" />}
-    {!loading && !base && <p className="tender-note">完成招标分析后，可在这里处理待确认问题、纠正事项业务字段。</p>}
+  return <Section role="region" aria-label="招标分析人工复核" padding={0} variant="transparent"><VStack gap={3}>
+    <Heading level={3}>人工复核与事项纠正</Heading>
+    {loading && <Text role="status" type="supporting">正在读取复核清单…</Text>}
+    {notice && <Banner role="alert" status="error" title={notice} />}
+    <HStack gap={2} wrap="wrap">
+      <Button variant="secondary" isDisabled={saving} onClick={() => void read()} label="刷新复核状态" />
+      {dirty && !pending && <Button variant="ghost" isDisabled={saving} onClick={() => {
+        if (window.confirm("放弃当前尚未提交的人工判定和事项纠正？")) {
+          setWorking(remote ? fresh(remote) : base ? fresh(base) : null); setConflict(false); setNotice(null);
+        }
+      }} label="放弃未提交输入" />}
+    </HStack>
+    {!loading && !base && <Text type="supporting">完成招标分析后，可在这里处理待确认问题、纠正事项业务字段。</Text>}
     {base && working && <>
-      <p className="tender-note">当前核对：来源版本 {base.source_version}，分析修订 {base.domain_revision}。{dirty ? "当前输入尚未提交。" : ""}</p>
-      {!(identity(base) === identity(remote) ? remote?.sources_current : base.sources_current) && <p className="tender-alert">项目来源已变化，以下仍是旧资料的分析。可确认该固定版本，或使用当前上传文件重新分析。</p>}
-      {(newer || conflict) && <div className="tender-alert" role="alert">
-        <p>分析状态或版本已有变化，当前输入仍保留。请刷新核对最新结果后再处理。</p>
-        {remote && <p>最新来源版本 {remote.source_version}，分析修订 {remote.domain_revision}；待确认问题 {remote.human_issue_ids.length} 项。</p>}
-        {remote && <details><summary>查看最新分析内容，对照当前输入</summary>
-          {remote.issues.map((issue, index) => <p key={index}>{issue.detail}</p>)}
-          {remote.correction?.items.map(entry => <div key={itemKey(entry.pack_id, entry.item.item_id)}><p>{entry.item.text}</p><ItemFacts item={entry.item} /></div>)}
-        </details>}
-        <Button isDisabled={saving || !!pending || !remote} onClick={() => {
+      <Text type="supporting">当前核对：来源版本 {base.source_version}，分析修订 {base.domain_revision}。{dirty ? "当前输入尚未提交。" : ""}</Text>
+      {!(identity(base) === identity(remote) ? remote?.sources_current : base.sources_current) && <Banner status="warning" title="项目来源已变化，以下仍是旧资料的分析。可确认该固定版本，或使用当前上传文件重新分析。" />}
+      {(newer || conflict) && <Banner role="alert" status="warning" collapsible={false} title="分析状态或版本已有变化，当前输入仍保留。请刷新核对最新结果后再处理。"
+        description={remote ? `最新来源版本 ${remote.source_version}，分析修订 ${remote.domain_revision}；待确认问题 ${remote.human_issue_ids.length} 项。` : undefined}
+        endContent={<Button size="sm" isDisabled={saving || !!pending || !remote} onClick={() => {
           if (remote && (!dirty || window.confirm("放弃当前未提交的复核输入，载入最新分析？"))) {
             setWorking(fresh(remote)); setConflict(false); setNotice(null);
           }
-        }} label="载入最新分析重新核对" />
-      </div>}
-      {currentState?.hard_blocking && <p className="tender-alert">存在来源、覆盖或执行问题，人工判定不能解除。请按问题提示补充来源、使用完整纠正流程或联系管理员处理后重新分析。</p>}
+        }} label="载入最新分析重新核对" />}>
+        {remote && <Collapsible trigger="查看最新分析内容，对照当前输入" defaultIsOpen={false}><VStack gap={2}>
+          {remote.issues.map((issue, index) => <Text key={index}>{issue.detail}</Text>)}
+          {remote.correction?.items.map(entry => <VStack key={itemKey(entry.pack_id, entry.item.item_id)} gap={1}><Text>{entry.item.text}</Text><ItemFacts item={entry.item} /></VStack>)}
+        </VStack></Collapsible>}
+      </Banner>}
+      {currentState?.hard_blocking && <Banner status="error" title="存在来源、覆盖或执行问题，人工判定不能解除。请按问题提示补充来源、使用完整纠正流程或联系管理员处理后重新分析。" />}
       {base.human_issue_ids.map((id, index) => {
         const issue = base.issues.find(value => value.issue_id === id);
         const value = working.decisions[id] ?? { verdict: "", reason: "" };
         const change = (patch: Partial<Decision>) => setWorking(current => current && { ...current,
           decisions: { ...current.decisions, [id]: { ...value, ...patch } } });
-        return <fieldset key={id} disabled={locked}><legend>问题 {index + 1}</legend>
-          <p>{issue?.detail ?? "此问题需要人工核对来源并记录判定。"}</p>
+        return <Section key={id} role="group" aria-label={`问题 ${index + 1}`} padding={3}><VStack gap={2}><Text weight="semibold">问题 {index + 1}</Text>
+          <Text>{issue?.detail ?? "此问题需要人工核对来源并记录判定。"}</Text>
           <Selector label={`问题 ${index + 1} 人工判定`} isDisabled={locked} value={value.verdict} onChange={verdict => change({ verdict: verdict as Decision["verdict"] })} options={[{ value: "", label: "请选择判定" }, { value: "acknowledged", label: "保留为已知问题" }, { value: "dismissed", label: "核对后排除此问题" }]} />
           <TextArea label={`问题 ${index + 1} 判定理由`} htmlMaxLength={4000} isDisabled={locked} value={value.reason} onChange={reason => change({ reason })} />
-        </fieldset>;
+        </VStack></Section>;
       })}
-      {!base.human_issue_ids.length && !base.correction?.items.length && <p className="tender-note">当前没有待核对的问题。</p>}
-      {!!base.human_issue_ids.length && <h4>待确认问题（{base.human_issue_ids.length}）</h4>}
-      {base.issues.filter(issue => !base.human_issue_ids.includes(issue.issue_id ?? "")).map((issue, index) => <p key={index} className="tender-note">{issue.detail}</p>)}
-      <Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")} label={pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"} />
-      {!!corrections.length && <p className="tender-note">已修改事项字段，请先提交事项纠正，等待重新审核后的确认清单。</p>}
-      {corrections.some(value => !validFields(value)) && <p className="tender-alert">请补齐已添加的业务字段和数值原文片段；不需要的字段可清空或删除，最高分须大于等于零。</p>}
-      {!!base.correction?.items.length && <><h4>事项业务字段</h4>
-      <p className="tender-note">对照冻结原文纠正事项。来源位置和证据保持冻结；数值原文片段必须能在该事项的冻结来源中找到。</p>
+      {!base.human_issue_ids.length && !base.correction?.items.length && <Text type="supporting">当前没有待核对的问题。</Text>}
+      {!!base.human_issue_ids.length && <Heading level={4}>待确认问题（{base.human_issue_ids.length}）</Heading>}
+      {base.issues.filter(issue => !base.human_issue_ids.includes(issue.issue_id ?? "")).map((issue, index) => <Text key={index} type="supporting">{issue.detail}</Text>)}
+      <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")} label={pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"} /></HStack>
+      {!!corrections.length && <Text type="supporting">已修改事项字段，请先提交事项纠正，等待重新审核后的确认清单。</Text>}
+      {corrections.some(value => !validFields(value)) && <Banner status="warning" title="请补齐已添加的业务字段和数值原文片段；不需要的字段可清空或删除，最高分须大于等于零。" />}
+      {!!base.correction?.items.length && <><Heading level={4}>事项业务字段</Heading>
+      <Text type="supporting">对照冻结原文纠正事项。来源位置和证据保持冻结；数值原文片段必须能在该事项的冻结来源中找到。</Text>
       {base.correction.items.map((entry, index) => {
         const key = itemKey(entry.pack_id, entry.item.item_id), item = entry.item;
-        return <details key={key}><summary>事项 {index + 1}：{item.text}</summary>
-          <p><strong>原事项：</strong>{item.text}</p>
+        return <Collapsible key={key} trigger={`事项 ${index + 1}：${item.text}`} defaultIsOpen={false}><VStack gap={2}>
+          <Text><Text weight="semibold">原事项：</Text>{item.text}</Text>
           <ItemFacts item={item} />
           <ItemFields index={index + 1} item={item} patch={patchOf(working.edits[key])} locked={locked} change={patch => {
             setWorking(current => {
@@ -173,10 +181,10 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
               return { ...current, edits };
             });
           }} />
-        </details>;
+        </VStack></Collapsible>;
       })}
       <TextArea label="事项纠正理由" htmlMaxLength={4000} isDisabled={locked} value={working.reason} onChange={reason => setWorking(current => current && { ...current, reason })} />
-      <Button isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")} label={pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"} /></>}
+      <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")} label={pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"} /></HStack></>}
     </>}
-  </section>;
+  </VStack></Section>;
 }

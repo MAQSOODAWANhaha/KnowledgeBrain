@@ -99,6 +99,7 @@ test("an unknown authoring submission survives reload and retries the same idemp
   await openTool(page, "直接生成整稿");
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认同一次编制请求", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
   await page.reload();

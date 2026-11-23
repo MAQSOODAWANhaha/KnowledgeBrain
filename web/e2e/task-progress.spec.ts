@@ -13,6 +13,7 @@ test("published authoring remains cancellable and cannot start another document"
   await page.keyboard.press("Escape");
   await openTool(page, "直接生成整稿");
   await expect(page.getByRole("button", { name: "生成新稿", exact: true })).toBeDisabled();
+  await page.keyboard.press("Escape");
   await page.getByRole("tab", { name: "大纲编排" }).click();
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
   expect(f.state.starts).toEqual([]);

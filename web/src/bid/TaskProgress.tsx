@@ -1,3 +1,8 @@
+import { Banner } from "@astryxdesign/core/Banner";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
+import { Section } from "@astryxdesign/core/Section";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import type { TaskProgressView } from "./api/workbench";
 import { executionStatus, inProgress } from "./executionStatus";
 
@@ -20,22 +25,26 @@ export function TaskProgress({ label, status, progress }: { label: string; statu
   const identity = progress?.identity;
   const version = identity?.source_version !== undefined && identity.domain_revision !== undefined
     ? `来源版本 ${identity.source_version} · 修订 ${identity.domain_revision}` : null;
-  return <section className="tender-progress" aria-label={`${label}进度`}>
-    <p role="status"><strong>{label}：{executionStatus(status)}</strong>
-      {active && progress?.current_phase && <span> · 当前阶段：{phaseName(progress.current_phase)}</span>}
-      {progress?.last_completed_phase && <span> · 最近进展：{phaseName(progress.last_completed_phase)}</span>}
-      {version && <span> · {version}</span>}
-    </p>
-    {progress && <>
-      <p>已接受 {progress.accepted_units} 个工作单元{active ? "，剩余总量尚未确定。" : "。"}</p>
-      {!!progress.request_states.uncertain && <p className="tender-context-warning">{progress.request_states.uncertain} 次请求回执待确认，请沿当前任务恢复入口处理。</p>}
-      <details><summary>阶段与请求回执</summary>
-        {!version && <p>依据身份尚未就绪，请等待任务状态更新。</p>}
-        {progress.accepted_by_phase.map(item => <p key={item.phase}>{phaseName(item.phase)}：已接受 {item.count} 个工作单元</p>)}
-        {progress.active_tasks.map(item => <p key={item.phase}>{phaseName(item.phase)}：准备发送 {item.prepared} 次，等待返回 {item.sent} 次</p>)}
-        <p>已收到返回 {progress.request_states.received} 次；失败 {progress.request_states.failed} 次；未通过业务验收 {progress.rejected_responses} 次。</p>
-        <p className="tender-note">同一逻辑请求的重试按最新状态统计。请求回执与已接受工作单元分别统计，收到返回仍需业务核验。</p>
-      </details>
-    </>}
-  </section>;
+  return <Section role="region" aria-label={`${label}进度`} variant="muted" padding={3}>
+    <VStack gap={2}>
+      <Text role="status"><Text weight="semibold">{label}：{executionStatus(status)}</Text>
+        {active && progress?.current_phase && ` · 当前阶段：${phaseName(progress.current_phase)}`}
+        {progress?.last_completed_phase && ` · 最近进展：${phaseName(progress.last_completed_phase)}`}
+        {version && ` · ${version}`}
+      </Text>
+      {progress && <>
+        <Text>已接受 {progress.accepted_units} 个工作单元{active ? "，剩余总量尚未确定。" : "。"}</Text>
+        {!!progress.request_states.uncertain && <Banner status="warning" title={`${progress.request_states.uncertain} 次请求回执待确认，请沿当前任务恢复入口处理。`} />}
+        <Collapsible trigger="阶段与请求回执" defaultIsOpen={false}>
+          <VStack gap={1}>
+            {!version && <Text>依据身份尚未就绪，请等待任务状态更新。</Text>}
+            {progress.accepted_by_phase.map(item => <Text key={item.phase}>{phaseName(item.phase)}：已接受 {item.count} 个工作单元</Text>)}
+            {progress.active_tasks.map(item => <Text key={item.phase}>{phaseName(item.phase)}：准备发送 {item.prepared} 次，等待返回 {item.sent} 次</Text>)}
+            <Text>已收到返回 {progress.request_states.received} 次；失败 {progress.request_states.failed} 次；未通过业务验收 {progress.rejected_responses} 次。</Text>
+            <Text type="supporting">同一逻辑请求的重试按最新状态统计。请求回执与已接受工作单元分别统计，收到返回仍需业务核验。</Text>
+          </VStack>
+        </Collapsible>
+      </>}
+    </VStack>
+  </Section>;
 }

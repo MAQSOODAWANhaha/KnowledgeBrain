@@ -3,9 +3,10 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 
-const rawElements = ["a", "article", "aside", "button", "details", "div", "em", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
-  "header", "input", "label", "li", "main", "nav", "ol", "p", "section", "select", "small", "span", "strong", "summary", "table",
-  "tbody", "td", "textarea", "th", "thead", "tr", "ul"];
+const rawElements = ["a", "article", "aside", "b", "blockquote", "button", "code", "dd", "details", "div", "dl", "dt", "em", "fieldset",
+  "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "img", "input", "label", "legend", "li", "main", "nav",
+  "ol", "p", "pre", "section", "select", "small", "span", "strong", "summary", "table", "tbody", "td", "textarea", "th", "thead",
+  "tr", "ul"];
 
 // Files still on raw markup. Remove each entry when its migration lands; the list must end empty.
 const pendingAstryxMigration = [
@@ -13,12 +14,9 @@ const pendingAstryxMigration = [
   "src/assets/Assets.tsx",
   "src/assets/DocumentDetail.tsx",
   "src/assets/FilePreview.tsx",
-  "src/bid/AnalysisItemFields.tsx",
   "src/bid/AnalysisRecovery.tsx",
-  "src/bid/AnalysisReview.tsx",
   "src/bid/KnowledgeSelection.tsx",
   "src/bid/ProjectList.tsx",
-  "src/bid/TaskProgress.tsx",
   "src/bid/Workbench.tsx",
   "src/bid/WorkbenchPanels.tsx",
   "src/bid/authoring/AnalysisProgress.tsx",
