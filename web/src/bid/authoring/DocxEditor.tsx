@@ -1,6 +1,7 @@
+import { VStack } from "@astryxdesign/core/VStack";
+import { Toolbar } from "@astryxdesign/core/Toolbar";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
-import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Text } from "@astryxdesign/core/Text";
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
@@ -208,22 +209,24 @@ export function DocxEditor({ workspaceId, api = docxApi, openRequest, controlRef
     if (session.unsafe()) { setNotice("当前修改或保存结果尚未确认，请先保存后再切换。"); return; }
     setNotice(null); void session.start({ mode, expected: state.current ?? undefined });
   }
-  return <section className="docx-pane" data-testid="docx-editor">
-    <HStack gap={2} className="docx-toolbar">
-      <Heading level={3}>{state.mode === "view" ? "Word 阅读" : "Word 编辑"}</Heading>
-      {state.current && <Text data-testid="docx-version">保存版本 {state.current.revision}</Text>}
-      <Text role="status" data-testid="docx-status">{docxStatus(state)}</Text>
-      {state.mode === "edit" && <Button variant="primary" data-testid="docx-save" isDisabled={state.closing || state.closePending || state.recoveryRequired || state.phase !== "ready" || state.syncing ||
-        (!state.uncertain && !state.saving && (!state.dirty || !!state.current?.editor.pending_save_id))}
-        onClick={() => { setNotice(null); void session.save(); }} label={state.uncertain || state.saving ? "确认保存结果" : "保存修改"} />}
-      <Button variant="secondary" isDisabled={!state.current || downloading} aria-describedby={downloadUnconfirmed ? `${elementId}-download-boundary` : undefined} onClick={() => void download()} label="下载已保存稿" />
-      {state.phase === "ready" && <Button variant="secondary" isDisabled={session.unsafe() || readOnly && state.mode === "view"}
-        data-testid="docx-mode" onClick={() => reopen(state.mode === "view" ? "edit" : "view")} label={state.mode === "view" ? "编辑 Word" : "返回阅读"} />}
-      {state.opened && state.phase !== "stale"
-        ? <Button variant="secondary" data-testid="docx-close" isDisabled={session.unsafe()} onClick={() => session.close()} label="关闭编辑器" />
-        : <Button variant="secondary" data-testid="docx-reopen" isDisabled={state.openPending || state.closing} onClick={() => reopen()} label="重新打开" />}
-      {state.phase === "closed" && onCreateRound && <Button variant="secondary" onClick={onCreateRound} label="生成或导入新轮" />}
-    </HStack>
+  return <VStack gap={2} data-testid="docx-editor" minHeight={0} style={{ flex: 1 }}>
+    <Toolbar label="Word 稿件操作" size="sm" dividers={["bottom"]}
+      startContent={<>
+          {state.mode === "edit" && <Button variant="primary" data-testid="docx-save" isDisabled={state.closing || state.closePending || state.recoveryRequired || state.phase !== "ready" || state.syncing ||
+            (!state.uncertain && !state.saving && (!state.dirty || !!state.current?.editor.pending_save_id))}
+            onClick={() => { setNotice(null); void session.save(); }} label={state.uncertain || state.saving ? "确认保存结果" : "保存修改"} />}
+          <Button variant="ghost" isDisabled={!state.current || downloading} aria-describedby={downloadUnconfirmed ? `${elementId}-download-boundary` : undefined} onClick={() => void download()} label="下载已保存稿" />
+          {state.phase === "ready" && <Button variant="ghost" isDisabled={session.unsafe() || readOnly && state.mode === "view"}
+            data-testid="docx-mode" onClick={() => reopen(state.mode === "view" ? "edit" : "view")} label={state.mode === "view" ? "编辑 Word" : "返回阅读"} />}
+          {state.opened && state.phase !== "stale"
+            ? <Button variant="ghost" data-testid="docx-close" isDisabled={session.unsafe()} onClick={() => session.close()} label="关闭编辑器" />
+            : <Button variant="ghost" data-testid="docx-reopen" isDisabled={state.openPending || state.closing} onClick={() => reopen()} label="重新打开" />}
+          {state.phase === "closed" && onCreateRound && <Button variant="ghost" onClick={onCreateRound} label="生成或导入新轮" />}
+      </>}
+      endContent={<HStack gap={2} vAlign="center">
+        {state.current && <Text data-testid="docx-version" textWrap="nowrap">保存版本 {state.current.revision}</Text>}
+        <Text role="status" type="supporting" textWrap="nowrap" data-testid="docx-status">{docxStatus(state)}</Text>
+      </HStack>} />
     {state.current && downloadUnconfirmed && <Banner status="info" role="status" id={`${elementId}-download-boundary`} data-testid="docx-download-boundary" title={`下载仅包含已保存的 Word v${state.current.revision}，不包含当前尚未确认保存的修改。`} />}
     {state.openPending && state.phase === "failed" && <Banner status="warning" role="status" title="上次打开文档的结果待确认。将恢复本标签页的原请求，不会关闭其他标签页的编辑会话。" endContent={<Button variant="secondary" data-testid="docx-confirm-open" onClick={() => void session.confirmOpen()} label="确认同一次打开请求" />} />}
     {state.closePending && !state.recoveryRequired && <Banner status="warning" role="status" title="当前文档暂时锁定，确认原会话已关闭后才能重新打开。" endContent={<Button variant="secondary" data-testid="docx-confirm-close" isDisabled={state.closing} onClick={() => void session.confirmClose()} label="确认同一次关闭请求" />} />}
@@ -231,5 +234,5 @@ export function DocxEditor({ workspaceId, api = docxApi, openRequest, controlRef
     {(state.error || notice) && <Banner status="error" role="alert" title={state.error || notice || ""} endContent={<><Button variant="secondary" onClick={() => void session.refresh()} label="刷新状态" />{!state.openPending && (state.phase === "connecting" || state.phase === "failed") && <Button variant="secondary" onClick={() => reopen()} label="重试打开" />}</>} />}
     {state.available && <Banner status="info" role="status" title={`另有保存版本 ${state.available.revision}。当前文稿保持打开，可从稿件版本中选择切换。`} />}
     {state.opened && <div ref={hostRef} inert={state.closing || state.closePending && !state.recoveryRequired} id={`${elementId}-host`} className="docx-editor-frame" key={state.opened.session.editor_key + elementId}><div id={elementId} /></div>}
-  </section>;
+  </VStack>;
 }

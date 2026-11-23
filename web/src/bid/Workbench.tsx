@@ -1,3 +1,5 @@
+import { List, ListItem } from "@astryxdesign/core/List";
+import { Item } from "@astryxdesign/core/Item";
 import { Toolbar } from "@astryxdesign/core/Toolbar";
 import { Link } from "@astryxdesign/core/Link";
 import { Code } from "@astryxdesign/core/Code";
@@ -103,7 +105,7 @@ function SavedPdfDownload({ projectId, version }: { projectId: string; version: 
     }
   }
   return <>
-    <Button size="sm" label={`下载 PDF v${version.revision}`} clickAction={download} />
+    <Button size="sm" variant="ghost" label={`下载 PDF v${version.revision}`} clickAction={download} />
     {error && <Text role="alert" color="secondary">{error}</Text>}
   </>;
 }
@@ -113,13 +115,12 @@ function SavedVersions({ projectId, versions, currentId, busy, unsafe, ended, do
   download(url: string, name: string): Promise<void>; select(version: WorkbenchView["versions"][number]): void;
 }) {
   return <Table data={versions} idKey="id" columns={[
-    { key: "revision", header: "版本", renderCell: (version) => `v${version.revision}` },
+    { key: "revision", header: "版本", width: pixel(150), renderCell: (version) => <HStack gap={2} vAlign="center"><Text weight="semibold">v{version.revision}</Text>{version.id === currentId && <Badge variant="info" label="当前稿" />}</HStack> },
     { key: "source", header: "来源", renderCell: (version) => version.source === "manual" ? "人工保存稿" : version.source === "recovered" ? "会话恢复稿（待核对）" : "编制生成稿" },
-    { key: "id", header: "状态", renderCell: (version) => <Badge variant={version.id === currentId ? "success" : "neutral"} label={version.id === currentId ? "当前稿件" : "已保留"} /> },
     { key: "download_url", header: "文件", renderCell: (version) => <HStack gap={2} wrap="wrap" vAlign="center">
-      <Button size="sm" label={`下载 DOCX v${version.revision}`} onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)} />
+      <Button size="sm" variant="ghost" label={`下载 DOCX v${version.revision}`} onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)} />
       <SavedPdfDownload projectId={projectId} version={version} />
-      {version.id !== currentId && <Button size="sm" label={`选为当前稿 v${version.revision}`} isDisabled={busy || unsafe || ended} onClick={() => select(version)} />}
+      {version.id !== currentId && <Button size="sm" variant="ghost" label={`选为当前稿 v${version.revision}`} isDisabled={busy || unsafe || ended} onClick={() => select(version)} />}
     </HStack> },
   ]} />;
 }
@@ -351,9 +352,11 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const pickChapter = (chapter: TenderChapter) => { setSelectedId(chapter.chapter_id); locate(chapter.bookmark); };
   const openReviewTool = (name: "revision" | "savedReview") => { setRightClosed(false); setTool(name); };
   const revisionReady = contextMatches && !!view?.context_execution_id && !!view?.outline;
-  const reviewShortcuts = savedReviewVersion && <VStack gap={3} role="group" aria-label="稿件复核入口" padding={3}>
-    <VStack gap={1}><Button label="打开保存稿复核" onClick={() => openReviewTool("savedReview")} /><Text type="supporting">当前保存稿：Word v{savedReviewVersion.revision}，读取已保存正文，包含人工修改；进入后确认复核版本。</Text></VStack>
-    <VStack gap={1}><Button label="基于生成稿修订" isDisabled={!revisionReady} onClick={() => openReviewTool("revision")} /><Text type="supporting">生成稿修订基准：{revisionReady ? reviewSourceLabel : "暂无可用生成基准"}，新稿生成后由你选择载入。</Text></VStack>
+  const reviewShortcuts = savedReviewVersion && <VStack gap={2} role="group" aria-label="稿件复核入口" paddingInline={3} paddingBlock={2}>
+    <Item density="compact" descriptionLines={2} label={`当前保存稿：Word v${savedReviewVersion.revision}`} description="读取已保存正文，包含人工修改；进入后确认复核版本。"
+      endContent={<Button size="sm" variant="secondary" label="打开保存稿复核" onClick={() => openReviewTool("savedReview")} />} />
+    <Item density="compact" descriptionLines={2} label={`生成稿修订基准：${revisionReady ? reviewSourceLabel : "暂无可用生成基准"}`} description="新稿生成后由你选择载入。"
+      endContent={<Button size="sm" variant="secondary" label="基于生成稿修订" isDisabled={!revisionReady} onClick={() => openReviewTool("revision")} />} />
   </VStack>;
   const bodyMode = step === "authoring" && authoringMode === "body";
   const toolItems = [
@@ -384,6 +387,8 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     <Tab value="body" label="正文编辑" panelId="word-editor-panel" />
   </TabList> : undefined;
   const closeTool = (open: boolean) => { if (!open) setTool(null); };
+  const authoringStatus = view?.authoring?.status;
+  const authoringAttention = !!authoringStatus && (inProgress(authoringStatus) || authoringStatus === "failed" || authoringStatus === "blocked" || !!view?.authoring?.progress?.request_states.uncertain);
   const latestVersion = view?.versions.reduce<TenderDraft | null>((best, item) => !best || item.revision > best.revision ? item : best, null) ?? null;
   const headerStatus = !view ? undefined
     : step === "analysis" ? (view.analysis ? <Badge variant={view.analysis.confirmed ? "success" : "warning"} label={view.analysis.confirmed ? "已确认" : "待人工确认"} /> : <Badge variant="neutral" label="尚未分析" />)
@@ -401,7 +406,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
       title={sectionLabel} status={headerStatus} meta={headerMeta} actions={pageActions} tabs={authoringTabs ?? analysisTabList} />}
     panel={projectPanel({ projectId, step, view })}>
     <VStack gap={0} height="100%" minHeight={0}>
-      {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || view?.authoring)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
+      {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || authoringAttention)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
         {error && <Banner role="alert" status="error" title={`${view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}${error}`} endContent={<Button size="sm" label="重试" onClick={() => setRetry(value => value + 1)} />} />}
         {notice && <Banner role="alert" status="error" title={notice} endContent={<Button size="sm" label="关闭提示" onClick={() => setNotice(null)} />} />}
         {!view && !error && <Center minHeight={240}><Spinner label="正在读取项目、稿件和任务…" /></Center>}
@@ -453,16 +458,19 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             start={leftClosed
               ? <LayoutPanel width={48} hasDivider label="文件与章节目录" role="complementary" padding={1}><IconButton variant="ghost" label="展开目录" icon={<PanelLeftOpen size={18} />} aria-expanded={false} onClick={() => setLeftClosed(false)} /></LayoutPanel>
               : <LayoutPanel width={264} hasDivider label="文件与章节目录" role="complementary" padding={0}>
+                <Toolbar label="目录操作" size="sm" dividers={["bottom"]}
+                  startContent={<HStack gap={2} vAlign="center"><Text weight="semibold">目录</Text><Text type="supporting">{displayedDraft ? `Word v${displayedDraft.revision}` : "编制大纲"}</Text></HStack>}
+                  endContent={<IconButton variant="ghost" size="sm" label="收起目录" icon={<PanelLeftClose size={16} />} aria-expanded onClick={() => setLeftClosed(true)} />} />
                 <VStack gap={2} padding={3}>
-                  <HStack hAlign="between" vAlign="center"><Text weight="semibold">文件结构</Text><IconButton variant="ghost" size="sm" label="收起目录" icon={<PanelLeftClose size={16} />} aria-expanded onClick={() => setLeftClosed(true)} /></HStack>
-                  <Text type="supporting">{displayedDraft ? `已保存 Word v${displayedDraft.revision} 的目录` : "编制大纲"}</Text>
                   <ChapterTree chapters={chapters} selectedId={selected?.chapter_id ?? null} gaps={contextMatches ? view.gaps : []} onSelect={pickChapter} onLocate={locate} />
                   {!!displayedDraft?.outline?.missing_chapter_ids?.length && <Banner status="warning" title={`${displayedDraft.outline.missing_chapter_ids.length} 个原章节未能绑定已保存文件，相关要求与待补记录仍保留。`} />}
                 </VStack>
               </LayoutPanel>}
-            content={<VStack role="region" aria-label="Word 稿件工作区" height="100%" minHeight={0} gap={2} padding={3} isScrollable>
-              {rightClosed && reviewShortcuts}
-              {navigationNotice && <Text role="status" type="supporting">{navigationNotice}</Text>}
+            content={<VStack role="region" aria-label="Word 稿件工作区" height="100%" minHeight={0} gap={0} isScrollable>
+              {(rightClosed || navigationNotice) && <VStack gap={2} padding={3}>
+                {rightClosed && reviewShortcuts}
+                {navigationNotice && <Text role="status" type="supporting">{navigationNotice}</Text>}
+              </VStack>}
               {openRequest && bodyOpened
                 ? <DocxEditor workspaceId={projectId} readOnly={!!ended} ownerIdentity={email} api={tenderDocxApi} controlRef={editorRef} openRequest={openRequest} navigationRequest={navigationRequest} onNavigationResult={onNavigationResult} onUnsafeChange={setWordUnsafe} onCurrentChange={onCurrentChange} onSaved={onSaved} />
                 : <Card><EmptyState headingLevel={2} title="投标稿尚未形成" description="请在大纲编排中生成并保存结构，再按已保存修订生成正文。"
@@ -471,7 +479,9 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             end={<LayoutPanel width={rightClosed ? 48 : 360} hasDivider label="要求、依据与待补" role="complementary" padding={rightClosed ? 1 : 0}>
                 {rightClosed && <IconButton variant="ghost" label="展开核对栏" icon={<PanelRightOpen size={18} />} aria-expanded={false} onClick={() => setRightClosed(false)} />}
                 <Panel isShown={!rightClosed}>
-                  <HStack hAlign="between" vAlign="center" padding={3}><Text weight="semibold">章节核对</Text><IconButton variant="ghost" size="sm" label="收起核对栏" icon={<PanelRightClose size={16} />} aria-expanded onClick={() => setRightClosed(true)} /></HStack>
+                  <Toolbar label="核对栏操作" size="sm" dividers={["bottom"]}
+                    startContent={<HStack gap={2} vAlign="center"><Text weight="semibold">章节核对</Text><Text type="supporting" maxLines={1}>{selected?.title ?? ""}</Text></HStack>}
+                    endContent={<IconButton variant="ghost" size="sm" label="收起核对栏" icon={<PanelRightClose size={16} />} aria-expanded onClick={() => setRightClosed(true)} />} />
                   {reviewShortcuts}
                   <Panel isShown={tool === "revision"} padding={3} gap={2}><HStack hAlign="between" vAlign="center"><Heading level={2}>按章节定向复核与修订</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
                     <ChapterRevision
@@ -489,21 +499,23 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
                 </Panel>
               </LayoutPanel>} />
         </Panel>
-        {step === "export" && <VStack gap={4} padding={6} isScrollable height="100%" role="region" aria-label="交付文件">
-          <Card><VStack gap={2}>
-            <Heading level={2}>已保存稿件</Heading>
-            <Text type="supporting">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</Text>
-            {displayedDraft && <Text data-testid="word-coverage">当前查看稿 v{displayedDraft.revision}：{coverageMatches ? view.coverage?.headline : "覆盖待核"}</Text>}
-            {coverageVersion && view.coverage?.headline && <Text data-testid="generated-coverage">生成稿 v{coverageVersion.revision}的覆盖统计：{view.coverage.headline}</Text>}
+        {step === "export" && <VStack gap={4} paddingInline={6} paddingBlock={4} isScrollable height="100%" role="region" aria-label="交付文件">
+          <Card padding={0}><VStack gap={0}>
+            <Toolbar label="已保存稿件" dividers={["bottom"]} startContent={<Text weight="semibold">已保存稿件</Text>}
+              endContent={<VStack gap={0} hAlign="end">
+                {displayedDraft && <Text type="supporting" data-testid="word-coverage">当前查看稿 v{displayedDraft.revision}：{coverageMatches ? view.coverage?.headline : "覆盖待核"}</Text>}
+                {coverageVersion && view.coverage?.headline && <Text type="supporting" data-testid="generated-coverage">生成稿 v{coverageVersion.revision}的覆盖统计：{view.coverage.headline}</Text>}
+              </VStack>} />
+            {!view.versions.length ? <EmptyState title="尚无已保存稿件。" description="在标书编制中生成正文后，已保存版本会列在这里。" /> : <SavedVersions projectId={projectId} versions={[...view.versions].sort((a, b) => b.revision - a.revision)} currentId={view.current_docx?.id} busy={busy} unsafe={unsafe} ended={!!ended} download={download} select={version => void selectDraft(version)} />}
+            <VStack padding={3}><Text type="supporting">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</Text></VStack>
           </VStack></Card>
-          <Card padding={0}>{!view.versions.length ? <EmptyState title="尚无已保存稿件。" description="在标书编制中生成正文后，已保存版本会列在这里。" /> : <SavedVersions projectId={projectId} versions={view.versions} currentId={view.current_docx?.id} busy={busy} unsafe={unsafe} ended={!!ended} download={download} select={version => void selectDraft(version)} />}</Card>
-          {view.artifacts?.package_url && <Card><VStack gap={2}>
-            <Heading level={2}>编制交付包</Heading>
-            <Text type="supporting">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</Text>
-            <Text type="supporting">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</Text>
-            <HStack><Button label="下载编制交付包（包含待补清单）" onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")} /></HStack>
+          {view.artifacts?.package_url && <Card padding={3}><Item label="编制交付包"
+            description={<VStack gap={0}><Text type="supporting">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</Text><Text type="supporting">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</Text></VStack>}
+            endContent={<Button variant="secondary" label="下载编制交付包（包含待补清单）" onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")} />} /></Card>}
+          {view.gaps.length > 0 && <Card padding={0}><VStack gap={0}>
+            <Toolbar label="编制时的待补记录" dividers={["bottom"]} startContent={<HStack gap={2} vAlign="center"><Text weight="semibold">编制时的待补记录</Text><Badge variant="warning" label={String(view.gaps.length)} /></HStack>} />
+            <List hasDividers>{view.gaps.map((gap, index) => <ListItem key={`${gap.code}:${index}`} label={gap.detail} />)}</List>
           </VStack></Card>}
-          {view.gaps.length > 0 && <Card><VStack gap={2}><Heading level={2}>编制时的待补记录</Heading>{view.gaps.map((gap, index) => <Text key={`${gap.code}:${index}`}>{gap.detail}</Text>)}</VStack></Card>}
         </VStack>}
         <Drawer isOpen={tool === "execution"} onOpenChange={closeTool} label="执行详情" width={440}>
           <DrawerHeader title="执行详情" onOpenChange={closeTool} />

@@ -109,7 +109,7 @@ test("PDF errors stay on the requested row and allow a retry of that version", a
     } });
   });
   await page.goto(`/#/bids/${project}/export`);
-  const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "v1", exact: true }) });
+  const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: /^v1( |$)/ }) });
   const button = row.getByRole("button", { name: "下载 PDF v1", exact: true });
   const alert = row.getByRole("alert").filter({ hasText: /\S/ });
   await expect(button).toBeVisible();

@@ -1,3 +1,4 @@
+import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { pixel, Table } from "@astryxdesign/core/Table";
 import { Pagination } from "@astryxdesign/core/Pagination";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
@@ -12,7 +13,6 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/HStack";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Banner } from "@astryxdesign/core/Banner";
-import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { TreeList, type TreeListItemData } from "@astryxdesign/core/TreeList";
@@ -107,9 +107,13 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
   const adoptedIds = new Set(units.flatMap(unit => [...unit.attachments.map(item => item.material_id), ...[...unit.blocks, ...unit.cell_fills].flatMap(item => item.material_ids ?? [])]));
   const materials = (view.materials ?? []).filter(material => adoptedIds.has(material.material_id));
   return <VStack gap={0}>
-    <TabList aria-label="章节信息" size="sm" value={tab} onChange={value => setTab(value as typeof tab)}>
-      <Tab value="requirements" label="要求" /><Tab value="supports" label="依据" /><Tab value="gaps" label={gaps.length ? `待补 ${gaps.length}` : "待补"} />
-    </TabList>
+    <VStack paddingInline={3} paddingBlockStart={3}>
+      <SegmentedControl label="章节信息" size="sm" layout="fill" value={tab} onChange={value => setTab(value as typeof tab)}>
+        <SegmentedControlItem value="requirements" label={`要求 ${boundRules.length + targets.length}`} />
+        <SegmentedControlItem value="supports" label={`依据 ${targets.filter(target => target.source_refs?.length).length + materials.length}`} />
+        <SegmentedControlItem value="gaps" label={`待补 ${gaps.length}`} />
+      </SegmentedControl>
+    </VStack>
     <VStack gap={2} padding={3}>
       <Text type="supporting">当前选定章节：{chapter?.title ?? "尚未选择"}</Text>
       {!contextMatches ? <Banner role="status" status="warning" title="当前业务记录尚未与这份稿件关联，保留 Word 供阅读，请刷新后核对。" />
