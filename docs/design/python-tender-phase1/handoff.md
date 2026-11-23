@@ -4,6 +4,7 @@
 
 ## 现在
 
+- W2 结构模型版对比未取得结果。安服 S1/D5 第六章 `select_bid_format_plan` 请求（估算输入 9,052 Token，摘要 `52ed945f…`）2026-11-22 实发两次，均在约 61 秒推理中被供应商中断（`Grok: connection lost mid-reply (the plugin host quit: exit status 1)`），流未完成，用量未知，未纠错重试。同网关的合成短请求（2 秒、22 秒）正常完成。证据见 `/opt/workspace/kb-tender-evidence/w2-anfu-d5-structure-offline-e07l/prepare/`。
 - W2 结构离线实测（安服 S1/D5 冻结原件，宿主 `bid_format_plan`，零发送）。第六章 p85–117 范围识别正确，13 个格式章节齐全，按表头、表格本体、签章表注拆位置；试点 36 个位置中以表格为依据的 10 个全部覆盖。未达标：5-x、8-x、9-x 子格式及廉洁投标承诺书没有独立位置（试点 26 个纯文字位置无落点）；第 61 页无关联关系承诺函在格式章节外，未生成；投标书清单第 14 项被展开为约 25 个采购需求章节且均标为 form；全部位置类型为 form；部分位置文字混入页码和页眉。证据见 `/opt/workspace/kb-tender-evidence/w2-anfu-d5-structure-offline-e07l/`。
 - W0 工作区收口完成（M1）。2026-11-22 按主题提交 `2f7d90e`、`8b2033d`、`e8be168`、`32f1eb0`、`df67c83`。提交前全量回归：DocReader 单测、workflow 与 acceptance 在隔离 PostgreSQL/Redis 上，分析快照 4,239 项、编制快照 4,261 项全部通过；前端单测 80 项、e2e 138 项通过；Rust api、platform 单测及已保存版本 PDF 的隔离 HTTP 用例通过；ruff 通过，pyright 1,920 个，低于基线 1,921。收口中修复 [BUG-299](bug-fix.md#bug-299作用域修订后普通查漏请求看不到人工结论重复报出已审疑点) 和 [BUG-300](bug-fix.md#bug-300窄屏打开的核对栏被-word-工具栏遮住无法收起)，并补齐过期的验收夹具。真实文件未因本次收口重跑。
 - [BUG-289](bug-fix.md#bug-289v3-工作台缺少按已保存-word-版本导出-pdf-的入口) 已接通并在隔离 V3 验证。安服 D5 核对稿打开后实际编辑，ONLYOFFICE 签名保存回调落库为 v2，重开实读 v2。切到 v2 后分别下载 v1 和 v2 的 DOCX 和 PDF，每次转换实读对应 DOCX 字节，测试修改仅在 v2 出现。收据见 `/opt/workspace/kb-tender-evidence/bug-289-anfu-v3-live-WXGimf/run-816650a4dd/result.json`。仅 `docx.outline` 使用隔离桩，模型发送为零，临时资源已清理。API 单测 35 项、相关隔离 PostgreSQL HTTP 回归、平台 60 项及真实 MinIO 回归、前端 80 项单测和 11 项 Chromium 回归通过。生产部署待执行。
