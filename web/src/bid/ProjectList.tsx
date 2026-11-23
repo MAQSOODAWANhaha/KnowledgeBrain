@@ -7,21 +7,18 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Link } from "@astryxdesign/core/Link";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
-import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { pixel, Table } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useEffect, useState } from "react";
-import { go } from "../hash";
+import { go, useHash } from "../hash";
 import { Shell } from "../Shell";
 import { PageHeader } from "../shell/PageHeader";
-import { OpenProjects } from "../shell/ProjectNav";
+import { inView, LIST_VIEWS, listPanel, type ListView } from "../shell/ProjectNav";
 import { type BidProjectView } from "./api";
 import { tenderApi } from "./api/workbench";
 import { authoringHref } from "./authoring/routes";
-
-type Filter = "all" | "open" | "ended";
 
 const dateTime = (value?: string | null) => (value ? value.slice(0, 16).replace("T", " ") : "—");
 
@@ -33,8 +30,11 @@ export function ProjectList({ email }: { email: string }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [err, setErr] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
+  const path = useHash();
+  const requested = new URLSearchParams(path.split("?")[1] ?? "").get("view");
+  const view: ListView = LIST_VIEWS.some((item) => item.key === requested) ? (requested as ListView) : "all";
   const [query, setQuery] = useState("");
+  const [panelQuery, setPanelQuery] = useState("");
   useEffect(() => {
     let canceled = false;
     setListError(false);
@@ -44,13 +44,9 @@ export function ProjectList({ email }: { email: string }) {
       .catch(() => { if (!canceled) setListError(true); });
     return () => { canceled = true; };
   }, [listRetry]);
-  const ended = (rows ?? []).filter((p) => p.status === "ended").length;
-  const shown = (rows ?? []).filter((p) => {
-    if (query.trim() && !p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return false;
-    if (filter === "open") return p.status !== "ended";
-    if (filter === "ended") return p.status === "ended";
-    return true;
-  });
+  const count = (key: ListView) => (rows ?? []).filter((p) => inView(p, key)).length;
+  const shown = (rows ?? []).filter((p) => inView(p, view) && (!query.trim() || p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
+  const viewLabel = LIST_VIEWS.find((item) => item.key === view)!.label;
   const create = <Button data-testid="new-bid" label="新建项目" variant="primary" onClick={() => setOpen(true)} />;
 
   return (
@@ -58,17 +54,12 @@ export function ProjectList({ email }: { email: string }) {
       root="bids"
       email={email}
       header={<PageHeader
-        crumbs={[{ label: "投标项目" }]}
-        title="投标项目"
+        crumbs={view === "all" ? [{ label: "投标项目" }] : [{ label: "投标项目", href: "/" }, { label: viewLabel }]}
+        title={viewLabel}
         actions={create}
-        meta={rows ? `在办 ${rows.length - ended} 个 · 已结束 ${ended} 个` : undefined}
-        tabs={<TabList value={filter} onChange={(value) => setFilter(value as Filter)}>
-          <Tab value="all" label="全部" />
-          <Tab value="open" label="在办" />
-          <Tab value="ended" label="已结束" />
-        </TabList>}
+        meta={rows ? [["在办", count("open")], ["本周截止", count("due")], ["已结束", count("ended")]] : undefined}
       />}
-      nav={<OpenProjects rows={rows} />}
+      panel={listPanel({ rows, view, query: panelQuery, onQuery: setPanelQuery, onCreate: () => setOpen(true) })}
     >
       <VStack gap={4} padding={6} isScrollable height="100%">
         {listError && <div role="alert"><Banner status="error" title="项目读取失败，已有项目不会因此被清空。" endContent={<Button size="sm" label="重试读取项目" onClick={() => setListRetry((value) => value + 1)} />} /></div>}
@@ -88,7 +79,7 @@ export function ProjectList({ email }: { email: string }) {
               { key: "ends_at", header: "投标截止", width: pixel(180), renderCell: (p) => <Text hasTabularNumbers>{dateTime(p.ends_at)}</Text> },
               { key: "ended_at", header: "结束时间", width: pixel(180), renderCell: (p) => <Text hasTabularNumbers color="secondary">{dateTime(p.ended_at)}</Text> },
             ]} />
-            {shown.length === 0 && <EmptyState isCompact title="没有符合条件的项目" description="换一个名称或切换到「全部」。" />}
+            {shown.length === 0 && <EmptyState isCompact title="没有符合条件的项目" description="换一个名称，或在左侧切换到「全部项目」。" />}
           </Card>
         )}
       </VStack>

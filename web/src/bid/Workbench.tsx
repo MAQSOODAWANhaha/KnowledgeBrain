@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
 import { PageHeader } from "../shell/PageHeader";
-import { ProjectStages, ProjectSwitcher } from "../shell/ProjectNav";
+import { projectPanel } from "../shell/ProjectNav";
 import { guardHashNavigation, parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
 import { authoringHref, type AuthoringStep } from "./authoring/routes";
@@ -343,8 +343,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   return <Shell root="bids" email={email} onBeforeLeave={() => !unsafe}
     header={<PageHeader crumbs={[{ label: "投标项目", href: "/" }, { label: projectTitle, href: authoringHref(projectId, "files") }, { label: sectionLabel }]}
       title={sectionLabel} actions={pageActions} tabs={authoringTabs} />}
-    navTop={<ProjectSwitcher projectId={projectId} title={projectTitle} step={step} />}
-    nav={<ProjectStages projectId={projectId} step={step} />}>
+    panel={projectPanel({ projectId, step, view })}>
     <VStack gap={0} height="100%" minHeight={0}>
       {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || view?.authoring)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
         {error && <div role="alert"><Banner status="error" title={`${view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}${error}`} endContent={<Button size="sm" label="重试" onClick={() => setRetry(value => value + 1)} />} /></div>}

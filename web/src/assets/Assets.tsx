@@ -411,11 +411,13 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
           <Button type="button" label={createHint} variant="primary" onClick={openCreateFromSelection} />
         )
       } />}
-      nav={
-        <SideNavSection title="资料目录">
+      panel={{
+        title: "知识资产",
+        label: "资料导航",
+        children: <SideNavSection title="资料目录">
           <TreeList key={[...open].sort().join("|")} aria-label="资料目录" density="compact" variant="noGuides" items={catalog} />
-        </SideNavSection>
-      }
+        </SideNavSection>,
+      }}
     >
       <VStack gap={4} padding={6} isScrollable height="100%">
         {err && (

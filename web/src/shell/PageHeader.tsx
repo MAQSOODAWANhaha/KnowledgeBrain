@@ -13,7 +13,8 @@ export function PageHeader({ crumbs, title, status, actions, meta, tabs }: {
   title: string;
   status?: ReactNode;
   actions?: ReactNode;
-  meta?: ReactNode;
+  /** One line of facts: label/value pairs, or free text. */
+  meta?: ReactNode | Array<[string, ReactNode]>;
   tabs?: ReactNode;
 }) {
   return (
@@ -32,7 +33,9 @@ export function PageHeader({ crumbs, title, status, actions, meta, tabs }: {
         </HStack>
         {actions ? <HStack gap={2} vAlign="center" wrap="wrap">{actions}</HStack> : null}
       </HStack>
-      {meta ? <Text type="supporting">{meta}</Text> : null}
+      {Array.isArray(meta)
+        ? <HStack gap={5} wrap="wrap">{meta.map(([label, value]) => <Text key={label} type="supporting" hasTabularNumbers>{label} <Text color="primary">{value}</Text></Text>)}</HStack>
+        : meta ? <Text type="supporting">{meta}</Text> : null}
       {tabs}
     </VStack>
   );

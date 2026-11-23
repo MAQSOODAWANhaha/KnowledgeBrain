@@ -33,7 +33,7 @@ test("a generated delivery package explains its boundary with later manual saves
 test("material gaps do not hide or block a persisted Word download", async ({ page }) => {
   const f = await fixture(page);
   await page.goto(`/#/bids/${project}/export`);
-  await expect(page.getByText("项目人员资料待补。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("main").getByText("项目人员资料待补。", { exact: true })).toBeVisible();
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 DOCX v1", exact: true }).click();
   await download;
