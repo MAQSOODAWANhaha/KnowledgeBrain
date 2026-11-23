@@ -374,3 +374,45 @@ async def test_phase1_a_longer_repeat_of_the_same_item_is_not_a_second_chapter(t
     assert '八、投标产品技术性能指标的详细描述' in performance
     assert '技术支持正文' not in performance
     assert '本页为性能指标模板' not in support
+
+
+SHARED_AND_WRAPPED = [
+    '第六章 投标文件格式\n'
+    '八、资格证明文件\n'
+    '营业执照、资质证书（如有）等\n'
+    '九、其他商务文件\n'
+    '由省级以上监狱管理局、戒毒管理局(含新疆生产建设兵团)出具的属于监狱\n'
+    '企业的证明文件\n'
+    '证明文件正文。\n',
+]
+
+
+def _shared_and_wrapped_documents():
+    return [{'document_id': 'tender', 'role': 'main', 'pages': SHARED_AND_WRAPPED,
+             'line_units': [[] for _ in SHARED_AND_WRAPPED]}]
+
+
+async def test_phase1_model_keeps_each_listed_file_and_each_wrapped_title(tmp_path):
+    """BUG-301: one顿号 line may name several files. BUG-298: a wrapped title keeps every line."""
+    import json
+
+    async def execute(task, request, validate):
+        body = json.loads(request['messages'][1]['content'][0]['text'])
+        found = {text.strip(): ref for ref, text in body['lines']}
+        listed = found['营业执照、资质证书（如有）等']
+        first = found['由省级以上监狱管理局、戒毒管理局(含新疆生产建设兵团)出具的属于监狱']
+        return validate({'chapters': [
+            {'heading_refs': [found['八、资格证明文件']], 'name': '资格证明文件'},
+            {'heading_refs': [listed], 'name': '营业执照'},
+            {'heading_refs': [listed], 'name': '资质证书'},
+            {'heading_refs': [first, first + 1],
+             'name': '由省级以上监狱管理局、戒毒管理局(含新疆生产建设兵团)出具的属于监狱企业的证明文件'},
+        ]})
+
+    _artifacts, outline = await _outline(
+        tmp_path, documents=_shared_and_wrapped_documents(), execute=execute,
+        directory_contract='bid_format_source_outline_v1')
+    titles = _flat(outline['chapters'])
+    assert '营业执照' in titles and '资质证书' in titles
+    assert '由省级以上监狱管理局、戒毒管理局(含新疆生产建设兵团)出具的属于监狱企业的证明文件' in titles
+    assert any('营业执照、资质证书（如有）等' in text for text in _purposes(outline))

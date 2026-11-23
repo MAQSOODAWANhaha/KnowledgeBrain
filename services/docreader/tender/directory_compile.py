@@ -75,10 +75,11 @@ _POINT = frozenset(('document_id', 'page', 'line'))
 _WINDOW = frozenset(('document_id', 'page', 'start_line', 'end_line'))
 _PLAN = frozenset(('nodes', 'composition', 'scopes', 'excluded', 'source_only', 'format_bindings', 'reading_only_sources'))
 _BINDING = frozenset(('id', 'source', 'response_node_id', 'reference_node_ids'))
-_NODE = frozenset(('id', 'heading', 'body_windows', 'response_kind', 'subjects', 'content_start', 'parent_id', 'name'))
+_NODE = frozenset(('id', 'heading', 'body_windows', 'response_kind', 'subjects', 'content_start', 'parent_id', 'name',
+                   'heading_lines'))
 _SUBJECT = frozenset(('source', 'role'))
 _COMPOSITION = frozenset(('priority_basis', 'entries'))
-_ENTRY = frozenset(('name', 'excluded_by'))
+_ENTRY = frozenset(('name', 'excluded_by', 'heading_lines'))
 _SCOPE = frozenset(('title', 'items'))
 _ITEM = frozenset(('node_id', 'entry', 'depth', 'presentation', 'condition', 'clause'))
 _EXCLUSION = frozenset(('node_id', 'source'))
@@ -3317,7 +3318,7 @@ def _nodes(plan, source):
         if not isinstance(node_id, str) or not node_id or node_id in nodes:
             raise DirectoryPlanRejected(f'duplicate or empty source node {node_id}')
         heading = _point(raw.get('heading'), source, f'source node {node_id} heading')
-        line = _continued_heading(source, heading)
+        line = _continued_heading(source, heading, raw.get('heading_lines'))
         name = raw.get('name')
         if name is not None and (not str(name).strip() or _compact(name) not in _compact(line)):
             if not str(node_id).startswith('volume-'):
@@ -3382,7 +3383,7 @@ def _composition(plan, source):
     for index, entry in enumerate(raw.get('entries', [])):
         _keys(entry, _ENTRY, 'composition entry')
         point = _point(entry.get('name'), source, f'composition entry {index}')
-        title = _business_name(_continued_heading(source, point))
+        title = _business_name(_continued_heading(source, point, entry.get('heading_lines')))
         if not title:
             raise DirectoryPlanRejected(f'composition entry {index} has no name')
         excluded_by = [_window(window, source, f'composition entry {index} exclusion') for window in entry.get('excluded_by', [])]
@@ -4020,10 +4021,14 @@ def _number_only(title):
     return not compact or compact.isdigit()
 
 
-def _continued_heading(source, point):
-    """Join a heading broken by the layout only while a parenthesis is still open."""
+def _continued_heading(source, point, count=None):
+    """Join a heading broken by the layout while a parenthesis is open, or over its selected lines."""
     document_id, page, line = point
     lines = source.pages(document_id)[page].splitlines()
+    if count is not None:
+        if type(count) is not int or not 1 <= count <= 4 or line + count > len(lines):
+            raise DirectoryPlanRejected('heading_lines must select consecutive lines on the heading page')
+        return ''.join(part.strip() for part in lines[line:line + count])
     parts = [lines[line]]
     while _unclosed(''.join(parts)) and line + len(parts) < len(lines):
         nxt = lines[line + len(parts)]

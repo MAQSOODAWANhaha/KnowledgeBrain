@@ -97,17 +97,21 @@ def decode_bid_format_outline(raw, prepared):
     if not plan['chapters']:
         raise ModelContractError([_issue('select the bid forms named in the tender')])
     chapters = []
-    used, seen_heads = set(), set()
+    used, seen_heads, shared_spans = set(), {}, {}
     for index, chapter in enumerate(plan['chapters']):
         path = ['chapters', index]
         heads = chapter['heading_refs']
-        if heads != sorted(heads) or any(reference in seen_heads or reference not in prepared.visible for reference in heads):
+        text = ''.join(prepared.refs.text(reference) for reference in heads) if all(
+            reference in prepared.visible for reference in heads) else ''
+        name = chapter['name'].strip()
+        # BUG-301: a顿号 line that names several files yields one chapter per file on the same line.
+        shared = tuple(heads) in seen_heads and '、' in text and _compact(name) not in seen_heads[tuple(heads)]
+        if heads != sorted(heads) or any(reference not in prepared.visible for reference in heads) or (
+                any(reference in key for key in seen_heads for reference in heads) and not shared):
             raise ModelContractError([_issue('heading refs must be unused section lines in order', [*path, 'heading_refs'])])
         if any(heads[offset] + 1 != heads[offset + 1] for offset in range(len(heads) - 1)):
             raise ModelContractError([_issue('a wrapped title must be consecutive source lines', [*path, 'heading_refs'])])
-        seen_heads.update(heads)
-        text = ''.join(prepared.refs.text(reference) for reference in heads)
-        name = chapter['name'].strip()
+        seen_heads.setdefault(tuple(heads), set()).add(_compact(name))
         if _annex_code(name) or _compact(name) not in _compact(text):
             raise ModelContractError([_issue('章节名称必须是标题原行里的文件名，不能是附件编号或新写的名称', [*path, 'name'])])
         if chapter['body'] is None:
@@ -119,9 +123,13 @@ def decode_bid_format_outline(raw, prepared):
         if not set(heads) <= set(range(start, end + 1)):
             raise ModelContractError([_issue('the file name line must sit inside its template', [*path, 'body'])])
         span = set(range(start, end + 1))
+        if shared and shared_spans.get(tuple(heads)) == (start, end):
+            chapters.append((heads, name, start, end))
+            continue
         if span & used:
             raise ModelContractError([_issue('each tender line belongs to one form', [*path, 'body'])])
         used.update(span)
+        shared_spans[tuple(heads)] = (start, end)
         chapters.append((heads, name, start, end))
     chapters.sort(key=lambda item: item[0][0])
     if any(item[2] is None for item in chapters):
@@ -129,17 +137,28 @@ def decode_bid_format_outline(raw, prepared):
             raise ModelContractError([_issue('either every chapter names its body range, or none do')])
         for index, (heads, name, _start, _end) in enumerate(chapters):
             start = heads[0]
-            end = chapters[index + 1][0][0] - 1 if index + 1 < len(chapters) else prepared.order[-1]
+            # Chapters sharing one listed line copy the same template up to the next other heading.
+            following = next((item[0][0] for item in chapters[index + 1:] if item[0][0] != start), None)
+            end = following - 1 if following is not None else prepared.order[-1]
             if end < start:
                 raise ModelContractError([_issue('chapter order leaves an empty template', ['chapters', index])])
             chapters[index] = (heads, name, start, end)
     nodes, entries, adopted = [], [], []
+    copied = set()
     for number, (heads, name, start, end) in enumerate(chapters, start=1):
         heading = prepared.refs.point(heads[0])
         identity = f'format-{number}'
-        nodes.append({'id': identity, 'heading': heading, 'parent_id': None, 'response_kind': 'form', 'name': name,
-                      'body_windows': prepared.refs.windows(start, end, visible=prepared.visible)})
-        entries.append({'name': heading})
+        # One tender line has one owner; later files listed on it keep their own chapter without a copy.
+        windows = [] if tuple(heads) in copied else prepared.refs.windows(start, end, visible=prepared.visible)
+        copied.add(tuple(heads))
+        node = {'id': identity, 'heading': heading, 'parent_id': None, 'response_kind': 'form', 'name': name,
+                'body_windows': windows}
+        entry = {'name': heading}
+        if len(heads) > 1:
+            # BUG-298: the selected wrapped title lines, not a parenthesis guess.
+            node['heading_lines'] = entry['heading_lines'] = len(heads)
+        nodes.append(node)
+        entries.append(entry)
         adopted.append({'node_id': identity, 'entry': number - 1, 'depth': 'self',
                         'presentation': 'section', 'clause': []})
     first = nodes[0]['heading']
