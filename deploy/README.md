@@ -204,7 +204,7 @@ Redis 队列入口要求显式 `REDIS_URL`，不回退固定本机地址；Oxana
 `DOCREADER_GRPC_PORT` 同步客户端默认地址与探针。数据服务默认没有主机映射。
 
 OnlyOffice 可选 profile 的浏览器入口为 28081（`ONLYOFFICE_HOST_PORT`）；Neo4j 仅在明确启用
-knowledge profile 时启动，HTTP/Bolt 宿主端口默认为 27474/27687。启动前核对宿主监听及
+knowledge profile 时启动，HTTP/Bolt 宿主端口默认为 27474/27687。本机开发栈（宿主进程直连、禁用 Compose 内部服务名）常用 loopback 地址：Postgres `127.0.0.1:15432`、Redis `127.0.0.1:16379`、对象存储 `127.0.0.1:19000`（使用 Chainguard MinIO，bucket 为 `knowledgebrain`）、前端 dev server `http://127.0.0.1:5174`（代理到本机 API）。启动前核对宿主监听及
 其他 Compose 项目的端口映射；如需覆盖端口，在现有 `.env` 中设置对应变量，并同步
 OnlyOffice 的浏览器 origin。
 本仓库的开发 release descriptor 不能当作生产身份。
