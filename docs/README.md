@@ -4,7 +4,7 @@
 
 招标分析与编制统一使用 [Python 路径](design/python-tender-phase1/README.md)，Rust 提供 API、知识库和基础服务。旧 Rust 招标流程、专用表和运行入口已退出；相关历史文档不再定义当前执行合同。当前初始化与创建人权限见 [数据库设计](design/database-initialization.md)。隔离回归和历史真实验收不能代替当前版本部署验收。
 
-仓库级产品与界面规范仍保留在标准入口：[`../PRODUCT.md`](../PRODUCT.md) 与 [`../DESIGN.md`](../DESIGN.md)。
+仓库级产品、界面与工程规范入口：[`../AGENTS.md`](../AGENTS.md)、[`../LESSONS.md`](../LESSONS.md)、[`code-standards.md`](code-standards.md)、[`../PRODUCT.md`](../PRODUCT.md) 与 [`../DESIGN.md`](../DESIGN.md)。
 
 ## 权威性规则
 
@@ -13,6 +13,7 @@
 3. 实施计划描述如何到达目标；目录位置不授予实现状态，领域入口只链接一个当前计划，不能并存重复方案。
 4. 调研材料不是当前规范；过期实施草案直接删除。冲突时以本页链接的领域文档为准。
 5. 跨领域能力由所属领域定义，通过端口使用；禁止在调用方重新定义被调用领域的数据模型。
+6. 修改任何文档后须通过 `python3 scripts/ci_check_docs.py`（检查断链、规则入口与源码路径一致）。
 
 ## 领域
 

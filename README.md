@@ -1,6 +1,6 @@
 # KnowledgeBrain
 
-Product-document knowledge service and tender authoring. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). The current tender workflow is implemented in Python: [business workflow](docs/design/python-tender-phase1/business-workflow.md), [field dictionary](docs/design/python-tender-phase1/field-dictionary.md), and [handoff](docs/design/python-tender-phase1/handoff.md). Rust provides the HTTP adapter, knowledge service and shared infrastructure; the former Rust tender workflow has been removed. Historical private evidence is not published.
+Product-document knowledge service and tender authoring. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Engineering and verification standards: [`docs/code-standards.md`](docs/code-standards.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). The current tender workflow is implemented in Python: [business workflow](docs/design/python-tender-phase1/business-workflow.md), [field dictionary](docs/design/python-tender-phase1/field-dictionary.md), and [handoff](docs/design/python-tender-phase1/handoff.md). Rust provides the HTTP adapter, knowledge service and shared infrastructure; the former Rust tender workflow has been removed. Historical private evidence is not published.
 
 HTTP (`/api/v1` knowledge, `/api/v3/tender-projects` tender) validates, persists, and enqueues. Knowledge parse / chunk / vector / wiki / graph run in `worker`; tender analysis and authoring run in Python workers. Resources are visible and writable only by their creator. API keys act as their owning user without separate scope permissions.
 
@@ -30,18 +30,18 @@ Host ports: API 18080, DocReader 15051, Postgres 15432, Redis 16379, MinIO 19000
 
 ## Development checks / target release gates
 
-The commands below are development checks. They become release gates only when the named required CI jobs in [`deploy/README.md`](deploy/README.md) run them fail-closed with real PostgreSQL/pgvector、Redis、MinIO and zero skipped suites. Current workflow status must not be described as release accepted merely because these commands are documented.
-
-Review evidence: `.scratch/knowledgebrain/review.md`.
+The L0–L3 verification matrix and audit rules live in [`docs/code-standards.md`](docs/code-standards.md). The commands below are development checks. They become release gates only when the named required CI jobs in [`deploy/README.md`](deploy/README.md) run them fail-closed with real PostgreSQL/pgvector, Redis, MinIO and zero skipped suites. Current workflow status must not be described as release accepted merely because these commands are documented.
 
 ```bash
+python3 scripts/ci_check_docs.py
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-(cd services/docreader && uvx ruff check . && uv run --with pyright pyright . && PYTHONPATH=.. uv run --with pytest pytest tests/)
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+(cd services/docreader && uv run --frozen pytest tests/unit -q)
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
 npm ci --prefix web
 npm --prefix web run lint
+npm --prefix web test
 npm --prefix web run build
 npm --prefix web run test:e2e
 ```
