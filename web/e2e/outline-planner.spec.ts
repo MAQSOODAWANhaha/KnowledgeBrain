@@ -10,6 +10,22 @@ test("a first project opens outline planning and generates only an outline candi
   expect(f.state.starts.filter(item => item.kind === "authoring")).toHaveLength(0);
 });
 
+test("a newer same-source analysis leaves the saved outline available and can generate a candidate", async ({ page }) => {
+  const f = await fixture(page);
+  const pinned = { run_id: "analysis", source_version: 1, domain_revision: 1 };
+  f.outline.draft!.outline.authoring_input = pinned;
+  f.outline.draft!.newer_analysis_identity = { ...pinned, domain_revision: 2 };
+  await f.ready();
+  await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
+  await expect(page.getByText("已保存大纲使用来源版本 1、分析修订 1。", { exact: true })).toBeVisible();
+  await expect(page.getByText(/同源分析已更新至来源版本 1、分析修订 2/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "按修订 1 生成正文", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "生成大纲", exact: true }).click();
+  await expect.poll(() => f.state.starts.filter(item => item.kind === "outline").length).toBe(1);
+  await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 1");
+  expect(f.state.outlineSaves).toHaveLength(0);
+});
+
 test("a failed outline save retains the user's title and never claims persistence", async ({ page }) => {
   const f = await fixture(page); await f.ready();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();

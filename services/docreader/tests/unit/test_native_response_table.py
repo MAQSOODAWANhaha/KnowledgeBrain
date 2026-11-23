@@ -16,9 +16,12 @@ from docreader.tender.evidence.references import SourceIndex, fragment, selector
 from docreader.tender.schema import ResponseTable, SourceExcerptRef
 
 
-def form_grid(*, fixed=False, merged=False):
+def form_grid(*, fixed=False, merged=False, clause_numbers=False):
     values = [['序号', '评价条款', '投标响应情况', '证明资料所在文件\n及页码'],
               *[[str(number), '', '', ''] for number in range(1, 6)], ['……', '', '', '']]
+    if clause_numbers:
+        values = [['条款号', '招标文件要求', '投标文件响应', '偏离情况', '说明'],
+                  *[[''] * 5 for _ in range(5)]]
     if fixed:
         values[1][1] = '原有固定条款，不得覆盖。'
     cells = [{'row': row, 'column': column, 'row_span': 1, 'col_span': 1, 'text': text}
@@ -26,17 +29,19 @@ def form_grid(*, fixed=False, merged=False):
     if merged:
         cells = [cell for cell in cells if (cell['row'], cell['column']) != (1, 2)]
         next(cell for cell in cells if (cell['row'], cell['column']) == (1, 1))['col_span'] = 2
-    return {'row_count': 7, 'column_count': 4, 'widths_mm': [15, 50, 55, 35], 'cells': cells}
+    return {'row_count': len(values), 'column_count': len(values[0]), 'cells': cells,
+            'widths_mm': [15, 50, 55, 20, 15] if clause_numbers else [15, 50, 55, 35]}
 
 
-def case(artifacts, count=8, *, fixed=False, merged=False, extra_parts=False, version='1'):
+def case(artifacts, count=8, *, fixed=False, merged=False, extra_parts=False, version='1', clause_numbers=False):
     def grid_unit(identity, grid, ordinal):
         return {'unit_id': identity, 'kind': 'table_region', 'ordinal': ordinal, 'text': '', 'grid': grid,
                 'locator': {'locator_kind': 'page_table', 'page_ordinal': ordinal, 'table_ordinal': 0,
                             'left': 100.0, 'right': 450.0, 'top': 700.0, 'bottom': 300.0}}
 
-    units = [grid_unit('form', form_grid(fixed=fixed, merged=merged), 0)]
-    for identity, values in [('start', ['4', '客户端信', '5.00', '支持x86架构（海光、兆', '']),
+    units = [grid_unit('form', form_grid(fixed=fixed, merged=merged, clause_numbers=clause_numbers), 0)]
+    cell_text = '1.3.3.2 支持x86架构（海光、兆' if clause_numbers else '支持x86架构（海光、兆'
+    for identity, values in [('start', ['4', '客户端信', '5.00', cell_text, '']),
                              ('end', ['', '创适配', '', '芯），须提供兼容证书。', ''])]:
         units.append(grid_unit(identity, {'row_count': 1, 'column_count': 5, 'cells': [
             {'row': 0, 'column': column, 'row_span': 1, 'col_span': 1, 'text': text}
@@ -47,7 +52,10 @@ def case(artifacts, count=8, *, fixed=False, merged=False, extra_parts=False, ve
         for column, text in enumerate(values)]}, len(units)))
     for identity, text in [('before', '原式前置固定说明。'), ('signature', '投标人签章：________\n日期：________'),
                            ('alpha', 'Alpha '), ('beta', 'Beta'),
+                           *([('inline-number', '参见 1.2.1.5 服务时限要求')] if clause_numbers else []),
                            *[(f'prose-{number}', f'独立条款{number}；须提供完整证明。') for number in range(count)]]:
+        if clause_numbers and identity.startswith('prose-'):
+            text = f'1.2.1.{5 + 2 * int(identity[6:])} {text}'
         units.append({'unit_id': identity, 'kind': 'section', 'ordinal': len(units), 'text': text,
                       'locator': {'locator_kind': 'document', 'section_ordinal': len(units)}})
     raw = {'schema_version': 2, 'units': units, 'images': {}, 'ocr': {},
@@ -76,6 +84,8 @@ def case(artifacts, count=8, *, fixed=False, merged=False, extra_parts=False, ve
              'context_source_excerpts': [excerpt('start', 1), excerpt('start', 2)],
              'source_join': 'continuation', 'rule_refs': []},
             *[{'source_excerpts': [excerpt(f'prose-{number}')], 'rule_refs': []} for number in range(count - 1)]]
+    if clause_numbers:
+        rows = [{'source_excerpts': [excerpt(f'prose-{number}')], 'rule_refs': []} for number in range(count)]
     for row in rows:
         row['row_id'] = response_row_id('native', row['source_excerpts'], row['rule_refs'],
             context_source_excerpts=row.get('context_source_excerpts', []),
@@ -119,6 +129,73 @@ def test_four_column_form_is_expanded_once_from_exact_cells_without_enterprise_a
     assert [row.cells[0].text for row in table.rows[1:-1]] == [str(number) for number in range(1, 9)]
     assert table.cell(9, 0).text == '……'
     assert all(not row.cells[2].text and not row.cells[3].text for row in table.rows[1:])
+
+
+@pytest.mark.parametrize('count', [2, 7])
+def test_empty_clause_number_column_copies_source_labels_and_extends_the_five_column_form(tmp_path, count):
+    artifacts = ArtifactStore(tmp_path)
+    target, _, _ = case(artifacts, count=count, clause_numbers=True)
+    doc, result = render(artifacts, target)
+    table = doc.tables[0]
+    labels = [f'1.2.1.{5 + 2 * index}' for index in range(count)]
+    assert [cell.text for cell in table.rows[0].cells] == ['条款号', '招标文件要求', '投标文件响应', '偏离情况', '说明']
+    assert [row.cells[0].text for row in table.rows[1:]] == labels + [''] * max(0, 5 - count)
+    assert [row.cells[1].text for row in table.rows[1:]] == [
+        f'{label} 独立条款{index}；须提供完整证明。' for index, label in enumerate(labels)] + [''] * max(0, 5 - count)
+    assert all(not cell.text for row in table.rows[1:] for cell in row.cells[2:])
+    assert not any(gap['code'] == 'export_native_response_table_unconfirmed' for gap in result['gaps'])
+
+
+@pytest.mark.parametrize('problem', ['missing', 'truncated', 'mid_line'])
+def test_unproven_clause_number_keeps_all_rows_of_the_original_form_blank(tmp_path, problem):
+    artifacts = ArtifactStore(tmp_path)
+    target, excerpt, index = case(artifacts, count=2, clause_numbers=True)
+    identity = {'missing': 'alpha', 'truncated': 'prose-0', 'mid_line': 'inline-number'}[problem]
+    selected = excerpt(identity)
+    if problem != 'missing':
+        base = index.by_id[selected['selectors'][0]['source_range_id']]
+        start, end = (0, 5) if problem == 'truncated' else (3, base['end'])
+        selected['selectors'] = [selector(fragment(base, start, end))]
+    target['response_table']['rows'][0]['source_excerpts'] = [selected]
+    rebind(target)
+    doc, result = render(artifacts, target)
+    assert len(doc.tables[0].rows) == 6
+    assert all(not cell.text for row in doc.tables[0].rows[1:] for cell in row.cells)
+    assert any(gap['code'] == 'export_native_response_table_unconfirmed' and '条款号' in gap['detail']
+               for gap in result['gaps'])
+
+
+def test_clause_number_uses_the_selected_native_cell_start(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    target, excerpt, _ = case(artifacts, count=1, clause_numbers=True)
+    row = target['response_table']['rows'][0]
+    row['source_excerpts'] = [excerpt('start', 3), excerpt('end', 3)]
+    row['source_join'] = 'continuation'
+    rebind(target)
+    doc, _ = render(artifacts, target)
+    assert doc.tables[0].cell(1, 0).text == '1.3.3.2'
+    assert doc.tables[0].cell(1, 1).text == '1.3.3.2 支持x86架构（海光、兆芯），须提供兼容证书。'
+
+
+def test_native_response_row_identity_survives_formal_item_reference_round_trip(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    target, _, _ = case(artifacts, count=1, clause_numbers=True)
+    row = target['response_table']['rows'][0]
+    row['rule_refs'] = [{'item_ref': {'artifact_ref': artifacts.put_json({'items': ['pack:i1']}),
+                                     'item_id': 'pack:i1'}}]
+    rebind(target)
+    doc, _ = render(artifacts, target)
+    assert doc.tables[0].cell(1, 0).text == '1.2.1.5'
+
+    target['response_table'] = ResponseTable.model_validate(target['response_table']).model_dump()
+    doc, _ = render(artifacts, target)
+    assert doc.tables[0].cell(1, 0).text == '1.2.1.5'
+
+    target['response_table']['rows'][0]['rule_refs'][0]['item_ref']['item_id'] = 'pack:i2'
+    doc, result = render(artifacts, target)
+    assert doc.tables[0].cell(1, 0).text == ''
+    assert any(gap['code'] == 'export_native_response_table_unconfirmed' and '条款行身份' in gap['detail']
+               for gap in result['gaps'])
 
 
 def test_fewer_requirements_keep_all_original_numbered_rows_and_other_source_parts(tmp_path):

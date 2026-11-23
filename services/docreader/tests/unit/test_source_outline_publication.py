@@ -22,6 +22,7 @@ def chapter(role='body', *, targets=None, children=None):
 def source_runtime(runtime):
     runtime.snapshot['frozen_ref'] = runtime.artifacts.put_json({'documents': []})
     runtime.outline['authoring_input'] = deepcopy(runtime.snapshot)
+    runtime.outline['chapters'] = []
     runtime.outline['issues'] = [{'code': 'outline_directory_plan_failed',
         'detail': '两次原件读取未完成，原始失败和未知费用仍保留。', 'rule_refs': []}]
     return runtime
@@ -76,14 +77,19 @@ async def test_diagnostic_persistence_failure_cannot_publish_empty_success(sourc
     assert len(source_runtime.observed) == 1
 
 
-async def test_fixed_manual_empty_tree_and_legacy_non_source_outline_are_unaffected(source_runtime):
+async def test_fixed_manual_empty_tree_is_unaffected(source_runtime):
     fixed = source_runtime.artifacts.put_json(source_runtime.outline)
     assert await source_runtime.execute('manual', outline_only=True, outline_ref=fixed)
     assert source_runtime.rows['manual']['status'] == 'succeeded'
+
+
+async def test_missing_frozen_snapshot_cannot_publish_empty_automatic_outline(source_runtime):
     source_runtime.snapshot['frozen_ref'] = None
     source_runtime.outline['authoring_input'] = deepcopy(source_runtime.snapshot)
-    assert await source_runtime.execute('legacy', outline_only=True)
-    assert source_runtime.rows['legacy']['status'] == 'succeeded'
+    with pytest.raises(document_execution.SourceOutlineUnavailable):
+        await source_runtime.execute(outline_only=True)
+    assert source_runtime.rows['execution']['status'] == 'failed'
+    assert source_runtime.rows['execution'].get('result_ref') is None
 
 
 async def test_previously_persisted_empty_success_is_not_returned_as_usable(source_runtime):

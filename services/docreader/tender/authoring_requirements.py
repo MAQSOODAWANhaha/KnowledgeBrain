@@ -1,6 +1,7 @@
 """Preserve frozen requirements without depending on generated bidder answers."""
 
 from copy import deepcopy
+from itertools import chain
 import json
 
 from pydantic import ValidationError
@@ -46,7 +47,10 @@ def preserve_requirements(context, outline) -> dict:
     def bind(chapters):
         for chapter in chapters:
             for target in chapter.get("targets", []):
-                for reference in target.get("rule_refs", []):
+                table_rows = (target.get("response_table") or {}).get("rows", [])
+                references = chain(target.get("rule_refs", []),
+                                   (ref for table_row in table_rows for ref in table_row.get("rule_refs", [])))
+                for reference in references:
                     row = add(reference)
                     if row is not None and target["target_id"] not in row["target_ids"]:
                         row["target_ids"].append(target["target_id"])

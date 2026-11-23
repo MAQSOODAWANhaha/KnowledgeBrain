@@ -74,7 +74,12 @@ def outline_pipeline(monkeypatch):
             "schema_version": 2,
             "authoring_input": snapshot,
             "issues": [],
-            "chapters": [],
+            "chapters": [{
+                "chapter_id": "chapter-1", "title": "响应章节", "children": [], "targets": [{
+                    "target_id": "response", "kind": "form", "purpose": "企业信息待人工填写",
+                    "rule_refs": [], "source_refs": [], "manual_fill": True, "support_origins": ["tender"],
+                }],
+            }],
         }
         reference = artifacts.put_json(outline)
         if outline_only:

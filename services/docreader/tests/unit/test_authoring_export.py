@@ -3,14 +3,18 @@
 from copy import deepcopy
 from io import BytesIO
 import json
+from typing import cast
 from zipfile import ZipFile
 
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from PIL import Image
 
 from docreader.integrations.artifacts import ArtifactStore
+from docreader.tender.authoring_excerpts import whole_source_excerpts
 from docreader.tender.authoring_export import export_authoring_document
-from docreader.tender.evidence.references import SourceIndex
+from docreader.tender.evidence.references import SourceIndex, fragment, selector
 
 
 def source_ref(artifacts, *, grid=None, text="", document_id="template", locator=None):
@@ -48,6 +52,33 @@ def document(artifacts, result):
     return Document(BytesIO(artifacts.read_bytes(result["docx_ref"])))
 
 
+def test_rule_bound_to_response_row_is_not_repeated_in_word_pending_appendix(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    source = source_ref(artifacts, text="已归属的运输费要求。")
+    attached = {"item_ref": {"artifact_ref": artifacts.put_json(["cost"]), "item_id": "cost"}}
+    pending = {"item_ref": {"artifact_ref": artifacts.put_json(["support"]), "item_id": "support"}}
+    response = target("cost-response")
+    response["response_table"] = {"rows": [{"row_id": "r1", "rule_refs": [attached],
+        "source_excerpts": whole_source_excerpts(artifacts, source)}]}
+    outline = {"chapters": [chapter("quote", "报价响应", [response])]}
+    requirements = {"rules": [{"rule_ref": ref, "rule": {"text": text, "evidence": [{"quote": text}]}}
+                              for ref, text in [(attached, "已归属的运输费要求。"), (pending, "未归属的售后要求。")]]}
+
+    result = export_authoring_document(artifacts, outline, [], requirements=requirements)
+    word = document(artifacts, result)
+    assert "已归属的运输费要求。" in [cell.text for table in word.tables for row in table.rows for cell in row.cells]
+    paragraphs = [paragraph.text for paragraph in word.paragraphs]
+    appendix = paragraphs[paragraphs.index("尚未归入响应表") + 1:]
+    assert not any("已归属的运输费要求" in text for text in appendix)
+    assert any("未归属的售后要求" in text for text in appendix)
+    with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as archive:
+        guide = archive.read("提交要求与待办.md").decode()
+    assigned, unassigned = guide.split("## 尚未安排的要求\n", 1)
+    assert "章节要求：1 报价响应" in assigned and "已归属的运输费要求" in assigned
+    assert "已归属的运输费要求" not in unassigned
+    assert "未归属的售后要求" in unassigned
+
+
 def grid():
     return {"row_count": 3, "column_count": 2, "widths_mm": [50, 100], "cells": [
         {"row": 0, "column": 0, "row_span": 1, "col_span": 2, "text": "人员安排表"},
@@ -75,6 +106,46 @@ def test_docx_keeps_nested_order_and_unfilled_required_positions(tmp_path):
     assert "按现有需求拟定实施步骤。" in [p.text for p in doc.paragraphs]
     assert [cell.text for cell in doc.tables[0].rows[1].cells] == ["部署", "配置记录"]
     assert any(g.get("target_id") == "staff" for g in result["gaps"])
+
+
+def test_pdf_form_keeps_repeated_body_parts_but_omits_identified_running_edges(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    header, footer = "招标项目页眉", "文件页脚"
+    fields, signature, notes = "投标人名称： 包号：", "投标人名称（盖章）：", "注："
+    page_text = [header, fields, None, signature, notes, "1. 应如实填写。", header, f"原式说明：{header}", footer]
+    units = []
+    for page in range(3):
+        for position, text in enumerate(page_text):
+            unit = {"unit_id": f"page-{page}-{position}", "ordinal": len(units),
+                    "kind": "section" if text is not None else "table_region",
+                    "text": text or "", "locator": {"locator_kind": "page", "page_ordinal": page}}
+            if text is None:
+                unit["grid"] = grid()
+                unit["locator"].update(locator_kind="page_table", table_ordinal=0)
+            units.append(unit)
+    raw = {"schema_version": 2, "units": units, "images": {}, "ocr": {}, "metadata": {
+        "presentation_evidence_issues": [{"code": "pdf_repeating_edge_lines_removed", "lines": [header, footer]}]},
+        "source_contract": {"page_manifest": [], "units": [{"unit_id": unit["unit_id"],
+            "section_id": "forms", "parent_section_id": None, "heading_path": "投标格式",
+            "physical_locator": unit["locator"]} for unit in units]}}
+    original = {"document_id": "template", "document_version": "1", "original_ref": artifacts.put_bytes(b"source")}
+    index = SourceIndex(original, raw)
+    index_ref = artifacts.put_json(index.descriptor(artifacts.put_json(raw)))
+    parts = [{"source_index_ref": index_ref, "unit_id": unit["unit_id"]} for unit in units[:len(page_text)]]
+    form = target("form", "form", templates=parts)
+    clipped = next(row for row in index.ranges if row["unit_id"] == units[len(page_text) - 2]["unit_id"])
+    form["template_refs"][-2]["selectors"] = [
+        selector(fragment(clipped, clipped["end"] - len(header), clipped["end"]))]
+    outline = {"chapters": [chapter("form", "投标格式", [form])]}
+
+    result = export_authoring_document(artifacts, outline, [])
+    word = document(artifacts, result)
+    body = list(word.iter_inner_content())
+    table = next(i for i, element in enumerate(body) if isinstance(element, Table))
+    before, after = ([cast(Paragraph, element).text for element in section] for section in (body[:table], body[table + 1:]))
+    assert before[-1:] == [fields]
+    assert after == [signature, notes, "1. 应如实填写。", header, header]
+    assert [gap["code"] for gap in result["gaps"]].count("export_running_header_omitted") == 1
 
 
 def test_pdf_table_keeps_each_source_row_height(tmp_path, monkeypatch):

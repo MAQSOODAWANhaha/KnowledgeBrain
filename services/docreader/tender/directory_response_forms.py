@@ -14,7 +14,7 @@ from docreader.tender.authoring_excerpts import response_row_id, source_excerpts
 from docreader.tender.authoring_templates import load_template_part, template_part_key
 from docreader.tender.authoring_view import _grid_view
 from docreader.tender.directory_compile import (
-    _Source, _source_tables, _table_id, _window, _window_text,
+    _Source, _public_part, _source_tables, _table_id, _window, _window_text,
 )
 from docreader.tender.evidence.references import EvidenceRepository, fragment, selector
 from docreader.tender.native_response_table import prepare_native_response_table
@@ -47,7 +47,8 @@ def _chapter_parts(compiled):
             continue
         parts = [*chapter.get('template_parts', []), *(segment['part']
             for key in ('template_segments', 'material_segments') for segment in chapter.get(key, []) if segment.get('part'))]
-        for part in parts:
+        for compiled_part in parts:
+            part = _public_part(compiled_part)
             key = chapter['id'], template_part_key(part)
             if not part.get('selectors') and key not in seen:
                 seen.add(key)

@@ -71,7 +71,7 @@ from docreader.tender.reviewed_source_facts import (
 from docreader.integrations.store import Conflict
 from docreader.tender.authoring_coverage import (
     accept_assessments, batch_coverage_view, build_ledger, coverage_scope_index, fair_select, plan_queries,
-    settle_coverage, task_coverage_refs, unit_fingerprint,
+    rule_ref_key, settle_coverage, task_coverage_refs, unit_fingerprint,
 )
 from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY, AUTHORING_UNIT_BINDING_CONTRACT,
@@ -814,26 +814,25 @@ def _batches(records, budget, task, payload, *, headroom_tokens=0):
 
 
 def _note_unassigned_rules(outline, context):
-    """A known rule that no target cites stays unassigned. The model does not place it."""
-    assigned, existing = set(), set()
-
-    def walk(chapters):
-        for chapter in chapters:
-            for target in chapter.get('targets', []):
-                assigned.update(_json(ref) for ref in target.get('rule_refs', []))
-            walk(chapter.get('children', []))
-
-    walk(outline.get('chapters', []))
+    assigned = {rule_ref_key(entry['rule_ref']) for entry in build_ledger(outline)
+                if entry['rule_ref'] is not None and entry['resolution'] != 'pending'}
+    existing, issues = set(), []
     for issue in outline.get('issues', []):
-        if issue.get('code') == 'outline_rule_unassigned':
-            existing.update(_json(ref) for ref in issue.get('rule_refs', []))
+        if issue.get('code') != 'outline_rule_unassigned' or not issue.get('rule_refs'):
+            issues.append(issue)
+            continue
+        remaining = [ref for ref in issue['rule_refs'] if rule_ref_key(ref) not in assigned]
+        if remaining:
+            issues.append({**issue, 'rule_refs': remaining})
+            existing.update(rule_ref_key(ref) for ref in remaining)
     for ref in context.rules.values():
-        identity = _json(ref)
+        identity = rule_ref_key(ref)
         if identity in assigned or identity in existing:
             continue
-        outline.setdefault('issues', []).append({
+        issues.append({
             'code': 'outline_rule_unassigned', 'detail': '该有效规则尚未安排响应位置，需补充大纲映射。',
             'rule_refs': [ref]})
+    outline['issues'] = issues
 
 
 def _gap(code, detail, task=None):
@@ -1067,7 +1066,7 @@ def _outline_payload(context, records, template_parts=()):
 def _constraint_context(context, refs, submission_refs=(), *, source_bindings=None, excerpt_bindings=None):
     """Only model-selected submission rules and their real source evidence."""
     views = {rule['rule_id']: rule for rule in context.payload['rules']}
-    by_ref = {_json(ref): views[identity] for identity, ref in context.rules.items()}
+    by_ref = {rule_ref_key(ref): views[identity] for identity, ref in context.rules.items()}
     rules, sources, used = [], [], {}
     def source(text, identity, references=(), excerpts=()):
         if not text.strip():
@@ -1085,7 +1084,7 @@ def _constraint_context(context, refs, submission_refs=(), *, source_bindings=No
                 excerpt_bindings[used[key]] = list(excerpts)
         return used[key]
     for ref in refs:
-        rule = by_ref.get(_json(ref))
+        rule = by_ref.get(rule_ref_key(ref))
         if rule is None:
             continue
         semantic = rule.get('item', rule.get('effective_rule', {}))
@@ -1366,7 +1365,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             'targets': [{'target_id': 'chapter-1:target-1', 'kind': 'narrative',
                          'purpose': '根据现有资料起草；招标目录及要求待补，不声称已覆盖。',
                          'rule_refs': [], 'source_refs': []}]}]).model_dump()
-    refs = list({_json(r): r for f in fragments for r in f.get('constraint_rule_refs', [])}.values())
+    refs = list({rule_ref_key(r): r for f in fragments for r in f.get('constraint_rule_refs', [])}.values())
     submission_refs = {_json(r): r for f in fragments for r in f.get('submission_refs', [])}
     available_sources = {_json(ref) for refs in context.sources.values() for ref in refs}
     for raw in submission_sources:
@@ -1436,8 +1435,9 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             return excerpt_ids[key]
 
         def register_rule(ref):
+            ref_key = rule_ref_key(ref)
             for identity, value in assembly_rules.items():
-                if value == ref:
+                if rule_ref_key(value) == ref_key:
                     return identity
             identity = f'a{len(assembly_rules) + 1}'
             assembly_rules[identity] = ref
@@ -1487,8 +1487,8 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             ordered = ordered_template_part_ids(part_map, source_repository)
             by_id = {part['part_id']: part for part in parts}
             parts[:] = [by_id[identity] for identity in ordered]
-        covered = {_json(ref) for ref in refs}
-        covered.update(_json(ref) for target in mapping.values() for ref in target['rule_refs'])
+        covered = {rule_ref_key(ref) for ref in refs}
+        covered.update(rule_ref_key(ref) for target in mapping.values() for ref in target['rule_refs'])
         views = {entry['rule_id']: entry for entry in context.payload['rules']}
         def semantic_rule(view):
             semantic = deepcopy(view.get('item', view.get('effective_rule', {})))
@@ -1503,16 +1503,16 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
 
         unassigned = []
         for identity, reference in context.rules.items():
-            if _json(reference) in covered:
+            if rule_ref_key(reference) in covered:
                 continue
             alias = f'u{len(missing_rules) + 1}'
             missing_rules[alias] = reference
             view = views.get(identity, {})
             unassigned.append({'rule_id': alias, 'rule': semantic_rule(view)})
-        by_ref = {_json(ref): views.get(identity, {}) for identity, ref in context.rules.items()}
+        by_ref = {rule_ref_key(ref): views.get(identity, {}) for identity, ref in context.rules.items()}
         candidate_rules = []
         for identity, reference in assembly_rules.items():
-            view = by_ref.get(_json(reference), {})
+            view = by_ref.get(rule_ref_key(reference), {})
             candidate_rules.append({'rule_id': identity, 'rule': semantic_rule(view)})
         sections, projected_parts = project_source_sections(parts)
         excerpt_sections, projected_excerpts = project_source_sections(excerpt_views)
@@ -1587,7 +1587,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 return [deepcopy(visible_rules[i]) for i in dict.fromkeys(identities)]
 
             views = {entry['rule_id']: entry for entry in context.payload['rules']}
-            by_ref = {_json(ref): views.get(identity, {}) for identity, ref in context.rules.items()}
+            by_ref = {rule_ref_key(ref): views.get(identity, {}) for identity, ref in context.rules.items()}
 
             def template_override(path):
                 value = raw
@@ -1661,7 +1661,8 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                     'code': 'outline_scope_carrier_conflict',
                                     'detail': 'Scope only one narrative candidate without a native template or response table; retain complete carriers.'}])
                             allowed_ranges = {excerpt_ids[source_excerpt_key(ref)] for ref in candidate_excerpts} & visible_excerpts.keys()
-                            allowed_rules = {identity for identity, ref in visible_rules.items() if ref in candidate_rules}
+                            candidate_rule_keys = {rule_ref_key(ref) for ref in candidate_rules}
+                            allowed_rules = {identity for identity, ref in visible_rules.items() if rule_ref_key(ref) in candidate_rule_keys}
                             _check_reference_ids(scope['range_ids'], allowed_ranges,
                                 (*target_path, 'candidate_scope', 'range_ids'), 'Select excerpts belonging to this candidate.')
                             _check_reference_ids(scope['rule_ids'], allowed_rules,
@@ -1716,7 +1717,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                         exact_sources.extend(ref for identity in selection['source_ids']
                                              for ref in submission_excerpt_bindings.get(identity, []))
                         for reference in [*(candidate_rules if scope is not None else []), *additional]:
-                            view = by_ref[_json(reference)]
+                            view = by_ref[rule_ref_key(reference)]
                             semantic = view.get('item', view.get('effective_rule', {}))
                             for evidence in semantic.get('evidence', []):
                                 exact = getattr(context, 'excerpts', {}).get(evidence['range_id'], [])
@@ -1728,7 +1729,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             'manual_fill': manual_fill or any(t.get('manual_fill', False) for t in selected),
                             'support_origins': list(dict.fromkeys(origin for t in selected
                                 for origin in t.get('support_origins', ['knowledge']))) if selected else target['support_origins'],
-                            'rule_refs': list({_json(r): r for r in [
+                            'rule_refs': list({rule_ref_key(r): r for r in [
                                 *candidate_rules, *additional]}.values()),
                             'source_refs': list({_json(r): r for r in [
                                 *candidate_sources, *additional_sources]}.values()),
@@ -1792,10 +1793,10 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                 extra_sources = list({_json(ref): ref for ref in [*bound['source_refs'],
                                     *(ref['source_ref'] for ref in extra_excerpts)]
                                     if _json(ref) not in known_sources}.values())
-                                known_rules = {_json(ref) for t in inherited for ref in t['rule_refs']}
-                                extra_rules = list({_json(ref): ref for ref in [*bound['rule_refs'],
+                                known_rules = {rule_ref_key(ref) for t in inherited for ref in t['rule_refs']}
+                                extra_rules = list({rule_ref_key(ref): ref for ref in [*bound['rule_refs'],
                                     *(ref for row in row_values for ref in row['rule_refs'])]
-                                    if _json(ref) not in known_rules}.values())
+                                    if rule_ref_key(ref) not in known_rules}.values())
                                 location = '章节「' + c['title'] + '」，原用途：' + '；'.join(t['purpose'] for t in inherited)
                                 header_issues.append({'code': 'outline_response_context_unassigned',
                                     'detail': location + '。不同原表的条件及响应行尚未完整交接，已保留各份原表及空应答；'
@@ -1833,14 +1834,14 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             bound['source_refs'] = list({_json(ref): ref for ref in [*bound['source_refs'],
                                 *(ref['source_ref'] for ref in table_context),
                                 *(ref['source_ref'] for row in row_values for ref in row['source_excerpts'])]}.values())
-                            bound['rule_refs'] = list({_json(ref): ref for ref in [*bound['rule_refs'],
+                            bound['rule_refs'] = list({rule_ref_key(ref): ref for ref in [*bound['rule_refs'],
                                 *(ref for row in row_values for ref in row['rule_refs'])]}.values())
                         targets.append(bound)
                         if scope is not None:
                             identity = target['target_ids'][0]
                             covered = scoped_coverage.setdefault(identity, {'ranges': set(), 'rules': set()})
                             covered['ranges'].update(source_excerpt_key(ref) for ref in bound.get('source_excerpts', []))
-                            covered['rules'].update(_json(ref) for ref in bound['rule_refs'])
+                            covered['rules'].update(rule_ref_key(ref) for ref in bound['rule_refs'])
                         selections.append((bound, selection))
                         links.append((bound, selection['related_target_ids']))
                         for identity in dict.fromkeys(target['target_ids']):
@@ -1875,7 +1876,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 selected = [visible_targets[key] for key in dict.fromkeys(entry['target_ids'])]
                 exclusion_issues.append({'code': 'outline_target_excluded',
                     'detail': entry['reason'] + ' 原候选用途：' + '；'.join(t['purpose'] for t in selected),
-                    'rule_refs': list({_json(ref): ref for t in selected for ref in t['rule_refs']}.values())})
+                    'rule_refs': list({rule_ref_key(ref): ref for t in selected for ref in t['rule_refs']}.values())})
             used.update(excluded)
             omitted = {}
             for key, original in visible_targets.items():
@@ -1887,10 +1888,10 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 covered = scoped_coverage[key]
                 remaining_excerpts = [ref for ref in original.get('source_excerpts', [])
                                       if source_excerpt_key(ref) not in covered['ranges']]
-                remaining_rules = [ref for ref in original['rule_refs'] if _json(ref) not in covered['rules']]
+                remaining_rules = [ref for ref in original['rule_refs'] if rule_ref_key(ref) not in covered['rules']]
                 accounted_sources = {_json(ref['source_ref']) for ref in original.get('source_excerpts', [])}
                 for reference in original['rule_refs']:
-                    view = by_ref.get(_json(reference), {})
+                    view = by_ref.get(rule_ref_key(reference), {})
                     semantic = view.get('item', view.get('effective_rule', {}))
                     accounted_sources.update(_json(ref) for evidence in semantic.get('evidence', [])
                         for ref in context.sources.get(evidence['range_id'], []))
@@ -1904,7 +1905,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 retained['source_excerpts'] = deepcopy(remaining_excerpts)
                 sources = [ref['source_ref'] for ref in remaining_excerpts]
                 for reference in remaining_rules:
-                    view = by_ref.get(_json(reference), {})
+                    view = by_ref.get(rule_ref_key(reference), {})
                     semantic = view.get('item', view.get('effective_rule', {}))
                     for evidence in semantic.get('evidence', []):
                         exact = getattr(context, 'excerpts', {}).get(evidence['range_id'], [])
@@ -1918,7 +1919,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 selections.append((retained, {'candidate_scope': {
                     'range_ids': [excerpt_ids[source_excerpt_key(ref)] for ref in remaining_excerpts],
                     'rule_ids': [identity for reference in remaining_rules
-                                 for identity, ref in visible_rules.items() if reference == ref]}}))
+                                 for identity, ref in visible_rules.items() if rule_ref_key(reference) == rule_ref_key(ref)]}}))
             for role in ('body', 'submission_note'):
                 retained = [target for key, target in omitted.items()
                             if (candidate_roles[key] == 'submission_note') == (role == 'submission_note')]
@@ -1951,7 +1952,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             for number, intent in enumerate(parsed['search_intents']):
                 references = rule_refs(intent['for_ids'], ['search_intents', number, 'for_ids'])
                 source_refs = [source for ref in references
-                    for e in by_ref[_json(ref)].get('item', by_ref[_json(ref)].get('effective_rule', {})).get('evidence', [])
+                    for e in by_ref[rule_ref_key(ref)].get('item', by_ref[rule_ref_key(ref)].get('effective_rule', {})).get('evidence', [])
                     for source in context.sources.get(e['range_id'], [])]
                 added_intents.append({'query': intent['query'], 'rule_refs': references,
                     'source_refs': list({_json(ref): ref for ref in source_refs}.values()), 'range_ids': []})
@@ -1978,7 +1979,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 assembled = _join_assemblies(batch_results)
         (chapters, omitted, exclusion_issues, excluded_origins, added_constraints, added_intents,
          candidate_bindings, candidate_selections) = assembled
-        refs = list({_json(ref): ref for ref in [*refs, *added_constraints]}.values())
+        refs = list({rule_ref_key(ref): ref for ref in [*refs, *added_constraints]}.values())
         if omitted:
             assembly_gap = _gap('outline_assembly_incomplete', '归并未安排的响应位置已保留在末尾，顺序待核对。')
             gaps.append(assembly_gap)
@@ -2000,11 +2001,11 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                   if i['code'] != 'outline_rule_unassigned'
                   and (ordinal, i.get('target_id')) not in excluded_origins]
         issues.extend(exclusion_issues)
-        assigned = {_json(r) for c in _flatten(chapters) for t in c['targets'] for r in t['rule_refs']}
-        assigned.update(_json(r) for r in refs)
-        assigned.update(_json(ref) for issue in exclusion_issues for ref in issue['rule_refs'])
+        assigned = {rule_ref_key(r) for c in _flatten(chapters) for t in c['targets'] for r in t['rule_refs']}
+        assigned.update(rule_ref_key(r) for r in refs)
+        assigned.update(rule_ref_key(ref) for issue in exclusion_issues for ref in issue['rule_refs'])
         for ref in context.rules.values():
-            if _json(ref) not in assigned:
+            if rule_ref_key(ref) not in assigned:
                 issues.append({'code': 'outline_rule_unassigned', 'detail': '该规则尚未安排响应或交付位置。', 'rule_refs': [ref]})
         # Local path IDs cannot survive assembly. Issues remain truthful at outline level.
         for issue in issues:
@@ -2080,7 +2081,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                                           'rows': [{'range_ids': [excerpt_ids[source_excerpt_key(ref)]
                                                         for ref in row['source_excerpts']],
                                                     'rule_ids': [identity for ref in row['rule_refs']
-                                                        for identity, value in assembly_rules.items() if value == ref]}
+                                                        for identity, value in assembly_rules.items() if rule_ref_key(value) == rule_ref_key(ref)]}
                                                    for row in target['response_table']['rows']]}}
                                          if target.get('response_table') else {})}
                                      for target in chapter['targets']],
@@ -2095,7 +2096,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             try:
                 repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = await _ask(
                     execute, budget, 'outline', feedback, assembly_validator(feedback))
-                refs = list({_json(ref): ref for ref in [*refs, *new_constraints]}.values())
+                refs = list({rule_ref_key(ref): ref for ref in [*refs, *new_constraints]}.values())
                 candidate = finalize(repaired, new_issues, new_excluded, new_intents)
                 changed = candidate['chapters'] != outline['chapters']
                 outline = candidate
@@ -2170,7 +2171,7 @@ def _load_task(artifacts, context, task, basis, materials):
     template_supports, response_context_supports, response_rows = {}, {}, []
     source_context_supports, body_cache = {}, {}
     views = {r['rule_id']: r for r in context.payload['rules']}
-    by_ref = {_json(ref): views[identity] for identity, ref in context.rules.items()}
+    by_ref = {rule_ref_key(ref): views[identity] for identity, ref in context.rules.items()}
     needed = {m['material_id']: m for m in _task_materials(materials, task)}
     global_issues = [i['issue_id'] for i in context.payload.get('issues', [])
                      if not i.get('range_id') and not i.get('item_ids') and i.get('issue_id')]
@@ -2211,7 +2212,7 @@ def _load_task(artifacts, context, task, basis, materials):
         if (target.get('source_body_contract') is not None or target.get('source_body_ref') is not None
                 or target.get('source_context_excerpts')):
             load_source_body(artifacts, context.input, target, repository=repository, cache=body_cache)
-        target_rules = [by_ref[_json(ref)] for ref in target['rule_refs'] if _json(ref) in by_ref]
+        target_rules = [by_ref[rule_ref_key(ref)] for ref in target['rule_refs'] if rule_ref_key(ref) in by_ref]
         rules.extend(target_rules)
         rows = (target.get('response_table') or {}).get('rows', [])
         table_context = (target.get('response_table') or {}).get('context_source_excerpts', [])
@@ -2262,7 +2263,7 @@ def _load_task(artifacts, context, task, basis, materials):
         for row in rows:
             identities = [register(ref, alias) for ref in [*row.get('context_source_excerpts', []), *row['source_excerpts']]]
             response_rows.append({'row_id': f'q{len(response_rows) + 1}', 'target_id': alias,
-                'rule_ids': [by_ref[_json(ref)]['rule_id'] for ref in row['rule_refs'] if _json(ref) in by_ref],
+                'rule_ids': [by_ref[rule_ref_key(ref)]['rule_id'] for ref in row['rule_refs'] if rule_ref_key(ref) in by_ref],
                 'support_ids': list(dict.fromkeys(identity for identity in identities if identity)),
                 **({'source_join': row['source_join']} if row.get('source_join') else {})})
     material_aliases = {identity: f'k{i}' for i, identity in enumerate(needed, 1)}
@@ -2281,7 +2282,7 @@ def _load_task(artifacts, context, task, basis, materials):
                             'template_support_ids': template_supports[f't{i + 1}'],
                             **({'response_context_support_ids': response_context_supports[f't{i + 1}']}
                                if response_context_supports[f't{i + 1}'] else {}),
-                            'rule_ids': [by_ref[_json(ref)]['rule_id'] for ref in t['rule_refs'] if _json(ref) in by_ref],
+                            'rule_ids': [by_ref[rule_ref_key(ref)]['rule_id'] for ref in t['rule_refs'] if rule_ref_key(ref) in by_ref],
                             'support_ids': [s['support_id'] for s in supports if f't{i + 1}' in s['target_ids']
                                             and s['origin'] in t.get('support_origins', ['knowledge'])]}
                            for i, t in enumerate(task['targets'])],
@@ -2689,7 +2690,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     basis_targets = [(task['title_path'], target) for task in tasks for target in task['targets']
                      if not target.get('manual_fill', False)]
     rule_views = {r['rule_id']: r for r in context.payload['rules']}
-    by_ref = {_json(ref): rule_views[identity] for identity, ref in context.rules.items()}
+    by_ref = {rule_ref_key(ref): rule_views[identity] for identity, ref in context.rules.items()}
     material_aliases = {m['material_id']: f'k{i}' for i, m in enumerate(candidates, 1)}
     by_alias = {alias: identity for identity, alias in material_aliases.items()}
     basis_views = _material_views(candidates, [t for _, t in basis_targets])
@@ -2699,14 +2700,14 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         batch_materials = {by_alias[alias] for alias in selected}
         related = [(i, path, target) for i, (path, target) in enumerate(basis_targets, 1)
                    if any(m['material_id'] in batch_materials and _material_applies(m, target) for m in candidates)]
-        rules = list({_json(ref): by_ref[_json(ref)] for _, _, t in related for ref in t['rule_refs']
-                      if _json(ref) in by_ref}.values())
+        rules = list({rule_ref_key(ref): by_ref[rule_ref_key(ref)] for _, _, t in related for ref in t['rule_refs']
+                      if rule_ref_key(ref) in by_ref}.values())
         return {'grounding_policy': AUTHORING_GROUNDING_POLICY,
                 'supports': [view for view in basis_views if view['support_id'] in selected],
                 'input_issues': snapshot['issues'],
                 'rules': rules,
                 'targets': [{'target_id': f't{i}', 'title_path': path, 'kind': t['kind'], 'purpose': t['purpose'],
-                             'rule_ids': [by_ref[_json(ref)]['rule_id'] for ref in t['rule_refs'] if _json(ref) in by_ref],
+                             'rule_ids': [by_ref[rule_ref_key(ref)]['rule_id'] for ref in t['rule_refs'] if rule_ref_key(ref) in by_ref],
                              'support_ids': [material_aliases[m['material_id']] for m in candidates
                                               if m['material_id'] in batch_materials and _material_applies(m, t)]}
                             for i, path, t in related],

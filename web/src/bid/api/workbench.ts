@@ -2,6 +2,7 @@ import { type MutationAttempt } from "../../api";
 import type { BidProjectView } from "./types";
 import type { DocxCurrent, DocxIdentity, DocxOpened, DocxSaveReceipt, DocxSavedReceipt } from "./docx";
 import type { DocxSessionApi } from "../authoring/docxSession";
+import type { ReviewIdentity } from "./analysisReview";
 import { v2Blob, v2Request } from "./http";
 
 export type TenderIssue = { code: string; detail: string; issue_id?: string; chapter_id?: string | null; target_id?: string | null };
@@ -28,8 +29,11 @@ export type TenderChapter = {
 };
 export type OutlineNode = Pick<TenderChapter, "chapter_id" | "title" | "is_volume" | "presentation_role" | "writing_goal"> & { children: OutlineNode[]; target_ids?: string[] };
 export type OutlineHistoryEntry = { revision_id: string; revision: number; parent_id: string | null; created_at: string };
-export type OutlineDocument = { chapters: TenderChapter[]; issues?: TenderIssue[] };
-export type OutlineRevision = { revision_id: string; revision: number; parent_id: string | null; execution_id: string; sha256: string; outline: OutlineDocument; sources_current: boolean };
+export type OutlineDocument = { chapters: TenderChapter[]; issues?: TenderIssue[]; authoring_input?: ReviewIdentity };
+export type OutlineRevision = {
+  revision_id: string; revision: number; parent_id: string | null; execution_id: string; sha256: string;
+  outline: OutlineDocument; sources_current: boolean; newer_analysis_identity?: ReviewIdentity | null;
+};
 export type OutlineView = { draft: OutlineRevision | null; candidate: { execution_id: string; sha256: string; outline: OutlineDocument } | null; generation: TenderExecution | null };
 export type OutlineSave = { expected_revision_id: string | null; source_revision_id?: string; source_execution_id?: string; chapters: OutlineNode[] };
 export type DocumentStart = { outline_revision_id?: string; outline_sha256?: string; knowledge_selections?: Array<{ product_id: string; version_id: string }>; previous_execution_id?: string; review_request?: { target_ids: string[]; reason: string } };

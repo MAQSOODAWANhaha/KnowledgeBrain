@@ -8,7 +8,7 @@ import json
 from docreader.integrations.artifacts import ArtifactIntegrityError
 from docreader.llm.request import ModelContractError
 from docreader.tender.evidence.references import EvidenceRepository, fragment, selector
-from docreader.tender.schema import NativeResponseLayout, SourceExcerptRef, SourceUnitRef
+from docreader.tender.schema import EffectiveItemRef, NativeResponseLayout, SourceExcerptRef, SourceUnitRef
 
 
 def source_excerpt_key(reference):
@@ -19,6 +19,8 @@ def source_excerpt_key(reference):
 
 def response_row_id(target_id, excerpts, rule_refs, *, context_source_excerpts=(),
                     source_join='paragraphs', native_layout=None):
+    if native_layout is not None:
+        rule_refs = [EffectiveItemRef.model_validate(ref).model_dump() for ref in rule_refs]
     content = {'sources': [source_excerpt_key(ref) for ref in excerpts], 'rules': rule_refs}
     if context_source_excerpts or source_join != 'paragraphs' or native_layout is not None:
         if source_join not in {'paragraphs', 'continuation'}:

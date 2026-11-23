@@ -82,6 +82,19 @@ def test_unknown_target_requirement_keeps_its_reference_and_location_without_gue
     AuthoringRequirements.model_validate(result)
 
 
+def test_supply_row_only_rule_preserves_its_target_in_the_requirements_snapshot():
+    row_rule = reference()
+    planned = outline(("table-target", []))
+    table = planned["chapters"][0]["children"][0]["targets"][0]
+    table["response_table"] = {"rows": [{"row_id": "row-1", "rule_refs": [row_rule]}]}
+    analysis = context([("r1", row_rule)], [{"rule_id": "r1", "item": item()}])
+
+    preserved = preserve_requirements(analysis, planned)
+
+    assert preserved["rules"][0]["target_ids"] == ["table-target"]
+    AuthoringRequirements.model_validate(preserved)
+
+
 def test_missing_semantic_view_keeps_an_unassigned_formal_requirement():
     known = reference()
 

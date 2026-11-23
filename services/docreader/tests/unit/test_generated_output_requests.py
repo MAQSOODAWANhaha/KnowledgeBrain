@@ -8,11 +8,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from docreader.llm.budget import RequestBudget
+from docreader.llm.contracts import ExtractionOutput
 from docreader.llm.request import (
     ModelContractError, ModelWorkUnitExhausted, build_request, request_digest,
 )
 from docreader.tender.authoring_execution import _OutlineModel
-from docreader.tender.schema import Extraction, OutlineResponse, WritingResponse
+from docreader.tender.schema import AnalysisReviewResponse, Extraction, OutlineResponse, WritingResponse
 
 from test_authoring_send_admission import JournalAudit
 from test_tender_llm import CountedArtifacts, model, response
@@ -67,6 +68,45 @@ async def test_analysis_client_sends_generated_schema_and_measures_the_same_body
     baseline = client.request_budget().measure_request(legacy, "extract")
     schema_bytes = len(request["messages"][0]["content"].encode()) - len(legacy["messages"][0]["content"].encode())
     assert measured["input_tokens"] - baseline["input_tokens"] == schema_bytes > 0
+
+
+async def test_strict_v2_extraction_uses_one_schema_and_pins_correction_identity(tmp_path):
+    calls, audit = [], JournalAudit()
+    payload = {"schema_version": 2, "work_unit_id": "pack-test"}
+    feedback = {"errors": [{"path": ["dispositions"], "code": "missing", "detail": "Field required"}]}
+    client, _ = model(lambda sent: (calls.append(json.loads(sent.content)), response())[1],
+                      audit, artifacts=CountedArtifacts(tmp_path))
+    async with client:
+        await client.call("extract", payload)
+        await client.call("extract", {**payload, "contract_feedback": feedback})
+
+    budget = client.request_budget()
+    first, correction = calls
+    assert first == budget.request("extract", payload)
+    assert correction == budget.request("extract", {**payload, "contract_feedback": feedback})
+    assert first["response_format"] == correction["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "tender_extraction", "strict": True,
+                        "schema": ExtractionOutput.model_json_schema(mode="validation")},
+    }
+    assert first["messages"][0]["content"] == "Return JSON evidence."
+    assert budget.spec()["extract_response_format"] == "json_schema"
+    assert client.execution_spec()["budget"]["chat"] == budget.spec()
+    legacy = budget.request("extract", {})
+    assert legacy["response_format"] == {"type": "json_object"}
+    assert_embedded_schema(legacy, Extraction)
+    verify = RequestBudget(prompts={"verify": "Review."}).request(
+        "verify", {"schema_version": 2}
+    )
+    assert verify["response_format"] == {"type": "json_object"}
+    assert_embedded_schema(verify, AnalysisReviewResponse)
+
+    digest = request_digest(client.config.chat.base_url, first)
+    assert request_digest(client.config.chat.base_url, correction) != digest
+    assert {row["metadata"]["logical_request_digest"] for row in audit.rows.values()} == {digest}
+    measured = budget.measure_request(first, "extract")
+    row = next(row for row in audit.rows.values() if row["metadata"]["request_digest"] == digest)
+    assert row["metadata"]["input_tokens"] == measured["input_tokens"]
 
 
 async def test_changed_schema_has_a_new_digest_and_cannot_claim_the_old_paid_cache(tmp_path, monkeypatch, schema_cache):

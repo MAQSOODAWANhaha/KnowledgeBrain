@@ -17,9 +17,9 @@ from psycopg.types.json import Jsonb
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.authoring import read_authoring_input
 from docreader.integrations.authoring_store import AuthoringStore
-from docreader.integrations.store import Conflict, Store
+from docreader.integrations.store import Cancelled, Conflict, InvalidConfirmation, Store
 from docreader.jobs.settings import Settings
-from docreader.tender.status import AuthoringExecutionStatus, AuthoringJobStatus, ProjectStatus, status_row
+from docreader.tender.status import AuthoringExecutionStatus, AuthoringJobStatus, ProjectStatus, RunStatus, status_row
 
 logger = logging.getLogger(__name__)
 
@@ -337,13 +337,31 @@ class WebBridge:
             raise WebError("EXECUTION_NOT_FOUND", "编制任务不存在或不属于此项目。", 404)
         return row
 
-    async def outline_sources_current(self, project_id, outline):
+    async def outline_sources_current(self, project_id, outline, *, registered=None):
         reference = outline["authoring_input"].get("frozen_ref")
         if reference is None:
             return False
         frozen = await asyncio.to_thread(self.artifacts.read_json, reference)
-        current = await self.manifest(project_id)
+        current = registered if registered is not None else await self.manifest(project_id)
         return _source_identities(frozen["documents"]) == _source_identities(current["documents"])
+
+    async def newer_outline_analysis(self, project_id, pinned, registered):
+        run = await self.latest_run(project_id)
+        if run is None or run["status"] not in (RunStatus.WAITING_CONFIRMATION, RunStatus.ANALYSIS_READY):
+            return None
+        identity = _identity(run)
+        if (identity["run_id"] == pinned["run_id"]
+                and (identity["source_version"], identity["domain_revision"])
+                <= (pinned["source_version"], pinned["domain_revision"])):
+            return None
+        try:
+            if not await self.sources_current(run, registered, require_current_pdf=True):
+                return None
+            snapshot = await read_authoring_input(self.store, self.artifacts, **identity,
+                                                  checklist_digest=run["checklist_digest"])
+        except (Cancelled, InvalidConfirmation, OSError, ValueError):
+            return None
+        return identity if snapshot["checklist_digest"] and snapshot["verification_ref"] else None
 
     async def outline_revision(self, project_id, revision_id):
         async with self.store.transaction() as conn:
@@ -357,10 +375,15 @@ class WebBridge:
         from docreader.tender.schema import AuthoringOutline
 
         outline = AuthoringOutline.model_validate(await asyncio.to_thread(self.artifacts.read_json, row["outline_ref"])).model_dump(exclude_unset=True)
+        project_id = str(row["project_id"])
+        pinned = outline["authoring_input"]
+        registered = await self.manifest(project_id) if pinned.get("frozen_ref") else None
+        current = await self.outline_sources_current(project_id, outline, registered=registered)
         return {"revision_id": str(row["revision_id"]), "revision": row["revision"],
                 "parent_id": str(row["parent_id"]) if row["parent_id"] else None,
                 "execution_id": row["execution_id"], "sha256": row["outline_ref"]["sha256"], "outline": outline,
-                "sources_current": await self.outline_sources_current(str(row["project_id"]), outline)}
+                "sources_current": current,
+                "newer_analysis_identity": await self.newer_outline_analysis(project_id, pinned, registered) if current else None}
 
     async def execution_outline(self, project_id, execution_id):
         from docreader.tender.schema import AuthoringOutline

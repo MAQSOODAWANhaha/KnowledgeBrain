@@ -18,7 +18,12 @@ def runtime(tmp_path, monkeypatch):
     artifacts = ArtifactStore(tmp_path)
     snapshot = AuthoringInput(schema_version=2, run_id="fixed-run", source_version=1,
                               domain_revision=1).model_dump()
-    outline = AuthoringOutline(schema_version=2, authoring_input=snapshot, issues=[], chapters=[]).model_dump()
+    outline = AuthoringOutline.model_validate({"schema_version": 2, "authoring_input": snapshot, "issues": [], "chapters": [{
+        "chapter_id": "chapter-1", "title": "响应章节", "children": [], "targets": [{
+            "target_id": "response", "kind": "form", "purpose": "企业信息待人工填写",
+            "rule_refs": [], "source_refs": [], "manual_fill": True, "support_origins": ["tender"],
+        }],
+    }]}).model_dump()
     outline_ref = artifacts.put_json(outline)
     rows = {}
     store = SimpleNamespace(setup=AsyncMock(), commit_artifact=AsyncMock(), heartbeat=AsyncMock())

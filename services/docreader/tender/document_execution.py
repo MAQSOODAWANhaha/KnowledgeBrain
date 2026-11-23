@@ -748,7 +748,7 @@ async def execute_document(
                 spec['reviewed_body_entry_contract'] = REVIEWED_BODY_ENTRY_CONTRACT
             elif 'reviewed_body_entry_contract' in existing['execution_spec']:
                 spec['reviewed_body_entry_contract'] = existing['execution_spec']['reviewed_body_entry_contract']
-    automatic_source_outline = outline_only and outline_ref is None and snapshot.get("frozen_ref") is not None
+    automatic_outline = outline_only and outline_ref is None
     await store.submit(execution_id, snapshot, spec)
     lease = await store.acquire(execution_id, lease_seconds=lease_seconds)
     if lease is None:
@@ -763,7 +763,7 @@ async def execute_document(
             raise ArtifactIntegrityError(
                 "stored document does not refer to its fixed input snapshot"
             )
-        if automatic_source_outline and not _has_outline_responses(value["chapters"]):
+        if automatic_outline and not _has_outline_responses(value["chapters"]):
             raise SourceOutlineUnavailable("directory_plan")
         await assert_authoring_active(analysis_store, snapshot)
         return saved["result_ref"]
@@ -946,7 +946,7 @@ async def execute_document(
                     raise ArtifactIntegrityError(
                         "generated outline changed the fixed input snapshot"
                     )
-                if automatic_source_outline and not _has_outline_responses(value["chapters"]):
+                if automatic_outline and not _has_outline_responses(value["chapters"]):
                     await store.commit_artifact(
                         lease, "directory-outline-unavailable", reference,
                         scope=reference["sha256"], input_digest=_digest(snapshot),

@@ -37,6 +37,26 @@ def test_response_form_has_its_own_generation_contract():
     assert {'layout', 'contexts', 'rows', 'source_guidance', 'dispositions'} <= model.model_fields.keys()
 
 
+@pytest.mark.parametrize('location', ['template_parts', 'template_segments', 'material_segments'])
+def test_compiled_part_locations_are_private_to_the_directory(tmp_path, location):
+    artifacts = ArtifactStore(tmp_path)
+    fixed, documents, compiled, selection, target = source_case(artifacts)
+    original = target['template_refs'][0]
+    source_part = {**original, '_document_id': 'source', '_source_page': 0}
+    chapter = compiled['chapters'][0]
+    for field in ('template_parts', 'template_segments', 'material_segments'):
+        chapter.pop(field, None)
+    chapter[location] = [source_part] if location == 'template_parts' else [{'part': source_part}]
+    before = deepcopy(compiled)
+
+    catalog = response_form_catalog(compiled, documents)
+    assert [entry['table_id'] for entry in catalog] == [selection['table_id']]
+    view = ResponseFormView(artifacts, compiled, documents, selection, fixed)
+    assert view.part == original
+    assert view.accept(synthetic_response(view.payload))['complete']
+    assert compiled == before
+
+
 def source_case(artifacts):
     target, _, index = case(artifacts, count=3)
     native = deepcopy(index.raw)

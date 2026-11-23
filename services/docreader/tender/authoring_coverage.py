@@ -28,8 +28,21 @@ def _digest(value, prefix):
     return prefix + hashlib.sha256(_json(value).encode()).hexdigest()[:24]
 
 
+def canonical_rule_ref(value):
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items()
+            if key not in {"decision_id", "rule_index"} or item is not None}
+
+
+def rule_ref_key(value):
+    if value is None:
+        return None
+    return _json(canonical_rule_ref(value))
+
+
 def coverage_identity(rule_ref, target_id, row_id):
-    return _digest({"rule_ref": rule_ref, "target_id": target_id, "row_id": row_id}, "c-")
+    return _digest({"rule_ref": canonical_rule_ref(rule_ref), "target_id": target_id, "row_id": row_id}, "c-")
 
 
 def query_identity(query, scope, include_original):
@@ -65,7 +78,7 @@ def _resolution(rule_ref, target, constraints, excluded_rules, excluded_targets,
         return "manual"
     if target is not None and target.get("target_id") in excluded_targets:
         return "excluded"
-    key = _canonical(rule_ref)
+    key = rule_ref_key(rule_ref)
     if key and key in excluded_rules:
         return "excluded"
     if external:
@@ -81,23 +94,25 @@ def build_ledger(outline, requirements=None):
     excluded_rules, excluded_targets = set(), set()
     for issue in outline.get("issues", []):
         if issue.get("code") in {"outline_rule_excluded", "outline_target_excluded"}:
-            excluded_rules.update(_canonical(ref) for ref in issue.get("rule_refs", []))
+            excluded_rules.update(rule_ref_key(ref) for ref in issue.get("rule_refs", []))
             if issue.get("target_id"):
                 excluded_targets.add(issue["target_id"])
-    constraints = {_canonical(ref) for ref in outline.get("constraint_rule_refs", [])}
+    constraints = {rule_ref_key(ref) for ref in outline.get("constraint_rule_refs", [])}
     entries, seen, placed = [], set(), set()
 
     def add(rule_ref, target, row, resolution):
+        rule_ref = canonical_rule_ref(rule_ref)
         target_id = None if target is None else target.get("target_id")
         row_id = None if row is None else row.get("row_id")
         if rule_ref is None and not target_id and not row_id:
             return
-        key = (_canonical(rule_ref), target_id, row_id)
+        ref_key = rule_ref_key(rule_ref)
+        key = (ref_key, target_id, row_id)
         if key in seen:
             return
         seen.add(key)
-        if rule_ref is not None:
-            placed.add(_canonical(rule_ref))
+        if ref_key is not None:
+            placed.add(ref_key)
         excerpts = ([*(row or target or {}).get("context_source_excerpts", []),
                      *(row or target or {}).get("source_excerpts", [])] if row or target else [])
         status = "not_required" if resolution in _SETTLED else "unreviewed"
@@ -116,10 +131,10 @@ def build_ledger(outline, requirements=None):
             for row in rows:
                 refs = row.get("rule_refs") or [None]
                 for ref in refs:
-                    row_refs.add(_canonical(ref))
+                    row_refs.add(rule_ref_key(ref))
                     add(ref, target, row, resolve(ref))
             for ref in target.get("rule_refs", []):
-                if _canonical(ref) not in row_refs:
+                if rule_ref_key(ref) not in row_refs:
                     add(ref, target, None, resolve(ref))
             return
         refs = target.get("rule_refs") or []
@@ -138,17 +153,17 @@ def build_ledger(outline, requirements=None):
         if target["target_id"] not in assigned_targets:
             add_target(target, lambda _reference: "pending")
     for ref in outline.get("constraint_rule_refs", []):
-        if _canonical(ref) not in placed:
+        if rule_ref_key(ref) not in placed:
             add(ref, None, None, "constraint")
     for issue in outline.get("issues", []):
-        if issue.get("code") != "outline_rule_excluded":
+        if issue.get("code") not in {"outline_target_excluded", "outline_rule_excluded"}:
             continue
         for ref in issue.get("rule_refs", []):
-            if _canonical(ref) not in placed:
+            if rule_ref_key(ref) not in placed:
                 add(ref, None, None, "excluded")
     for row in requirements.get("rules", []):
         ref = row.get("rule_ref")
-        key = _canonical(ref)
+        key = rule_ref_key(ref)
         if ref is not None and key not in placed and key not in constraints and key not in excluded_rules:
             add(ref, None, None, "pending")
     return entries
@@ -195,8 +210,8 @@ def _source_intents(intents, target):
 
 
 def _rule_intents(intents, rule_ref):
-    key = _canonical(rule_ref)
-    return [intent for intent in intents if any(_canonical(ref) == key for ref in intent.get("rule_refs", []))]
+    key = rule_ref_key(rule_ref)
+    return [intent for intent in intents if any(rule_ref_key(ref) == key for ref in intent.get("rule_refs", []))]
 
 
 def _row_text(row, excerpt_texts, context_excerpts=()):
@@ -222,7 +237,7 @@ def plan_queries(outline, tasks, entries, requirements=None, excerpt_texts=None,
     for row in requirements.get("rules", []):
         text = ((row.get("rule") or {}).get("text"))
         if row.get("rule_ref") is not None and isinstance(text, str):
-            texts[_canonical(row["rule_ref"])] = text
+            texts[rule_ref_key(row["rule_ref"])] = text
     by_target = {}
     for entry in entries:
         by_target.setdefault(entry.get("target_id"), []).append(entry)
@@ -301,7 +316,7 @@ def plan_queries(outline, tasks, entries, requirements=None, excerpt_texts=None,
                                     "coverage_id": entry["coverage_id"], "target_id": target["target_id"],
                                     "include_original": target.get("kind") == "attachment"})
                     continue
-                consider(texts.get(_canonical(entry["rule_ref"])), "effective_requirement", [entry], target)
+                consider(texts.get(rule_ref_key(entry["rule_ref"])), "effective_requirement", [entry], target)
     grouped = {}
     for item in raw:
         bucket = grouped.setdefault(item["query"], {"query": item["query"], "bindings": [], "targets": [],
@@ -485,10 +500,10 @@ def _target_positions(target):
     row_rules = set()
     for row in rows:
         for rule in row.get("rule_refs") or [None]:
-            row_rules.add(_canonical(rule))
+            row_rules.add(rule_ref_key(rule))
             yield rule, row
     for rule in target.get("rule_refs") or ([] if rows else [None]):
-        if _canonical(rule) not in row_rules:
+        if rule_ref_key(rule) not in row_rules:
             yield rule, None
 
 
@@ -505,7 +520,7 @@ def coverage_scope_index(tasks):
 
 def task_coverage_refs(task, payload, rule_refs):
     """Host-only link from formal positions to aliases actually present in this payload."""
-    aliases = {_canonical(reference): alias for alias, reference in rule_refs.items()}
+    aliases = {rule_ref_key(reference): alias for alias, reference in rule_refs.items()}
     row_views = iter(payload.get("response_rows") or [])
     result = {}
     for target, view in zip(task["targets"], payload.get("targets", [])):
@@ -515,7 +530,7 @@ def task_coverage_refs(task, payload, rule_refs):
             row_view = projected_rows.get(row["row_id"]) if row else None
             if row is not None and row_view is None:
                 continue
-            rule_ids = [] if rule is None else [aliases.get(_canonical(rule))]
+            rule_ids = [] if rule is None else [aliases.get(rule_ref_key(rule))]
             if rule is not None and (not rule_ids[0] or rule_ids[0] not in (row_view or view).get("rule_ids", [])):
                 continue
             identity = coverage_identity(rule, target["target_id"], (row or {}).get("row_id"))

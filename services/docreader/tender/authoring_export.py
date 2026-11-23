@@ -6,6 +6,7 @@ from collections import defaultdict
 from ctypes import byref, c_double
 from io import BytesIO
 import json
+from math import hypot, isfinite
 import mimetypes
 import re
 from statistics import median
@@ -13,13 +14,13 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 from PIL import Image, ImageOps
 
-from docreader.tender.authoring_coverage import pending_outline_issues
+from docreader.tender.authoring_coverage import build_ledger, pending_outline_issues
 from docreader.tender.authoring_templates import load_template_part, template_part_key
 from docreader.tender.directory_compile import _native_header_count
 from docreader.tender.evidence.references import EvidenceRepository
@@ -306,6 +307,7 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
             page = pdf[locator['page_ordinal']]
             text = page.get_textpage()
             try:
+                matrix = raw.FS_MATRIX()
                 for index in range(text.count_chars()):
                     ch = text.get_text_range(index, 1)
                     if not ch.strip():
@@ -313,15 +315,19 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
                     x0, y0, x1, y1 = text.get_charbox(index)
                     if left <= (x0 + x1) / 2 <= right and bottom <= (y0 + y1) / 2 <= top:
                         origin_x, origin_y = c_double(), c_double()
-                        if not raw.FPDFText_GetCharOrigin(text, index, byref(origin_x), byref(origin_y)):
+                        if (not raw.FPDFText_GetCharOrigin(text, index, byref(origin_x), byref(origin_y))
+                                or not raw.FPDFText_GetMatrix(text, index, byref(matrix))):
+                            return None
+                        # PDFium reports the untransformed size. Map the text's vertical axis to the page.
+                        size = round(raw.FPDFText_GetFontSize(text, index) * hypot(matrix.c, matrix.d), 2)
+                        if not isfinite(size) or size <= 0:
                             return None
                         chars.append({'ch': ch, 'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
-                                      'baseline': round(origin_y.value, 2),
-                                      'font': round(raw.FPDFText_GetFontSize(text, index), 2)})
+                                      'baseline': round(origin_y.value, 2), 'font': size})
             finally:
                 text.close()
         sizes = {char['font'] for char in chars}
-        if len(sizes) != 1 or next(iter(sizes)) <= 0:
+        if len(sizes) != 1:
             return None
         size = next(iter(sizes))
         xs, ys = [left], [top]
@@ -342,7 +348,7 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
                 baselines = sorted({char['baseline'] for char in selected}, reverse=True)
                 gaps.extend(upper - lower for upper, lower in zip(baselines, baselines[1:])
                             if upper - lower >= size * 0.5)
-        return {'font_size': size, 'line_spacing': median(gaps) if gaps else size,
+        return {'font_size': size, 'line_spacing': median(gaps) if gaps else None,
                 'padding': min([5.4, *insets])}
     except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError):
         return None
@@ -471,16 +477,19 @@ def _toc(document, entries, display_paths):
     update.set(qn("w:val"), "true")
 
 
-def _submission_notes(outline, requirements, gaps, artifacts=None):
+def _submission_notes(outline, requirements, gaps, artifacts, ledger):
     entries = list(_walk(outline.get("chapters", [])))
     rules = {_requirement_key(row["rule_ref"]): row for row in (requirements or {}).get("rules", [])}
-    assigned = {_requirement_key(ref) for chapter, _ in entries for target in chapter.get("targets", [])
-                for ref in target.get("rule_refs", [])}
+    assigned = set()
+    target_rules = defaultdict(list)
+    for entry in ledger:
+        ref = entry["rule_ref"]
+        if ref is None or entry["resolution"] == "pending":
+            continue
+        assigned.add(_requirement_key(ref))
+        if entry["target_id"] is not None:
+            target_rules[entry["target_id"]].append(ref)
     constraints = outline.get("constraint_rule_refs", [])
-    assigned.update(_requirement_key(ref) for ref in constraints)
-    assigned.update(_requirement_key(ref) for issue in outline.get("issues", [])
-                    if issue["code"] in {"outline_target_excluded", "outline_rule_excluded"}
-                    for ref in issue.get("rule_refs", []))
     lines = ["# 提交要求与待办", "", "以下内容来自本次固定分析和编制结果，供人工整理提交；不表示已完成履约或企业应答。", ""]
     if requirements is not None and not requirements.get("authoring_input", {}).get("confirmation_ref"):
         lines.extend([PENDING_ANALYSIS_NOTE, ""])
@@ -564,7 +573,7 @@ def _submission_notes(outline, requirements, gaps, artifacts=None):
                     else:
                         lines.extend(['> ' + text.replace('\n', '\n> '), ''])
     for chapter, _ in entries:
-        references = [ref for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])]
+        references = [ref for target in chapter.get("targets", []) for ref in target_rules[target["target_id"]]]
         if references:
             location = " ".join(part for part in (
                 ".".join(map(str, paths.get(chapter["chapter_id"], ()))), chapter["title"]) if part)
@@ -704,25 +713,31 @@ class _Assembler:
         self.locations = {target["target_id"]: chapter["title"]
             for chapter, _ in _body_entries(entries) for target in chapter.get("targets", [])}
 
-    def _running_header(self, source_ref, text):
-        stripped = text.strip()
-        if not stripped or "\n" in stripped or len(stripped) > 80:
+    def _running_header(self, source_ref, unit):
+        text = (unit.get("text") or "").strip()
+        locator = unit.get("physical_locator") or unit.get("locator") or {}
+        if not text or locator.get("page_ordinal") is None:
             return False
         index_ref = source_ref["source_index_ref"]
         digest = index_ref["sha256"]
         if digest not in self._running_headers:
-            counts = {}
-            try:
-                index = self.artifacts.read_json(index_ref)
-                raw = self.artifacts.read_json(index["raw_ref"])
-                for unit in raw.get("units") or []:
-                    value = (unit.get("text") or "").strip()
-                    if value and "\n" not in value and len(value) <= 80:
-                        counts[value] = counts.get(value, 0) + 1
-            except (OSError, ValueError, KeyError, TypeError):
-                counts = {}
-            self._running_headers[digest] = {value for value, count in counts.items() if count >= 3}
-        return stripped in self._running_headers[digest]
+            raw = self.repository.source_index(index_ref).raw
+            metadata = raw.get("metadata", {})
+            repeated = {line for field in ("evidence_issues", "presentation_evidence_issues")
+                        for issue in metadata.get(field, []) if issue.get("code") == "pdf_repeating_edge_lines_removed"
+                        for line in issue.get("lines", [])}
+            page_edges = {}
+            if repeated:
+                for candidate in raw["units"]:
+                    locator = candidate.get("physical_locator") or candidate["locator"]
+                    page = locator.get("page_ordinal")
+                    value = (candidate.get("text") or "").strip()
+                    if page is not None and (value or candidate.get("grid")):
+                        edge = (candidate["unit_id"], value)
+                        page_edges.setdefault(page, [edge, edge])[1] = edge
+            self._running_headers[digest] = {unit_id: value for edges in page_edges.values()
+                                             for unit_id, value in edges if value in repeated}
+        return self._running_headers[digest].get(source_ref["unit_id"]) == text
 
     def _selected_grid(self, excerpt, loaded):
         ranges = [item for item in loaded.get("ranges") or [] if item.get("row_start") is not None]
@@ -874,11 +889,10 @@ class _Assembler:
             loaded = self.load_template(part)
             unit = loaded["unit"]
             grid = unit.get("grid")
-            header = bool(unit.get("text")) and self._running_header(part["source_ref"], unit["text"])
-            if header and not grid:
-                self.gap("export_running_header_omitted", "已省略在多页独立重复出现的源页眉。", chapter_id, target_id)
+            if not grid and self._running_header(part["source_ref"], unit):
+                self.gap("export_running_header_omitted", "已省略冻结解析标记的重复页边文字。", chapter_id, target_id)
                 return
-            if unit.get("text") and not header and not grid:
+            if unit.get("text") and not grid:
                 # Keep a whole form's own line breaks. Split only where the source recorded a paragraph.
                 breaks, start = self._template_breaks(part, unit)
                 for paragraph in _template_paragraphs(unit["text"], breaks, start):
@@ -975,9 +989,15 @@ class _Assembler:
                     margin.set(qn('w:w'), str(Pt(typography['padding']).twips))
                     margins.append(margin)
                 target._tc.get_or_add_tcPr().append(margins)
+                measured_spacing = typography['line_spacing']
                 for paragraph in target.paragraphs:
-                    paragraph.paragraph_format.space_before = paragraph.paragraph_format.space_after = Pt(0)
-                    paragraph.paragraph_format.line_spacing = Pt(typography['line_spacing'])
+                    formatting = paragraph.paragraph_format
+                    formatting.space_before = formatting.space_after = Pt(0)
+                    if measured_spacing is None:
+                        formatting.line_spacing = Pt(typography['font_size'])
+                        formatting.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+                    else:
+                        formatting.line_spacing = Pt(measured_spacing)
                     snap = OxmlElement('w:snapToGrid')
                     snap.set(qn('w:val'), '0')
                     paragraph._p.get_or_add_pPr().append(snap)
@@ -1550,6 +1570,7 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
     from docreader.tender.source_body import validate_outline_source_bodies
     validate_outline_source_bodies(artifacts, outline)
     entries = list(_walk(outline.get("chapters", [])))
+    ledger = build_ledger(outline)
     assembler = _Assembler(artifacts, writing_units, review_issues, entries, render_pdf=render_pdf,
                            authoring_input=outline.get('authoring_input'))
     assembler.pending_reviews = pending_outline_issues(outline)
@@ -1560,8 +1581,10 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
                       None, target["target_id"])
     if requirements is not None:
         rules = {_requirement_key(entry["rule_ref"]): entry.get("rule") for entry in requirements.get("rules", [])}
-        locations = [(ref, chapter["chapter_id"], target["target_id"]) for chapter, _ in entries
-                     for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])]
+        chapters_by_target = {target["target_id"]: chapter["chapter_id"] for chapter, _ in entries
+                              for target in chapter.get("targets", [])}
+        locations = [(entry["rule_ref"], chapters_by_target.get(entry["target_id"]), entry["target_id"])
+                     for entry in ledger if entry["rule_ref"] is not None and entry["target_id"] in chapters_by_target]
         located = {_requirement_key(ref) for ref, _, _ in locations}
         locations.extend((entry["rule_ref"], None, None) for entry in requirements.get("rules", [])
                          if _requirement_key(entry["rule_ref"]) not in located)
@@ -1576,12 +1599,8 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
                     not isinstance(item, dict) or not isinstance(item.get("quote"), str) for item in evidence):
                 assembler.gap("export_requirement_evidence_unverified", "已有原文依据结构需核对，原值保留在底稿中。",
                               chapter_id, target_id)
-        assigned = {_requirement_key(ref) for chapter, _ in entries
-                    for target in chapter.get("targets", []) for ref in target.get("rule_refs", [])}
-        assigned.update(_requirement_key(ref) for ref in outline.get("constraint_rule_refs", []))
-        assigned.update(_requirement_key(ref) for issue in outline.get("issues", [])
-                        if issue["code"] in {"outline_target_excluded", "outline_rule_excluded"}
-                        for ref in issue.get("rule_refs", []))
+        assigned = {_requirement_key(entry["rule_ref"]) for entry in ledger
+                    if entry["rule_ref"] is not None and entry["resolution"] != "pending"}
         for entry in requirements.get("rules", []):
             if _requirement_key(entry["rule_ref"]) not in assigned:
                 text = (entry.get("rule") or {}).get("text")
@@ -1627,7 +1646,7 @@ def export_authoring_document(artifacts, outline: dict, writing_units: list[dict
         manifest["unplaced_targets"] = {"artifact_ref": artifacts.put_json(assembler.unplaced_targets),
                                         "package_path": "未安排响应.json"}
         requirement_files.append(manifest["unplaced_targets"])
-    notes = artifacts.put_bytes(_submission_notes(outline, requirements, gaps, artifacts).encode(), "text/markdown")
+    notes = artifacts.put_bytes(_submission_notes(outline, requirements, gaps, artifacts, ledger).encode(), "text/markdown")
     manifest["submission_notes"] = {"artifact_ref": notes, "package_path": "提交要求与待办.md"}
     coverage_file = None
     if coverage is not None:

@@ -3,8 +3,10 @@
 from io import BytesIO
 
 from docx import Document
+from docx.enum.text import WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.shared import Pt
+import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -14,7 +16,7 @@ from docreader.tender.evidence.references import SourceIndex
 from docreader.tender.word_navigation import bookmark_name
 
 
-def pdf_table(artifacts):
+def pdf_table(artifacts, *, x_scale, y_scale, multiline):
     writer = PdfWriter()
     page = writer.add_blank_page(width=400, height=600)
     font = writer._add_object(DictionaryObject({NameObject("/Type"): NameObject("/Font"),
@@ -22,9 +24,12 @@ def pdf_table(artifacts):
     page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
     commands = ["1 w", "20 500 m 380 500 l S", "20 540 m 380 540 l S", "20 570 m 380 570 l S",
         "20 590 m 380 590 l S", "20 500 m 20 590 l S", "200 500 m 200 590 l S", "380 500 m 380 590 l S"]
-    for x, y, text in [(22, 577, "Item"), (202, 577, "Response"), (22, 557, "First line"),
-                       (22, 546, "Second line"), (22, 527, "Another item")]:
-        commands.append(f"BT /F1 9 Tf {x} {y} Td ({text}) Tj ET")
+    lines = [(22, 577, "Item"), (202, 577, "Response"), (22, 557, "First line")]
+    if multiline:
+        lines.append((22, 546, "Second line"))
+    lines.append((22, 527, "Another item"))
+    for x, y, text in lines:
+        commands.append(f"BT /F1 {9 / y_scale:g} Tf {x_scale:g} 0 0 {y_scale:g} {x} {y} Tm ({text}) Tj ET")
     stream = DecodedStreamObject()
     stream.set_data("\n".join(commands).encode())
     page[NameObject("/Contents")] = writer._add_object(stream)
@@ -32,7 +37,8 @@ def pdf_table(artifacts):
     writer.write(data)
     grid = {"row_count": 3, "column_count": 2, "widths_mm": [63.5, 63.5], "cells": [
         {"row": row, "column": column, "row_span": 1, "col_span": 1, "text": text}
-        for row, values in enumerate([["Item", "Response"], ["First line\nSecond line", ""], ["Another item", ""]])
+        for row, values in enumerate([["Item", "Response"],
+                                     ["First line\nSecond line" if multiline else "First line", ""], ["Another item", ""]])
         for column, text in enumerate(values)]}
     locator = {"locator_kind": "page_table", "page_ordinal": 0, "table_ordinal": 0,
         "left": 20.0, "right": 380.0, "bottom": 500.0, "top": 590.0}
@@ -70,24 +76,30 @@ def test_cached_toc_has_real_chapter_links_without_fabricated_page_numbers(tmp_p
     assert all("".join(text.text or "" for text in field.iter(qn("w:t"))) == "待计算" for field in page_refs)
 
 
-def test_pdf_table_uses_its_source_font_and_line_spacing_without_changing_cells(tmp_path):
+@pytest.mark.parametrize("x_scale,y_scale,multiline", [
+    (1, 1, True), (0.05, 0.05, True), (0.04, 0.05, True), (0.05, 0.05, False),
+])
+def test_pdf_table_uses_its_source_font_and_line_spacing_without_changing_cells(tmp_path, x_scale, y_scale, multiline):
     artifacts = ArtifactStore(tmp_path)
-    part, grid = pdf_table(artifacts)
+    part, grid = pdf_table(artifacts, x_scale=x_scale, y_scale=y_scale, multiline=multiline)
     target = {"target_id": "table:1", "kind": "form", "purpose": "Original form", "template_refs": [part],
         "rule_refs": [], "source_refs": [], "manual_fill": True}
     result = export_authoring_document(artifacts, {"chapters": [chapter("table", "Original form", targets=[target])]}, [])
     document = Document(BytesIO(artifacts.read_bytes(result["docx_ref"])))
     table = document.tables[0]
+    body_text = "First line\nSecond line" if multiline else "First line"
     assert [[cell.text for cell in row.cells] for row in table.rows] == [
-        ["Item", "Response"], ["First line\nSecond line", ""], ["Another item", ""]]
+        ["Item", "Response"], [body_text, ""], ["Another item", ""]]
     assert document.styles["Normal"].font.size == Pt(11)
+    spacing, rule = (11, WD_LINE_SPACING.EXACTLY) if multiline else (9, WD_LINE_SPACING.AT_LEAST)
     for row in table.rows:
         for cell in row.cells:
             for paragraph in cell.paragraphs:
                 assert paragraph.paragraph_format.space_after == Pt(0)
-                assert paragraph.paragraph_format.line_spacing == Pt(11)
+                assert paragraph.paragraph_format.line_spacing == Pt(spacing)
+                assert paragraph.paragraph_format.line_spacing_rule == rule
                 assert all(run.font.size == Pt(9) for run in paragraph.runs)
     assert table.rows[0].cells[0].paragraphs[0].paragraph_format.keep_with_next is True
     assert table.rows[1].cells[0].paragraphs[0].paragraph_format.keep_with_next is not True
     assert not table.rows[0]._tr.xpath("./w:trPr/w:tblHeader")  # Missing source semantics are not guessed.
-    assert grid["cells"][2]["text"] == "First line\nSecond line"
+    assert grid["cells"][2]["text"] == body_text

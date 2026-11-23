@@ -1,6 +1,7 @@
 """Retrieval plans and coverage settlement stay per requirement, row and subject."""
 
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -9,11 +10,11 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.authoring_knowledge import KnowledgeProvider
 from docreader.llm.contracts import output_schema
 from docreader.tender.authoring_coverage import (
-    accept_assessments, build_ledger, coverage_headline, fair_select, plan_queries, settle_coverage,
-    unit_fingerprint,
+    accept_assessments, build_ledger, coverage_headline, coverage_identity, fair_select, plan_queries,
+    settle_coverage, task_coverage_refs, unit_fingerprint,
 )
-from docreader.tender.authoring_pipeline import _adopt_reviewed
-from docreader.tender.schema import AuthoringContentReviewResponse, AuthoringDocument
+from docreader.tender.authoring_pipeline import _adopt_reviewed, _note_unassigned_rules
+from docreader.tender.schema import AuthoringContentReviewResponse, AuthoringDocument, EffectiveItemRef
 
 
 def ref(item_id):
@@ -45,6 +46,25 @@ def requirement(rule_ref, text, kind="obligation"):
 
 def queries_of(planned):
     return [item["query"] for item in planned["search"]]
+
+
+def test_unassigned_notes_follow_coverage_resolutions_for_saved_outlines():
+    row, constraint, excluded, missing = (ref(item) for item in ("row", "constraint", "excluded", "missing"))
+    outline = outline_for(target("table", [], response_table={"rows": [{"row_id": "r", "rule_refs": [row]}]}),
+                          constraints=[constraint], issues=[
+                              {"code": "outline_rule_excluded", "rule_refs": [excluded]},
+                              {"code": "outline_rule_unassigned", "rule_refs": [row, excluded]},
+                          ])
+    context = SimpleNamespace(rules=dict(zip(("row", "constraint", "excluded", "missing"),
+                                            (row, constraint, excluded, missing), strict=True)))
+
+    _note_unassigned_rules(outline, context)
+    _note_unassigned_rules(outline, context)
+
+    assert [issue["rule_refs"] for issue in outline["issues"] if issue["code"] == "outline_rule_unassigned"] == [[missing]]
+    assert {entry["rule_ref"]["item_ref"]["item_id"]: entry["resolution"] for entry in build_ledger(outline)} == {
+        "row": "content", "constraint": "constraint", "excluded": "excluded",
+    }
 
 
 def test_same_target_does_not_let_one_rule_intent_hide_another():
@@ -244,3 +264,93 @@ async def test_provider_sends_long_text_and_stops_before_the_byte_limit(tmp_path
     if not sent:
         assert result["issues"][0]["code"] == "knowledge_query_too_large"
         assert calls == []
+
+
+def test_coverage_and_unassigned_notes_unify_default_null_rule_ref_fields():
+    sparse_form, sparse_row, sparse_proof = ref("form-1"), ref("row-1"), ref("proof-1")
+    sparse_constraint, sparse_excluded, sparse_pending = ref("constraint-1"), ref("excluded-1"), ref("pending-1")
+    dec_a = {**ref("shared-1"), "decision_id": "dec-1", "rule_index": 0}
+    dec_b = {**ref("shared-1"), "decision_id": "dec-2", "rule_index": 0}
+    dec_a_second = {**ref("shared-1"), "decision_id": "dec-1", "rule_index": 1}
+
+    def dense(reference):
+        return EffectiveItemRef.model_validate(reference).model_dump()
+
+    assert coverage_identity(sparse_form, "t-form", None) == coverage_identity(dense(sparse_form), "t-form", None)
+    assert coverage_identity(dec_a, "t-proof", None) != coverage_identity(dec_b, "t-proof", None)
+    assert coverage_identity(dec_a, "t-proof", None) != coverage_identity(dec_a_second, "t-proof", None)
+
+    form_target = target("t-form", [dense(sparse_form)], kind="form", response_table={"rows": [
+        {"row_id": "r1", "rule_refs": [dense(sparse_row)], "source_excerpts": []}]})
+    proof_target = target("t-proof", [dense(sparse_proof), dense(dec_a)], kind="attachment")
+    outline = outline_for(
+        form_target,
+        proof_target,
+        intents=[{"query": "证明材料原件", "rule_refs": [sparse_proof], "source_refs": [], "range_ids": []}],
+        constraints=[dense(sparse_constraint)],
+        issues=[{"code": "outline_rule_excluded", "rule_refs": [dense(sparse_excluded)]}],
+    )
+    requirements = {"rules": [
+        requirement(sparse_form, "必交表完整要求"),
+        requirement(sparse_row, "表格条款完整要求"),
+        requirement(sparse_proof, "证明材料完整要求"),
+        requirement(sparse_constraint, "编制约束"),
+        requirement(sparse_excluded, "不适用条款"),
+        requirement(sparse_pending, "尚未落位要求"),
+        requirement(dec_a, "决议一第零条"),
+        requirement(dec_b, "决议二第零条"),
+        requirement(dec_a_second, "决议一第一条"),
+    ]}
+
+    entries = build_ledger(outline, requirements)
+    by_identity = {}
+    for entry in entries:
+        rule_ref = entry["rule_ref"]
+        key = (rule_ref["item_ref"]["item_id"], rule_ref.get("decision_id"), rule_ref.get("rule_index"))
+        assert key not in by_identity, f"duplicate coverage entry for {key}"
+        by_identity[key] = (entry["resolution"], entry["target_id"], entry["row_id"])
+
+    assert by_identity == {
+        ("form-1", None, None): ("content", "t-form", None),
+        ("row-1", None, None): ("content", "t-form", "r1"),
+        ("proof-1", None, None): ("content", "t-proof", None),
+        ("constraint-1", None, None): ("constraint", None, None),
+        ("excluded-1", None, None): ("excluded", None, None),
+        ("pending-1", None, None): ("pending", None, None),
+        ("shared-1", "dec-1", 0): ("content", "t-proof", None),
+        ("shared-1", "dec-2", 0): ("pending", None, None),
+        ("shared-1", "dec-1", 1): ("pending", None, None),
+    }
+
+    planned = plan_queries(outline, tasks_for(form_target, proof_target), entries, requirements)
+    assert "必交表完整要求" in queries_of(planned)
+    assert "证明材料原件" in queries_of(planned)
+    assert "决议一第零条" in queries_of(planned)
+    assert not any(gap["code"] == "knowledge_query_missing" and gap["target_id"] == "t-proof" for gap in planned["gaps"])
+
+    refs_map = {"rule-1": sparse_form, "rule-2": sparse_proof, "rule-3": dec_a}
+    payload = {"targets": [
+        {"target_id": "t1", "rule_ids": ["rule-1"]},
+        {"target_id": "t2", "rule_ids": ["rule-2", "rule-3"]},
+    ], "response_rows": [{"row_id": "q1", "rule_ids": []}]}
+    coverage_refs = task_coverage_refs(tasks_for(form_target, proof_target)[0], payload, refs_map)
+    assert coverage_identity(sparse_form, "t-form", None) in coverage_refs
+    assert coverage_identity(sparse_proof, "t-proof", None) in coverage_refs
+    assert coverage_identity(dec_a, "t-proof", None) in coverage_refs
+
+    context = SimpleNamespace(rules={
+        "rule-1": sparse_form, "rule-2": sparse_row, "rule-3": sparse_proof,
+        "rule-4": sparse_constraint, "rule-5": sparse_excluded, "rule-6": sparse_pending,
+        "rule-7": dec_a, "rule-8": dec_b, "rule-9": dec_a_second,
+    })
+    _note_unassigned_rules(outline, context)
+    unassigned = [
+        (r["item_ref"]["item_id"], r.get("decision_id"), r.get("rule_index"))
+        for issue in outline["issues"] if issue["code"] == "outline_rule_unassigned"
+        for r in issue["rule_refs"]
+    ]
+    assert sorted(unassigned) == [
+        ("pending-1", None, None),
+        ("shared-1", "dec-1", 1),
+        ("shared-1", "dec-2", 0),
+    ]

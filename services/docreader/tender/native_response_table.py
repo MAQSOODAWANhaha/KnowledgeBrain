@@ -1,6 +1,7 @@
 """Expand only an explicitly bound native response form from immutable source text."""
 
 from copy import deepcopy
+import re
 
 from docreader.tender.authoring_excerpts import response_row_id, source_excerpts_text
 from docreader.tender.authoring_templates import load_template_part
@@ -9,6 +10,27 @@ from docreader.tender.schema import ResponseTable
 
 class NativeResponseTableRejected(ValueError):
     pass
+
+
+def _source_clause_number(excerpt, repository):
+    selected = excerpt['selectors'][0]
+    index = repository.source_index(excerpt['source_ref']['source_index_ref'])
+    base = index.by_id[selected['source_range_id']]
+    start, end = selected['start'], selected['end']
+    text, origin = base['text'], base['start']
+    if 'cell_intervals' in base:
+        cell = next((cell for cell in base['cell_intervals'] if cell['start'] <= start < end <= cell['end']), None)
+        if cell is None:
+            return None
+        text, origin = cell['text'], cell['start']
+    before = text[:start - origin].rpartition('\n')[2].rpartition('\r')[2]
+    if before.strip():
+        return None
+    # Read the number's right boundary in the original, even if the selector ends there.
+    match = re.match(r'\s*([0-9]+(?:\.[0-9]+)+)(?=\s|$)', text[start - origin:])
+    if match and start + match.end() <= end:
+        return match[1]
+    return None
 
 
 def prepare_native_response_table(artifacts, target, parts, *, repository):
@@ -43,20 +65,26 @@ def prepare_native_response_table(artifacts, target, parts, *, repository):
     cells = {(cell['row'], cell['column']): cell for cell in grid['cells']}
     if any((row, column) not in cells for row in range(start, end + 1) for column in range(grid['column_count'])):
         raise NativeResponseTableRejected('重复填写区域没有完整的原生单元格锚点。')
+    sequence_column = layout['sequence_column']
+    original_labels = [cells[(row, sequence_column)]['text'].strip() for row in range(start, end + 1)]
+    heading = cells.get((start - 1, sequence_column))
+    clause_numbers = (heading is not None and heading['col_span'] == 1
+                      and heading['text'].strip() == '条款号' and not any(original_labels))
     sequence = []
+    if not clause_numbers:
+        for label in original_labels:
+            try:
+                number = int(label)
+            except ValueError:
+                raise NativeResponseTableRejected('原序号不是已核定的连续整数，保留原表待核。') from None
+            if label != str(number) or (sequence and number != sequence[-1] + 1):
+                raise NativeResponseTableRejected('原序号不是已核定的连续整数，保留原表待核。')
+            sequence.append(number)
     for row in range(start, end + 1):
-        label = cells[(row, layout['sequence_column'])]['text'].strip()
-        try:
-            number = int(label)
-        except ValueError:
-            raise NativeResponseTableRejected('原序号不是已核定的连续整数，保留原表待核。') from None
-        if label != str(number) or (sequence and number != sequence[-1] + 1):
-            raise NativeResponseTableRejected('原序号不是已核定的连续整数，保留原表待核。')
-        sequence.append(number)
         if any(cells[(row, column)]['text'].strip() for column in range(grid['column_count'])
-               if column != layout['sequence_column']):
+               if column != sequence_column):
             raise NativeResponseTableRejected('重复填写区域含有原固定文字，不能覆盖或复制为新条款。')
-    texts, row_ids = [], set()
+    texts, clause_labels, row_ids = [], [], set()
     for row in table['rows']:
         expected = response_row_id(target['target_id'], row['source_excerpts'], row['rule_refs'],
             context_source_excerpts=row.get('context_source_excerpts', []),
@@ -69,6 +97,11 @@ def prepare_native_response_table(artifacts, target, parts, *, repository):
                                    source_join=row.get('source_join', 'paragraphs'), repository=repository)
         if not body.strip():
             raise NativeResponseTableRejected('条款行没有可读取的来源正文。')
+        if clause_numbers:
+            label = _source_clause_number(row['source_excerpts'][0], repository)
+            if label is None:
+                raise NativeResponseTableRejected(f'第 {len(texts) + 1} 个响应行缺少可核对的完整原文条款号。')
+            clause_labels.append(label)
         texts.append('\n'.join(value for value in (context, body) if value))
     extra = max(0, len(texts) - (end - start + 1))
     expanded = deepcopy(grid)
@@ -80,13 +113,15 @@ def prepare_native_response_table(artifacts, target, parts, *, repository):
         for column in range(grid['column_count']):
             copied = deepcopy(cells[(end, column)])
             copied['row'] = end + offset + 1
-            if column == layout['sequence_column']:
+            if column == sequence_column and sequence:
                 copied['text'] = str(sequence[-1] + offset + 1)
             expanded['cells'].append(copied)
     expanded['cells'].sort(key=lambda cell: (cell['row'], cell['column']))
     output_cells = {(cell['row'], cell['column']): cell for cell in expanded['cells']}
     for offset, text in enumerate(texts):
         output_cells[(start + offset, layout['source_column'])]['text'] = text
+    for offset, label in enumerate(clause_labels):
+        output_cells[(start + offset, sequence_column)]['text'] = label
     context = source_excerpts_text(artifacts, table.get('context_source_excerpts', []), repository=repository)
     return {'part': part, 'loaded': loaded, 'grid': expanded, 'context': context,
             'row_origins': [*range(end + 1), *([end] * extra), *range(end + 1, grid['row_count'])],

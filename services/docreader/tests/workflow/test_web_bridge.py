@@ -2,6 +2,7 @@
 from io import BytesIO
 import asyncio
 import hashlib
+import json
 import os
 from types import SimpleNamespace
 from uuid import uuid4
@@ -311,6 +312,64 @@ async def test_document_submission_pins_saved_outline_and_rejects_changed_source
     with pytest.raises(WebError) as changed:
         await runtime.bridge.start_authoring({**request, "request_key": "new-click-on-stale-outline"})
     assert changed.value.code == "SOURCE_CHANGED_REQUIRES_NEW_OUTLINE"
+
+
+async def test_same_source_analysis_revision_is_available_for_a_new_outline(runtime, monkeypatch):
+    await upload(runtime)
+    bridge = runtime.bridge
+    initial = await bridge.start_analysis(payload(runtime, request_key="analysis-for-outline"))
+    run_id = initial["analysis"]["run_id"]
+    source = await bridge.source_run(runtime.project)
+    frozen = next(entry["artifact_ref"] for entry in source["artifacts"] if entry["stage"] == "freeze")
+    async with bridge.store.transaction() as conn:
+        await conn.execute("INSERT INTO tender_analysis_artifacts(run_id,source_version,domain_revision,stage,artifact_ref,epoch) "
+                           "VALUES(%s,1,0,'freeze',%s,0)", (run_id, Jsonb(frozen)))
+    execution_id, _, outline = await finish_outline(runtime, monkeypatch)
+    draft = (await bridge.save_outline(payload(runtime, request_key="save-before-correction", expected_revision_id=None,
+        source_execution_id=execution_id, chapters=outline_tree(outline))))["draft"]
+
+    current = {"run_id": run_id, "source_version": 1, "domain_revision": 2}
+    async with bridge.store.transaction() as conn:
+        await conn.execute("INSERT INTO tender_analysis_revisions(run_id,source_version,domain_revision,request_key) "
+                           "VALUES(%s,1,2,'analysis-correction')", (run_id,))
+        await conn.execute("UPDATE tender_analysis_runs SET domain_revision=2,status='running' WHERE run_id=%s", (run_id,))
+    assert (await bridge.outline_view(runtime.project))["draft"].get("newer_analysis_identity") is None
+
+    items = bridge.artifacts.put_json({"schema_version": 2, "packs": []})
+    plan = bridge.artifacts.put_json({"schema_version": 2, "packs": [], "run_identity": current, "frozen_ref": frozen})
+    verification = bridge.artifacts.put_json({"schema_version": 2, "items_ref": items})
+    digest = hashlib.sha256(json.dumps({"schema_version": 2, "source_version": 1, "domain_revision": 2,
+        "frozen_ref": frozen, "pack_plan_ref": plan, "items_ref": items, "verification_ref": verification},
+        sort_keys=True).encode()).hexdigest()
+    async with bridge.store.transaction() as conn:
+        for stage, ref in (("pack-plan", plan), ("extract", items), ("verify", verification)):
+            await conn.execute("INSERT INTO tender_analysis_artifacts(run_id,source_version,domain_revision,stage,artifact_ref,epoch) "
+                               "VALUES(%s,1,2,%s,%s,0)", (run_id, stage, Jsonb(ref)))
+        await conn.execute("UPDATE tender_analysis_runs SET status='waiting-confirmation',checklist_digest=%s WHERE run_id=%s",
+                           (digest, run_id))
+
+    view = (await bridge.outline_view(runtime.project))["draft"]
+    assert view["outline"]["authoring_input"]["domain_revision"] == 1
+    assert view["sources_current"] is True and view["newer_analysis_identity"] == current
+    document = (await bridge.start_authoring(payload(runtime, request_key="body-on-pinned-outline",
+        outline_revision_id=draft["revision_id"], outline_sha256=draft["sha256"])))['authoring']
+    body_job = await bridge.job(runtime.project, document["execution_id"])
+    assert body_job["payload"]["identity"] == {**current, "domain_revision": 1}
+
+    candidate = (await bridge.start_outline(payload(runtime, request_key="outline-on-new-analysis")))["generation"]
+    candidate_job = await bridge.job(runtime.project, candidate["execution_id"])
+    assert candidate_job["payload"]["identity"] == current
+    assert bridge.artifacts.read_json(candidate_job["payload"]["authoring_input_ref"])["verification_ref"] == verification
+    assert (await bridge.outline_view(runtime.project))["draft"]["revision_id"] == draft["revision_id"]
+
+    new_execution, _, new_outline = await finish_outline(runtime, monkeypatch, key="outline-on-new-analysis")
+    adopted = (await bridge.save_outline(payload(runtime, request_key="adopt-new-analysis-outline",
+        expected_revision_id=draft["revision_id"], source_execution_id=new_execution,
+        chapters=outline_tree(new_outline))))["draft"]
+    assert adopted["outline"]["authoring_input"]["domain_revision"] == 2
+    assert adopted["newer_analysis_identity"] is None
+    assert (await bridge.start_authoring(payload(runtime, request_key="body-on-pinned-outline",
+        outline_revision_id=draft["revision_id"], outline_sha256=draft["sha256"])))['authoring'] == document
 
 
 async def test_outline_worker_and_document_worker_receive_the_explicit_saved_input(runtime, monkeypatch):
