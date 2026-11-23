@@ -35,6 +35,8 @@ jobs:
         run: bash scripts/ci_check_sources.sh
       - name: createdb retry after ready
         run: bash scripts/tests/ci_services_createdb_retry_test.sh
+      - name: documentation guard unit tests
+        run: python3 -m unittest scripts/tests/test_ci_check_docs.py
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -236,6 +238,7 @@ jobs:
         run: bash scripts/ci_load_config.sh
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          python-version: ${{ env.CI_DOCREADER_PYTHON_VERSION }}
           enable-cache: true
       - name: sync
         run: uv sync --frozen

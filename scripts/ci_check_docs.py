@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Fail closed when repository workflow documentation drifts from structure or source files."""
+from __future__ import annotations
+
+import argparse
+import pathlib
+import re
+import sys
+
+IGNORED_DIRS = frozenset({
+    ".git",
+    ".pytest_cache",
+    ".scratch",
+    ".venv",
+    "dist",
+    "node_modules",
+    "target",
+    "testdata",
+})
+
+# Pre-reorganization legacy docs on main with historical links to retired Rust bidding paths.
+# Ratchet only: remove entries as legacy docs are cleaned up or deleted; never add new entries.
+LEGACY_BROKEN_LINK_FILES = frozenset({
+    "docs/bidding/docx-editor.md",
+    "docs/design/evidence-runtime-contract.md",
+    "docs/research/repository-implementation-snapshot.md",
+})
+
+CORE_RULE_DOCS = frozenset({
+    "CLAUDE.md",
+    "AGENTS.md",
+    "LESSONS.md",
+    "README.md",
+    "docs/README.md",
+    "docs/code-standards.md",
+})
+
+RUNTIME_ONLY_PATHS = frozenset({
+    "deploy/.env",
+    "deploy/release-descriptor-v1.json",
+    "web/dist",
+})
+
+LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+BACKTICK_REPO_PATH_RE = re.compile(
+    r"`((?:crates|services|web|scripts|migrations|deploy|docs|plans|\.github)/[A-Za-z0-9._/\-*<>]+)`"
+)
+TMP_PATH_RE = re.compile(r"/tmp/[A-Za-z0-9._/\-]+")
+LESSONS_CURSOR_RE = re.compile(r"<!--\s*reviewed-through:\s*\S+.*?-->")
+RETIRED_LINE_RE = re.compile(r"已删除|retired|removed", re.IGNORECASE)
+LESSONS_MAX_LINES = 180
+
+
+def iter_markdown_files(root: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(
+        p
+        for p in root.rglob("*.md")
+        if not any(part in IGNORED_DIRS for part in p.relative_to(root).parts)
+    )
+
+
+def strip_fenced_code(text: str) -> str:
+    """Replace fenced code blocks with blank lines to preserve line numbers."""
+    out: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append("")
+            continue
+        out.append("" if in_fence else line)
+    return "\n".join(out)
+
+
+def check_repo(root: pathlib.Path) -> list[str]:
+    errors: list[str] = []
+
+    # 1. Required workflow files and structure
+    claude_md = root / "CLAUDE.md"
+    agents_md = root / "AGENTS.md"
+    lessons_md = root / "LESSONS.md"
+    docs_readme = root / "docs" / "README.md"
+    code_standards = root / "docs" / "code-standards.md"
+
+    for req in (claude_md, agents_md, lessons_md, docs_readme, code_standards):
+        if not req.is_file():
+            errors.append(f"missing required workflow file: {req.relative_to(root)}")
+
+    if claude_md.is_file():
+        claude_text = claude_md.read_text(encoding="utf-8")
+        for needle in ("@AGENTS.md", "@LESSONS.md"):
+            if needle not in claude_text:
+                errors.append(f"CLAUDE.md must import {needle}")
+
+    if lessons_md.is_file():
+        lessons_text = lessons_md.read_text(encoding="utf-8")
+        lessons_lines = lessons_text.splitlines()
+        if not LESSONS_CURSOR_RE.search(lessons_text):
+            errors.append("LESSONS.md is missing a '<!-- reviewed-through: ... -->' cursor")
+        if len(lessons_lines) > LESSONS_MAX_LINES:
+            errors.append(
+                f"LESSONS.md has {len(lessons_lines)} lines (limit {LESSONS_MAX_LINES}); "
+                "promote recurring lessons to docs/code-standards.md or guard tests"
+            )
+
+    if docs_readme.is_file():
+        docs_readme_text = docs_readme.read_text(encoding="utf-8")
+        for needle in ("code-standards.md", "../LESSONS.md"):
+            if needle not in docs_readme_text:
+                errors.append(f"docs/README.md must link to {needle}")
+
+    for path in iter_markdown_files(root):
+        rel = path.relative_to(root).as_posix()
+        raw_text = path.read_text(encoding="utf-8", errors="ignore")
+        prose_text = strip_fenced_code(raw_text)
+
+        # 2. Relative Markdown links across repository (excluding explicit legacy ratchet list)
+        if rel not in LEGACY_BROKEN_LINK_FILES:
+            for lineno, line in enumerate(prose_text.splitlines(), 1):
+                for match in LINK_RE.finditer(line):
+                    href = match.group(1).strip()
+                    if not href or href.startswith(("http://", "https://", "mailto:", "#", "file://")):
+                        continue
+                    path_part = href.split("#", 1)[0].split("?", 1)[0]
+                    if not path_part:
+                        continue
+                    target = (path.parent / path_part).resolve()
+                    if not target.exists():
+                        errors.append(f"{rel}:{lineno}: broken relative link -> {href}")
+
+        # 3. Strict path and /tmp hygiene in core workflow and entry docs
+        if rel in CORE_RULE_DOCS:
+            for lineno, line in enumerate(raw_text.splitlines(), 1):
+                m = TMP_PATH_RE.search(line)
+                if m:
+                    errors.append(
+                        f"{rel}:{lineno}: forbidden /tmp path '{m.group(0)}' "
+                        "(use /opt/workspace/kb-tender-evidence/)"
+                    )
+            for lineno, line in enumerate(prose_text.splitlines(), 1):
+                if "DOCREADER_PORT" in line:
+                    errors.append(
+                        f"{rel}:{lineno}: obsolete env var DOCREADER_PORT "
+                        "(code reads DOCREADER_GRPC_PORT)"
+                    )
+                if RETIRED_LINE_RE.search(line):
+                    continue
+                for match in BACKTICK_REPO_PATH_RE.finditer(line):
+                    ref = match.group(1).rstrip(".,:;/")
+                    if any(ch in ref for ch in ("*", "<", ">", "{", "}")):
+                        continue
+                    if ref in RUNTIME_ONLY_PATHS:
+                        continue
+                    if not (root / ref).exists():
+                        errors.append(f"{rel}:{lineno}: referenced repo path does not exist -> `{ref}`")
+
+    return errors
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root",
+        type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parent.parent,
+        help="Repository root directory",
+    )
+    args = parser.parse_args(argv)
+    errors = check_repo(args.root.resolve())
+    if errors:
+        for err in errors:
+            print(f"DOC CHECK FAILED: {err}", file=sys.stderr)
+        print(f"Total documentation guard errors: {len(errors)}", file=sys.stderr)
+        return 1
+    print(f"ci_check_docs: ok ({args.root.resolve()})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
