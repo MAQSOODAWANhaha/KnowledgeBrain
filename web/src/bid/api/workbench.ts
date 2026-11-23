@@ -3,7 +3,7 @@ import type { BidProjectView } from "./types";
 import type { DocxCurrent, DocxIdentity, DocxOpened, DocxSaveReceipt, DocxSavedReceipt } from "./docx";
 import type { DocxSessionApi } from "../authoring/docxSession";
 import type { ReviewIdentity } from "./analysisReview";
-import { v2Blob, v2Request } from "./http";
+import { downloadResponse, v2Blob, v2Request } from "./http";
 
 export type TenderIssue = { code: string; detail: string; issue_id?: string; chapter_id?: string | null; target_id?: string | null };
 export type TenderEvidence = { range_id: string; quote: string };
@@ -181,13 +181,33 @@ export function executionError(value: unknown): string | null {
   return "执行中断，详细记录暂不可读取。";
 }
 
-export async function downloadTenderFile(url: string, name: string): Promise<void> {
-  if (!url.startsWith(`${root}/`) || url.startsWith("//")) throw new Error("文件地址不属于投标项目");
-  const file = await v2Blob(url);
+function saveTenderFile(file: Blob, name: string): void {
   const objectUrl = URL.createObjectURL(file);
   const link = document.createElement("a");
   link.href = objectUrl;
   link.download = name;
   link.click();
   setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
+export async function downloadTenderFile(url: string, name: string): Promise<void> {
+  if (!url.startsWith(`${root}/`) || url.startsWith("//")) throw new Error("文件地址不属于投标项目");
+  saveTenderFile(await v2Blob(url), name);
+}
+
+export async function downloadTenderPdf(project: string, version: Pick<TenderDraft, "id" | "sha256" | "revision">, signal: AbortSignal): Promise<void> {
+  const { id, sha256, revision } = version;
+  const response = await downloadResponse(`${docxPath(project)}/versions/${encodeURIComponent(id)}/pdf`, {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/pdf" },
+    body: JSON.stringify({ docx_sha256: sha256 }), signal,
+  });
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/pdf" || response.headers.get("x-kb-render-source-version") !== id
+      || response.headers.get("x-kb-render-source-sha256") !== sha256
+      || !/^[a-f0-9]{64}$/.test(response.headers.get("x-kb-render-pdf-sha256") ?? "")) {
+    throw new Error("PDF 响应无法与此已保存版本核对，请重试。");
+  }
+  const file = await response.blob();
+  signal.throwIfAborted();
+  saveTenderFile(file, `投标文件-v${revision}.pdf`);
 }

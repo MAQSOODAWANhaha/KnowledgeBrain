@@ -79,6 +79,30 @@ async fn render_requires_worker_authentication_before_configuration_or_database(
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn saved_pdf_requires_user_authentication_before_configuration_or_storage() {
+    let app = router().with_state(AppState {
+        jwt_secret: "unused-fixture".into(),
+        bootstrap_key: String::new(),
+    });
+    let response = app
+        .oneshot(
+            Request::post(format!(
+                "/api/v3/tender-projects/{}/docx/versions/{}/pdf",
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"docx_sha256":"a".repeat(64)}).to_string(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[test]
 fn worker_token_binds_purpose_execution_hash_epoch_expiry_and_exact_fields() {
     let value = worker();
@@ -167,30 +191,35 @@ fn source_capability_is_short_lived_and_bound_to_all_candidate_fields() {
         );
     }
     let guard = install(Candidate {
-        claims: claims.clone(),
+        claims: ConversionSource::Render(claims.clone()),
         bytes: Bytes::from_static(b"fixture"),
     })
     .unwrap();
-    assert_eq!(candidate_bytes(&claims).unwrap().as_ref(), b"fixture");
+    assert_eq!(
+        candidate_bytes(&ConversionSource::Render(claims.clone()))
+            .unwrap()
+            .as_ref(),
+        b"fixture"
+    );
     let mut other = claims.clone();
     other.project = Uuid::new_v4();
-    assert!(candidate_bytes(&other).is_err());
+    assert!(candidate_bytes(&ConversionSource::Render(other)).is_err());
     other = claims.clone();
     other.owner = Uuid::new_v4();
-    assert!(candidate_bytes(&other).is_err());
+    assert!(candidate_bytes(&ConversionSource::Render(other)).is_err());
     other = claims.clone();
     other.epoch += 1;
-    assert!(candidate_bytes(&other).is_err());
+    assert!(candidate_bytes(&ConversionSource::Render(other)).is_err());
     other = claims.clone();
     other.docx_sha256 = "b".repeat(64);
-    assert!(candidate_bytes(&other).is_err());
+    assert!(candidate_bytes(&ConversionSource::Render(other)).is_err());
     drop(guard);
-    assert!(candidate_bytes(&claims).is_err());
+    assert!(candidate_bytes(&ConversionSource::Render(claims)).is_err());
 }
 
 #[tokio::test]
 async fn timeout_or_cancelled_conversion_revokes_its_source_bytes() {
-    let claims = grant();
+    let claims = ConversionSource::Render(grant());
     let copy = claims.clone();
     let timed = tokio::time::timeout(Duration::from_millis(1), async move {
         let _candidate = install(Candidate {
@@ -562,7 +591,7 @@ mod postgres {
             exp: now() + 2,
         };
         let candidate = install(Candidate {
-            claims: short.clone(),
+            claims: ConversionSource::Render(short.clone()),
             bytes: Bytes::from_static(b"PK\x03\x04fixture-docx"),
         })
         .unwrap();
@@ -713,21 +742,25 @@ mod postgres {
             .header("content-type", DOCX)
             .body(bytes);
         let task = tokio::spawn(async move { call.send().await });
-        let cap = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(claims) = candidates()
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .find(|value| value.claims.execution_id == execution)
-                    .map(|value| value.claims.clone())
-                {
-                    break claims;
+        let cap =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(claims) = candidates().lock().unwrap().values().find_map(|value| {
+                        match &value.claims {
+                            ConversionSource::Render(claims)
+                                if claims.execution_id == execution =>
+                            {
+                                Some(claims.clone())
+                            }
+                            _ => None,
+                        }
+                    }) {
+                        break claims;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await;
+            })
+            .await;
         let response = task
             .await
             .unwrap()

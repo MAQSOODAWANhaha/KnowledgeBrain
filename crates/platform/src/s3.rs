@@ -7,7 +7,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{BucketLocationConstraint, CreateBucketConfiguration},
 };
-use std::{future::Future, time::Duration};
+use std::{future::Future, io, time::Duration};
 
 pub fn configured() -> bool {
     !bucket().is_empty() && !endpoint().is_empty()
@@ -98,12 +98,16 @@ pub fn put_object(key: &str, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn get_object(key: &str) -> Result<Vec<u8>, String> {
+    get_object_bounded(key, usize::MAX).map_err(|error| error.to_string())
+}
+
+pub(crate) fn get_object_bounded(key: &str, limit: usize) -> io::Result<Vec<u8>> {
     if !configured() {
-        return Err("s3 not configured".into());
+        return Err(io::Error::other("s3 not configured"));
     }
-    let key = object_key(key)?;
+    let key = object_key(key).map_err(io::Error::other)?;
     with_client(
-        ConnectionConfig::from_environment()?,
+        ConnectionConfig::from_environment().map_err(io::Error::other)?,
         Duration::from_secs(30),
         |client, bucket| async move {
             let response = client
@@ -113,14 +117,31 @@ pub fn get_object(key: &str) -> Result<Vec<u8>, String> {
                 .send()
                 .await
                 .map_err(|error| sdk_error("GET object", error))?;
-            response
-                .body
-                .collect()
-                .await
-                .map(|body| body.into_bytes().to_vec())
-                .map_err(|error| format!("S3 object body: {error}"))
+            if response
+                .content_length()
+                .is_some_and(|length| length as u64 > limit as u64)
+            {
+                return Ok(Err(io::ErrorKind::FileTooLarge.into()));
+            }
+            Ok(read_object_body(response.body, limit).await)
         },
     )
+    .map_err(io::Error::other)?
+}
+
+async fn read_object_body(mut body: ByteStream, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body
+        .try_next()
+        .await
+        .map_err(|error| io::Error::other(format!("S3 object body: {error}")))?
+    {
+        if chunk.len() > limit - bytes.len() {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn delete_object(key: &str) -> Result<(), String> {
@@ -263,6 +284,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn object_stream_limit_applies_even_without_a_declared_size() {
+        assert_eq!(
+            read_object_body(ByteStream::from_static(b"exact"), 5)
+                .await
+                .unwrap(),
+            b"exact"
+        );
+        assert_eq!(
+            read_object_body(ByteStream::from_static(b"over limit"), 5)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::FileTooLarge
+        );
+    }
 
     #[test]
     fn storage_credentials_never_cross_external_endpoints() {

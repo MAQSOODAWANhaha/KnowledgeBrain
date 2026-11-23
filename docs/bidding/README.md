@@ -8,7 +8,7 @@
 
 ## 来源格式怎么进 Word
 
-投标文件只产出 Word。PDF、DOCX、Excel 都冻结成同一批来源对象，格式定义只在来源存一份。Word 还原的是来源里已经记下的格式，不按原 PDF 逐页排版。
+编制产出可编辑的 Word，已保存稿的 PDF 出件见 [ONLYOFFICE](onlyoffice.md#pdf-与报告)。PDF、DOCX、Excel 都冻结成同一批来源对象，格式定义只在来源存一份。Word 还原的是来源里已经记下的格式，不按原 PDF 逐页排版。
 
 - **给模型的：** 表格的格子明文 `grid.rows`（空字符串是原生空格，`null` 是没有独立单元格）、非 1×1 的 `merged_cells`、正文的阅读文本，以及 `part_id`、`range_id` 这些身份。模型只回引用和有依据的应答，不回表格、列宽或换行。
 - **只留在来源的：** 列宽、字体、页边距、页坐标，以及 `paragraph_breaks` 的字符偏移。

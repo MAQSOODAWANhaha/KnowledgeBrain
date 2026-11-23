@@ -1,14 +1,14 @@
-//! Temporary layout conversion; candidates never become saved Word versions here.
+//! ONLYOFFICE conversion for temporary layout candidates and saved Word versions.
 use crate::AppState;
 use crate::err::{fail, forbidden, not_found, unauthorized, validation};
 use crate::tender_editor::Office;
-use crate::tender_routes::{ApiErr, pg_error};
-use axum::Router;
+use crate::tender_routes::{ApiErr, pg_error, require_project};
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Path, Query, Request};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::{Json, Router};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -24,6 +24,7 @@ use uuid::Uuid;
 const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const WORKER_PURPOSE: &str = "tender_docx_render_v1";
 const SOURCE_PURPOSE: &str = "tender-docx-render-source";
+const SAVED_SOURCE_PURPOSE: &str = "tender-saved-pdf-source";
 const MAX_BYTES: usize = 50 * 1024 * 1024;
 const MAX_SECONDS: u64 = 180;
 static SLOTS: Semaphore = Semaphore::const_new(4);
@@ -112,9 +113,63 @@ struct SourceClaims {
     exp: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SavedSourceClaims {
+    aud: String,
+    project: Uuid,
+    owner: Uuid,
+    version: Uuid,
+    docx_sha256: String,
+    nonce: Uuid,
+    exp: usize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ConversionSource {
+    Render(SourceClaims),
+    Saved(SavedSourceClaims),
+}
+
+impl ConversionSource {
+    fn lifetime(&self) -> (Uuid, usize) {
+        match self {
+            Self::Render(claims) => (claims.nonce, claims.exp),
+            Self::Saved(claims) => (claims.nonce, claims.exp),
+        }
+    }
+
+    fn url(&self, office: &Office) -> Result<reqwest::Url, ApiErr> {
+        let (base, parts, token) = match self {
+            Self::Render(claims) => (
+                "api/internal/tender-render/",
+                vec![claims.execution_id.clone(), claims.nonce.to_string()],
+                office.sign(claims, true)?,
+            ),
+            Self::Saved(claims) => (
+                "api/internal/tender-saved-pdf/",
+                vec![
+                    claims.project.to_string(),
+                    claims.version.to_string(),
+                    claims.nonce.to_string(),
+                ],
+                office.sign(claims, true)?,
+            ),
+        };
+        let mut url = office.api.join(base).map_err(|_| unavailable())?;
+        url.path_segments_mut()
+            .map_err(|_| unavailable())?
+            .pop_if_empty()
+            .extend(parts)
+            .push("source");
+        url.query_pairs_mut().append_pair("token", &token);
+        Ok(url)
+    }
+}
+
 #[derive(Clone)]
 struct Candidate {
-    claims: SourceClaims,
+    claims: ConversionSource,
     bytes: Bytes,
 }
 
@@ -133,7 +188,7 @@ impl Drop for CandidateGuard {
 }
 
 fn install(candidate: Candidate) -> Result<CandidateGuard, ApiErr> {
-    let nonce = candidate.claims.nonce;
+    let (nonce, _) = candidate.claims.lifetime();
     candidates()
         .lock()
         .map_err(|_| unavailable())?
@@ -141,14 +196,15 @@ fn install(candidate: Candidate) -> Result<CandidateGuard, ApiErr> {
     Ok(CandidateGuard(nonce))
 }
 
-fn candidate_bytes(claims: &SourceClaims) -> Result<Bytes, ApiErr> {
-    if claims.exp <= now() {
+fn candidate_bytes(claims: &ConversionSource) -> Result<Bytes, ApiErr> {
+    let (nonce, exp) = claims.lifetime();
+    if exp <= now() {
         return Err(unauthorized());
     }
     candidates()
         .lock()
         .map_err(|_| unavailable())?
-        .get(&claims.nonce)
+        .get(&nonce)
         .filter(|c| c.claims == *claims)
         .map(|c| c.bytes.clone())
         .ok_or_else(|| not_found("temporary layout candidate"))
@@ -259,6 +315,14 @@ struct Ticket {
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v3/tender-projects/{project}/docx/versions/{version}/pdf",
+            post(saved_pdf),
+        )
+        .route(
+            "/api/internal/tender-saved-pdf/{project}/{version}/{nonce}/source",
+            get(saved_pdf_source),
+        )
         .route("/api/internal/tender-render/{execution}", post(render))
         .route(
             "/api/internal/tender-render/{execution}/{nonce}/source",
@@ -273,7 +337,8 @@ async fn source(
     let secret =
         platform::required_secret("KB_ONLYOFFICE_CAPABILITY_SECRET").map_err(|_| unauthorized())?;
     let claims = source_claims(&ticket.token, &secret, &execution, nonce)?;
-    candidate_bytes(&claims)?;
+    let source = ConversionSource::Render(claims.clone());
+    candidate_bytes(&source)?;
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(claims.exp.saturating_sub(now()) as u64);
     let pool = tokio::time::timeout_at(deadline, platform::connect())
@@ -287,15 +352,19 @@ async fn source(
     {
         return Err(forbidden());
     }
-    Ok((
+    Ok(source_response(candidate_bytes(&source)?, deadline))
+}
+
+fn source_response(bytes: Bytes, deadline: tokio::time::Instant) -> Response {
+    (
         [
             ("content-type", DOCX),
             ("cache-control", "private, no-store"),
             ("x-content-type-options", "nosniff"),
         ],
-        timed_body(candidate_bytes(&claims)?, deadline),
+        timed_body(bytes, deadline),
     )
-        .into_response())
+        .into_response()
 }
 
 async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ApiErr> {
@@ -312,21 +381,11 @@ async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8
     Ok(bytes)
 }
 
-async fn convert(office: &Office, candidate: &SourceClaims) -> Result<Vec<u8>, ApiErr> {
-    let mut url = office
-        .api
-        .join("api/internal/tender-render/")
-        .map_err(|_| unavailable())?;
-    url.path_segments_mut()
-        .map_err(|_| unavailable())?
-        .pop_if_empty()
-        .push(&candidate.execution_id)
-        .push(&candidate.nonce.to_string())
-        .push("source");
-    url.query_pairs_mut()
-        .append_pair("token", &office.sign(candidate, true)?);
+async fn convert(office: &Office, source: &ConversionSource) -> Result<Vec<u8>, ApiErr> {
+    let (nonce, _) = source.lifetime();
+    let url = source.url(office)?;
     let mut command = json!({"async":false,"filetype":"docx","outputtype":"pdf",
-        "key":candidate.nonce.simple().to_string(),"title":"candidate.docx","url":url.as_str()});
+        "key":nonce.simple().to_string(),"title":"candidate.docx","url":url.as_str()});
     command["token"] = json!(office.sign(&command, false)?);
     let client = office.client()?;
     let response = client
@@ -404,7 +463,7 @@ async fn render(Path(execution): Path<String>, request: Request) -> Result<Respo
     if !body.starts_with(b"PK\x03\x04") || platform::sha256_hex(&body) != claims.docx_sha256 {
         return Err(validation("layout candidate hash or format mismatch"));
     }
-    let source = SourceClaims {
+    let source = ConversionSource::Render(SourceClaims {
         aud: SOURCE_PURPOSE.into(),
         execution_id: execution.clone(),
         docx_sha256: claims.docx_sha256.clone(),
@@ -413,7 +472,7 @@ async fn render(Path(execution): Path<String>, request: Request) -> Result<Respo
         owner,
         nonce: Uuid::new_v4(),
         exp: now() + seconds as usize + 15,
-    };
+    });
     let _candidate = install(Candidate {
         claims: source.clone(),
         bytes: retain_quota(body, slot.clone()),
@@ -449,6 +508,207 @@ async fn render(Path(execution): Path<String>, request: Request) -> Result<Respo
     Ok(response)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedPdfRequest {
+    docx_sha256: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct SavedVersion {
+    docx_sha256: String,
+    byte_length: i64,
+    revision: i64,
+}
+
+async fn saved_version(
+    pool: &PgPool,
+    project: Uuid,
+    owner: Uuid,
+    version: Uuid,
+) -> Result<SavedVersion, ApiErr> {
+    sqlx::query_as(
+        "SELECT v.content_sha256::text AS docx_sha256,v.byte_length,v.revision
+         FROM tender_draft_versions v JOIN tender_projects p ON p.id=v.project_id
+         WHERE v.project_id=$1 AND p.owner_user_id=$2 AND v.id=$3",
+    )
+    .bind(project)
+    .bind(owner)
+    .bind(version)
+    .fetch_optional(pool)
+    .await
+    .map_err(pg_error)?
+    .ok_or_else(|| not_found("Word version"))
+}
+
+fn saved_pdf_unavailable() -> ApiErr {
+    fail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "SAVED_PDF_UNAVAILABLE",
+        "此版本的 PDF 暂不可用，请从版本行重试。",
+    )
+}
+
+fn saved_pdf_conflict() -> ApiErr {
+    fail(
+        StatusCode::CONFLICT,
+        "DOCX_VERSION_CONFLICT",
+        "此 Word 版本与请求或存储的文件不一致，请刷新后核对版本。",
+    )
+}
+
+fn saved_pdf_too_large() -> ApiErr {
+    fail(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "SAVED_PDF_FILE_TOO_LARGE",
+        "此 Word 版本超过 PDF 转换文件限额，可下载 DOCX。",
+    )
+}
+
+async fn saved_pdf(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project, version)): Path<(Uuid, Uuid)>,
+    Json(input): Json<SavedPdfRequest>,
+) -> Result<Response, ApiErr> {
+    let (pool, owner) = require_project(&headers, &state, project).await?;
+    let saved = saved_version(&pool, project, owner, version).await?;
+    if !valid_hash(&input.docx_sha256) || saved.docx_sha256 != input.docx_sha256 {
+        return Err(saved_pdf_conflict());
+    }
+    let limit = platform::max_file_bytes().min(MAX_BYTES);
+    let length = usize::try_from(saved.byte_length)
+        .ok()
+        .filter(|len| *len > 0)
+        .ok_or_else(saved_pdf_conflict)?;
+    if length > limit {
+        return Err(saved_pdf_too_large());
+    }
+
+    let office = Office::load().map_err(|_| saved_pdf_unavailable())?;
+    let seconds = office.timeout.min(MAX_SECONDS);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let slot = Arc::new(SLOTS.try_acquire().map_err(|_| saved_pdf_unavailable())?);
+    let storage_slot = slot.clone();
+    let hash = input.docx_sha256.clone();
+    let read = tokio::task::spawn_blocking(move || {
+        // Keep the quota until the storage read ends even if its caller times out.
+        let _slot = storage_slot;
+        platform::read_blob_bounded(&hash, length)
+    });
+    let bytes = tokio::time::timeout_at(deadline, read)
+        .await
+        .map_err(|_| saved_pdf_unavailable())?
+        .map_err(|_| saved_pdf_unavailable())?
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::FileTooLarge {
+                saved_pdf_conflict()
+            } else {
+                saved_pdf_unavailable()
+            }
+        })?;
+    if bytes.len() != length
+        || !bytes.starts_with(b"PK\x03\x04")
+        || platform::sha256_hex(&bytes) != input.docx_sha256
+    {
+        return Err(saved_pdf_conflict());
+    }
+
+    let source = ConversionSource::Saved(SavedSourceClaims {
+        aud: SAVED_SOURCE_PURPOSE.into(),
+        project,
+        owner,
+        version,
+        docx_sha256: input.docx_sha256.clone(),
+        nonce: Uuid::new_v4(),
+        exp: now()
+            + deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_secs() as usize
+            + 1,
+    });
+    let candidate = install(Candidate {
+        claims: source.clone(),
+        bytes: retain_quota(Bytes::from(bytes), slot.clone()),
+    })
+    .map_err(|_| saved_pdf_unavailable())?;
+    let pdf = tokio::time::timeout_at(deadline, convert(&office, &source))
+        .await
+        .map_err(|_| saved_pdf_unavailable())?
+        .map_err(|_| saved_pdf_unavailable())?;
+    drop(candidate);
+    let version_after =
+        tokio::time::timeout_at(deadline, saved_version(&pool, project, owner, version))
+            .await
+            .map_err(|_| saved_pdf_unavailable())??;
+    if version_after.docx_sha256 != input.docx_sha256 {
+        return Err(saved_pdf_conflict());
+    }
+    let pdf_hash = platform::sha256_hex(&pdf);
+    Response::builder()
+        .header("content-type", "application/pdf")
+        .header("cache-control", "private, no-store")
+        .header("x-content-type-options", "nosniff")
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"tender-v{}.pdf\"", saved.revision),
+        )
+        .header("x-kb-render-source-version", version.to_string())
+        .header("x-kb-render-source-sha256", input.docx_sha256)
+        .header("x-kb-render-pdf-sha256", pdf_hash)
+        .body(timed_body(retain_quota(Bytes::from(pdf), slot), deadline))
+        .map_err(|_| saved_pdf_unavailable())
+}
+
+async fn saved_pdf_source(
+    Path((project, version, nonce)): Path<(Uuid, Uuid, Uuid)>,
+    Query(ticket): Query<Ticket>,
+) -> Result<Response, ApiErr> {
+    let secret =
+        platform::required_secret("KB_ONLYOFFICE_CAPABILITY_SECRET").map_err(|_| unauthorized())?;
+    let mut rules = Validation::new(Algorithm::HS256);
+    rules.leeway = 0;
+    rules.set_audience(&[SAVED_SOURCE_PURPOSE]);
+    let claims = decode::<SavedSourceClaims>(
+        &ticket.token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &rules,
+    )
+    .map_err(|_| unauthorized())?
+    .claims;
+    let current_time = now();
+    if claims.project != project
+        || claims.version != version
+        || claims.nonce != nonce
+        || claims.exp <= current_time
+        || claims.exp > current_time + MAX_SECONDS as usize + 1
+        || !valid_hash(&claims.docx_sha256)
+    {
+        return Err(unauthorized());
+    }
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs((claims.exp - current_time) as u64);
+    let owner = claims.owner;
+    let sha = claims.docx_sha256.clone();
+    let source = ConversionSource::Saved(claims);
+    candidate_bytes(&source)?;
+    let pool = tokio::time::timeout_at(deadline, platform::connect())
+        .await
+        .map_err(|_| saved_pdf_unavailable())?
+        .map_err(pg_error)?;
+    let saved = tokio::time::timeout_at(deadline, saved_version(&pool, project, owner, version))
+        .await
+        .map_err(|_| saved_pdf_unavailable())??;
+    if saved.docx_sha256 != sha {
+        return Err(saved_pdf_conflict());
+    }
+    Ok(source_response(candidate_bytes(&source)?, deadline))
+}
+
 #[cfg(test)]
 #[path = "tender_render_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tender_saved_pdf_tests.rs"]
+mod saved_pdf_tests;

@@ -130,11 +130,30 @@ impl LocalObjectStore {
         directory_at(&parent, c"objects", create)
     }
 
-    pub(crate) fn read(&self, name: &str) -> io::Result<Vec<u8>> {
+    fn open(&self, name: &str) -> io::Result<File> {
         let name = CString::new(object_name(name)?).unwrap();
         let directory = self.directory(false)?;
+        regular_file(&directory, &name)
+    }
+
+    pub(crate) fn read(&self, name: &str) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        regular_file(&directory, &name)?.read_to_end(&mut bytes)?;
+        self.open(name)?.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn read_bounded(&self, name: &str, limit: usize) -> io::Result<Vec<u8>> {
+        let file = self.open(name)?;
+        if file.metadata()?.len() > limit as u64 {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        let mut bytes = Vec::new();
+        // Probe for growth after checking the descriptor's size.
+        file.take((limit as u64).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
         Ok(bytes)
     }
 
@@ -288,6 +307,23 @@ mod tests {
         );
         assert!(!fixture.0.join("root").exists());
         assert!(LocalObjectStore::new(fixture.0.join("../outside")).is_err());
+    }
+
+    #[test]
+    fn bounded_reads_allow_exact_size_and_keep_descriptor_checks() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let path = store.write("object", b"bytes").unwrap();
+        assert_eq!(store.read_bounded("object", 5).unwrap(), b"bytes");
+        assert_eq!(
+            store.read_bounded("object", 4).unwrap_err().kind(),
+            io::ErrorKind::FileTooLarge
+        );
+
+        let outside = fixture.0.join("outside");
+        fs::rename(&path, &outside).unwrap();
+        symlink(&outside, &path).unwrap();
+        assert!(store.read_bounded("object", 5).is_err());
     }
 
     #[test]

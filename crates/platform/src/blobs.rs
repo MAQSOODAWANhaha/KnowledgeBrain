@@ -48,6 +48,26 @@ pub fn read_blob(hash: &str) -> io::Result<Vec<u8>> {
     }
 }
 
+/// Apply the size ceiling to both the local file and the remote response body.
+pub fn read_blob_bounded(hash: &str, limit: usize) -> io::Result<Vec<u8>> {
+    let store = LocalObjectStore::from_environment()?;
+    match store.read_bounded(hash, limit) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let bytes = match crate::s3::get_object_bounded(&object_ref(hash), limit) {
+                Err(over_limit) if over_limit.kind() == io::ErrorKind::FileTooLarge => {
+                    return Err(over_limit);
+                }
+                result => result.map_err(|_| error)?,
+            };
+            if crate::sha256_hex(&bytes) == hash {
+                store.write(hash, &bytes)?;
+            }
+            Ok(bytes)
+        }
+        result => result,
+    }
+}
+
 pub fn blob_exists(hash: &str) -> bool {
     LocalObjectStore::from_environment()
         .and_then(|store| store.exists(hash))
@@ -109,5 +129,31 @@ mod tests {
         runtime.block_on(delete_retained_blob(&name)).unwrap();
         assert!(!store.exists(&name).unwrap());
         assert!(crate::get_object(&object_ref(&name)).is_err());
+
+        let content = format!("bounded cache object {name}");
+        let digest = crate::sha256_hex(content.as_bytes());
+        let reference = object_ref(&digest);
+        crate::s3::put_object(&reference, content.as_bytes()).unwrap();
+        assert_eq!(
+            read_blob_bounded(&digest, content.len() - 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::FileTooLarge
+        );
+        assert!(!store.exists(&digest).unwrap());
+        assert_eq!(
+            read_blob_bounded(&digest, content.len()).unwrap(),
+            content.as_bytes()
+        );
+        assert_eq!(store.read(&digest).unwrap(), content.as_bytes());
+        store.remove(&digest).unwrap();
+
+        crate::s3::put_object(&reference, b"corrupt object").unwrap();
+        assert_eq!(
+            read_blob_bounded(&digest, content.len()).unwrap(),
+            b"corrupt object"
+        );
+        assert!(!store.exists(&digest).unwrap());
+        runtime.block_on(delete_retained_blob(&digest)).unwrap();
     }
 }

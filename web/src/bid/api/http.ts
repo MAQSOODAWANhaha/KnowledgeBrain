@@ -131,17 +131,16 @@ export async function v2Request<T>(
   return { data: data as T, etag, status: res.status };
 }
 
-export async function v2Blob(
+export async function downloadResponse(
   path: string,
-  opts: V2RequestOptions = {},
-): Promise<Blob> {
-  const headers = new Headers();
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
   const auth = token();
   if (auth) headers.set("Authorization", `Bearer ${auth}`);
-  if (opts.ifMatch) headers.set("If-Match", opts.ifMatch);
   let res: Response;
   try {
-    res = await fetch(path, { headers, signal: opts.signal });
+    res = await fetch(path, { ...init, headers });
   } catch (error) {
     throw new NetworkTransportError(error);
   }
@@ -160,5 +159,13 @@ export async function v2Blob(
     }
     throw readError(res.status, data, "下载失败");
   }
-  return res.blob();
+  return res;
+}
+
+export async function v2Blob(path: string, opts: V2RequestOptions = {}): Promise<Blob> {
+  const response = await downloadResponse(path, {
+    headers: opts.ifMatch ? { "If-Match": opts.ifMatch } : undefined,
+    signal: opts.signal,
+  });
+  return response.blob();
 }

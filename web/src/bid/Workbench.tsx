@@ -10,7 +10,7 @@ import { OutlinePlanner } from "./authoring/OutlinePlanner";
 import type { WordNavigationRequest, WordNavigationResult } from "./authoring/wordNavigation";
 import { TENDER_INPUT_ACCEPT } from "./authoring/media";
 import type { DocxCurrent, DocxIdentity } from "./api/docx";
-import { downloadTenderFile, executionError, tenderApi, tenderDocxApi, type DocumentStart, type TenderChapter, type TenderDocxCurrent, type TenderDraft, type WorkbenchView } from "./api/workbench";
+import { downloadTenderFile, downloadTenderPdf, executionError, tenderApi, tenderDocxApi, type DocumentStart, type TenderChapter, type TenderDocxCurrent, type TenderDraft, type WorkbenchView } from "./api/workbench";
 import { Button } from "@astryxdesign/core/Button";
 import { FileInput } from "@astryxdesign/core/FileInput";
 import { Table } from "@astryxdesign/core/Table";
@@ -34,15 +34,42 @@ function ProjectFiles({ documents, download }: { documents: WorkbenchView["docum
   ]} />;
 }
 
-function SavedVersions({ versions, currentId, busy, unsafe, ended, download, select }: {
-  versions: WorkbenchView["versions"]; currentId?: string; busy: boolean; unsafe: boolean; ended: boolean;
+function SavedPdfDownload({ projectId, version }: { projectId: string; version: TenderDraft }) {
+  const [error, setError] = useState<string | null>(null);
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => () => request.current?.abort(), []);
+  async function download() {
+    if (request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setError(null);
+    try { await downloadTenderPdf(projectId, version, controller.signal); }
+    catch (ex) {
+      if (!controller.signal.aborted) setError(ex instanceof Error ? ex.message : "PDF 下载失败，请重试。");
+    } finally {
+      controller.abort();
+      request.current = null;
+    }
+  }
+  return <>
+    <Button label={`下载 PDF v${version.revision}`} clickAction={download} />
+    {error && <p role="alert">{error}</p>}
+  </>;
+}
+
+function SavedVersions({ projectId, versions, currentId, busy, unsafe, ended, download, select }: {
+  projectId: string; versions: WorkbenchView["versions"]; currentId?: string; busy: boolean; unsafe: boolean; ended: boolean;
   download(url: string, name: string): Promise<void>; select(version: WorkbenchView["versions"][number]): void;
 }) {
-  return <Table data={versions} columns={[
+  return <Table data={versions} idKey="id" columns={[
     { key: "revision", header: "版本", renderCell: (version) => `v${version.revision}` },
     { key: "source", header: "来源", renderCell: (version) => version.source === "manual" ? "人工保存稿" : version.source === "recovered" ? "会话恢复稿（待核对）" : "编制生成稿" },
     { key: "id", header: "状态", renderCell: (version) => version.id === currentId ? "当前稿件" : "已保留" },
-    { key: "download_url", header: "文件", renderCell: (version) => <><Button label={`下载 DOCX v${version.revision}`} onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)} />{version.id !== currentId && <Button label={`选为当前稿 v${version.revision}`} isDisabled={busy || unsafe || ended} onClick={() => select(version)} />}</> },
+    { key: "download_url", header: "文件", renderCell: (version) => <>
+      <Button label={`下载 DOCX v${version.revision}`} onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)} />
+      <SavedPdfDownload projectId={projectId} version={version} />
+      {version.id !== currentId && <Button label={`选为当前稿 v${version.revision}`} isDisabled={busy || unsafe || ended} onClick={() => select(version)} />}
+    </> },
   ]} />;
 }
 
@@ -339,7 +366,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
         {step === "export" && <section className="tender-section"><p className="tender-note">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</p>
           {displayedDraft && <p className="tender-note" data-testid="word-coverage">当前查看稿 v{displayedDraft.revision}：{coverageMatches ? view.coverage?.headline : "覆盖待核"}</p>}
           {coverageVersion && view.coverage?.headline && <p className="tender-note" data-testid="generated-coverage">生成稿 v{coverageVersion.revision}的覆盖统计：{view.coverage.headline}</p>}
-          {!view.versions.length ? <p className="tender-empty">尚无已保存稿件。</p> : <SavedVersions versions={view.versions} currentId={view.current_docx?.id} busy={busy} unsafe={unsafe} ended={!!ended} download={download} select={version => void selectDraft(version)} />}
+          {!view.versions.length ? <p className="tender-empty">尚无已保存稿件。</p> : <SavedVersions projectId={projectId} versions={view.versions} currentId={view.current_docx?.id} busy={busy} unsafe={unsafe} ended={!!ended} download={download} select={version => void selectDraft(version)} />}
           {view.artifacts?.package_url && <><Button label="下载编制交付包（包含待补清单）" onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")} /><p className="tender-note">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</p><p className="tender-note">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</p></>}{view.gaps.length > 0 && <div className="tender-gap-list"><h3>编制时的待补记录</h3>{view.gaps.map((gap, index) => <p key={`${gap.code}:${index}`}>{gap.detail}</p>)}</div>}
         </section>}
         <div className="tender-foot" ref={footRef}><div style={{ display: step === "authoring" && authoringMode === "body" ? "contents" : "none" }}><details className="tender-task-details" ref={revisionDetails}><summary>按章节定向复核与修订</summary><ChapterRevision
