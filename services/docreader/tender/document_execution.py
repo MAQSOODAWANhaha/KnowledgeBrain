@@ -100,6 +100,18 @@ def load_prompts():
     }
 
 
+_BODY_PROMPTS = (AuthoringPrompt.BASIS, AuthoringPrompt.WRITE, AuthoringPrompt.REVIEW, AuthoringPrompt.STRUCTURE)
+
+
+def execution_prompt_names(*, outline_only, fixed_outline):
+    """BUG-259: the prompts this execution can call, and therefore its identity."""
+    if outline_only:
+        return tuple(name for name in _PROMPTS if name not in _BODY_PROMPTS)
+    if fixed_outline:
+        return _BODY_PROMPTS
+    return _PROMPTS
+
+
 def _digest(value):
     return hashlib.sha256(
         json.dumps(
@@ -669,7 +681,9 @@ async def execute_document(
     material_snapshot = [
         KnowledgeMaterial.model_validate(value).model_dump() for value in materials
     ]
-    prompts = load_prompts()
+    every_prompt = load_prompts()
+    prompts = {name: every_prompt[name] for name in
+               execution_prompt_names(outline_only=outline_only, fixed_outline=outline_ref is not None)}
     admitted = RequestBudget(
         context_tokens=budget.context_tokens,
         model=budget.model,

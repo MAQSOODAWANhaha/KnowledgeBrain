@@ -1,12 +1,12 @@
 """Resolve final source fields with bounded choices; preserve pending source domains."""
 from copy import deepcopy
-from importlib.resources import files
 import json
 
 from docreader.llm.request import build_request
 from docreader.tender.native_body_selection import CONTRACT, plan_native_body_packs
 from docreader.tender.source_body import bind_source_body
 from docreader.tender.status import AuthoringTask
+from docreader.tender.prompts import execution_prompt
 
 
 class SourceBodyResolutionPending(RuntimeError):
@@ -24,9 +24,7 @@ def _targets(outline):
 
 def selection_request(budget, scope, view):
     """The measured and sent body includes the complete finite response schema."""
-    prompt = budget.prompts.get('directory_native_body')
-    if not prompt:
-        prompt = files('docreader.tender.prompts').joinpath('directory_native_body.md').read_text('utf-8')
+    prompt = execution_prompt(budget.prompts, 'directory_native_body')
     prompt += '\n\n返回JSON须符合以下完整JSON Schema：\n' + json.dumps(
         view.response_schema(), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return build_request(budget.model, prompt, scope.request_payload(view),

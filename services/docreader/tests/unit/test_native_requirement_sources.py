@@ -559,7 +559,7 @@ def test_new_operation_dispatch_and_derived_fingerprints_only(tmp_path):
     assert response_model('directory_requirement', {}) is RequirementPlan
     assert response_model('directory_classification', {'operation': 'classify_with_native_requirement_cases_v1'}) is NativeClassificationPlan
     assert response_model('directory_classification', {}) is ClassificationPlan
-    fingerprints = output_contract_spec()
+    fingerprints = output_contract_spec(['directory_requirement_native', 'directory_classification_native'])
     assert {'NativeRequirementPlan', 'NativeClassificationPlan'} <= fingerprints.keys()
 
 

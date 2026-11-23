@@ -2728,13 +2728,13 @@ P2、P3 按当时多轮核验写的五问已过时，不继续当作当前调用
 - 解决方案：没有处置记录的范围只留在 source_views 里作为阅读上下文，不进入 `dispositions`，与 verify Prompt「只对 dispositions 列出的范围查漏抽」一致；展开结果按 `source_order` 排序。
 - 验证：新增 `test_page_siblings_without_disposition_are_context_not_review_targets`，修复前失败、修复后通过；downstream 验收 9 项在隔离 PostgreSQL 下全部通过。
 
-## BUG-259：改一个 Prompt 会让全部执行身份失效，且没有运行级费用上限
+## BUG-259：改一个 Prompt 会让无关执行的身份失效，且没有运行级费用上限
 
-- 状态 / 发现阶段：待修；架构评审。
-- 现象与影响：`RequestBudget` 默认载入所有任务的 Prompt，`budget.spec()` 带上全部 Prompt 和输出契约的哈希，而分析和编制的执行规格都包含 `budget.spec()`。所以只改一个任务的 Prompt（例如 verify），所有分析和编制执行的身份都会变：已在途的执行无法用新镜像续跑，只能新建执行。另外代码里只有单请求预算和「每个请求最多 4 次」，没有按运行或按文件的总调用数、总 Token 上限；一份大文件可能在 B、S、P、F 上不受限地累计调用。
-- 根因：执行身份按「整个 Prompt 集合」而不是「本执行实际用到的任务」计算；预算只设计了单请求和单逻辑请求两层。
-- 解决方案：待定，见[改进路线](../../../plans/improvement-roadmap.md)的「治理」工作流。方向：执行身份只包含本执行实际调用的任务的 Prompt 和契约哈希；增加运行级调用数和 Token 上限，超限后停在当前阶段、把剩余工作记为具名待核，已完成产物照常组装导出，不回滚、不静默截断。
-- 验证：待实施。需要的用例包括：只改 verify Prompt 时编制执行身份不变；运行级上限触发后剩余任务全部以具名待核出现在缺口清单里。
+- 状态 / 发现阶段：身份部分已修（W3.1），离线回归通过；运行级上限待修（W3.2）。架构评审。
+- 现象与影响：分析和编制的执行规格都带 `budget.spec()`。只改一个任务的 Prompt 或输出契约，用不到它的执行身份也会变，在途执行无法用新镜像续跑，只能新建。另外只有单请求预算和「每个请求最多 4 次」，没有按运行或按文件的总调用数、总 Token 上限。
+- 根因：原条目写的「默认载入所有任务的 Prompt」不准确：分析只带 `extract`、`verify`、`ocr`，编制只带编制 Prompt。实际耦合有三处：`output_contract_spec()` 不分任务，把分析和编制的全部输出契约（含已退役的 `LocateResult`、`AssociationResult`、`Plan`）都算进身份；大纲执行和固定大纲的正文执行共用全部 23 个编制 Prompt；`budget.prompts.get(...) or 读文件` 的回退可以调用未计入身份的 Prompt。预算只设计了单请求和单逻辑请求两层。
+- 改法：执行身份只含本执行会调用的任务，规则见[字段字典](field-dictionary.md#调用预算恢复与修订)第 6 条，五问见[业务工作流](business-workflow.md#执行身份范围)。输出契约按 Prompt 登记，未登记的 Prompt 不能进入身份；编制按大纲、正文、整稿取任务集合；回退改为统一入口，带编制 Prompt 的执行缺某个 Prompt 时报配置错误。运行级上限见[改进路线](../../../plans/improvement-roadmap.md) W3.2。
+- 验证：`test_execution_identity_scope.py` 覆盖：分析身份只含分析契约；编制身份不含分析契约；正文执行身份不含大纲 Prompt 和契约；改 verify Prompt 时编制身份不变；身份外 Prompt 报错。上线会让现有在途执行身份一次性改变。运行级上限的用例待 W3.2。
 
 ## BUG-260：传输故障与合同纠正共用重试额度，429 时并发槽位互相抢占
 

@@ -190,7 +190,7 @@ class RequestBudget:
             "safety": self.safety,
             "image_tokens_each": self.IMAGE_TOKENS,
             "framing_tokens": self.FRAMING_TOKENS,
-            "output_contracts": output_contract_spec(),
+            "output_contracts": output_contract_spec(self.prompts),
             "prompts": {
                 task: hashlib.sha256(prompt.encode()).hexdigest()
                 for task, prompt in sorted(self.prompts.items())

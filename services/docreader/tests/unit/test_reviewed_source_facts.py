@@ -484,7 +484,7 @@ def test_new_C_schema_is_additive_and_short_facts_are_request_local(tmp_path):
     assert response_model('directory_classification', payload) is reviewed().ReviewedClassificationPlan
     assert response_model('directory_classification', {}) is ClassificationPlan
     assert 'reviewed_body_dispositions' not in output_schema('directory_classification', {})['properties']
-    assert 'ReviewedClassificationPlan' in output_contract_spec()
+    assert 'ReviewedClassificationPlan' in output_contract_spec(['directory_classification_reviewed_facts'])
     budget = RequestBudget(model='synthetic')
     assert 'reviewed_body_dispositions' in pipeline._request(budget, 'directory_classification', ids.payload)['messages'][0]['content']
     assert 'reviewed_body_dispositions' not in pipeline._request(budget, 'directory_classification', {})['messages'][0]['content']

@@ -107,7 +107,7 @@ def test_new_schema_and_prompt_activate_only_for_the_new_operation():
     assert response_model('directory_material', {'operation': module.SOURCE_CARRIER_OPERATION}) is module.MaterialClosurePlan
     for operation in (None, 'select_response_forms_v1', SOURCE_GROUP_OPERATION):
         assert 'carrier_dispositions' not in output_schema('directory_material', {'operation': operation})['properties']
-    assert 'MaterialClosurePlan' in output_contract_spec()
+    assert 'MaterialClosurePlan' in output_contract_spec(['directory_material_closure'])
     budget = RequestBudget(model='synthetic')
     legacy = pipeline._request(budget, 'directory_material', {'operation': SOURCE_GROUP_OPERATION})
     new = pipeline._request(budget, 'directory_material', {'operation': module.SOURCE_CARRIER_OPERATION})

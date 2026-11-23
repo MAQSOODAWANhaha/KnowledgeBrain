@@ -106,17 +106,46 @@ def output_schema(task, payload):
     return json.loads(_schema_text(response_model(task, payload)))
 
 
-def output_contract_spec():
-    models = {*_DIRECT.values(), *_VERIFY.values(), ExtractionOutput,
-              Extraction, Verification, OutlineResponse, OutlineAssemblyResponse,
-              AuthoringReviewResponse, AuthoringContentReviewResponse,
-              DirectoryPlan, RefDirectoryPlan, RefDirectoryPlanV2, MaterialPlan, NativeMaterialPlan, RequirementPlan, ClassificationPlan, ParameterPlan,
-              NativeRequirementPlan, NativeClassificationPlan, MaterialSourceGroupPlan, MaterialClosurePlan, ReviewedClassificationPlan,
-              response_form_model({'atom_count': 1, 'form': {'grid': {'row_count': 1, 'column_count': 4}}}),
-              response_form_model({'operation': 'select_native_response_form_v2', 'atom_count': 1,
-                                   'mandate': [{}], 'form': {'grid': {'row_count': 1, 'column_count': 4}}}),
-              response_form_model({'operation': 'select_native_response_form_v3', 'atom_count': 1,
-                                   'mandate': [{}], 'form': {'grid': {'row_count': 1, 'column_count': 4}}})}
+def _contracts_by_prompt():
+    from docreader.tender.bid_format_outline import BidFormatOutline
+
+    directory_plan = {DirectoryPlan, RefDirectoryPlan, RefDirectoryPlanV2, BidFormatOutline}
+    requirement = {RequirementPlan, NativeRequirementPlan}
+    material = {MaterialPlan, NativeMaterialPlan, MaterialSourceGroupPlan, MaterialClosurePlan}
+    classification = {ClassificationPlan, NativeClassificationPlan, ReviewedClassificationPlan}
+    response_form = {
+        response_form_model({'atom_count': 1, 'form': {'grid': {'row_count': 1, 'column_count': 4}}}),
+        response_form_model({'operation': 'select_native_response_form_v2', 'atom_count': 1,
+                             'mandate': [{}], 'form': {'grid': {'row_count': 1, 'column_count': 4}}}),
+        response_form_model({'operation': 'select_native_response_form_v3', 'atom_count': 1,
+                             'mandate': [{}], 'form': {'grid': {'row_count': 1, 'column_count': 4}}})}
+    outline = {OutlineResponse, OutlineAssemblyResponse}
+    return {
+        'extract': {ExtractionOutput, Extraction}, 'verify': {*_VERIFY.values(), Verification},
+        'ocr': {OCRResponse}, 'plan': {Plan},
+        'outline': outline, 'outline_assemble': outline,
+        'directory_plan': directory_plan, 'directory_ref_plan': directory_plan, 'directory_ref_plan_v2': directory_plan,
+        'directory_requirement': requirement, 'directory_requirement_native': requirement,
+        'directory_material': material, 'directory_material_response_forms': material,
+        'directory_material_source_groups': material, 'directory_material_closure': material,
+        'directory_classification': classification, 'directory_classification_native': classification,
+        'directory_classification_reviewed_facts': classification,
+        'directory_parameter': {ParameterPlan}, 'directory_native_body': {ParameterPlan},
+        'directory_response_form': response_form, 'directory_response_form_v2': response_form,
+        'directory_response_form_v3': response_form,
+        'authoring_basis': {AuthoringBasisResponse}, 'authoring_write': {WritingResponse},
+        'authoring_review': {AuthoringContentReviewResponse, AuthoringReviewResponse},
+        'authoring_structure': {AuthoringStructureResponse},
+    }
+
+
+def output_contract_spec(prompt_names):
+    """BUG-259: hash only the contracts the named prompts can request."""
+    table = _contracts_by_prompt()
+    unknown = sorted(set(prompt_names) - table.keys())
+    if unknown:
+        raise ModelConfigurationError(f"prompts without a registered output contract: {unknown}")
+    models = {model for name in prompt_names for model in table[name]}
     return {model.__name__: hashlib.sha256(_schema_text(model).encode()).hexdigest()
             for model in sorted(models, key=lambda model: model.__name__)}
 

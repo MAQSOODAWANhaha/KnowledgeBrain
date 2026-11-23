@@ -14,6 +14,7 @@ from docreader.llm.request import (
 )
 from docreader.tender.authoring import _OutlineContext, project_source_sections
 from docreader.tender.schema import AUTHORING_GROUNDING_POLICY, AuthoringStructureResponse
+from docreader.tender.prompts import execution_prompt
 
 
 _COMPACT_VIEW_PROMPT = (
@@ -621,11 +622,7 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
                         for rename in renames)
         return value["findings"], gaps
 
-    prompt = budget.prompts.get("authoring_structure")
-    if not isinstance(prompt, str):
-        from docreader.tender.document_execution import load_prompts
-
-        prompt = load_prompts()["authoring_structure"]
+    prompt = execution_prompt(budget.prompts, "authoring_structure")
     chapters = list(payload.get('chapters', []))
     if payload.get('response_form_decisions'):
         prompt += _RESPONSE_FORM_DECISION_PROMPT

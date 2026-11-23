@@ -22,4 +22,19 @@ def get_prompt(task: Task) -> str:
     )
 
 
-__all__ = ["get_prompt", "PROMPT_VERSION", "ANALYSIS_PROMPT_TASKS"]
+def execution_prompt(prompts, name: str) -> str:
+    """BUG-259: an authoring-scoped budget sends only prompts in its execution identity.
+
+    A budget without any authoring prompt (deterministic tests) reads the packaged file.
+    """
+    from docreader.llm.request import ModelConfigurationError
+    from docreader.tender.status import AuthoringPrompt
+
+    if name in prompts:
+        return prompts[name]
+    if prompts.keys() & {prompt.value for prompt in AuthoringPrompt.__members__.values()}:
+        raise ModelConfigurationError(f"prompt {name} is outside this execution identity")
+    return files("docreader.tender.prompts").joinpath(f"{name}.md").read_text(encoding="utf-8")
+
+
+__all__ = ["get_prompt", "execution_prompt", "PROMPT_VERSION", "ANALYSIS_PROMPT_TASKS"]

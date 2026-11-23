@@ -5,6 +5,8 @@ from docreader.tender.directory_compile import (
     DirectoryPlanRejected, compile_directory, compile_plans, documents_from_frozen, outline_from_compiled,
 )
 import pytest
+
+from docreader.tender.document_execution import load_prompts
 from test_authoring_pipeline_boundaries import payload as request_payload
 
 
@@ -947,7 +949,7 @@ async def test_registered_documents_request_two_location_plans_and_do_not_organi
     artifacts = ArtifactStore(tmp_path)
     outline = artifacts.read_json(await generate_document(
         artifacts, _snapshot(), RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384,
-                                              prompts={'directory_plan': '只返回位置。'}),
+                                              prompts={**load_prompts(), 'directory_plan': '只返回位置。'}),
         execute, directory_documents=documents, outline_only=True))
     assert calls[:3] == ['directory_plan', 'directory_plan', 'directory_material']
     assert {'directory_requirement', 'directory_classification'} <= set(calls)
@@ -980,7 +982,7 @@ async def test_outline_from_frozen_sources_uses_directory_plans(tmp_path):
     snapshot = {**_snapshot(), 'frozen_ref': frozen_ref}
     outline = artifacts.read_json(await generate_document(
         artifacts, snapshot, RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384,
-                                           prompts={'directory_plan': '只返回位置。'}),
+                                           prompts={**load_prompts(), 'directory_plan': '只返回位置。'}),
         execute, outline_only=True))
     assert calls[:3] == ['directory_plan', 'directory_plan', 'directory_material']
     assert {'directory_requirement', 'directory_classification'} <= set(calls)

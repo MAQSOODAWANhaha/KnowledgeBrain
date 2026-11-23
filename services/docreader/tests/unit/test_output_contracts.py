@@ -149,7 +149,7 @@ def test_execution_spec_pins_generated_contracts_as_well_as_prompt_files(monkeyp
     from docreader.llm.budget import RequestBudget
     from docreader.llm.contracts import _schema_text
     from docreader.tender.schema import OutlineResponse
-    budget = RequestBudget(prompts={})
+    budget = RequestBudget(prompts={'outline': 'x'})
     before = budget.spec()
     assert 'output_contracts' in before
     original = OutlineResponse.model_json_schema

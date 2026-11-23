@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import hashlib
-from importlib.resources import files
 import json
 
 from pydantic import ValidationError
@@ -69,6 +68,7 @@ from docreader.tender.reviewed_source_facts import (
     reviewed_classification_view, apply_reviewed_classification,
 )
 from docreader.integrations.store import Conflict
+from docreader.tender.prompts import execution_prompt
 from docreader.tender.authoring_coverage import (
     accept_assessments, batch_coverage_view, build_ledger, coverage_scope_index, fair_select, plan_queries,
     rule_ref_key, settle_coverage, task_coverage_refs, unit_fingerprint,
@@ -247,7 +247,7 @@ def _parse(schema, value):
 
 
 def _prompt(budget, task):
-    return budget.prompts.get(task) or files('docreader.tender.prompts').joinpath(task + '.md').read_text('utf-8')
+    return execution_prompt(budget.prompts, task)
 
 
 def _request(budget, task, payload):

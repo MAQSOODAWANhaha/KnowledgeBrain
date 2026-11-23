@@ -10,6 +10,7 @@ from docreader.llm.recovery import _fragments
 from docreader.llm.request import ModelContractError
 from docreader.tender.authoring import _OutlineContext, validate_outline_references
 from docreader.tender.authoring_pipeline import _organize
+from docreader.tender.document_execution import load_prompts
 from docreader.tender.schema import OutlineResponse
 from test_authoring_pipeline_boundaries import ordinary_response, payload, snapshot
 
@@ -83,7 +84,7 @@ def test_source_outline_reference_domains_preserve_scalar_corrections(path, iden
 async def test_source_validator_reports_constraint_reference_instead_of_copying_chapter_tree(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     context = _OutlineContext(artifacts, snapshot(artifacts, [{"text": "须按原文规定组织技术响应。"}]))
-    budget = RequestBudget(model="fixture", context_tokens=131072, prompts={"outline": "Return JSON"})
+    budget = RequestBudget(model="fixture", context_tokens=131072, prompts={**load_prompts(), "outline": "Return JSON"})
     feedback = []
 
     async def execute(task, request, validate):
@@ -107,7 +108,7 @@ async def test_source_packing_leaves_feedback_room_without_losing_original_text(
     context = _OutlineContext(artifacts, snapshot(artifacts, [{"text": text} for text in originals]))
     # Include the generated schema while still forcing the two intact sources into separate reads.
     budget = RequestBudget(model="fixture", context_tokens=15000, output_reserve=2000,
-                           prompts={"outline": "Return the requested outline JSON"})
+                           prompts={**load_prompts(), "outline": "Return the requested outline JSON"})
     source_requests = []
 
     async def execute(task, request, validate):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from importlib.resources import files
 
 from docreader.llm.request import ModelBudgetError, ModelWorkUnitExhausted, build_request
+from docreader.tender.prompts import execution_prompt
 
 
 def _source_key(reference):
@@ -150,8 +150,7 @@ async def revise_units(artifacts, budget, execute, tasks, units, findings, make_
             content = {**deepcopy(payload), "previous_content": previous,
                        "review_findings": [{key: finding[key] for key in ("code", "detail", "suggestion", "can_revise", "reject_content", "content_ids")
                                             if key in finding} for finding in relevant]}
-            prompt = budget.prompts.get("authoring_write") or files("docreader.tender.prompts").joinpath(
-                "authoring_write.md").read_text("utf-8")
+            prompt = execution_prompt(budget.prompts, "authoring_write")
             request = build_request(budget.model, prompt, content, task="authoring_write",
                                     reasoning_effort=budget.reasoning_effort)
             from docreader.tender.authoring_pipeline import _replay
