@@ -151,6 +151,14 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     narrow.addEventListener("change", closeDirectory);
     return () => narrow.removeEventListener("change", closeDirectory);
   }, []);
+  // Below 900px the analysis side panel stacks under the item list.
+  const [stacked, setStacked] = useState(() => window.matchMedia("(max-width: 899px)").matches);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 899px)");
+    const update = () => setStacked(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
   const [dismissedDraft, setDismissedDraft] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
   const executionAttempts = useRef(new Map<string, MutationAttempt>());
@@ -359,17 +367,22 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
           <Card><KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} /></Card>
           <Card padding={0}>{!view.documents.length ? <EmptyState title="尚未上传项目文件。" description="上传招标文件后即可分析招标事项。" /> : <ProjectFiles documents={view.documents} download={download} />}</Card>
         </VStack>}
-        <div hidden={step !== "analysis"} style={{ flex: 1, minHeight: 0, display: step === "analysis" ? "flex" : "none" }}>
-          <Layout height="fill"
-            content={<LayoutContent padding={6}><AnalysisPane analysis={view.analysis} /></LayoutContent>}
-            end={<LayoutPanel width={380} hasDivider label="分析处理" role="complementary"><VStack gap={4}>
+        <div hidden={step !== "analysis"} style={{ flex: 1, minHeight: 0, flexDirection: "column", display: step === "analysis" ? "flex" : "none" }}>
+          {stacked
+            ? <VStack isScrollable height="100%" gap={4}><AnalysisPane analysis={view.analysis} /><VStack padding={4} role="complementary" aria-label="分析处理"><VStack gap={4}>
               <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
               <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
-            </VStack></LayoutPanel>} />
+            </VStack></VStack></VStack>
+            : <Layout height="fill"
+              content={<LayoutContent padding={0}><AnalysisPane analysis={view.analysis} /></LayoutContent>}
+              end={<LayoutPanel width={380} hasDivider label="分析处理" role="complementary"><VStack gap={4}>
+              <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
+              <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
+            </VStack></LayoutPanel>} />}
         </div>
         <div id="guide-panel" role="tabpanel" aria-label="材料引导" hidden={!(step === "authoring" && authoringMode === "guide")} style={{ overflow: "auto" }}><GuideScreen /></div>
         <div id="outline-planner-panel" role="tabpanel" aria-label="大纲编排" hidden={!(step === "authoring" && authoringMode === "outline")} className="outline-planner-panel"><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></div>
-        <div id="word-editor-panel" role="tabpanel" aria-label="正文编辑" hidden={!bodyMode} style={{ flex: 1, minHeight: 0, display: bodyMode ? "flex" : "none" }}>
+        <div id="word-editor-panel" role="tabpanel" aria-label="正文编辑" hidden={!bodyMode} style={{ flex: 1, minHeight: 0, flexDirection: "column", display: bodyMode ? "flex" : "none" }}>
           <Layout height="fill"
             start={leftClosed
               ? <LayoutPanel width={48} hasDivider label="文件与章节目录" role="complementary" padding={1}><IconButton variant="ghost" label="展开目录" icon={<PanelLeftOpen size={18} />} aria-expanded={false} onClick={() => setLeftClosed(false)} /></LayoutPanel>

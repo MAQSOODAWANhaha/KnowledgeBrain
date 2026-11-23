@@ -1,7 +1,15 @@
+import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
+import { HStack } from "@astryxdesign/core/HStack";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Selector } from "@astryxdesign/core/Selector";
+import { Tab, TabList } from "@astryxdesign/core/TabList";
+import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { useState, type KeyboardEvent } from "react";
+import { TreeList, type TreeListItemData } from "@astryxdesign/core/TreeList";
+import { VStack } from "@astryxdesign/core/VStack";
+import { useState } from "react";
 import { executionError, type TenderChapter, type TenderIssue, type TenderItem, type WorkbenchView } from "./api/workbench";
 import { authoringHref } from "./authoring/routes";
 import { inProgress } from "./executionStatus";
@@ -16,35 +24,35 @@ export function ChapterTree({ chapters, selectedId, gaps, onSelect, onLocate }: 
   onLocate?(bookmark?: string | null): void;
 }) {
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState(new Set<string>());
-  const matches = (chapter: TenderChapter): boolean => chapter.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) || (chapter.children ?? []).some(matches);
-  const render = (nodes: TenderChapter[], depth: number) => nodes.filter(matches).map(chapter => {
+  const needle = query.trim().toLocaleLowerCase();
+  const matches = (chapter: TenderChapter): boolean => chapter.title.toLocaleLowerCase().includes(needle) || (chapter.children ?? []).some(matches);
+  const items = (nodes: TenderChapter[]): TreeListItemData[] => nodes.filter(matches).map(chapter => {
     const count = gaps.filter(gap => gap.chapter_id === chapter.chapter_id).length;
-    return <li key={chapter.chapter_id}>
-      <div className="tender-tree-row">{!!chapter.children?.length && <Button className="tender-tree-toggle" aria-label={`${collapsed.has(chapter.chapter_id) ? "展开" : "收起"}${chapter.title}`} aria-expanded={!collapsed.has(chapter.chapter_id)} onClick={() => setCollapsed(current => { const next = new Set(current); if (next.has(chapter.chapter_id)) next.delete(chapter.chapter_id); else next.add(chapter.chapter_id); return next; })} label={collapsed.has(chapter.chapter_id) ? "›" : "⌄"} />}
-      <Button className={selectedId === chapter.chapter_id ? "selected" : ""} style={{ paddingLeft: 12 + depth * 13 }}
-        aria-current={selectedId === chapter.chapter_id ? "location" : undefined} onClick={() => onSelect(chapter)} label={`${chapter.is_volume ? "分册 " : ""}${chapter.title}${chapter.manual ? "，人工新增" : ""}`}>
-        <span>{chapter.is_volume ? "▤ " : ""}{chapter.title}{chapter.manual ? " · 人工新增" : ""}</span>{count > 0 && <small title={`${count} 条待补记录`}>{count}</small>}
-      </Button></div>
-      {selectedId === chapter.chapter_id && !!chapter.targets?.length && <ul className="tender-tree-targets">{chapter.targets.filter(target => target.kind !== "narrative").map(target => <li key={target.target_id}><Button onClick={() => onLocate?.(target.bookmark)} label={`${target.kind === "form" ? "表单：" : "附件："}${target.purpose}`} /></li>)}</ul>}
-      {!!chapter.children?.length && (!collapsed.has(chapter.chapter_id) || !!query.trim()) && <ul>{render(chapter.children, depth + 1)}</ul>}
-    </li>;
+    const children = chapter.children?.length ? items(chapter.children) : undefined;
+    return {
+      id: chapter.chapter_id,
+      label: `${chapter.is_volume ? "分册 " : ""}${chapter.title}${chapter.manual ? " · 人工新增" : ""}`,
+      isSelected: selectedId === chapter.chapter_id,
+      isExpanded: true,
+      onClick: () => onSelect(chapter),
+      endContent: count > 0 ? <Badge variant="warning" label={String(count)} aria-label={`${count} 条待补记录`} /> : undefined,
+      children,
+    };
   });
-  const onTreeKey = (event: KeyboardEvent<HTMLUListElement>) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".tender-tree-row > button:not(.tender-tree-toggle)")];
-    const index = buttons.findIndex(button => button === document.activeElement);
-    const next = buttons[index + (event.key === "ArrowDown" ? 1 : -1)];
-    if (!next) return;
-    event.preventDefault();
-    next.focus();
-    next.click();
-  };
-  return <div className="tender-tree"><TextInput label="搜索章节" isLabelHidden placeholder="搜索章节…" value={query} onChange={setQuery} />
-    {!chapters.length ? <p className="tender-note">尚无可读取的文件结构。</p> : <ul onKeyDown={onTreeKey}>{render(chapters, 0)}</ul>}
-    {!!chapters.length && !chapters.some(matches) && <p className="tender-note">没有匹配章节。</p>}
-    <p className="tender-note">目录与待补标记用于定位，章节存在不代表要求已经满足。</p>
-  </div>;
+  const selected = flattenChapters(chapters).find(chapter => chapter.chapter_id === selectedId);
+  const anchors = (selected?.targets ?? []).filter(target => target.kind !== "narrative");
+  const tree = items(chapters);
+  return <VStack gap={2}>
+    <TextInput label="搜索章节" isLabelHidden type="search" placeholder="搜索章节…" value={query} onChange={setQuery} />
+    {!chapters.length ? <Text type="supporting">尚无可读取的文件结构。</Text>
+      : !tree.length ? <Text type="supporting">没有匹配章节。</Text>
+      : <TreeList key={needle} aria-label="章节目录" density="compact" variant="noGuides" items={tree} />}
+    {!!anchors.length && <VStack gap={1} role="group" aria-label="本章定位">
+      <Text type="supporting">本章表单与附件</Text>
+      {anchors.map(target => <Button key={target.target_id} size="sm" variant="ghost" onClick={() => onLocate?.(target.bookmark)} label={`${target.kind === "form" ? "表单：" : "附件："}${target.purpose}`} />)}
+    </VStack>}
+    <Text type="supporting">目录与待补标记用于定位，章节存在不代表要求已经满足。</Text>
+  </VStack>;
 }
 
 function ItemContent({ item }: { item: TenderItem }) {
@@ -74,7 +82,9 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
   const adoptedIds = new Set(units.flatMap(unit => [...unit.attachments.map(item => item.material_id), ...[...unit.blocks, ...unit.cell_fills].flatMap(item => item.material_ids ?? [])]));
   const materials = (view.materials ?? []).filter(material => adoptedIds.has(material.material_id));
   return <div className="tender-context">
-    <nav aria-label="章节信息"><Button aria-pressed={tab === "requirements"} onClick={() => setTab("requirements")} label="要求" /><Button aria-pressed={tab === "supports"} onClick={() => setTab("supports")} label="依据" /><Button aria-pressed={tab === "gaps"} onClick={() => setTab("gaps")} label="待补" /></nav>
+    <TabList aria-label="章节信息" size="sm" value={tab} onChange={value => setTab(value as typeof tab)}>
+      <Tab value="requirements" label="要求" /><Tab value="supports" label="依据" /><Tab value="gaps" label={gaps.length ? `待补 ${gaps.length}` : "待补"} />
+    </TabList>
     <div className="tender-context-body"><p className="tender-note">当前选定章节：{chapter?.title ?? "尚未选择"}</p>
       {!contextMatches ? <p className="tender-context-warning" role="status">当前业务记录尚未与这份稿件关联，保留 Word 供阅读，请刷新后核对。</p> : !chapter ? <p className="tender-note">选择章节查看相关信息。</p> : <>
         {draftId && <p className="tender-note">以下记录来自本稿的编制快照，后续人工修改仍需核对。</p>}
@@ -109,15 +119,15 @@ export function AnalysisPane({ analysis }: { analysis: WorkbenchView["analysis"]
   const taskVisible = !!analysis && (inProgress(analysis.status) || analysis.status === "failed" || analysis.status === "blocked" || !!analysis.progress?.request_states.uncertain);
   const issues = analysis ? groupedIssues(analysis.issues) : [];
   return <section className="tender-section tender-analysis-main">
-    {!analysis ? <p className="tender-empty">尚无分析结果。上传文件后可开始分析，也可先编制可用稿件。</p> : <>
-      {!taskVisible && <p className="tender-note">当前分析{analysis.confirmed ? "已确认" : "未确认"} · 来源版本 {analysis.source_version} · 修订 {analysis.domain_revision}</p>}
+    {!analysis ? <EmptyState title="尚无分析结果" description="上传文件后可开始分析，也可先编制可用稿件。" /> : <>
+      {!taskVisible && <HStack gap={2} vAlign="center"><Badge variant={analysis.confirmed ? "success" : "warning"} label={analysis.confirmed ? "已确认" : "未确认"} /><Text type="supporting" hasTabularNumbers>来源版本 {analysis.source_version}，修订 {analysis.domain_revision}</Text></HStack>}
       <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />
-      {analysis.sources_current === false && <p className="tender-context-warning" role="status">招标资料已有更新，以下是旧资料的分析结果。可重新分析，也可基于最新资料生成新稿。</p>}
-      {executionError(analysis.error) && <p role="alert">{executionError(analysis.error)}</p>}
-      {!!items.length && <div className="tender-filter"><TextInput label="搜索招标事项" placeholder="搜索事项原文…" value={query} onChange={setQuery} />
+      {analysis.sources_current === false && <div role="status"><Banner status="warning" title="招标资料已有更新，以下是旧资料的分析结果。" description="可重新分析，也可基于最新资料生成新稿。" /></div>}
+      {executionError(analysis.error) && <div role="alert"><Banner status="error" title={executionError(analysis.error)} /></div>}
+      {!!items.length && <div className="tender-filter"><TextInput label="搜索招标事项" type="search" placeholder="搜索事项原文…" value={query} onChange={setQuery} />
         <Selector label="事项类型" value={kind} onChange={setKind} options={[{ value: "", label: "全部类型" }, ...Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => ({ value, label: kindLabels[value] ?? value }))]} /></div>}
-      {!items.length ? <p className="tender-empty">当前尚无可读取的事项。分析结束后在这里逐条查看。</p> : !shown.length ? <p>没有匹配事项。</p> : shown.map((item, index) => <article className="tender-analysis-item" key={item.item_id ?? index}><span className="tender-kind">{kindLabels[item.kind ?? ""] ?? item.kind}</span><ItemContent item={item} /></article>)}
-      {!!issues.length && <div className="tender-note">{issues.map(([text, count]) => <p key={text}>{count > 1 ? `${count} 个阶段同一情况：` : ""}{text}</p>)}</div>}
+      {!items.length ? <EmptyState isCompact title="当前尚无可读取的事项" description="分析结束后在这里逐条查看。" /> : !shown.length ? <EmptyState isCompact title="没有匹配事项" description="换一个关键词或事项类型。" /> : shown.map((item, index) => <article className="tender-analysis-item" key={item.item_id ?? index}>{item.kind && <Badge variant="neutral" label={kindLabels[item.kind] ?? item.kind} />}<ItemContent item={item} /></article>)}
+      {!!issues.length && <VStack gap={1}>{issues.map(([text, count]) => <Text key={text} type="supporting">{count > 1 ? `${count} 个阶段同一情况：` : ""}{text}</Text>)}</VStack>}
     </>}
   </section>;
 }

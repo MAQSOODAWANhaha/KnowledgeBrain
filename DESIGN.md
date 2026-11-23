@@ -58,7 +58,7 @@
 - 页头组件 `PageHeader`（`web/src/shell/PageHeader.tsx`）：`Breadcrumbs`、`Heading level={1}`、状态 `Badge`、元信息、右侧按钮组、可选 `TabList`
 - 内容区三种模式：
   1. **列表**：工具条（搜索、筛选）+ `Table` + 分页。项目列表、项目资料、知识资产
-  2. **详情**：列表或正文 + 右侧 `LayoutPanel`（320–380）。招标解读、项目资料
+  2. **详情**：列表或正文 + 右侧 `LayoutPanel`（320–380）。招标解读、项目资料。窄于 900px 时右侧面板排到列表下方
   3. **工作区**：目录 | ONLYOFFICE 稿件 | 核对栏。标书编制正文。目录和核对栏可收起成 48px 的图标列；窄于 1200px 时核对栏默认收起。编辑器至少 420px 高，高度不够时稿件区纵向滚动
 - 次要工具放在页头「更多操作」（`MoreMenu`）里。与稿件并用的复核工具（定向复核与修订、核对已保存的 Word 内容）在核对栏内打开，不遮挡编辑器；执行详情、直接生成整稿用非模态 `Drawer`。关闭工具不清除未提交的输入
 
@@ -91,7 +91,7 @@
 | 列表 | `Table`（`hasHover`，行选中时打开详情面板），`Pagination` |
 | 搜索、筛选 | `TextInput`（search）、`Selector` |
 | 章节目录 | `TreeList` |
-| 详情面板 | `Layout` + `LayoutPanel`；窄屏 `Drawer` |
+| 详情面板 | `Layout` + `LayoutPanel`；窄屏排到内容下方 |
 | 元数据 | `MetadataList` |
 | 状态 | `Badge`（success / warning / error / neutral）、`StatusDot` |
 | 页内必须看见的提示 | `Banner`，可带重试按钮 |
