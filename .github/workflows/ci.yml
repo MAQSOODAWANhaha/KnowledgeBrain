@@ -14,9 +14,10 @@ permissions:
   actions: write
 
 concurrency:
-  # The latest run replaces older CI runs across PR and main push events.
-  group: ci-${{ github.workflow }}
-  cancel-in-progress: true
+  # Isolate runs per ref; newer PR pushes cancel stale PR runs, while main runs
+  # finish uninterrupted so release verification and image publishing are never starved.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   rust-build:

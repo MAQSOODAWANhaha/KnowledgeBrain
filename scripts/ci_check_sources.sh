@@ -27,6 +27,14 @@ if [[ "$CI_PUSH_BRANCH" != "$DEFAULT_BRANCH" ]]; then
   exit 1
 fi
 grep -Fq "branches: [${CI_PUSH_BRANCH}]" .github/workflows/ci.yml
+grep -Fq 'group: ci-${{ github.workflow }}-${{ github.ref }}' .github/workflows/ci.yml || {
+  echo "workflow concurrency group must be scoped by github.ref" >&2
+  exit 1
+}
+grep -Fq "cancel-in-progress: \${{ github.ref != 'refs/heads/${CI_PUSH_BRANCH}' }}" .github/workflows/ci.yml || {
+  echo "workflow must not cancel in-progress runs on ${CI_PUSH_BRANCH}" >&2
+  exit 1
+}
 
 workflow=.github/workflows/ci.yml
 anchor=0
