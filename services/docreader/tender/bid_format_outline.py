@@ -46,6 +46,7 @@ class _Prepared:
         self.found = found is not None
         self.refs = SourceRefs(documents, identity)
         self.visible = set()
+        self.page_edges = set()
         self.payload = None
         if found is None:
             return
@@ -53,6 +54,7 @@ class _Prepared:
         points = [(anchor[0], anchor[1], anchor[2])]
         points.extend((row[0], row[1], row[2]) for row in section)
         self.visible = {self.refs.by_point[point] for point in points}
+        self.page_edges = {self.refs.by_point[point] for point in _page_edges(documents) if point in self.refs.by_point}
         self.order = [self.refs.by_point[point] for point in points]
         shown = _heading_candidates(section, self.refs)
         self.payload = {'operation': BID_FORMAT_OPERATION, 'source_ref_format': 'host_bound_line_refs_v1',
@@ -78,6 +80,48 @@ def _heading_candidates(section, refs):
         if len(text) <= 48 or text.startswith('附件') or text[:2] in '一二三四五六七八九十':
             shown.append([ref, row[3]])
     return shown
+
+
+def _page_edges(documents):
+    """BUG-302: repeated running lines and bare page numbers are page edges, not form text."""
+    import re
+    from collections import Counter
+
+    points = set()
+    for document in documents:
+        pages = document['pages']
+        for page, flags in enumerate(document.get('layout_decoration') or []):
+            points.update((document['document_id'], page, line) for line, flag in enumerate(flags) if flag)
+        numbers = []
+        for page, text in enumerate(pages):
+            lines = text.splitlines()
+            filled = [index for index, line in enumerate(lines) if line.strip()]
+            for index in {filled[0], filled[-1]} if filled else ():
+                if re.fullmatch(r'\d{1,4}', lines[index].strip()):
+                    numbers.append((page, index, int(lines[index].strip()) - page))
+        offsets = Counter(offset for _page, _line, offset in numbers)
+        texted = sum(1 for text in pages if text.strip())
+        if offsets:
+            offset, count = offsets.most_common(1)[0]
+            if count >= max(2, int(texted * 0.6)):
+                points.update((document['document_id'], page, line) for page, line, value in numbers if value == offset)
+    return points
+
+
+def _copy_windows(prepared, start, end):
+    """The form's own lines from start to end; page edges are skipped, nothing else."""
+    windows = []
+    for reference in range(start, end + 1):
+        if reference in prepared.page_edges:
+            continue
+        point = prepared.refs.point(reference)
+        document_id, page, line = point['document_id'], point['page'], point['line']
+        if windows and windows[-1]['document_id'] == document_id and windows[-1]['page'] == page \
+                and windows[-1]['end_line'] + 1 == line:
+            windows[-1]['end_line'] = line
+        else:
+            windows.append({'document_id': document_id, 'page': page, 'start_line': line, 'end_line': line})
+    return windows
 
 
 def _bare_annex(text):
@@ -149,7 +193,7 @@ def decode_bid_format_outline(raw, prepared):
         heading = prepared.refs.point(heads[0])
         identity = f'format-{number}'
         # One tender line has one owner; later files listed on it keep their own chapter without a copy.
-        windows = [] if tuple(heads) in copied else prepared.refs.windows(start, end, visible=prepared.visible)
+        windows = [] if tuple(heads) in copied else _copy_windows(prepared, start, end)
         copied.add(tuple(heads))
         node = {'id': identity, 'heading': heading, 'parent_id': None, 'response_kind': 'form', 'name': name,
                 'body_windows': windows}

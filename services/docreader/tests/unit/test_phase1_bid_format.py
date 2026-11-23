@@ -416,3 +416,34 @@ async def test_phase1_model_keeps_each_listed_file_and_each_wrapped_title(tmp_pa
     assert '营业执照' in titles and '资质证书' in titles
     assert '由省级以上监狱管理局、戒毒管理局(含新疆生产建设兵团)出具的属于监狱企业的证明文件' in titles
     assert any('营业执照、资质证书（如有）等' in text for text in _purposes(outline))
+
+
+RUNNING = [
+    '招标编号：A-1\n第六章 投标文件格式\n一、投标书\n致：招标人\n11\n',
+    '招标编号：A-1\n我方承诺按招标文件提交。\n投标人名称：\n12\n',
+    '招标编号：A-1\n二、开标一览表\n总价：\n13\n',
+    '招标编号：A-1\n单位负责人签字：\n14\n',
+]
+
+
+async def test_phase1_model_copy_skips_running_headers_and_page_numbers(tmp_path):
+    """BUG-302: a form copied across pages keeps its text, not the page edges."""
+    import json
+
+    from docreader.tender.directory_compile import _layout_decoration
+
+    documents = [{'document_id': 'tender', 'role': 'main', 'pages': RUNNING,
+                  'line_units': [[] for _ in RUNNING], 'layout_decoration': _layout_decoration(RUNNING)}]
+
+    async def execute(task, request, validate):
+        body = json.loads(request['messages'][1]['content'][0]['text'])
+        found = {text.strip(): ref for ref, text in body['lines']}
+        return validate({'chapters': [{'heading_refs': [found['一、投标书']], 'name': '投标书'},
+                                      {'heading_refs': [found['二、开标一览表']], 'name': '开标一览表'}]})
+
+    _artifacts, outline = await _outline(tmp_path, documents=documents, execute=execute,
+                                         directory_contract='bid_format_source_outline_v1')
+    text = '\n'.join(_purposes(outline))
+    assert '我方承诺按招标文件提交。' in text and '单位负责人签字：' in text
+    assert '招标编号' not in text
+    assert not any(line.strip() in {'11', '12', '13', '14'} for line in text.splitlines())
