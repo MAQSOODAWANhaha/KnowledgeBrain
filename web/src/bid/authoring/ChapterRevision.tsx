@@ -1,6 +1,5 @@
 import { VStack } from "@astryxdesign/core/VStack";
 import { Text } from "@astryxdesign/core/Text";
-import { Section } from "@astryxdesign/core/Section";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Code } from "@astryxdesign/core/Code";
@@ -61,7 +60,7 @@ export function ChapterRevision({ source, disabled, busy, pending, pendingReques
       {!!chapter.targets.length && <VStack gap={1} paddingInlineStart={4}>{chapter.targets.map(target => <CheckboxInput key={target.target_id} label={`复核响应：${target.purpose}`} description={target.manual_fill ? "需人工填写" : undefined} isDisabled={locked || !!target.manual_fill} value={selected.includes(target.target_id)} onChange={() => toggle([target.target_id])} />)}</VStack>}
       {!!chapter.children.length && render(chapter.children, depth + 1)}</VStack>;
   })}</VStack>;
-  return <Section role="region" aria-label="定向复核与修订" padding={0} variant="transparent"><VStack gap={3}>
+  return <VStack role="region" aria-label="定向复核与修订" gap={3}>
     <Text type="supporting">选择生成稿中的章节或响应位置，说明需要核对的问题。系统会基于该次生成结果形成新稿，并在复核需要时修订内容；执行范围可能包含其他章节。</Text>
     {frozen ? <Text>待确认请求的生成基准：{frozen.previous_execution_id === basis?.execution_id ? basis.label : "原生成稿（待确认请求）"}</Text> : basis ? <Text>复核基准：{basis.label}</Text> : <Text type="supporting">当前没有可复核的生成稿，请先选择已有生成稿。</Text>}
     {(frozen || basis) && <Collapsible trigger="查看生成稿标识" defaultIsOpen={false}><Text>{frozen ? "待确认请求的生成基准：" : "生成执行："}<Code>{frozen?.previous_execution_id ?? basis?.execution_id}</Code></Text></Collapsible>}
@@ -75,5 +74,5 @@ export function ChapterRevision({ source, disabled, busy, pending, pendingReques
     <Text type="supporting">已选择 {selected.length} 项响应。需人工填写的内容请在 Word 中处理。</Text>
     <HStack gap={2} wrap="wrap"><Button variant="primary" isDisabled={pending ? disabled || busy || submitting : locked || !selected.length || !reason.trim()} onClick={() => void submit()} label={pending ? "确认同一次定向复核请求" : "生成复核修订稿"} />
     {draft && <Button variant="ghost" isDisabled={busy || pending || submitting} onClick={() => { if (window.confirm("放弃尚未提交的复核选择与理由？")) setDraft(null); }} label="放弃本次复核选择" />}</HStack>
-  </VStack></Section>;
+  </VStack>;
 }

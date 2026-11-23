@@ -1,6 +1,6 @@
-import { type ReactNode, useEffect, useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Markdown } from "@astryxdesign/core/Markdown";
+import { VStack } from "@astryxdesign/core/VStack";
+import { useEffect, useRef, useState } from "react";
 import { fileBlob } from "../api";
 
 function slug(text: string): string {
@@ -10,18 +10,6 @@ function slug(text: string): string {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 80);
-}
-
-function flatten(node: ReactNode): string {
-  if (node == null || typeof node === "boolean") return "";
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(flatten).join("");
-  if (typeof node === "object" && "props" in node) {
-    return flatten(
-      (node as { props?: { children?: ReactNode } }).props?.children,
-    );
-  }
-  return "";
 }
 
 const LEADER = /[\u00b7\u2022\u22c5\u2027\uff0e.]{4,}/;
@@ -100,97 +88,51 @@ function objectKey(src: string): string | null {
   return null;
 }
 
-function MdImage({ src, alt }: { src?: string; alt?: string }) {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!src) return;
-    if (/^https?:\/\//i.test(src) || src.startsWith("data:")) {
-      setUrl(src);
-      return;
-    }
-    const key = objectKey(src);
-    if (!key) return;
-    let alive = true;
-    let created: string | null = null;
-    fileBlob(key)
-      .then((u) => {
-        created = u;
-        if (alive) setUrl(u);
-        else URL.revokeObjectURL(u);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [src]);
-  if (!url) {
-    return <span className="note">{alt ? `图：${alt}` : "图"}</span>;
-  }
-  return <img className="md-img" src={url} alt={alt || ""} />;
-}
+const IMAGE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
 
-function heading(tag: "h1" | "h2" | "h3" | "h4") {
-  return function Heading({ children }: { children?: ReactNode }) {
-    const Tag = tag;
-    const id = slug(flatten(children));
-    return (
-      <Tag id={id} className={`md-${tag}`}>
-        {children}
-      </Tag>
-    );
-  };
+// Parsed documents reference images by object key or inline data; both become blob URLs the renderer accepts.
+function useImageUrls(markdown: string): Map<string, string> {
+  const [urls, setUrls] = useState(new Map<string, string>());
+  useEffect(() => {
+    const sources = [...new Set([...markdown.matchAll(IMAGE)].map((match) => match[2]).filter((src) => objectKey(src) || src.startsWith("data:")))];
+    let alive = true;
+    const created: string[] = [];
+    void Promise.all(sources.map(async (src) => {
+      try {
+        const url = src.startsWith("data:") ? URL.createObjectURL(await (await fetch(src)).blob()) : await fileBlob(objectKey(src)!);
+        created.push(url);
+        return [src, url] as const;
+      } catch { return null; }
+    })).then((pairs) => {
+      if (alive) setUrls(new Map(pairs.filter((pair): pair is readonly [string, string] => !!pair)));
+      else created.forEach((url) => URL.revokeObjectURL(url));
+    });
+    return () => { alive = false; created.forEach((url) => URL.revokeObjectURL(url)); };
+  }, [markdown]);
+  return urls;
 }
 
 export function GfmPreview({ markdown }: { markdown: string }) {
-  const src = rewriteTocLinks(
-    isolatePdfLayout(markdown.replace(/<!--[\s\S]*?-->/g, "")),
-  );
+  const source = rewriteTocLinks(isolatePdfLayout(markdown.replace(/<!--[\s\S]*?-->/g, "")));
+  const urls = useImageUrls(source);
+  const resolved = source.replace(IMAGE, (whole, alt: string, src: string) => {
+    if (!objectKey(src) && !src.startsWith("data:")) return whole;
+    const url = urls.get(src);
+    return url ? `![${alt}](${url})` : `*${alt ? `图：${alt}` : "图"}*`;
+  });
+  const container = useRef<HTMLElement>(null);
   return (
-    <div className="md-doc">
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          img: ({ src, alt }) => <MdImage src={src} alt={alt} />,
-          a: ({ href, children }) => {
-            const raw = href || "";
-            const inPage = raw.startsWith("#") || raw.startsWith("_Toc");
-            if (inPage) {
-              return (
-                <a
-                  href={
-                    typeof location !== "undefined" ? location.hash || "#" : "#"
-                  }
-                  onClick={(e) => {
-                    e.preventDefault();
-                    const id = raw.replace(/^#/, "");
-                    const el =
-                      document.getElementById(id) ||
-                      document.getElementById(slug(flatten(children)));
-                    el?.scrollIntoView({ block: "start", behavior: "smooth" });
-                  }}
-                >
-                  {children}
-                </a>
-              );
-            }
-            if (href && /^https?:\/\//i.test(href)) {
-              return (
-                <a href={href} target="_blank" rel="noreferrer">
-                  {children}
-                </a>
-              );
-            }
-            return <a href={href}>{children}</a>;
-          },
-          h1: heading("h1"),
-          h2: heading("h2"),
-          h3: heading("h3"),
-          h4: heading("h4"),
-        }}
-      >
-        {src}
+    <VStack ref={container} gap={0}>
+      <Markdown autolink="gfm" contentWidth="100%"
+        onLinkClick={(href) => {
+          if (!href.startsWith("#") && !href.startsWith("_Toc")) return;
+          const id = href.replace(/^#/, "");
+          const headings = [...(container.current?.querySelectorAll("h1, h2, h3, h4, h5, h6") ?? [])];
+          headings.find((heading) => heading.id === id || slug(heading.textContent ?? "") === id)?.scrollIntoView({ block: "start", behavior: "smooth" });
+          return false;
+        }}>
+        {resolved}
       </Markdown>
-    </div>
+    </VStack>
   );
 }

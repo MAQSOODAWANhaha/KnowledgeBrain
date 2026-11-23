@@ -1,7 +1,15 @@
-import { Button } from "@astryxdesign/core/Button";
-import { useEffect, useMemo, useState } from "react";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Card } from "@astryxdesign/core/Card";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Link } from "@astryxdesign/core/Link";
+import { List, ListItem } from "@astryxdesign/core/List";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
-import { cn } from "../lib/utils";
+import { Tab as TabItem, TabList } from "@astryxdesign/core/TabList";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
+import { useEffect, useMemo, useState } from "react";
 import { type DocChunk, type DocContent, api } from "../api";
 import { GfmPreview, formatPlainLayout } from "../bid/gfm";
 import { FilePreview } from "./FilePreview";
@@ -67,26 +75,11 @@ export function DocumentDetail({
   }, [data]);
 
   if (err) {
-    return (
-      <div className="card">
-        <p className="note stop">
-          {err}
-        </p>
-        <a className="btn" href={`#${backHref}`}>
-          返回
-        </a>
-      </div>
-    );
+    return <Banner role="alert" status="error" title={err} endContent={<Link href={`#${backHref}`}>返回</Link>} />;
   }
   if (!data) {
-    return (
-      <div className="card stack">
-        <Skeleton height={44} />
-        <Skeleton height={320} />
-      </div>
-    );
+    return <Card><VStack gap={3}><Skeleton height={44} /><Skeleton height={320} /></VStack></Card>;
   }
-
   const tabs: { key: Tab; label: string; n?: number; hideIfEmpty?: boolean }[] = [
     { key: "file", label: "原件" },
     { key: "parse", label: "解析" },
@@ -96,179 +89,59 @@ export function DocumentDetail({
     { key: "summary", label: "摘要", n: groups.summary.length, hideIfEmpty: true },
     { key: "wiki", label: "Wiki", n: groups.wiki.length, hideIfEmpty: true },
   ];
-
   return (
-    <div className="stack doc-detail">
-      <div className="card pad-0">
-        {data.error_message ? (
-          <p className="note stop inset">
-            {data.error_message}
-          </p>
-        ) : null}
-        <div className="flex h-10 flex-wrap items-stretch gap-1 border-b border-line bg-canvas px-4" role="tablist">
-          {tabs
-            .filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0)
-            .map((item) => (
-              <Button key={item.key}
-                type="button"
-                role="tab"
-                aria-selected={tab === item.key}
-                className={cn(
-                  "relative flex items-center gap-2 bg-transparent px-3 text-[13px] font-medium transition-colors duration-[140ms]",
-                  tab === item.key ? "font-semibold text-ink" : "text-quiet hover:text-ink",
-                )}
-                onClick={() => setTab(item.key)}
-                label={item.label}
-              >
-                {item.label}
-                {item.n != null ? (
-                  <span className="rounded-[4px] bg-white px-1.5 py-0.5 text-[12px] font-medium text-quiet">
-                    {item.n}
-                  </span>
-                ) : null}
-                <span
-                  className={cn(
-                    "absolute inset-x-3 bottom-0 h-0.5 bg-sky transition-opacity duration-[140ms]",
-                    tab === item.key ? "opacity-100" : "opacity-0",
-                  )}
-                />
-              </Button>
-            ))}
-        </div>
-      </div>
-      {tab === "file" ? (
-        <div className="card pad-0 preview-card">
-          <FilePreview fileName={data.file_name} objectKey={data.object_ref} />
-        </div>
-      ) : null}
+    <VStack gap={4}>
+      {data.error_message ? <Banner status="error" title={data.error_message} /> : null}
+      <TabList aria-label="文档视图" value={tab} onChange={(value) => setTab(value as Tab)}>
+        {tabs.filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0).map((item) => (
+          <TabItem key={item.key} value={item.key} label={item.n != null ? `${item.label} ${item.n}` : item.label} />
+        ))}
+      </TabList>
+      {tab === "file" ? <Card padding={0}><FilePreview fileName={data.file_name} objectKey={data.object_ref} /></Card> : null}
       {tab === "parse" ? (
-        <div className="card pad-0 preview-card">
-          {data.markdown.trim() ? (
-            <div className="md-wrap">
-              <GfmPreview markdown={data.markdown} />
-            </div>
-          ) : (
-            <p className="note pad">
-              还没有解析正文
-            </p>
-          )}
-        </div>
+        <Card>{data.markdown.trim() ? <GfmPreview markdown={data.markdown} /> : <EmptyState isCompact title="还没有解析正文" />}</Card>
       ) : null}
-      {tab === "body" ? <BodyChunks chunks={groups.body} /> : null}
-      {tab === "images" ? <ImageChunks groups={groups.images} /> : null}
-      {tab === "questions" ? (
-        <ListChunks
-          emptyTitle="还没有检索问句"
-          chunks={groups.questions}
-          label="问句"
-        />
+      {tab === "body" ? (
+        <ChunkList emptyTitle="还没有正文分片" rows={groups.body.map((c, i) => ({
+          key: c.id, tag: c.chunk_type === "text" ? "正文" : c.chunk_type,
+          meta: `${i + 1}/${groups.body.length}${c.start_at || c.end_at ? ` · 字 ${c.start_at}–${c.end_at}` : ""}`,
+          parts: [{ text: formatPlainLayout(c.content) }],
+        }))} />
       ) : null}
-      {tab === "summary" ? (
-        <ListChunks emptyTitle="还没有摘要" chunks={groups.summary} label="摘要" />
+      {tab === "images" ? (
+        <ChunkList emptyTitle="没有图像块" rows={groups.images.map((g, i) => ({
+          key: g.key, tag: `图 ${i + 1}`, meta: g.key.replace(/^objects\//, "").slice(0, 12),
+          parts: [...(g.ocr ? [{ title: "OCR", text: g.ocr.content }] : []), ...(g.caption ? [{ title: "配图说明", text: g.caption.content }] : [])],
+        }))} />
       ) : null}
-      {tab === "wiki" ? (
-        <ListChunks emptyTitle="还没有 Wiki" chunks={groups.wiki} label="Wiki" />
-      ) : null}
-    </div>
+      {tab === "questions" ? <ChunkList emptyTitle="还没有检索问句" rows={plainRows(groups.questions, "问句")} /> : null}
+      {tab === "summary" ? <ChunkList emptyTitle="还没有摘要" rows={plainRows(groups.summary, "摘要")} /> : null}
+      {tab === "wiki" ? <ChunkList emptyTitle="还没有 Wiki" rows={plainRows(groups.wiki, "Wiki")} /> : null}
+    </VStack>
   );
 }
 
-function BodyChunks({ chunks }: { chunks: DocChunk[] }) {
-  if (chunks.length === 0) {
-    return (
-      <div className="card pad-0">
-        <div className="empty">
-          <h2>还没有正文分片</h2>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="card pad-0">
-      {chunks.map((c, i) => (
-        <article key={c.id} className="chunk-row">
-          <header>
-            <span className="chip gray">{c.chunk_type === "text" ? "正文" : c.chunk_type}</span>
-            <span className="muted">
-              {i + 1}/{chunks.length}
-              {c.start_at || c.end_at ? ` · 字 ${c.start_at}–${c.end_at}` : ""}
-            </span>
-          </header>
-          <pre>{formatPlainLayout(c.content)}</pre>
-        </article>
-      ))}
-    </div>
-  );
+type ChunkRow = { key: string; tag: string; meta: string; parts: { title?: string; text: string }[] };
+
+function plainRows(chunks: DocChunk[], tag: string): ChunkRow[] {
+  return chunks.map((c, i) => ({ key: c.id, tag, meta: `${i + 1}/${chunks.length}${c.context_header ? ` · ${c.context_header}` : ""}`, parts: [{ text: c.content }] }));
 }
 
-function ImageChunks({ groups }: { groups: { key: string; ocr?: DocChunk; caption?: DocChunk }[] }) {
-  if (groups.length === 0) {
-    return (
-      <div className="card pad-0">
-        <div className="empty">
-          <h2>没有图像块</h2>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="card pad-0">
-      {groups.map((g, i) => (
-        <article key={g.key} className="chunk-row">
-          <header>
-            <span className="chip gray">图 {i + 1}</span>
-            <span className="muted">{g.key.replace(/^objects\//, "").slice(0, 12)}</span>
-          </header>
-          {g.ocr ? (
-            <>
-              <div className="chunk-kicker">OCR</div>
-              <pre>{g.ocr.content}</pre>
-            </>
-          ) : null}
-          {g.caption ? (
-            <>
-              <div className="chunk-kicker">配图说明</div>
-              <pre>{g.caption.content}</pre>
-            </>
-          ) : null}
-        </article>
-      ))}
-    </div>
-  );
+// Chunk text keeps its line breaks: one block per line.
+function Lines({ text }: { text: string }) {
+  return <VStack gap={0}>{text.split("\n").map((line, index) => <Text key={index} display="block">{line || "\u00a0"}</Text>)}</VStack>;
 }
 
-function ListChunks({
-  chunks,
-  label,
-  emptyTitle,
-}: {
-  chunks: DocChunk[];
-  label: string;
-  emptyTitle: string;
-}) {
-  if (chunks.length === 0) {
-    return (
-      <div className="card pad-0">
-        <div className="empty">
-          <h2>{emptyTitle}</h2>
-        </div>
-      </div>
-    );
-  }
+function ChunkList({ rows, emptyTitle }: { rows: ChunkRow[]; emptyTitle: string }) {
+  if (!rows.length) return <Card><EmptyState isCompact title={emptyTitle} /></Card>;
   return (
-    <div className="card pad-0">
-      {chunks.map((c, i) => (
-        <article key={c.id} className="chunk-row">
-          <header>
-            <span className="chip gray">{label}</span>
-            <span className="muted">
-              {i + 1}/{chunks.length}
-              {c.context_header ? ` · ${c.context_header}` : ""}
-            </span>
-          </header>
-          <pre>{c.content}</pre>
-        </article>
-      ))}
-    </div>
+    <Card padding={0}>
+      <List hasDividers>
+        {rows.map((row) => (
+          <ListItem key={row.key} label={<HStack gap={2} vAlign="center"><Badge variant="neutral" label={row.tag} /><Text type="supporting" hasTabularNumbers>{row.meta}</Text></HStack>}
+            description={<VStack gap={2}>{row.parts.map((part, index) => <VStack key={index} gap={1}>{part.title && <Text weight="semibold">{part.title}</Text>}<Lines text={part.text} /></VStack>)}</VStack>} />
+        ))}
+      </List>
+    </Card>
   );
 }

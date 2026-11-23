@@ -117,7 +117,7 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
     } finally { if (active.current) setSaving(false); }
   }
 
-  return <Section role="region" aria-label="招标分析人工复核" padding={0} variant="transparent"><VStack gap={3}>
+  return <VStack role="region" aria-label="招标分析人工复核" gap={3}>
     <Heading level={3}>人工复核与事项纠正</Heading>
     {loading && <Text role="status" type="supporting">正在读取复核清单…</Text>}
     {notice && <Banner role="alert" status="error" title={notice} />}
@@ -186,5 +186,5 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
       <TextArea label="事项纠正理由" htmlMaxLength={4000} isDisabled={locked} value={working.reason} onChange={reason => setWorking(current => current && { ...current, reason })} />
       <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")} label={pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"} /></HStack></>}
     </>}
-  </VStack></Section>;
+  </VStack>;
 }

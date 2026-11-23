@@ -40,7 +40,6 @@ import { SavedWordReview } from "./authoring/SavedWordReview";
 import { KnowledgeSelection, type KnowledgeSelection as KnowledgeChoice } from "./KnowledgeSelection";
 import { inProgress, executionStatus } from "./executionStatus";
 import { TaskProgress } from "./TaskProgress";
-import "./workbench.css";
 
 function ProjectFiles({ documents, download }: { documents: WorkbenchView["documents"]; download(url: string, name: string): Promise<void> }) {
   return <Table data={documents} columns={[
@@ -374,7 +373,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             </VStack></VStack></VStack>
             : <Layout height="fill"
               content={<LayoutContent padding={0}><AnalysisPane analysis={view.analysis} /></LayoutContent>}
-              end={<LayoutPanel width={380} hasDivider label="分析处理" role="complementary"><VStack gap={4}>
+              end={<LayoutPanel width={380} hasDivider label="分析处理" role="complementary" padding={4}><VStack gap={4}>
               <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
               <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
             </VStack></LayoutPanel>} />}

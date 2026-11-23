@@ -1,4 +1,11 @@
+import { Button } from "@astryxdesign/core/Button";
+import { Center } from "@astryxdesign/core/Center";
+import { CodeBlock } from "@astryxdesign/core/CodeBlock";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { Table } from "@astryxdesign/core/Table";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import { useEffect, useRef, useState } from "react";
 import { token } from "../api";
 
@@ -46,7 +53,8 @@ async function renderPdf(blob: Blob, el: HTMLElement, cancelled: () => boolean) 
       const scale = Math.max(0.5, (width - 8) / base.width);
       const viewport = page.getViewport({ scale });
       const canvas = document.createElement("canvas");
-      canvas.className = "pdf-page";
+      canvas.style.display = "block";
+      canvas.style.margin = "0 auto 8px";
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
       const ctx = canvas.getContext("2d");
@@ -61,8 +69,7 @@ async function renderPdf(blob: Blob, el: HTMLElement, cancelled: () => boolean) 
 
 export function FilePreview({ fileName, objectKey }: { fileName: string; objectKey: string }) {
   const kind = kindOf(fileName);
-  const host = useRef<HTMLDivElement>(null);
-  const [url, setUrl] = useState<string | null>(null);
+  const host = useRef<HTMLElement>(null);
   const [text, setText] = useState("");
   const [sheets, setSheets] = useState<{ name: string; rows: string[][] }[]>([]);
   const [err, setErr] = useState("");
@@ -76,7 +83,6 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
     setErr("");
     setText("");
     setSheets([]);
-    setUrl(null);
     if (host.current) host.current.innerHTML = "";
     (async () => {
       if (kind === "unsupported") {
@@ -91,8 +97,14 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
           if (!el) throw new Error("预览容器未就绪");
           await renderPdf(blob, el, () => dead);
         } else if (kind === "image") {
+          // Rendered into the host like the PDF pages: full size, scaled to the preview width.
+          const el = host.current;
+          if (!el) throw new Error("预览容器未就绪");
           blobUrl = URL.createObjectURL(blob);
-          setUrl(blobUrl);
+          const image = document.createElement("img");
+          image.src = blobUrl; image.alt = fileName;
+          image.style.maxWidth = "100%"; image.style.display = "block"; image.style.margin = "0 auto";
+          el.appendChild(image);
         } else if (kind === "docx") {
           const { renderAsync } = await import("docx-preview");
           if (dead) return;
@@ -143,73 +155,44 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
     };
   }, [fileName, objectKey, kind]);
 
+  const download = <DownloadButton objectKey={objectKey} fileName={fileName} />;
   return (
-    <div className="file-preview">
-      {busy ? <div className="preview-empty">正在打开原件…</div> : null}
-      {err ? (
-        <div className="preview-empty">
-          {err}
-          <div className="mt-3">
-            <DownloadLink objectKey={objectKey} fileName={fileName} />
-          </div>
-        </div>
-      ) : null}
+    <VStack gap={3} padding={4}>
+      {busy ? <Center minHeight={240}><Spinner label="正在打开原件…" /></Center> : null}
+      {err ? <EmptyState title="原件预览失败" description={err} actions={download} /> : null}
       {!busy && !err && kind === "unsupported" ? (
-        <div className="preview-empty">
-          {fileName.toLowerCase().endsWith(".ppt") || fileName.toLowerCase().endsWith(".doc")
+        <EmptyState title="无法在浏览器中预览"
+          description={fileName.toLowerCase().endsWith(".ppt") || fileName.toLowerCase().endsWith(".doc")
             ? "旧版 .ppt / .doc 请下载后用 Office 打开。pptx / docx 可在浏览器里预览。"
-            : "浏览器里嵌不了这种格式。请下载原件，解析结果看「解析」和「分片」。"}
-          <div className="mt-3">
-            <DownloadLink objectKey={objectKey} fileName={fileName} />
-          </div>
-        </div>
+            : "浏览器里嵌不了这种格式。请下载原件，解析结果看「解析」和「正文」。"}
+          actions={download} />
       ) : null}
-      {!busy && !err && kind === "image" && url ? (
-        <div className="preview-image">
-          <img src={url} alt={fileName} />
-        </div>
-      ) : null}
-      <div
-        ref={host}
-        className={kind === "pptx" ? "preview-pptx" : "preview-docx"}
-        style={{
-          display: kind === "docx" || kind === "pptx" || kind === "pdf" ? "block" : "none",
-          visibility: busy || err ? "hidden" : "visible",
-        }}
-      />
+      <VStack ref={host} gap={0} isScrollable
+        style={{ display: kind === "docx" || kind === "pptx" || kind === "pdf" || kind === "image" ? "flex" : "none", visibility: busy || err ? "hidden" : "visible" }} />
       {!busy && !err && kind === "excel" ? (
-        <div className="preview-excel">
+        <VStack gap={4}>
           {sheets.map((sheet) => (
-            <div key={sheet.name} className="excel-sheet">
-              {sheets.length > 1 ? <div className="excel-sheet-name">{sheet.name}</div> : null}
+            <VStack key={sheet.name} gap={2}>
+              {sheets.length > 1 ? <Text weight="semibold">{sheet.name}</Text> : null}
               <Table data={sheet.rows.map((row, index) => ({ id: String(index), cells: row }))} columns={Array.from({ length: Math.max(1, ...sheet.rows.map(row => row.length)) }, (_, column) => ({ key: String(column), header: String(column + 1), renderCell: (row: { cells: string[] }) => row.cells[column] ?? "" }))} />
-            </div>
+            </VStack>
           ))}
-        </div>
+        </VStack>
       ) : null}
-      {!busy && !err && kind === "text" ? <pre className="preview-text">{text}</pre> : null}
-    </div>
+      {!busy && !err && kind === "text" ? <CodeBlock code={text} title={fileName} hasLineNumbers /> : null}
+    </VStack>
   );
 }
 
-function DownloadLink({ objectKey, fileName }: { objectKey: string; fileName: string }) {
-  const [href, setHref] = useState<string | null>(null);
-  useEffect(() => {
-    let u: string | null = null;
-    fetchBlob(objectKey)
-      .then((b) => {
-        u = URL.createObjectURL(b);
-        setHref(u);
-      })
-      .catch(() => undefined);
-    return () => {
-      if (u) URL.revokeObjectURL(u);
-    };
-  }, [objectKey]);
-  if (!href) return null;
-  return (
-    <a className="btn pri" href={href} download={fileName}>
-      下载原件
-    </a>
-  );
+function DownloadButton({ objectKey, fileName }: { objectKey: string; fileName: string }) {
+  const [busy, setBusy] = useState(false);
+  return <Button variant="primary" label="下载原件" isLoading={busy} onClick={async () => {
+    setBusy(true);
+    try {
+      const url = URL.createObjectURL(await fetchBlob(objectKey));
+      const link = Object.assign(document.createElement("a"), { href: url, download: fileName });
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } finally { setBusy(false); }
+  }} />;
 }

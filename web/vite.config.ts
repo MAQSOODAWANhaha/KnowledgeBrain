@@ -1,4 +1,3 @@
-import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Connect } from "vite";
 
@@ -15,7 +14,7 @@ const navigationCors: Connect.NextHandleFunction = (request, response, next) => 
 };
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), {
+  plugins: [react(), {
     name: "navigation-assets-cors",
     configureServer: server => { server.middlewares.use(navigationCors); },
     configurePreviewServer: server => { server.middlewares.use(navigationCors); },

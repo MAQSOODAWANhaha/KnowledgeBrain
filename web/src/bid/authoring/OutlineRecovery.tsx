@@ -69,7 +69,7 @@ export function OutlineRecovery({ projectId, tree, sourceRevision, sourceExecuti
     catch (error) { setHistoryError(error instanceof Error ? error.message : "历史修订读取失败。"); }
     finally { setLoading(false); }
   }
-  return <Section role="region" aria-label="大纲历史与响应安排" padding={0} variant="transparent"><VStack gap={2}>
+  return <VStack role="region" aria-label="大纲历史与响应安排" gap={2}>
     {catalogError?.source === source && <Banner role="alert" status="error" title={catalogError.message} endContent={<Button size="sm" onClick={() => setRetry(value => value + 1)} label="重新读取响应位置" />} />}
     {historyError && <Banner role="alert" status="error" title={`${historyError} 请使用历史修订列表或预览按钮重试。`} />}
     <Collapsible trigger="历史大纲" defaultIsOpen={false}><VStack gap={2}>
@@ -90,5 +90,5 @@ export function OutlineRecovery({ projectId, tree, sourceRevision, sourceExecuti
           endContent={<Button size="sm" variant="secondary" isDisabled={disabled || !selectedId || current.get(target.target_id)?.chapter_id === selectedId} onClick={() => selectedId && onChange(assignTarget(tree, target, selectedId))} label="安排到当前章节" />} />
       </Card>)}
     </VStack></Collapsible>
-  </VStack></Section>;
+  </VStack>;
 }

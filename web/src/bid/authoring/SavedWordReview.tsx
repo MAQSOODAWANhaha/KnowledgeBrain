@@ -1,6 +1,5 @@
 import { VStack } from "@astryxdesign/core/VStack";
 import { Text } from "@astryxdesign/core/Text";
-import { Section } from "@astryxdesign/core/Section";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Code } from "@astryxdesign/core/Code";
@@ -95,7 +94,7 @@ export function SavedWordReview({ projectId, version, disabled, readOnly = false
   const reportMatches = !!report && report.version_id === basis?.version_id && report.docx_sha256 === basis?.docx_sha256;
   const complete = review?.status === "succeeded" && !!report && report.record_count > 0 && report.reviewed_record_count === report.record_count && !report.gaps.length;
   const statusLabel = (status: string) => status === "published" ? "排队中" : running(status) ? "执行中" : ({ succeeded: "已结束", failed: "失败", blocked: "待恢复", cancelled: "已取消" }[status] ?? status);
-  return <Section role="region" aria-label="已保存 Word 只读复核" padding={0} variant="transparent"><VStack gap={3}>
+  return <VStack role="region" aria-label="已保存 Word 只读复核" gap={3}>
     <Text type="supporting">读取明确版本的已保存 Word 正文，核对内容本身。该复核不改写 Word，也不自动生成或载入新稿。</Text>
     {basis ? <Text>复核版本：Word v{basis.revision} <Code>{basis.version_id}</Code></Text> : <Text type="supporting">请先保存 Word，形成明确版本后再复核。</Text>}
     {basis && version && !sameVersion(basis, version) && <Banner status="warning" title={`当前 Word 已更新为 v${version.revision}，以下仍对应 v${basis.revision}，未自动复核新版本。`}
@@ -139,5 +138,5 @@ export function SavedWordReview({ projectId, version, disabled, readOnly = false
         </VStack></Card>) : <Text>{complete ? "已复核范围内未报告问题。请继续人工核对适用范围与业务事实。" : "当前已返回结果中未报告问题；仍需处理上方缺口，不能视为完整复核。"}</Text>}
       </VStack>}
     </VStack>}
-  </VStack></Section>;
+  </VStack>;
 }

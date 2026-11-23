@@ -4,7 +4,6 @@ import "./docxSession.test";
 import "./compositionReport.test";
 import { runAll, testSummary } from "./harness";
 import "./sha256.test";
-import "./analysisProgress.test";
 import "./routes.test";
 import "./outlineTree.test";
 

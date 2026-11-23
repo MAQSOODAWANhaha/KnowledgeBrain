@@ -1,4 +1,3 @@
-export { createBidV2Client, type BidV2Api } from "./client";
 export type {
   BidProjectView,
   DocumentRole,

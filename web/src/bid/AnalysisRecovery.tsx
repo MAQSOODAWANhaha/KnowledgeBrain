@@ -1,7 +1,6 @@
 import { Banner } from "@astryxdesign/core/Banner";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
-import { Section } from "@astryxdesign/core/Section";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { Button } from "@astryxdesign/core/Button";
@@ -81,7 +80,7 @@ export function AnalysisRecovery({ projectId, disabled, readOnly = false, onChan
     } finally { setSaving(false); }
   }
   if (!notice && !dirty && !pending && base?.status !== "failed") return null;
-  return <Section role="region" aria-label="分析任务恢复" padding={0} variant="transparent"><VStack gap={3}>
+  return <VStack role="region" aria-label="分析任务恢复" gap={3}>
     <Heading level={3}>继续失败的分析</Heading>
     <Text type="supporting">继续原任务和原资料。未完成的模型调用仍可能产生费用。</Text>
     {notice && <Banner role="alert" status="error" title={notice} />}
@@ -102,5 +101,5 @@ export function AnalysisRecovery({ projectId, disabled, readOnly = false, onChan
         }} label="放弃恢复理由" />}
       </HStack>
     </>}
-  </VStack></Section>;
+  </VStack>;
 }

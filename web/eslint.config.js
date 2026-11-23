@@ -8,14 +8,6 @@ const rawElements = ["a", "article", "aside", "b", "blockquote", "button", "code
   "ol", "p", "pre", "section", "select", "small", "span", "strong", "summary", "table", "tbody", "td", "textarea", "th", "thead",
   "tr", "ul"];
 
-// Files still on raw markup. Remove each entry when its migration lands; the list must end empty.
-const pendingAstryxMigration = [
-  "src/assets/DocumentDetail.tsx",
-  "src/assets/FilePreview.tsx",
-  "src/bid/authoring/AnalysisProgress.tsx",
-  "src/bid/gfm.tsx",
-];
-
 export default tseslint.config(
   {
     ignores: [
@@ -26,7 +18,6 @@ export default tseslint.config(
       "test-results/**",
       "test-results-live/**",
       "e2e/artifacts/**",
-      "postcss.config.cjs",
       "playwright.config.ts",
       "public/onlyoffice-navigation/onlyoffice-plugins-8.3.3.js",
     ],
@@ -53,7 +44,7 @@ export default tseslint.config(
   // styling are errors; the ONLYOFFICE frame host is the only exception.
   {
     files: ["src/**/*.tsx"],
-    ignores: [...pendingAstryxMigration, "src/bid/authoring/DocxEditor.tsx"],
+    ignores: ["src/bid/authoring/DocxEditor.tsx"],
     rules: {
       "no-restricted-syntax": ["error",
         {
