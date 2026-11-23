@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { fixture, type WordTestWindow } from "./tender.fixture";
+import { fixture, type WordTestWindow, openTool } from "./tender.fixture";
 
 test("volume and cover settings survive save/reload and can be explicitly cleared without replacing Word", async ({ page }) => {
   const f = await fixture(page); await f.ready(); await f.edit(); await f.dirty();
@@ -36,7 +36,7 @@ test("a chapter review uses real subtree response identities and leaves the curr
     { target_id: "signature-only", kind: "form", purpose: "人工签字", manual_fill: true },
   ] }];
   await f.ready();
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   const revision = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await expect(revision).toContainText("execution-word-v1");
   await expect(revision.getByRole("button", { name: "生成复核修订稿", exact: true })).toBeDisabled();
@@ -59,7 +59,7 @@ test("a chapter review uses real subtree response identities and leaves the curr
 
 test("a dirty Word draft prevents starting a review while retaining the editor and local choices", async ({ page }) => {
   const f = await fixture(page); await f.ready();
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   const revision = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await revision.getByLabel("复核响应：说明实施方法", { exact: true }).check();
   await revision.getByLabel("复核与修订理由", { exact: true }).fill("已选择的复核理由不能丢失。");
@@ -74,7 +74,7 @@ test("a dirty Word draft prevents starting a review while retaining the editor a
 
 test("an unknown review request keeps its exact generation, reason and request identity after reload", async ({ page }) => {
   const f = await fixture(page); await f.ready();
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   let revision = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await revision.getByLabel("复核响应：说明实施方法", { exact: true }).check();
   await revision.getByLabel("复核与修订理由", { exact: true }).fill("保留原范围并重新核对证明资料。");
@@ -86,7 +86,7 @@ test("an unknown review request keeps its exact generation, reason and request i
     { target_id: "other-response", kind: "narrative", purpose: "新响应" },
   ] }] };
   await page.reload();
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   revision = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await expect(revision).toContainText("待确认请求的生成基准：execution-word-v1");
   await expect(revision.getByLabel("复核与修订理由", { exact: true })).toHaveValue("保留原范围并重新核对证明资料。");
@@ -99,7 +99,7 @@ test("an unknown review request keeps its exact generation, reason and request i
 
 test("manual Word edits are explicitly outside the generated-content review input", async ({ page }) => {
   const f = await fixture(page); f.publish(); await f.ready();
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   const revision = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await expect(revision).toContainText("当前人工 Word v2 的编辑内容不作为本次复核输入。");
   await expect(revision).toContainText("现有 Word 稿继续保留，新稿生成后由你选择载入。");
@@ -109,7 +109,7 @@ test("manual Word edits are explicitly outside the generated-content review inpu
 
 test("a changed generation cannot silently reuse the previous selection and its draft can be explicitly discarded", async ({ page }) => {
   await page.clock.install(); const f = await fixture(page); await f.ready();
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   const revision = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await revision.getByLabel("复核响应：说明实施方法", { exact: true }).check();
   await revision.getByLabel("复核与修订理由", { exact: true }).fill("属于原生成执行的意见。");

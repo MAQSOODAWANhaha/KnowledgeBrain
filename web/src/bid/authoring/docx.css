@@ -1,5 +1,6 @@
-.docx-pane { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; height: 100%; }
+.docx-pane { display: flex; flex: 1; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
 .docx-toolbar { position: relative; z-index: 26; flex-wrap: wrap; align-items: center; }
-.docx-editor-frame { flex: 1; height: max(480px, calc(100dvh - 160px)); width: 100%; min-height: 320px; }
+/* The editor keeps at least 420px; a short viewport scrolls the Word region instead of squeezing it. */
+.docx-editor-frame { flex: 1; width: 100%; min-height: 420px; }
 .docx-editor-frame > div { height: 100%; }
 .docx-editor-frame iframe { border: 0; }

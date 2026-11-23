@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { fixture, project, path, type WordTestWindow } from "./tender.fixture";
+import { fixture, project, path, type WordTestWindow, openTool } from "./tender.fixture";
 
 test("the Word workspace keeps project actions in view when navigating chapters", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -21,7 +21,7 @@ test("unconfirmed analysis does not hide an existing Word draft or add a second 
   await expect(page.getByTestId("docx-editor")).toBeVisible();
   await expect(page.getByTestId("docx-save")).toHaveCount(0);
   await expect(page.getByTestId("docx-mode")).toHaveText("编辑 Word");
-  await expect(page.getByRole("main", { name: "Word 稿件工作区" }).locator("textarea,[contenteditable=true]")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Word 稿件工作区" }).locator("textarea,[contenteditable=true]")).toHaveCount(0);
   await expect(page.getByRole("tab", { name: /Markdown|内容浏览/ })).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view"]);
 });
@@ -96,13 +96,13 @@ test("a failed close cannot select the candidate or destroy the previous documen
 
 test("an unknown authoring submission survives reload and retries the same idempotency key", async ({ page }) => {
   const f = await fixture(page); await f.ready(); f.state.loseStart = true;
-  await page.getByText("直接生成整稿", { exact: true }).click();
+  await openTool(page, "直接生成整稿");
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认同一次编制请求", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
   await page.reload();
-  await page.getByText("直接生成整稿", { exact: true }).click();
+  await openTool(page, "直接生成整稿");
   await page.getByRole("button", { name: "确认同一次编制请求", exact: true }).click();
   await expect.poll(() => f.state.starts.length).toBe(2);
   expect(f.state.starts[0]).toEqual(f.state.starts[1]);

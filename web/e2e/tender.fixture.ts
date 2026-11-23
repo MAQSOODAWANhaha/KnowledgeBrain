@@ -211,3 +211,9 @@ async function fixture(page: Page) {
 }
 
 export { project, path, metadata, draft, fixture, type WordTestWindow };
+
+// Secondary tools live in the page header's "更多操作" menu and open as drawers.
+export async function openTool(page: Page, name: string) {
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name, exact: true }).click();
+}

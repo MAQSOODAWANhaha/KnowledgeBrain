@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { SavedWordReview, SavedWordReviewBody } from "../src/bid/api/savedWordReview";
-import { fixture, type WordTestWindow } from "./tender.fixture";
+import { fixture, type WordTestWindow, openTool } from "./tender.fixture";
 
 const sha = "a".repeat(64);
 function reviewed(version = "word-v1"): SavedWordReview {
@@ -40,7 +40,7 @@ async function reviewFixture(page: Page) {
     return route.fulfill({ status: 202, contentType: "application/json", body: "{}" });
   });
   const open = async () => {
-    await page.getByText("核对已保存的 Word 内容", { exact: true }).click();
+    await openTool(page, "核对已保存的 Word 内容");
     return page.getByRole("region", { name: "已保存 Word 只读复核", exact: true });
   };
   return { ...f, reviewState: state, open };

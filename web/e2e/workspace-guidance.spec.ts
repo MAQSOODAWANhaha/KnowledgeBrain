@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { draft, fixture, metadata, project, type WordTestWindow } from "./tender.fixture";
+import { draft, fixture, metadata, project, type WordTestWindow, openTool } from "./tender.fixture";
 
 async function guidanceFixture(page: Page) {
   const f = await fixture(page);
@@ -113,12 +113,11 @@ test("the saved-review shortcut keeps the original report and local reason after
     } }),
   }));
   await f.ready();
-  const summary = page.getByText("核对已保存的 Word 内容", { exact: true });
-  await summary.click();
+  await openTool(page, "核对已保存的 Word 内容");
   const saved = page.getByRole("region", { name: "已保存 Word 只读复核", exact: true });
   await expect(saved.getByRole("heading", { name: "Word v1 的复核报告", exact: true })).toBeVisible();
   await saved.getByLabel("保存稿复核理由", { exact: true }).fill("保留原版本的待提交意见。");
-  await summary.click();
+  await page.keyboard.press("Escape");
   await f.edit(); await f.dirty(); await page.getByTestId("docx-save").click();
   f.publish(); await page.clock.runFor(1100);
   await expect(page.getByTestId("docx-version")).toHaveText("保存版本 2");

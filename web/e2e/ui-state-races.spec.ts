@@ -2,7 +2,7 @@ import { expect, test, type Page, type Request } from "@playwright/test";
 import type { AnalysisReviewView } from "../src/bid/api/analysisReview";
 import type { AnalysisRecoveryView } from "../src/bid/api/analysisRecovery";
 import type { SavedWordReview } from "../src/bid/api/savedWordReview";
-import { fixture, metadata, project } from "./tender.fixture";
+import { fixture, metadata, project, openTool } from "./tender.fixture";
 
 async function holdNextRead(page: Page, pattern: string, body: unknown, status = 200) {
   let release!: () => void, observed!: () => void, held: Request | undefined;
@@ -84,7 +84,7 @@ async function savedFixture(page: Page) {
     return route.fulfill({ json: { review: state.review } });
   });
   return { ...f, stateReview: state, async open() {
-    await f.ready(); await page.getByText("核对已保存的 Word 内容", { exact: true }).click();
+    await f.ready(); await openTool(page, "核对已保存的 Word 内容");
     return page.getByRole("region", { name: "已保存 Word 只读复核", exact: true });
   } };
 }
@@ -94,7 +94,7 @@ test("an old workbench poll cannot replace the new authoring queue state", async
   const held = await holdNextRead(page, "**/workbench", structuredClone(f.view));
   await page.clock.runFor(5100); await held.received;
   f.view.authoring = { execution_id: "new-authoring", status: "published" };
-  await page.getByText("直接生成整稿", { exact: true }).click();
+  await openTool(page, "直接生成整稿");
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await held.release();
@@ -122,7 +122,7 @@ test("an old workbench read error cannot replace the successful post-mutation st
   const held = await holdNextRead(page, "**/workbench", { error: { message: "过期的工作台错误" } }, 503);
   await page.clock.runFor(5100); await held.received;
   f.view.authoring = { execution_id: "new-authoring", status: "published" };
-  await page.getByText("直接生成整稿", { exact: true }).click();
+  await openTool(page, "直接生成整稿");
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await held.release();
@@ -181,7 +181,7 @@ test("same-command recovery blockers disable a new retry without dropping its re
 
 test("ending a project still permits the exact unknown authoring receipt to be confirmed", async ({ page }) => {
   await page.clock.install(); const f = await fixture(page); await f.ready(); f.state.loseStart = true;
-  await page.getByText("直接生成整稿", { exact: true }).click();
+  await openTool(page, "直接生成整稿");
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   const confirm = page.getByRole("button", { name: "确认同一次编制请求", exact: true });
   await expect(confirm).toBeEnabled(); f.view.project.status = "ended"; await page.clock.runFor(5100);
@@ -252,7 +252,7 @@ test("ending a project still permits the exact unknown saved-Word review receipt
 
 test("ending a project still permits the exact unknown chapter revision receipt", async ({ page }) => {
   await page.clock.install(); const f = await fixture(page); await f.ready(); f.state.loseStart = true;
-  await page.getByText("按章节定向复核与修订", { exact: true }).click();
+  await openTool(page, "按章节定向复核与修订");
   const region = page.getByRole("region", { name: "定向复核与修订", exact: true });
   await region.getByLabel("复核响应：说明实施方法", { exact: true }).check();
   await region.getByLabel("复核与修订理由", { exact: true }).fill("固定原章节范围。");

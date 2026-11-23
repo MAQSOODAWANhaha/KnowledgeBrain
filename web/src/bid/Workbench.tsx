@@ -11,7 +11,24 @@ import type { WordNavigationRequest, WordNavigationResult } from "./authoring/wo
 import { TENDER_INPUT_ACCEPT } from "./authoring/media";
 import type { DocxCurrent, DocxIdentity } from "./api/docx";
 import { downloadTenderFile, downloadTenderPdf, executionError, tenderApi, tenderDocxApi, type DocumentStart, type TenderChapter, type TenderDocxCurrent, type TenderDraft, type WorkbenchView } from "./api/workbench";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Center } from "@astryxdesign/core/Center";
+import { Drawer, DrawerHeader } from "@astryxdesign/core/Drawer";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { IconButton } from "@astryxdesign/core/IconButton";
+import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
+import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
+import { MoreMenu } from "@astryxdesign/core/MoreMenu";
+import { Spinner } from "@astryxdesign/core/Spinner";
+import { Tab, TabList } from "@astryxdesign/core/TabList";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { FileInput } from "@astryxdesign/core/FileInput";
 import { Table } from "@astryxdesign/core/Table";
 import { GuideScreen } from "../guide/GuideScreen";
@@ -29,8 +46,8 @@ function ProjectFiles({ documents, download }: { documents: WorkbenchView["docum
   return <Table data={documents} columns={[
     { key: "file_name", header: "文件" },
     { key: "byte_length", header: "大小", renderCell: (document) => `${Math.ceil(document.byte_length / 1024)} KB` },
-    { key: "parse_status", header: "处理状态", renderCell: (document) => document.parse_status ?? "已上传，执行时读取" },
-    { key: "id", header: "原件", renderCell: (document) => document.download_url ? <Button label="下载原件" onClick={() => void download(document.download_url!, document.file_name)} /> : "—" },
+    { key: "parse_status", header: "处理状态", renderCell: (document) => <Badge variant={document.parse_status ? "neutral" : "info"} label={document.parse_status ?? "已上传，执行时读取"} /> },
+    { key: "id", header: "原件", renderCell: (document) => document.download_url ? <Button size="sm" label="下载原件" onClick={() => void download(document.download_url!, document.file_name)} /> : "—" },
   ]} />;
 }
 
@@ -52,8 +69,8 @@ function SavedPdfDownload({ projectId, version }: { projectId: string; version: 
     }
   }
   return <>
-    <Button label={`下载 PDF v${version.revision}`} clickAction={download} />
-    {error && <p role="alert">{error}</p>}
+    <Button size="sm" label={`下载 PDF v${version.revision}`} clickAction={download} />
+    {error && <Text role="alert" color="secondary">{error}</Text>}
   </>;
 }
 
@@ -64,12 +81,12 @@ function SavedVersions({ projectId, versions, currentId, busy, unsafe, ended, do
   return <Table data={versions} idKey="id" columns={[
     { key: "revision", header: "版本", renderCell: (version) => `v${version.revision}` },
     { key: "source", header: "来源", renderCell: (version) => version.source === "manual" ? "人工保存稿" : version.source === "recovered" ? "会话恢复稿（待核对）" : "编制生成稿" },
-    { key: "id", header: "状态", renderCell: (version) => version.id === currentId ? "当前稿件" : "已保留" },
-    { key: "download_url", header: "文件", renderCell: (version) => <>
-      <Button label={`下载 DOCX v${version.revision}`} onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)} />
+    { key: "id", header: "状态", renderCell: (version) => <Badge variant={version.id === currentId ? "success" : "neutral"} label={version.id === currentId ? "当前稿件" : "已保留"} /> },
+    { key: "download_url", header: "文件", renderCell: (version) => <HStack gap={2} wrap="wrap" vAlign="center">
+      <Button size="sm" label={`下载 DOCX v${version.revision}`} onClick={() => void download(version.download_url, `投标文件-v${version.revision}.docx`)} />
       <SavedPdfDownload projectId={projectId} version={version} />
-      {version.id !== currentId && <Button label={`选为当前稿 v${version.revision}`} isDisabled={busy || unsafe || ended} onClick={() => select(version)} />}
-    </> },
+      {version.id !== currentId && <Button size="sm" label={`选为当前稿 v${version.revision}`} isDisabled={busy || unsafe || ended} onClick={() => select(version)} />}
+    </HStack> },
   ]} />;
 }
 
@@ -111,30 +128,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const [navigationNotice, setNavigationNotice] = useState<string | null>(null);
   const [openRequest, setOpenRequest] = useState<OpenRequest | null>(null);
   useEffect(() => { if (step === "authoring" && authoringMode === "body" && openRequest) setBodyOpened(true); }, [step, authoringMode, openRequest]);
-  const revisionDetails = useRef<HTMLDetailsElement | null>(null);
-  const savedReviewDetails = useRef<HTMLDetailsElement | null>(null);
-  const footRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const foot = footRef.current;
-    if (!foot) return;
-    const closeOthers = (current: HTMLDetailsElement) => {
-      foot.querySelectorAll("details").forEach(item => { if (item !== current) item.open = false; });
-    };
-    const onToggle = (event: Event) => {
-      const details = event.target;
-      if (details instanceof HTMLDetailsElement && details.open) closeOthers(details);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      const open = foot.querySelector("details[open]");
-      if (!(open instanceof HTMLDetailsElement)) return;
-      open.open = false;
-      open.querySelector("summary")?.focus({ preventScroll: true });
-    };
-    foot.addEventListener("toggle", onToggle);
-    foot.addEventListener("keydown", onKey);
-    return () => { foot.removeEventListener("toggle", onToggle); foot.removeEventListener("keydown", onKey); };
-  }, [view]);
+  const [tool, setTool] = useState<"revision" | "savedReview" | "execution" | "regenerate" | null>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (step !== "authoring" || authoringMode !== "body") return;
@@ -310,81 +304,147 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     setNavigationRequest({ id: createMutationAttempt().idempotencyKey, versionId: draftId, bookmark });
   };
   const pickChapter = (chapter: TenderChapter) => { setSelectedId(chapter.chapter_id); locate(chapter.bookmark); };
-  const showReview = (details: HTMLDetailsElement | null) => {
-    if (!details) return;
-    footRef.current?.querySelectorAll("details").forEach(item => { if (item !== details) item.open = false; });
-    details.open = true;
-    details.querySelector("summary")?.focus({ preventScroll: true });
-  };
-  const moveAuthoringMode = (key: string) => {
-    if (key !== "ArrowLeft" && key !== "ArrowRight") return false;
-    const order = ["guide", "outline", "body"] as const;
-    const index = Math.max(0, order.indexOf(authoringMode === "body" || authoringMode === "guide" ? authoringMode : "outline"));
-    const mode = order[(index + (key === "ArrowRight" ? 1 : -1) + order.length) % order.length];
-    setAuthoringMode(mode);
-    document.getElementById(mode === "outline" ? "outline-planner-tab" : mode === "guide" ? "guide-tab" : "word-editor-tab")?.focus();
-    return true;
-  };
-  const reviewShortcuts = savedReviewVersion && <div className="tender-review-shortcuts" role="group" aria-label="稿件复核入口"><div><Button label="打开保存稿复核" onClick={() => showReview(savedReviewDetails.current)} /><p>当前保存稿：Word v{savedReviewVersion.revision}，读取已保存正文，包含人工修改；进入后确认复核版本。</p></div><div><Button label="基于生成稿修订" isDisabled={!contextMatches || !view?.context_execution_id || !view?.outline} onClick={() => showReview(revisionDetails.current)} /><p>生成稿修订基准：{contextMatches && view?.context_execution_id && view?.outline ? reviewSourceLabel : "暂无可用生成基准"}，新稿生成后由你选择载入。</p></div></div>;
-  const pageActions = view && <div className="tender-page-actions">
+  const openReviewTool = (name: "revision" | "savedReview") => { setRightClosed(false); setTool(name); };
+  const revisionReady = contextMatches && !!view?.context_execution_id && !!view?.outline;
+  const reviewShortcuts = savedReviewVersion && <VStack gap={3} role="group" aria-label="稿件复核入口" padding={3}>
+    <VStack gap={1}><Button label="打开保存稿复核" onClick={() => openReviewTool("savedReview")} /><Text type="supporting">当前保存稿：Word v{savedReviewVersion.revision}，读取已保存正文，包含人工修改；进入后确认复核版本。</Text></VStack>
+    <VStack gap={1}><Button label="基于生成稿修订" isDisabled={!revisionReady} onClick={() => openReviewTool("revision")} /><Text type="supporting">生成稿修订基准：{revisionReady ? reviewSourceLabel : "暂无可用生成基准"}，新稿生成后由你选择载入。</Text></VStack>
+  </VStack>;
+  const bodyMode = step === "authoring" && authoringMode === "body";
+  const toolItems = [
+    ...(bodyMode ? [
+      { label: "按章节定向复核与修订", onClick: () => openReviewTool("revision") },
+      { label: "核对已保存的 Word 内容", onClick: () => openReviewTool("savedReview") },
+      { type: "divider" as const },
+    ] : []),
+    { label: "执行详情", onClick: () => setTool("execution") },
+    { label: "直接生成整稿", onClick: () => setTool("regenerate") },
+  ];
+  const pageActions = view && <HStack gap={2} vAlign="center">
+    <MoreMenu label="更多操作" variant="secondary" alignment="end" items={toolItems} />
     {step === "analysis" && <Button variant="primary" label={pending?.kind === "analysis" ? "确认同一次分析请求" : "分析招标文件"} isDisabled={busy || ended && pending?.kind !== "analysis" || inProgress(view.analysis?.status) && pending?.kind !== "analysis" || !!pending && pending.kind !== "analysis"} onClick={() => void start("analysis")} />}
     {step === "authoring" && <Button variant="primary" label="编排大纲" onClick={() => { setAuthoringMode("outline"); window.location.hash = `/bids/${projectId}/authoring`; }} />}
-  </div>;
-  const authoringTabs = <div className="tender-authoring-tabs" role="tablist" aria-label="标书编制视图" onKeyDown={event => { if (moveAuthoringMode(event.key)) event.preventDefault(); }}><Button role="tab" tabIndex={authoringMode === "guide" ? 0 : -1} aria-selected={authoringMode === "guide"} aria-controls="guide-panel" id="guide-tab" label="材料引导" variant={authoringMode === "guide" ? "primary" : "secondary"} onClick={() => setAuthoringMode("guide")} /><Button role="tab" tabIndex={authoringMode === "outline" ? 0 : -1} aria-selected={authoringMode === "outline"} aria-controls="outline-planner-panel" id="outline-planner-tab" label="大纲编排" variant={authoringMode === "outline" ? "primary" : "secondary"} onClick={() => setAuthoringMode("outline")} /><Button role="tab" tabIndex={authoringMode === "body" ? 0 : -1} aria-selected={authoringMode === "body"} aria-controls="word-editor-panel" id="word-editor-tab" label="正文编辑" variant={authoringMode === "body" ? "primary" : "secondary"} onClick={() => setAuthoringMode("body")} /></div>;
+  </HStack>;
+  const authoringTabs = step === "authoring" ? <TabList role="tablist" value={authoringMode === "body" || authoringMode === "guide" ? authoringMode : "outline"} onChange={value => setAuthoringMode(value as "guide" | "outline" | "body")}>
+    <Tab value="guide" label="材料引导" panelId="guide-panel" />
+    <Tab value="outline" label="大纲编排" panelId="outline-planner-panel" />
+    <Tab value="body" label="正文编辑" panelId="word-editor-panel" />
+  </TabList> : undefined;
+  const closeTool = (open: boolean) => { if (!open) setTool(null); };
   const projectTitle = view?.project.title ?? "投标项目";
   return <Shell root="bids" email={email} onBeforeLeave={() => !unsafe}
     header={<PageHeader crumbs={[{ label: "投标项目", href: "/" }, { label: projectTitle, href: authoringHref(projectId, "files") }, { label: sectionLabel }]}
-      title={sectionLabel} actions={pageActions} />}
+      title={sectionLabel} actions={pageActions} tabs={authoringTabs} />}
     navTop={<ProjectSwitcher projectId={projectId} title={projectTitle} step={step} />}
     nav={<ProjectStages projectId={projectId} step={step} />}>
-    <div className={`tender-workspace${step === "authoring" ? " is-authoring" : ""}`}>
-      {error && <div className="tender-alert" role="alert">{view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}{error}<Button label="重试" onClick={() => setRetry(value => value + 1)} /></div>}
-      {notice && <div className="tender-alert" role="alert">{notice}<Button label="关闭提示" onClick={() => setNotice(null)} /></div>}
-      {!view ? !error && <p className="tender-loading" role="status">正在读取项目、稿件和任务…</p> : <>
-        {pending && <p className="tender-note" role="status">存在尚未确认的提交，请确认同一次请求。刷新页面不会自动创建新任务。</p>}
-        {candidate && <div className="tender-new-draft" role="status"><div><strong>{candidate.source === "recovered" ? "发现会话恢复稿" : "新稿"} v{candidate.revision} {candidate.source === "recovered" ? "待核对" : "已生成"}</strong><p>当前稿件及人工修改保留，查看新稿前请确认当前修改已经保存。</p></div><Button label="查看新稿" variant="primary" isDisabled={busy || unsafe || ended} onClick={() => void selectDraft(candidate)} /><Button label="继续当前稿" variant="secondary" onClick={() => setDismissedDraft(candidate.id)} /></div>}
-        {step === "files" && <section className="tender-section" aria-label="项目资料"><p className="tender-note">上传项目文件。分析会自行读取结构和内容，新资料用于后续编制快照，已有稿件保留。</p>
-          {!ended && <FileInput label="选择项目文件" mode="dropzone" isMultiple accept={TENDER_INPUT_ACCEPT} value={null} isDisabled={busy} isLoading={uploading.length > 0} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list); }} />}
-          {uploading.map(name => <p key={name} role="status">正在上传：{name}</p>)}
-          <KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} />
-          {!view.documents.length ? <p className="tender-empty">尚未上传项目文件。</p> : <ProjectFiles documents={view.documents} download={download} />}
-        </section>}
-        {step === "authoring" && authoringTabs}
-        <div className={`tender-step${view.analysis?.items?.length ? "" : " is-empty"}`} style={{ display: step === "analysis" ? undefined : "none" }}>
-          <AnalysisPane analysis={view.analysis} />
-          <aside className="tender-analysis-side" aria-label="分析处理">
-            <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
-            <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
-          </aside>
+    <VStack gap={0} height="100%" minHeight={0}>
+      {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || view?.authoring)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
+        {error && <div role="alert"><Banner status="error" title={`${view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}${error}`} endContent={<Button size="sm" label="重试" onClick={() => setRetry(value => value + 1)} />} /></div>}
+        {notice && <div role="alert"><Banner status="error" title={notice} endContent={<Button size="sm" label="关闭提示" onClick={() => setNotice(null)} />} /></div>}
+        {!view && !error && <Center minHeight={240}><Spinner label="正在读取项目、稿件和任务…" /></Center>}
+        {view && pending && <div role="status"><Banner status="warning" title="存在尚未确认的提交，请确认同一次请求。刷新页面不会自动创建新任务。" /></div>}
+        {view && candidate && <div role="status"><Banner status="info" title={`${candidate.source === "recovered" ? "发现会话恢复稿" : "新稿"} v${candidate.revision} ${candidate.source === "recovered" ? "待核对" : "已生成"}`} description="当前稿件及人工修改保留，查看新稿前请确认当前修改已经保存。"
+          endContent={<HStack gap={2}><Button label="查看新稿" variant="primary" isDisabled={busy || unsafe || ended} onClick={() => void selectDraft(candidate)} /><Button label="继续当前稿" variant="secondary" onClick={() => setDismissedDraft(candidate.id)} /></HStack>} /></div>}
+        {view && step === "authoring" && authoringMode === "outline" && !bodyOpened && view.current_docx && <div role="status"><Banner status="success" title="正文已生成" description={`可查看已保存的 Word v${view.current_docx.revision}，当前大纲调整继续保留。`} endContent={<Button label="正文已生成，查看Word" onClick={() => setAuthoringMode("body")} />} /></div>}
+        {view && step === "authoring" && view.authoring && <TaskProgress label={view.authoring.operation === "outline" ? "大纲任务" : "正文任务"} status={view.authoring.status} progress={view.authoring.progress} />}
+      </VStack>}
+      {view && <>
+        {step === "files" && <VStack gap={4} padding={6} isScrollable height="100%" role="region" aria-label="项目资料">
+          {!ended && <Card><VStack gap={3}>
+            <Heading level={2}>上传项目文件</Heading>
+            <Text type="supporting">招标文件、附件、补遗和澄清都放在这里。分析会自行读取结构和内容，新资料用于后续编制快照，已有稿件保留。</Text>
+            <FileInput label="选择项目文件" mode="dropzone" isMultiple accept={TENDER_INPUT_ACCEPT} value={null} isDisabled={busy} isLoading={uploading.length > 0} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list); }} />
+            {uploading.map(name => <Text key={name} role="status">正在上传：{name}</Text>)}
+          </VStack></Card>}
+          <Card><KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} /></Card>
+          <Card padding={0}>{!view.documents.length ? <EmptyState title="尚未上传项目文件。" description="上传招标文件后即可分析招标事项。" /> : <ProjectFiles documents={view.documents} download={download} />}</Card>
+        </VStack>}
+        <div hidden={step !== "analysis"} style={{ flex: 1, minHeight: 0, display: step === "analysis" ? "flex" : "none" }}>
+          <Layout height="fill"
+            content={<LayoutContent padding={6}><AnalysisPane analysis={view.analysis} /></LayoutContent>}
+            end={<LayoutPanel width={380} hasDivider label="分析处理" role="complementary"><VStack gap={4}>
+              <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
+              <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
+            </VStack></LayoutPanel>} />
         </div>
-        {step === "authoring" && authoringMode === "outline" && !bodyOpened && view.current_docx && <div className="tender-first-word" role="status"><div><strong>正文已生成</strong><p>可查看已保存的 Word v{view.current_docx.revision}，当前大纲调整继续保留。</p></div><Button label="正文已生成，查看Word" onClick={() => setAuthoringMode("body")} /></div>}
-        {step === "authoring" && view.authoring && <TaskProgress label={view.authoring.operation === "outline" ? "大纲任务" : "正文任务"} status={view.authoring.status} progress={view.authoring.progress} />}
-        <div id="guide-panel" role="tabpanel" aria-labelledby="guide-tab" style={{ display: step === "authoring" && authoringMode === "guide" ? undefined : "none" }}><GuideScreen /></div>
-      <div id="outline-planner-panel" role="tabpanel" aria-labelledby="outline-planner-tab" style={{ display: step === "authoring" && authoringMode === "outline" ? undefined : "none" }} className="outline-planner-panel"><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></div>
-        <div id="word-editor-panel" role="tabpanel" aria-labelledby="word-editor-tab" style={{ display: step === "authoring" && authoringMode === "body" ? undefined : "none" }} className={`tender-authoring${leftClosed ? " left-closed" : ""}${rightClosed ? " right-closed" : ""}`}>
-          <aside className="tender-outline" aria-label="文件与章节目录"><div className="tender-pane-heading"><strong>文件结构</strong><Button label={leftClosed ? "展开目录" : "收起目录"} aria-expanded={!leftClosed} onClick={() => setLeftClosed(value => !value)} /></div>{!leftClosed && <><p className="tender-outline-version">{displayedDraft ? `已保存 Word v${displayedDraft.revision} 的目录` : "编制大纲"}</p><ChapterTree chapters={chapters} selectedId={selected?.chapter_id ?? null} gaps={contextMatches ? view.gaps : []} onSelect={pickChapter} onLocate={locate} />{!!displayedDraft?.outline?.missing_chapter_ids?.length && <p className="tender-context-warning">{displayedDraft.outline.missing_chapter_ids.length} 个原章节未能绑定已保存文件，相关要求与待补记录仍保留。</p>}</>}</aside>
-          <main className="tender-word" aria-label="Word 稿件工作区">{rightClosed && reviewShortcuts}{navigationNotice && <p className="tender-navigation-status" role="status">{navigationNotice}</p>}{openRequest && bodyOpened ? <DocxEditor workspaceId={projectId} readOnly={!!ended} ownerIdentity={email} api={tenderDocxApi} controlRef={editorRef} openRequest={openRequest} navigationRequest={navigationRequest} onNavigationResult={onNavigationResult} onUnsafeChange={setWordUnsafe} onCurrentChange={onCurrentChange} onSaved={onSaved} /> : <section className="tender-before-word"><h2>投标稿尚未形成</h2><p>请在大纲编排中生成并保存结构，再按已保存修订生成正文。</p>{inProgress(view.authoring?.status) && <p role="status">编制任务正在执行，当前尚无可打开的 Word 文件。</p>}{executionError(view.authoring?.error) && <p role="alert">{executionError(view.authoring?.error)}</p>}</section>}</main>
-          <aside className="tender-inspector" aria-label="要求、依据与待补"><div className="tender-pane-heading"><strong>章节核对</strong><Button label={rightClosed ? "展开核对栏" : "收起核对栏"} aria-expanded={!rightClosed} onClick={() => setRightClosed(value => !value)} /></div>{!rightClosed && <>{reviewShortcuts}<ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></>}</aside>
+        <div id="guide-panel" role="tabpanel" aria-label="材料引导" hidden={!(step === "authoring" && authoringMode === "guide")} style={{ overflow: "auto" }}><GuideScreen /></div>
+        <div id="outline-planner-panel" role="tabpanel" aria-label="大纲编排" hidden={!(step === "authoring" && authoringMode === "outline")} className="outline-planner-panel"><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></div>
+        <div id="word-editor-panel" role="tabpanel" aria-label="正文编辑" hidden={!bodyMode} style={{ flex: 1, minHeight: 0, display: bodyMode ? "flex" : "none" }}>
+          <Layout height="fill"
+            start={leftClosed
+              ? <LayoutPanel width={48} hasDivider label="文件与章节目录" role="complementary" padding={1}><IconButton variant="ghost" label="展开目录" icon={<PanelLeftOpen size={18} />} aria-expanded={false} onClick={() => setLeftClosed(false)} /></LayoutPanel>
+              : <LayoutPanel width={264} hasDivider label="文件与章节目录" role="complementary" padding={0}>
+                <VStack gap={2} padding={3}>
+                  <HStack hAlign="between" vAlign="center"><Text weight="semibold">文件结构</Text><IconButton variant="ghost" size="sm" label="收起目录" icon={<PanelLeftClose size={16} />} aria-expanded onClick={() => setLeftClosed(true)} /></HStack>
+                  <Text type="supporting">{displayedDraft ? `已保存 Word v${displayedDraft.revision} 的目录` : "编制大纲"}</Text>
+                  <ChapterTree chapters={chapters} selectedId={selected?.chapter_id ?? null} gaps={contextMatches ? view.gaps : []} onSelect={pickChapter} onLocate={locate} />
+                  {!!displayedDraft?.outline?.missing_chapter_ids?.length && <Banner status="warning" title={`${displayedDraft.outline.missing_chapter_ids.length} 个原章节未能绑定已保存文件，相关要求与待补记录仍保留。`} />}
+                </VStack>
+              </LayoutPanel>}
+            content={<VStack role="region" aria-label="Word 稿件工作区" height="100%" minHeight={0} gap={2} padding={3} isScrollable>
+              {rightClosed && reviewShortcuts}
+              {navigationNotice && <Text role="status" type="supporting">{navigationNotice}</Text>}
+              {openRequest && bodyOpened
+                ? <DocxEditor workspaceId={projectId} readOnly={!!ended} ownerIdentity={email} api={tenderDocxApi} controlRef={editorRef} openRequest={openRequest} navigationRequest={navigationRequest} onNavigationResult={onNavigationResult} onUnsafeChange={setWordUnsafe} onCurrentChange={onCurrentChange} onSaved={onSaved} />
+                : <Card><EmptyState headingLevel={2} title="投标稿尚未形成" description="请在大纲编排中生成并保存结构，再按已保存修订生成正文。"
+                  actions={<>{inProgress(view.authoring?.status) && <Text role="status">编制任务正在执行，当前尚无可打开的 Word 文件。</Text>}{executionError(view.authoring?.error) && <Text role="alert">{executionError(view.authoring?.error)}</Text>}</>} /></Card>}
+            </VStack>}
+            end={<LayoutPanel width={rightClosed ? 48 : 360} hasDivider label="要求、依据与待补" role="complementary" padding={rightClosed ? 1 : 0}>
+                {rightClosed && <IconButton variant="ghost" label="展开核对栏" icon={<PanelRightOpen size={18} />} aria-expanded={false} onClick={() => setRightClosed(false)} />}
+                <div hidden={rightClosed}><VStack gap={0}>
+                  <HStack hAlign="between" vAlign="center" padding={3}><Text weight="semibold">章节核对</Text><IconButton variant="ghost" size="sm" label="收起核对栏" icon={<PanelRightClose size={16} />} aria-expanded onClick={() => setRightClosed(true)} /></HStack>
+                  {reviewShortcuts}
+                  <div hidden={tool !== "revision"}><VStack gap={2} padding={3}><HStack hAlign="between" vAlign="center"><Heading level={2}>按章节定向复核与修订</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
+                    <ChapterRevision
+            source={revisionReady ? { execution_id: view.context_execution_id!, label: reviewSourceLabel, chapters: view.outline!.chapters } : null}
+            disabled={!!ended && !(pending?.kind === "authoring" && !!pending.body?.review_request) || wordUnsafe || !!pending && !(pending.kind === "authoring" && !!pending.body?.review_request) || inProgress(view.authoring?.status) && !pending}
+            busy={busy} pending={pending?.kind === "authoring" && !!pending.body?.review_request}
+            pendingRequest={pending?.kind === "authoring" && pending.body?.previous_execution_id && pending.body.review_request ? { previous_execution_id: pending.body.previous_execution_id, review_request: pending.body.review_request } : null}
+            manualWordRevision={displayedSource === "manual" || displayedSource === "recovered" ? displayedDraft?.revision : null}
+            onSubmit={body => start("authoring", body)} onUnsafeChange={setRevisionUnsafe} />
+                  </VStack></div>
+                  <div hidden={tool !== "savedReview"}><VStack gap={2} padding={3}><HStack hAlign="between" vAlign="center"><Heading level={2}>核对已保存的 Word 内容</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
+                    <SavedWordReview projectId={projectId} version={savedReviewVersion} readOnly={!!ended} disabled={wordUnsafe || busy} onUnsafeChange={setSavedReviewUnsafe} />
+                  </VStack></div>
+                  <div hidden={tool === "revision" || tool === "savedReview"}><ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></div>
+                </VStack></div>
+              </LayoutPanel>} />
         </div>
-        {step === "export" && <section className="tender-section"><p className="tender-note">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</p>
-          {displayedDraft && <p className="tender-note" data-testid="word-coverage">当前查看稿 v{displayedDraft.revision}：{coverageMatches ? view.coverage?.headline : "覆盖待核"}</p>}
-          {coverageVersion && view.coverage?.headline && <p className="tender-note" data-testid="generated-coverage">生成稿 v{coverageVersion.revision}的覆盖统计：{view.coverage.headline}</p>}
-          {!view.versions.length ? <p className="tender-empty">尚无已保存稿件。</p> : <SavedVersions projectId={projectId} versions={view.versions} currentId={view.current_docx?.id} busy={busy} unsafe={unsafe} ended={!!ended} download={download} select={version => void selectDraft(version)} />}
-          {view.artifacts?.package_url && <><Button label="下载编制交付包（包含待补清单）" onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")} /><p className="tender-note">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</p><p className="tender-note">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</p></>}{view.gaps.length > 0 && <div className="tender-gap-list"><h3>编制时的待补记录</h3>{view.gaps.map((gap, index) => <p key={`${gap.code}:${index}`}>{gap.detail}</p>)}</div>}
-        </section>}
-        <div className="tender-foot" ref={footRef}><div style={{ display: step === "authoring" && authoringMode === "body" ? "contents" : "none" }}><details className="tender-task-details" ref={revisionDetails}><summary>按章节定向复核与修订</summary><ChapterRevision
-          source={contextMatches && view.context_execution_id && view.outline ? { execution_id: view.context_execution_id, label: reviewSourceLabel, chapters: view.outline.chapters } : null}
-          disabled={!!ended && !(pending?.kind === "authoring" && !!pending.body?.review_request) || wordUnsafe || !!pending && !(pending.kind === "authoring" && !!pending.body?.review_request) || inProgress(view.authoring?.status) && !pending}
-          busy={busy} pending={pending?.kind === "authoring" && !!pending.body?.review_request}
-          pendingRequest={pending?.kind === "authoring" && pending.body?.previous_execution_id && pending.body.review_request ? { previous_execution_id: pending.body.previous_execution_id, review_request: pending.body.review_request } : null}
-          manualWordRevision={displayedSource === "manual" || displayedSource === "recovered" ? displayedDraft?.revision : null}
-          onSubmit={body => start("authoring", body)} onUnsafeChange={setRevisionUnsafe} /></details>
-          <details className="tender-task-details" ref={savedReviewDetails}><summary>核对已保存的 Word 内容</summary><SavedWordReview projectId={projectId}
-            version={savedReviewVersion} readOnly={!!ended} disabled={wordUnsafe || busy} onUnsafeChange={setSavedReviewUnsafe} /></details></div>
-        <details className="tender-task-details"><summary>执行详情</summary><p>分析：{executionStatus(view.analysis?.status)}；编制：{executionStatus(view.authoring?.status)}</p>{view.authoring?.usage && <p>已发送 {view.authoring.usage.sent_requests} 次，重试 {view.authoring.usage.retry_requests} 次，Token {view.authoring.usage.total_tokens}；未知用量 {view.authoring.usage.unknown_usage_requests} 次。</p>}{executionError(view.authoring?.error) && <p>{executionError(view.authoring?.error)}</p>}{view.authoring && (inProgress(view.authoring.status) ? <Button label="取消本次编制" isDisabled={busy} onClick={() => void executionAction(view.authoring!.execution_id, "cancel")} /> : ["failed", "blocked"].includes(view.authoring.status) && <Button label="继续本次编制" isDisabled={busy || ended} onClick={() => void executionAction(view.authoring!.execution_id, "resume")} />)}</details>
-        <details className="tender-task-details tender-legacy-generation"><summary>直接生成整稿</summary><p>此入口重新生成大纲和正文。需要沿用人工编排时，请在大纲编排中按已保存修订生成正文。</p><Button label={pending?.kind === "authoring" && !(pending.body && ("outline_revision_id" in pending.body || "review_request" in pending.body)) ? "确认同一次编制请求" : view.current_docx ? "生成新稿" : "生成投标稿"} isDisabled={busy || ended && pending?.kind !== "authoring" || inProgress(view.authoring?.status) && pending?.kind !== "authoring" || !!pending && (pending.kind !== "authoring" || !!pending.body && ("outline_revision_id" in pending.body || "review_request" in pending.body))} onClick={() => void start("authoring")} /></details>
-        </div>
+        {step === "export" && <VStack gap={4} padding={6} isScrollable height="100%" role="region" aria-label="交付文件">
+          <Card><VStack gap={2}>
+            <Heading level={2}>已保存稿件</Heading>
+            <Text type="supporting">下载明确版本的已保存稿件。资料待补及复核问题随稿保留，文件生成不代表内容全部满足要求。</Text>
+            {displayedDraft && <Text data-testid="word-coverage">当前查看稿 v{displayedDraft.revision}：{coverageMatches ? view.coverage?.headline : "覆盖待核"}</Text>}
+            {coverageVersion && view.coverage?.headline && <Text data-testid="generated-coverage">生成稿 v{coverageVersion.revision}的覆盖统计：{view.coverage.headline}</Text>}
+          </VStack></Card>
+          <Card padding={0}>{!view.versions.length ? <EmptyState title="尚无已保存稿件。" description="在标书编制中生成正文后，已保存版本会列在这里。" /> : <SavedVersions projectId={projectId} versions={view.versions} currentId={view.current_docx?.id} busy={busy} unsafe={unsafe} ended={!!ended} download={download} select={version => void selectDraft(version)} />}</Card>
+          {view.artifacts?.package_url && <Card><VStack gap={2}>
+            <Heading level={2}>编制交付包</Heading>
+            <Text type="supporting">{packageVersion ? `交付包来源：生成稿 v${packageVersion.revision}。` : "交付包来源：最近一次成功编制。"}</Text>
+            <Text type="supporting">交付包对应原编制产物，不包含后续人工修改；人工保存稿请按上方版本下载。</Text>
+            <HStack><Button label="下载编制交付包（包含待补清单）" onClick={() => void download(view.artifacts!.package_url!, "投标文件及附件.zip")} /></HStack>
+          </VStack></Card>}
+          {view.gaps.length > 0 && <Card><VStack gap={2}><Heading level={2}>编制时的待补记录</Heading>{view.gaps.map((gap, index) => <Text key={`${gap.code}:${index}`}>{gap.detail}</Text>)}</VStack></Card>}
+        </VStack>}
+        <Drawer isOpen={tool === "execution"} onOpenChange={closeTool} hasScrim={false} label="执行详情" width={440}>
+          <DrawerHeader title="执行详情" onOpenChange={closeTool} />
+          <VStack gap={3}>
+            <MetadataList><MetadataListItem label="分析">{executionStatus(view.analysis?.status)}</MetadataListItem><MetadataListItem label="编制">{executionStatus(view.authoring?.status)}</MetadataListItem></MetadataList>
+            {view.authoring?.usage && <Text>已发送 {view.authoring.usage.sent_requests} 次，重试 {view.authoring.usage.retry_requests} 次，Token {view.authoring.usage.total_tokens}；未知用量 {view.authoring.usage.unknown_usage_requests} 次。</Text>}
+            {executionError(view.authoring?.error) && <Banner status="error" title={executionError(view.authoring?.error)} />}
+            {view.authoring && (inProgress(view.authoring.status)
+              ? <HStack><Button label="取消本次编制" isDisabled={busy} onClick={() => void executionAction(view.authoring!.execution_id, "cancel")} /></HStack>
+              : ["failed", "blocked"].includes(view.authoring.status) && <HStack><Button label="继续本次编制" isDisabled={busy || ended} onClick={() => void executionAction(view.authoring!.execution_id, "resume")} /></HStack>)}
+          </VStack>
+        </Drawer>
+        <Drawer isOpen={tool === "regenerate"} onOpenChange={closeTool} hasScrim={false} label="直接生成整稿" width={440}>
+          <DrawerHeader title="直接生成整稿" onOpenChange={closeTool} />
+          <VStack gap={3}>
+            <Text>此入口重新生成大纲和正文。需要沿用人工编排时，请在大纲编排中按已保存修订生成正文。</Text>
+            <HStack><Button variant="primary" label={pending?.kind === "authoring" && !(pending.body && ("outline_revision_id" in pending.body || "review_request" in pending.body)) ? "确认同一次编制请求" : view.current_docx ? "生成新稿" : "生成投标稿"} isDisabled={busy || ended && pending?.kind !== "authoring" || inProgress(view.authoring?.status) && pending?.kind !== "authoring" || !!pending && (pending.kind !== "authoring" || !!pending.body && ("outline_revision_id" in pending.body || "review_request" in pending.body))} onClick={() => void start("authoring")} /></HStack>
+          </VStack>
+        </Drawer>
       </>}
-    </div>
+    </VStack>
   </Shell>;
 }

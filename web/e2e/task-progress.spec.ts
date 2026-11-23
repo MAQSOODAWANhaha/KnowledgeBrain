@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { fixture, project } from "./tender.fixture";
+import { fixture, project, openTool } from "./tender.fixture";
 import type { TaskProgressView } from "../src/bid/api/workbench";
 
 test("published authoring remains cancellable and cannot start another document", async ({ page }) => {
@@ -7,10 +7,11 @@ test("published authoring remains cancellable and cannot start another document"
   f.view.authoring = { execution_id: "queued-document", status: "published" };
   await f.ready();
   await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
-  await page.getByText("执行详情", { exact: true }).click();
+  await openTool(page, "执行详情");
   await page.getByRole("button", { name: "取消本次编制" }).click();
   expect(f.state.executions.map(x => x.action)).toEqual(["cancel"]);
-  await page.getByText("直接生成整稿", { exact: true }).click();
+  await page.keyboard.press("Escape");
+  await openTool(page, "直接生成整稿");
   await expect(page.getByRole("button", { name: "生成新稿", exact: true })).toBeDisabled();
   await page.getByRole("tab", { name: "大纲编排" }).click();
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
@@ -64,7 +65,7 @@ test("inactive tasks show their last real phase and preserve resume without inve
   await expect(panel).toContainText("执行失败");
   await expect(panel).toContainText("最近进展：整理写作依据");
   await expect(panel).not.toContainText("当前阶段");
-  await page.getByText("执行详情", { exact: true }).click();
+  await openTool(page, "执行详情");
   await page.getByRole("button", { name: "继续本次编制", exact: true }).click();
   expect(f.state.executions.map(x => x.action)).toEqual(["resume"]);
   expect(f.state.starts).toEqual([]);
