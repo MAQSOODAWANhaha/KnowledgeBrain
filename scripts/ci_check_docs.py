@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when repository workflow documentation drifts from structure or source files."""
+"""Fail closed when repository documentation drifts from standards, structure, or source files."""
 from __future__ import annotations
 
 import argparse
@@ -10,29 +10,11 @@ import sys
 IGNORED_DIRS = frozenset({
     ".git",
     ".pytest_cache",
-    ".scratch",
     ".venv",
     "dist",
     "node_modules",
     "target",
     "testdata",
-})
-
-# Pre-reorganization legacy docs on main with historical links to retired Rust bidding paths.
-# Ratchet only: remove entries as legacy docs are cleaned up or deleted; never add new entries.
-LEGACY_BROKEN_LINK_FILES = frozenset({
-    "docs/bidding/docx-editor.md",
-    "docs/design/evidence-runtime-contract.md",
-    "docs/research/repository-implementation-snapshot.md",
-})
-
-CORE_RULE_DOCS = frozenset({
-    "CLAUDE.md",
-    "AGENTS.md",
-    "LESSONS.md",
-    "README.md",
-    "docs/README.md",
-    "docs/code-standards.md",
 })
 
 RUNTIME_ONLY_PATHS = frozenset({
@@ -41,13 +23,24 @@ RUNTIME_ONLY_PATHS = frozenset({
     "web/dist",
 })
 
+# Docs that quote forbidden patch phrases as negative examples in rule definitions.
+PATCH_PHRASE_EXEMPT_FILES = frozenset({
+    "AGENTS.md",
+    "LESSONS.md",
+    "docs/code-standards.md",
+    "docs/README.md",
+    "docs/design/python-tender-phase1/bug-fix.md",
+    "docs/design/python-tender-phase1/handoff.md",
+})
+
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 BACKTICK_REPO_PATH_RE = re.compile(
     r"`((?:crates|services|web|scripts|migrations|deploy|docs|plans|\.github)/[A-Za-z0-9._/\-*<>]+)`"
 )
 TMP_PATH_RE = re.compile(r"/tmp/[A-Za-z0-9._/\-]+")
+PATCH_PHRASE_RE = re.compile(r"若旧句|本轮尚未|架构草案")
 LESSONS_CURSOR_RE = re.compile(r"<!--\s*reviewed-through:\s*\S+.*?-->")
-RETIRED_LINE_RE = re.compile(r"已删除|retired|removed", re.IGNORECASE)
+RETIRED_LINE_RE = re.compile(r"已删除|已废止|retired|removed", re.IGNORECASE)
 LESSONS_MAX_LINES = 180
 
 
@@ -109,40 +102,56 @@ def check_repo(root: pathlib.Path) -> list[str]:
             if needle not in docs_readme_text:
                 errors.append(f"docs/README.md must link to {needle}")
 
-    for path in iter_markdown_files(root):
+    md_files = iter_markdown_files(root)
+    resolved_links_by_src: dict[pathlib.Path, set[pathlib.Path]] = {}
+
+    for path in md_files:
         rel = path.relative_to(root).as_posix()
         raw_text = path.read_text(encoding="utf-8", errors="ignore")
         prose_text = strip_fenced_code(raw_text)
 
-        # 2. Relative Markdown links across repository (excluding explicit legacy ratchet list)
-        if rel not in LEGACY_BROKEN_LINK_FILES:
-            for lineno, line in enumerate(prose_text.splitlines(), 1):
-                for match in LINK_RE.finditer(line):
-                    href = match.group(1).strip()
-                    if not href or href.startswith(("http://", "https://", "mailto:", "#", "file://")):
-                        continue
-                    path_part = href.split("#", 1)[0].split("?", 1)[0]
-                    if not path_part:
-                        continue
-                    target = (path.parent / path_part).resolve()
-                    if not target.exists():
-                        errors.append(f"{rel}:{lineno}: broken relative link -> {href}")
+        # 2. Zero broken relative Markdown links across the entire repository
+        targets: set[pathlib.Path] = set()
+        for lineno, line in enumerate(prose_text.splitlines(), 1):
+            for match in LINK_RE.finditer(line):
+                href = match.group(1).strip()
+                if not href or href.startswith(("http://", "https://", "mailto:", "#", "file://")):
+                    continue
+                path_part = href.split("#", 1)[0].split("?", 1)[0]
+                if not path_part:
+                    continue
+                target = (path.parent / path_part).resolve()
+                if not target.exists():
+                    errors.append(f"{rel}:{lineno}: broken relative link -> {href}")
+                else:
+                    targets.add(target)
+        resolved_links_by_src[path.resolve()] = targets
 
-        # 3. Strict path and /tmp hygiene in core workflow and entry docs
-        if rel in CORE_RULE_DOCS:
+        # 3. Forbid /tmp/ evidence paths outside historical bug-fix archive
+        if rel != "docs/design/python-tender-phase1/bug-fix.md":
             for lineno, line in enumerate(raw_text.splitlines(), 1):
                 m = TMP_PATH_RE.search(line)
                 if m:
                     errors.append(
                         f"{rel}:{lineno}: forbidden /tmp path '{m.group(0)}' "
-                        "(use /opt/workspace/kb-tender-evidence/)"
+                        "(use /opt/workspace/kb-tender-evidence/ or mktemp without hardcoded /tmp)"
                     )
+
+        # 4. Active doc hygiene: referenced repo paths, obsolete env vars, and patch phrases
+        if path.name not in {"bug-fix.md", "handoff.md"}:
             for lineno, line in enumerate(prose_text.splitlines(), 1):
                 if "DOCREADER_PORT" in line:
                     errors.append(
                         f"{rel}:{lineno}: obsolete env var DOCREADER_PORT "
                         "(code reads DOCREADER_GRPC_PORT)"
                     )
+                if rel not in PATCH_PHRASE_EXEMPT_FILES:
+                    patch_match = PATCH_PHRASE_RE.search(line)
+                    if patch_match:
+                        errors.append(
+                            f"{rel}:{lineno}: forbidden patch/draft phrase '{patch_match.group(0)}' "
+                            "(rewrite in present tense instead of patching over stale text)"
+                        )
                 if RETIRED_LINE_RE.search(line):
                     continue
                 for match in BACKTICK_REPO_PATH_RE.finditer(line):
@@ -153,6 +162,22 @@ def check_repo(root: pathlib.Path) -> list[str]:
                         continue
                     if not (root / ref).exists():
                         errors.append(f"{rel}:{lineno}: referenced repo path does not exist -> `{ref}`")
+
+    # 5. Every doc under docs/ must be linked from docs/README.md or its directory README.md
+    if docs_readme.is_file():
+        linked_from_docs_readme = resolved_links_by_src.get(docs_readme.resolve(), set())
+        for path in md_files:
+            rel_parts = path.relative_to(root).parts
+            rel = path.relative_to(root).as_posix()
+            if not rel_parts or rel_parts[0] != "docs" or rel == "docs/README.md":
+                continue
+            resolved = path.resolve()
+            dir_readme = (path.parent / "README.md").resolve()
+            linked_from_dir = resolved_links_by_src.get(dir_readme, set())
+            if resolved not in linked_from_docs_readme and resolved not in linked_from_dir:
+                errors.append(
+                    f"{rel}: orphan doc under docs/ (link it from docs/README.md or {path.relative_to(root).parent}/README.md)"
+                )
 
     return errors
 
