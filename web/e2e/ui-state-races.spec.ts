@@ -126,7 +126,7 @@ test("an old workbench read error cannot replace the successful post-mutation st
   await page.getByRole("button", { name: "生成新稿", exact: true }).click();
   await expect(page.getByText("正文任务：排队中", { exact: true })).toBeVisible();
   await held.release();
-  await expect(page.getByRole("alert").filter({ hasText: "过期的工作台错误" })).toHaveCount(0);
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "过期的工作台错误" })).toHaveCount(0);
 });
 
 test("overlapping analysis refreshes keep the most recently requested revision", async ({ page }) => {
@@ -142,7 +142,7 @@ test("overlapping analysis refreshes keep the most recently requested revision",
 
 test("an old saved-review retry cannot clear a newer report for the same Word", async ({ page }) => {
   await page.clock.install(); const f = await savedFixture(page); f.stateReview.failRead = true;
-  const region = await f.open(); await expect(region.getByRole("alert")).toContainText("复核读取失败");
+  const region = await f.open(); await expect(region.getByRole("alert").filter({ hasText: /\S/ })).toContainText("复核读取失败");
   const held = await holdNextRead(page, "**/docx/versions/word-v1/review", { review: null });
   f.stateReview.failRead = false;
   await region.getByRole("button", { name: "重试读取复核状态", exact: true }).click(); await held.received;

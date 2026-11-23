@@ -111,7 +111,7 @@ test("PDF errors stay on the requested row and allow a retry of that version", a
   await page.goto(`/#/bids/${project}/export`);
   const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "v1", exact: true }) });
   const button = row.getByRole("button", { name: "下载 PDF v1", exact: true });
-  const alert = row.getByRole("alert");
+  const alert = row.getByRole("alert").filter({ hasText: /\S/ });
   await expect(button).toBeVisible();
   for (const message of ["PDF 转换暂不可用", "PDF 响应无法与此已保存版本核对", "PDF 响应无法与此已保存版本核对", "PDF 响应无法与此已保存版本核对"]) {
     const response = page.waitForResponse(`**/docx/versions/${version.id}/pdf`);

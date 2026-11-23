@@ -32,7 +32,7 @@ test("a failed outline save retains the user's title and never claims persistenc
   await page.getByLabel("章节名称", { exact: true }).fill("人工调整的实施方案");
   f.state.failOutlineSave = true;
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "大纲保存未完成" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "大纲保存未完成" })).toBeVisible();
   await expect(page.getByLabel("章节名称", { exact: true })).toHaveValue("人工调整的实施方案");
   await expect(page.getByTestId("outline-save-status")).toContainText("未保存");
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
@@ -216,7 +216,7 @@ test("unsaved outline changes block leaving the project in both views", async ({
   await page.getByRole("tab", { name: "正文编辑", exact: true }).click();
   await page.evaluate(() => { location.hash = "/products"; });
   await expect(page).toHaveURL(new RegExp(`/bids/${project}/authoring$`));
-  await expect(page.getByRole("alert").filter({ hasText: "请先保存并确认大纲调整" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "请先保存并确认大纲调整" })).toBeVisible();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   await expect(page.getByLabel("章节名称", { exact: true })).toHaveValue("未保存编排");
 });
@@ -243,7 +243,7 @@ test("source changes discovered by polling disable generation without replacing 
   f.outline.draft!.sources_current = false;
   await page.clock.runFor(5100);
   await expect(page.getByRole("button", { name: /按修订.*生成正文/ })).toBeDisabled();
-  await expect(page.getByRole("alert").filter({ hasText: "项目来源已变化" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "项目来源已变化" })).toBeVisible();
   await expect(page.getByLabel("章节名称", { exact: true })).toHaveValue("实施方案");
   expect(f.state.starts).toHaveLength(0);
 });

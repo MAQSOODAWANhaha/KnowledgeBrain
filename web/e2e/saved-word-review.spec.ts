@@ -95,11 +95,11 @@ test("partial reads and semantic gaps stay visible and a polling error retains t
   await expect(review).toContainText("人工改写后的时间前后不一致。");
   expect(await review.getByRole("button", { name: /修订|改写/ }).count()).toBe(0);
   f.reviewState.failRead = true; await page.clock.runFor(5100);
-  await expect(review.getByRole("alert").filter({ hasText: "复核状态读取失败" })).toBeVisible();
+  await expect(review.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "复核状态读取失败" })).toBeVisible();
   await expect(review).toContainText("人工改写后的时间前后不一致。");
   f.reviewState.failRead = false;
   await review.getByRole("button", { name: "重试读取复核状态", exact: true }).click();
-  await expect(review.getByRole("alert").filter({ hasText: "复核状态读取失败" })).toHaveCount(0);
+  await expect(review.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "复核状态读取失败" })).toHaveCount(0);
 });
 
 test("saving a newer Word leaves the displayed report on its old version until explicit switching", async ({ page }) => {
@@ -122,7 +122,7 @@ test("saving a newer Word leaves the displayed report on its old version until e
 test("missing, empty and mismatched reports never masquerade as zero problems", async ({ page }) => {
   await page.clock.install(); const f = await reviewFixture(page);
   f.reviewState.failRead = true; await f.ready(); const review = await f.open();
-  await expect(review.getByRole("alert")).toContainText("未读取到可确认的复核结果。");
+  await expect(review.getByRole("alert").filter({ hasText: /\S/ })).toContainText("未读取到可确认的复核结果。");
   f.reviewState.failRead = false;
   f.reviewState.values.set("word-v1", { ...reviewed(), report: null });
   await review.getByRole("button", { name: "重试读取复核状态", exact: true }).click();
@@ -154,7 +154,7 @@ test("updated tender sources leave the review on its original analysis and displ
   const f = await reviewFixture(page); const value = reviewed(); value.sources_current = false;
   f.reviewState.values.set("word-v1", value); await f.ready(); const review = await f.open();
   await expect(review).toContainText("固定复核依据：原分析 original-word-analysis，来源版本 1，分析修订 2。");
-  await expect(review.getByRole("alert")).toContainText("此任务仍按生成该 Word 时的原始分析依据复核，未覆盖后续上传的补遗或资料");
+  await expect(review.getByRole("alert").filter({ hasText: /\S/ })).toContainText("此任务仍按生成该 Word 时的原始分析依据复核，未覆盖后续上传的补遗或资料");
   await expect(review).toContainText("Word v1 的复核报告");
   expect(f.reviewState.posts).toEqual([]); expect(f.state.starts).toEqual([]);
 });
@@ -163,7 +163,7 @@ test("an unsent reason guards navigation and explicit discard allows leaving", a
   const f = await reviewFixture(page); await f.ready(); const review = await f.open();
   await review.getByLabel("保存稿复核理由", { exact: true }).fill("尚未提交的人工核对意见。");
   await page.getByRole("navigation", { name: "导航", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "请先提交或放弃复核修改" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "请先提交或放弃复核修改" })).toBeVisible();
   await expect(review.getByLabel("保存稿复核理由", { exact: true })).toHaveValue("尚未提交的人工核对意见。");
   page.on("dialog", dialog => void dialog.accept());
   await review.getByRole("button", { name: "放弃保存稿复核理由", exact: true }).click();

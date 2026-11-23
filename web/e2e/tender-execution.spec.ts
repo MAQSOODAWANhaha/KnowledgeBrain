@@ -27,7 +27,7 @@ test("analysis failures remain visible and retry uses the explicit analysis endp
   const f = await fixture(page); f.view.analysis!.status = "failed";
   f.view.analysis!.error = { code: "SOURCE_READING_FAILED", message: "来源读取失败，请重试。" };
   await page.goto(`/#/bids/${project}/analysis`);
-  await expect(page.getByRole("alert")).toContainText("来源读取失败");
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toContainText("来源读取失败");
   await page.getByRole("button", { name: "分析招标文件", exact: true }).click();
   expect(f.state.starts).toHaveLength(1);
   expect(f.state.starts[0].kind).toBe("analysis");

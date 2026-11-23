@@ -94,7 +94,7 @@ test("structured correction conflict retains fields across reload and guards lea
   await page.getByLabel("事项 1 适用范围", { exact: true }).fill("人工编辑的固定范围");
   await page.getByLabel("事项纠正理由", { exact: true }).fill("范围更正");
   await page.getByRole("button", { name: "提交事项纠正并重新审核", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "当前输入已保留" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "当前输入已保留" })).toBeVisible();
   f.review.domain_revision = 2; f.review.correction!.items[0].item.scope = "远程最新范围";
   await page.getByRole("button", { name: "刷新复核状态", exact: true }).click();
   await expect(page.getByLabel("事项 1 适用范围", { exact: true })).toHaveValue("人工编辑的固定范围");
@@ -105,7 +105,7 @@ test("structured correction conflict retains fields across reload and guards lea
   await expect(page.getByLabel("事项 1 适用范围", { exact: true })).toHaveValue("人工编辑的固定范围");
   await page.getByRole("navigation", { name: "导航", exact: true }).getByRole("link", { name: "投标项目", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/bids/${project}/analysis$`));
-  await expect(page.getByRole("alert").filter({ hasText: "请先提交或放弃分析修改" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "请先提交或放弃分析修改" })).toBeVisible();
   page.once("dialog", dialog => void dialog.accept()); await page.reload();
   await page.getByText("事项 1：服务响应不超过2小时", { exact: true }).click();
   await expect(page.getByLabel("事项 1 适用范围", { exact: true })).toHaveValue("人工编辑的固定范围");

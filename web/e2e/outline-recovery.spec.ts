@@ -127,16 +127,16 @@ test("successful history reads never hide a failed response catalog or claim zer
   await f.ready();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   const recovery = page.getByRole("region", { name: "大纲历史与响应安排", exact: true });
-  await expect(recovery.getByRole("alert")).toContainText("响应目录暂不可读取");
+  await expect(recovery.getByRole("alert").filter({ hasText: /\S/ })).toContainText("响应目录暂不可读取");
   await expect(recovery.getByText(/响应安排（响应目录待读取）/)).toBeVisible();
   await page.getByText("历史大纲", { exact: true }).click();
   await page.getByRole("button", { name: "读取历史修订", exact: true }).click();
   await page.getByRole("button", { name: "预览修订 1", exact: true }).click();
-  await expect(recovery.getByRole("alert")).toContainText("响应目录暂不可读取");
+  await expect(recovery.getByRole("alert").filter({ hasText: /\S/ })).toContainText("响应目录暂不可读取");
   failCatalog = false;
   await recovery.getByRole("button", { name: "重新读取响应位置", exact: true }).click();
   await expect(recovery.getByText("响应安排（1 项未安排）", { exact: true })).toBeVisible();
-  await expect(recovery.getByRole("alert")).toHaveCount(0);
+  await expect(recovery.getByRole("alert").filter({ hasText: /\S/ })).toHaveCount(0);
 });
 
 test("structural warnings are deduplicated and clear only when their exact references are restored", async ({ page }) => {

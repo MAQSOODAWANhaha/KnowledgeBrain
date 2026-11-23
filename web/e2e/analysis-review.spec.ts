@@ -98,7 +98,7 @@ test("a text correction retains unedited business fields and retries its exact r
 test("a correction conflict and remote version refresh retain local edits", async ({ page }) => {
   const f = await reviewFixture(page); await f.open(); await f.edit(); f.state.conflict = true;
   await page.getByRole("button", { name: "提交事项纠正并重新审核", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "当前输入已保留" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "当前输入已保留" })).toBeVisible();
   f.review.domain_revision = 2; f.review.correction!.items[0].item.text = "另一页面的事项表述";
   await page.getByRole("button", { name: "刷新复核状态", exact: true }).click();
   await expect(page.getByLabel("事项 1 纠正文案")).toHaveValue("合同服务期内，服务响应不超过2小时。");

@@ -115,12 +115,12 @@ test("a changed generation cannot silently reuse the previous selection and its 
   await revision.getByLabel("复核与修订理由", { exact: true }).fill("属于原生成执行的意见。");
   f.view.context_execution_id = "different-generation";
   await page.clock.runFor(5100);
-  await expect(revision.getByRole("alert")).toContainText("生成稿已切换，原选择与理由仍保留。");
+  await expect(revision.getByRole("alert").filter({ hasText: /\S/ })).toContainText("生成稿已切换，原选择与理由仍保留。");
   await expect(revision).toContainText("execution-word-v1");
   await expect(revision.getByLabel("复核与修订理由", { exact: true })).toHaveValue("属于原生成执行的意见。");
   await expect(revision.getByRole("button", { name: "生成复核修订稿", exact: true })).toBeDisabled();
   await page.getByRole("navigation", { name: "导航", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "请先提交或放弃复核修改" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "请先提交或放弃复核修改" })).toBeVisible();
   page.on("dialog", dialog => void dialog.accept());
   await revision.getByRole("button", { name: "放弃本次复核选择", exact: true }).click();
   await expect(revision.getByLabel("复核与修订理由", { exact: true })).toHaveValue("");

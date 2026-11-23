@@ -88,7 +88,7 @@ test("a failed close cannot select the candidate or destroy the previous documen
   await page.clock.install(); const f = await fixture(page); await f.ready(); f.candidate();
   await page.clock.runFor(5100); f.state.failClose = true;
   await page.getByRole("button", { name: "查看新稿", exact: true }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "当前文档会话尚未安全关闭" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "当前文档会话尚未安全关闭" })).toBeVisible();
   expect(f.state.calls.filter(call => call === "select")).toHaveLength(0);
   await expect(page.getByTestId("docx-version")).toHaveText("保存版本 1");
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.destroyed)).toBe(0);
@@ -120,7 +120,7 @@ test("the structure remains readable before Word generation and incomplete mater
 test("a failed initial read shows a retry error rather than an empty project", async ({ page }) => {
   const f = await fixture(page); f.state.failRead = true;
   await page.goto(`/#/bids/${project}/authoring`);
-  await expect(page.getByRole("alert")).toContainText("工作台读取失败");
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toContainText("工作台读取失败");
   await expect(page.getByText("还没有项目", { exact: true })).toHaveCount(0);
   f.state.failRead = false; await page.getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByTestId("docx-editor")).toBeVisible();

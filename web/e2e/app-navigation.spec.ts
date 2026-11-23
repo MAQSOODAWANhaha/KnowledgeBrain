@@ -20,11 +20,11 @@ test("项目列表失败显示重试而不是空列表", async ({ page }) => {
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/#/");
-  await expect(page.getByRole("alert")).toContainText("项目读取失败");
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toContainText("项目读取失败");
   await expect(page.getByRole("heading", { name: "还没有项目" })).toHaveCount(0);
   await page.getByRole("button", { name: "重试读取项目" }).click();
   await expect(page.getByRole("cell", { name: project.title })).toBeVisible();
-  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toHaveCount(0);
 });
 
 test("临时登录验证失败保留token并允许原页重试", async ({ page }) => {
@@ -40,7 +40,7 @@ test("临时登录验证失败保留token并允许原页重试", async ({ page }
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/#/");
-  await expect(page.getByRole("alert")).toContainText("登录信息已保留");
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toContainText("登录信息已保留");
   expect(await page.evaluate(() => localStorage.getItem("kb.token"))).toBe("navigation-test-token");
   await expect(page.getByTestId("login-form")).toHaveCount(0);
   await page.getByRole("button", { name: "重试验证登录" }).click();
@@ -71,7 +71,7 @@ test("已验证会话遇到503时保留当前列表和输入", async ({ page }) 
   const filter = page.getByPlaceholder("按项目名称搜索");
   await filter.fill("导航回归");
   await page.evaluate(() => { location.hash = "/?refresh=1"; });
-  await expect(page.getByRole("alert")).toContainText("当前页面和登录信息已保留");
+  await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toContainText("当前页面和登录信息已保留");
   await expect(filter).toHaveValue("导航回归");
   await expect(page.getByRole("cell", { name: project.title })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("kb.token"))).toBe("navigation-test-token");

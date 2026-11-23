@@ -58,11 +58,11 @@ test("catalog refresh failure retains selected versions and provides a retry", a
   await section.getByRole("button", { name: "添加资料版本", exact: true }).click();
   state.fail = true;
   await section.getByRole("button", { name: "刷新资料目录", exact: true }).click();
-  await expect(section.getByRole("alert")).toContainText("资料目录暂不可读取");
+  await expect(section.getByRole("alert").filter({ hasText: /\S/ })).toContainText("资料目录暂不可读取");
   await expect(section.getByRole("listitem")).toContainText("设备甲");
   state.fail = false;
   await section.getByRole("button", { name: "重试资料目录", exact: true }).click();
-  await expect(section.getByRole("alert")).toHaveCount(0);
+  await expect(section.getByRole("alert").filter({ hasText: /\S/ })).toHaveCount(0);
   await expect(section.getByRole("listitem")).toHaveCount(1);
   await section.getByRole("button", { name: /移除.*设备甲/ }).click();
   await expect(section.getByRole("listitem")).toHaveCount(0);

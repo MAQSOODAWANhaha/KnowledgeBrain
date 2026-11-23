@@ -67,7 +67,7 @@ test("a conflict retains the reason and requires explicit review of the latest f
   const f = await recoveryFixture(page); await f.open();
   await page.getByLabel("分析恢复理由").fill("人工保留的恢复理由"); f.state.conflict = true;
   await f.region.getByRole("button", { name: "继续原分析任务", exact: true }).click();
-  await expect(f.region.getByRole("alert").filter({ hasText: "恢复理由已保留" })).toBeVisible();
+  await expect(f.region.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "恢复理由已保留" })).toBeVisible();
   f.recovery.domain_revision = 2; f.recovery.failed_command_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   await f.region.getByRole("button", { name: "刷新分析恢复状态", exact: true }).click();
   await expect(page.getByLabel("分析恢复理由")).toHaveValue("人工保留的恢复理由");
@@ -94,7 +94,7 @@ test("read failures preserve recovery input and an explicit discard sends nothin
   const f = await recoveryFixture(page); await f.open();
   await page.getByLabel("分析恢复理由").fill("尚未提交的恢复理由"); f.state.failRead = true;
   await f.region.getByRole("button", { name: "刷新分析恢复状态", exact: true }).click();
-  await expect(f.region.getByRole("alert").filter({ hasText: "恢复状态暂不可用" })).toBeVisible();
+  await expect(f.region.getByRole("alert").filter({ hasText: /\S/ }).filter({ hasText: "恢复状态暂不可用" })).toBeVisible();
   await expect(page.getByLabel("分析恢复理由")).toHaveValue("尚未提交的恢复理由");
   page.once("dialog", dialog => void dialog.accept());
   await f.region.getByRole("button", { name: "放弃恢复理由", exact: true }).click();

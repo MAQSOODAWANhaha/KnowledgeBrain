@@ -33,5 +33,9 @@ export const brandTheme = defineTheme({
     // DESIGN.md §2: deep navy app bar; its content renders in the dark color mode (see Shell.tsx).
     "app-shell-header": { base: { backgroundColor: "#0E2A47", borderColor: "#0E2A47" } },
     "top-nav": { base: { backgroundColor: "#0E2A47" } },
+    // §2: gray page ground, white page header and panels.
+    "layout-content": { base: { backgroundColor: "var(--color-background-body)" } },
+    "layout-header": { base: { backgroundColor: "var(--color-background-surface)" } },
+    "layout-panel": { base: { backgroundColor: "var(--color-background-surface)" } },
   },
 });
