@@ -645,6 +645,17 @@ compact摘录可省略共同`section_id`，统一引用这唯一章节；多章�
 仍须分别实现和验收。保留这些完整交付目标，不把当前分批复核和DOCX产物冒充全部完成。
 金额自动计算不在当前实现目标内；如未来明确需要，再单独讨论输入、人工采用和计算合同。
 
+### 新链事项归属
+
+流程和五问见[业务工作流](business-workflow.md#新链格式补位与事项归属)。
+
+| 结构 | 字段与含义 |
+| --- | --- |
+| 归属请求 `item_placement` | `{operation:"place_items_v1", positions:[{id,title_path:str[],kind,opening,origin?}], requirements:[{id,kind,subject?,scope?,text,conditions?,exceptions?,submission?,consequence?,scoring?,evidence:[{page,quote}]}]}`。`id` 为本批短 ID（位置 `t*`，事项 `r*`），`opening` 为位置原文开头，最长 120 字；`origin:"outside_format"` 标出格式章节外的候选原式 |
+| `ItemPlacementResponse` | `{placements:[[r,value]]}`，每个本批事项恰好一行。`value` 为本批位置 ID、理由代码或 null（待核） |
+| 不需响应理由代码 | `evaluation`：评标程序或评委动作；`performance`：签订合同、付款、验收、合同变更、违约处理这类签约后才发生、投标文件不需说明的手续，采购需求的技术、服务、人员和交付要求不属此类；`document_wide`：整份投标文件的格式、份数、递交等约束；`not_applicable`：原文明示本项目不适用 |
+| 宿主落账 | 位置 ID → 目标 `rule_refs`；`document_wide` → `constraint_rule_refs`；其余代码 → `outline_rule_excluded` 问题，`detail` 写明理由；null 和未采纳批次 → 覆盖台账 `pending` |
+
 ## 编制最小修订（knowledge_required_v2）
 
 本节是BUG-047至BUG-052的统一后续合同，取代v1中所有内容必须有material_ids、

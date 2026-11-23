@@ -11,6 +11,7 @@ from docreader.tender.directory_compile import (
     ClassificationPlan, DirectoryPlan, MaterialPlan, NativeMaterialPlan, ParameterPlan, RequirementPlan,
 )
 from docreader.tender.directory_response_forms import response_form_model
+from docreader.tender.item_placement import ItemPlacementResponse
 from docreader.tender.directory_ref_plan import RefDirectoryPlan, RefDirectoryPlanV2
 from docreader.tender.directory_source_groups import MaterialSourceGroupPlan, SOURCE_GROUP_OPERATION
 from docreader.tender.directory_material_closure import MaterialClosurePlan, SOURCE_CARRIER_OPERATION
@@ -78,6 +79,8 @@ def response_model(task, payload):
         return NativeClassificationPlan if payload.get('operation') == CLASSIFICATION_OPERATION else ClassificationPlan
     if task == AuthoringTask.DIRECTORY_PARAMETER:
         return ParameterPlan
+    if task == AuthoringTask.ITEM_PLACEMENT:
+        return ItemPlacementResponse
     if task == AuthoringTask.DIRECTORY_RESPONSE_FORM:
         return response_form_model(payload)
     if task == 'outline':
@@ -136,6 +139,7 @@ def _contracts_by_prompt():
         'authoring_basis': {AuthoringBasisResponse}, 'authoring_write': {WritingResponse},
         'authoring_review': {AuthoringContentReviewResponse, AuthoringReviewResponse},
         'authoring_structure': {AuthoringStructureResponse},
+        'item_placement': {ItemPlacementResponse},
     }
 
 

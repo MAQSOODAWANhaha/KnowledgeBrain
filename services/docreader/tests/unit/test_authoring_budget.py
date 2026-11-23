@@ -236,6 +236,7 @@ def test_tokenized_authoring_spec_records_full_tasks_without_changing_analysis(
         "directory_plan",
         "directory_requirement",
         "directory_response_form",
+        "item_placement",
         "outline",
         "verify",
     ]

@@ -72,6 +72,7 @@ _PROMPT_FILES = {
     AuthoringPrompt.ASSEMBLE: "outline_assemble.md",
     AuthoringPrompt.DIRECTORY_PLAN: "directory_plan.md",
     AuthoringPrompt.BID_FORMAT_OUTLINE: "bid_format_outline.md",
+    AuthoringPrompt.ITEM_PLACEMENT: "item_placement.md",
     AuthoringPrompt.DIRECTORY_REF_PLAN: "directory_ref_plan.md",
     AuthoringPrompt.DIRECTORY_REF_PLAN_V2: "directory_ref_plan_v2.md",
     AuthoringPrompt.DIRECTORY_REQUIREMENT: "directory_requirement.md",
@@ -524,6 +525,7 @@ async def execute_document(
     authoring_input_ref=None,
     reviewed_source_facts_ref=None,
     native_requirement_contract=None,
+    requirement_chain_contract=None,
     layout_renderer=None,
     concurrency: int = 2,
     lease_seconds: float = 60,
@@ -660,6 +662,17 @@ async def execute_document(
         if outline_only and reviewed_source_facts_ref is None:
             reviewed_source_facts_ref = previous['execution_spec'].get('reviewed_source_facts_ref')
     if existing is not None:
+        stored_chain = existing['execution_spec'].get('requirement_chain_contract')
+        if requirement_chain_contract is not None and requirement_chain_contract != stored_chain:
+            raise Conflict('execution_id already identifies a different requirement chain contract')
+        requirement_chain_contract = stored_chain
+    elif requirement_chain_contract is None and previous is not None:
+        requirement_chain_contract = previous['execution_spec'].get('requirement_chain_contract')
+    if requirement_chain_contract is not None and (
+            not outline_only or outline_ref is not None or not snapshot.get('frozen_ref')
+            or native_requirement_contract is not None):
+        raise ModelConfigurationError('the requirement chain requires automatic frozen outline generation')
+    if existing is not None:
         stored_contract = existing['execution_spec'].get('native_requirement_contract')
         if native_requirement_contract is not None and native_requirement_contract != stored_contract:
             raise Conflict('execution_id already identifies a different native requirement contract')
@@ -733,6 +746,9 @@ async def execute_document(
             spec["directory_material_identity_contract"] = existing["execution_spec"]["directory_material_identity_contract"]
         spec["directory_parameter_source_contract"] = PARAMETER_SOURCE_CONTRACT
         spec["directory_response_form_contract"] = RESPONSE_FORM_ROLE_CONTRACT
+        if requirement_chain_contract is not None:
+            spec["directory_planning_contract"] = "bid_format_source_outline_v1"
+            spec["requirement_chain_contract"] = requirement_chain_contract
         if native_requirement_contract is not None:
             spec['native_requirement_contract'] = native_requirement_contract
         elif existing is None and outline_ref is None:
@@ -820,6 +836,8 @@ async def execute_document(
                 review_options["native_requirement_contract"] = spec["native_requirement_contract"]
             if "directory_planning_contract" in spec:
                 review_options["directory_contract"] = spec["directory_planning_contract"]
+            if "requirement_chain_contract" in spec:
+                review_options["requirement_chain_contract"] = spec["requirement_chain_contract"]
             if "directory_parameter_source_contract" in spec:
                 review_options["parameter_source_contract"] = spec["directory_parameter_source_contract"]
             if "directory_response_form_contract" in spec:

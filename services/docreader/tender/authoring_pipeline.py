@@ -2481,7 +2481,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                             source_group_contract=None, native_requirement_contract=None, source_carrier_contract=None,
                             reviewed_source_facts_ref=None, on_source_closure=None, on_reviewed_facts=None,
                             render_pdf=None, on_layout=None, saved_layout_exports=None, reviewed_body_entry_contract=None,
-                            native_body_contract=None, on_source_bodies=None):
+                            native_body_contract=None, on_source_bodies=None, requirement_chain_contract=None):
     """Plan an outline or compile its fixed tree; the executor supplies document usage."""
     if directory_plans is not None and directory_documents is None:
         raise ValueError('directory plans require registered documents')
@@ -2492,6 +2492,13 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         raise ModelConfigurationError('unsupported final source body contract')
     if native_body_contract is not None and (outline is not None or not outline_only):
         raise ModelConfigurationError('final source resolution requires automatic directory outline generation')
+    from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
+    if requirement_chain_contract not in (None, REQUIREMENT_CHAIN_CONTRACT):
+        raise ModelConfigurationError('unsupported requirement chain contract')
+    if requirement_chain_contract is not None and (
+            outline is not None or not outline_only or directory_contract != 'bid_format_source_outline_v1'):
+        raise ModelConfigurationError('the requirement chain builds an automatic bid-format outline')
+    chain_items = chain_added = None
     source_body_result = None
     snapshot = AuthoringInput.model_validate(snapshot).model_dump()
     if outline is None and directory_documents is None and directory_plans is None and outline_only:
@@ -2528,6 +2535,14 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 raise ModelConfigurationError('bid-format semantic selection requires a model')
             from docreader.tender.bid_format_outline import select_bid_format_plan
             selected = await select_bid_format_plan(directory_documents, budget, execute, snapshot)
+            if selected and requirement_chain_contract is not None:
+                from docreader.tender.directory_compile import bid_format_section
+                from docreader.tender.item_placement import _items, add_submission_forms
+                context = await asyncio.to_thread(_OutlineContext, artifacts, snapshot)
+                chain_items = await asyncio.to_thread(_items, context)
+                found = bid_format_section(directory_documents)
+                format_pages = {(row[0], row[1]) for row in (found[0], *found[1])} if found else set()
+                selected, chain_added = add_submission_forms(selected, directory_documents, chain_items, format_pages)
             directory_plans = [selected] if selected else []
         elif directory_plans is None and execute is None:
             from docreader.tender.directory_compile import bid_format_plan
@@ -2580,6 +2595,11 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             if on_source_closure is not None:
                 await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
         outline = await asyncio.to_thread(outline_from_compiled, snapshot, compiled, artifacts=artifacts)
+        if chain_items is not None:
+            from docreader.tender.item_placement import place_items
+            outline, _placement = await place_items(
+                outline, chain_items, budget, execute, _ask,
+                lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload), outside_format=chain_added or ())
         if directory_facts:
             await asyncio.to_thread(bind_reviewed_outline_facts, outline, compiled, directory_facts)
         if native_body_contract is not None:

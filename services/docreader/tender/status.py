@@ -16,6 +16,7 @@ class AuthoringTask(StrEnum):
     WRITE = "authoring_write"
     REVIEW = "authoring_review"
     STRUCTURE = "authoring_structure"
+    ITEM_PLACEMENT = "item_placement"
 
 
 class AuthoringPrompt(StrEnum):
@@ -45,6 +46,7 @@ class AuthoringPrompt(StrEnum):
     WRITE = AuthoringTask.WRITE
     REVIEW = AuthoringTask.REVIEW
     STRUCTURE = AuthoringTask.STRUCTURE
+    ITEM_PLACEMENT = AuthoringTask.ITEM_PLACEMENT
 
 
 class DocumentRole(StrEnum):

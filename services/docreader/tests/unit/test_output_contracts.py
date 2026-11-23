@@ -129,7 +129,7 @@ def test_extraction_relations_request_semantics_without_host_owned_identity():
     relation = {'from_item_id': 'w1:i1', 'to_item_id': 'w1:i2', 'relation': '完整适用关系。',
                 'evidence': [{'range_id': 'r1', 'quote': '完整依据'}]}
     raw = {'schema_version': 2, 'items': [], 'dispositions': [], 'issues': [], 'relations': [relation]}
-    assert response_model('extract', payload).model_validate(raw).relations[0].model_dump() == relation
+    assert response_model('extract', payload).model_validate(raw).model_dump()['relations'] == [relation]
     assert 'relation_id' in Relation.model_json_schema()['required']
 
 
