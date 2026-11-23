@@ -346,13 +346,13 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     panel={projectPanel({ projectId, step, view })}>
     <VStack gap={0} height="100%" minHeight={0}>
       {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || view?.authoring)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
-        {error && <div role="alert"><Banner status="error" title={`${view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}${error}`} endContent={<Button size="sm" label="重试" onClick={() => setRetry(value => value + 1)} />} /></div>}
-        {notice && <div role="alert"><Banner status="error" title={notice} endContent={<Button size="sm" label="关闭提示" onClick={() => setNotice(null)} />} /></div>}
+        {error && <Banner role="alert" status="error" title={`${view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}${error}`} endContent={<Button size="sm" label="重试" onClick={() => setRetry(value => value + 1)} />} />}
+        {notice && <Banner role="alert" status="error" title={notice} endContent={<Button size="sm" label="关闭提示" onClick={() => setNotice(null)} />} />}
         {!view && !error && <Center minHeight={240}><Spinner label="正在读取项目、稿件和任务…" /></Center>}
-        {view && pending && <div role="status"><Banner status="warning" title="存在尚未确认的提交，请确认同一次请求。刷新页面不会自动创建新任务。" /></div>}
-        {view && candidate && <div role="status"><Banner status="info" title={`${candidate.source === "recovered" ? "发现会话恢复稿" : "新稿"} v${candidate.revision} ${candidate.source === "recovered" ? "待核对" : "已生成"}`} description="当前稿件及人工修改保留，查看新稿前请确认当前修改已经保存。"
-          endContent={<HStack gap={2}><Button label="查看新稿" variant="primary" isDisabled={busy || unsafe || ended} onClick={() => void selectDraft(candidate)} /><Button label="继续当前稿" variant="secondary" onClick={() => setDismissedDraft(candidate.id)} /></HStack>} /></div>}
-        {view && step === "authoring" && authoringMode === "outline" && !bodyOpened && view.current_docx && <div role="status"><Banner status="success" title="正文已生成" description={`可查看已保存的 Word v${view.current_docx.revision}，当前大纲调整继续保留。`} endContent={<Button label="正文已生成，查看Word" onClick={() => setAuthoringMode("body")} />} /></div>}
+        {view && pending && <Banner role="status" status="warning" title="存在尚未确认的提交，请确认同一次请求。刷新页面不会自动创建新任务。" />}
+        {view && candidate && <Banner role="status" status="info" title={`${candidate.source === "recovered" ? "发现会话恢复稿" : "新稿"} v${candidate.revision} ${candidate.source === "recovered" ? "待核对" : "已生成"}`} description="当前稿件及人工修改保留，查看新稿前请确认当前修改已经保存。"
+          endContent={<HStack gap={2}><Button label="查看新稿" variant="primary" isDisabled={busy || unsafe || ended} onClick={() => void selectDraft(candidate)} /><Button label="继续当前稿" variant="secondary" onClick={() => setDismissedDraft(candidate.id)} /></HStack>} />}
+        {view && step === "authoring" && authoringMode === "outline" && !bodyOpened && view.current_docx && <Banner role="status" status="success" title="正文已生成" description={`可查看已保存的 Word v${view.current_docx.revision}，当前大纲调整继续保留。`} endContent={<Button label="正文已生成，查看Word" onClick={() => setAuthoringMode("body")} />} />}
         {view && step === "authoring" && view.authoring && <TaskProgress label={view.authoring.operation === "outline" ? "大纲任务" : "正文任务"} status={view.authoring.status} progress={view.authoring.progress} />}
       </VStack>}
       {view && <>

@@ -23,7 +23,6 @@ const pendingAstryxMigration = [
   "src/bid/WorkbenchPanels.tsx",
   "src/bid/authoring/AnalysisProgress.tsx",
   "src/bid/authoring/ChapterRevision.tsx",
-  "src/bid/authoring/OutlinePlanner.tsx",
   "src/bid/authoring/OutlineRecovery.tsx",
   "src/bid/authoring/SavedWordReview.tsx",
   "src/bid/gfm.tsx",

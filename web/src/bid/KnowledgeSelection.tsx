@@ -58,7 +58,7 @@ export function KnowledgeSelection({ value, onChange, disabled = false }: {
       <Button variant="secondary" isDisabled={disabled || loading} onClick={() => void load()} label="刷新资料目录" />
     </HStack>
     {loading && <Text role="status" type="supporting">正在读取可选资料版本…</Text>}
-    {error && <div role="alert"><Banner status="error" title="资料目录读取失败，可先用项目已上传资料继续编制。" description={error} endContent={<Button size="sm" isDisabled={disabled || loading} onClick={() => void load()} label="重试资料目录" />} /></div>}
+    {error && <Banner role="alert" status="error" title="资料目录读取失败，可先用项目已上传资料继续编制。" description={error} endContent={<Button size="sm" isDisabled={disabled || loading} onClick={() => void load()} label="重试资料目录" />} />}
     {!loading && !error && !choices.length && <Text type="supporting">当前没有可选的有效资料版本，可先上传项目资料继续编制。</Text>}
     {value.length ? <ul aria-label="已选资料版本" style={{ margin: 0, padding: 0, listStyle: "none" }}><VStack gap={2}>{value.map(item => <li key={keyOf(item)}><HStack gap={2} vAlign="center"><Badge variant="info" label="已选" /><Text>{labelOf(item)}</Text><Button size="sm" variant="ghost" aria-label={`移除 ${labelOf(item)}`} isDisabled={disabled} onClick={() => onChange(value.filter(existing => keyOf(existing) !== keyOf(item)))} label="移除" /></HStack></li>)}</VStack></ul> : <Text type="supporting">尚未选择参考资料版本。</Text>}
     {value.length >= 20 && <Text type="supporting">最多选择 20 个资料版本，请移除部分选择后再添加。</Text>}

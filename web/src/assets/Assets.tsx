@@ -421,7 +421,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     >
       <VStack gap={4} padding={6} isScrollable height="100%">
         {err && (
-          <div role="alert"><Banner status="error" title="资料目录读取失败，已有资料不会因此被清空。" description={err} endContent={<Button size="sm" label="重试" onClick={() => { setErr(""); void reloadTree().catch((e) => setErr(e instanceof Error ? e.message : "加载失败")); }} />} /></div>
+          <Banner role="alert" status="error" title="资料目录读取失败，已有资料不会因此被清空。" description={err} endContent={<Button size="sm" label="重试" onClick={() => { setErr(""); void reloadTree().catch((e) => setErr(e instanceof Error ? e.message : "加载失败")); }} />} />
         )}
         {route.kind === "company" && (
           <Pane empty={folders.length === 0} emptyTitle="还没有分类">

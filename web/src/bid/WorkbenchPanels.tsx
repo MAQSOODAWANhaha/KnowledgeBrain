@@ -122,8 +122,8 @@ export function AnalysisPane({ analysis }: { analysis: WorkbenchView["analysis"]
     {!analysis ? <EmptyState title="尚无分析结果" description="上传文件后可开始分析，也可先编制可用稿件。" /> : <>
       {!taskVisible && <HStack gap={2} vAlign="center"><Badge variant={analysis.confirmed ? "success" : "warning"} label={analysis.confirmed ? "已确认" : "未确认"} /><Text type="supporting" hasTabularNumbers>来源版本 {analysis.source_version}，修订 {analysis.domain_revision}</Text></HStack>}
       <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />
-      {analysis.sources_current === false && <div role="status"><Banner status="warning" title="招标资料已有更新，以下是旧资料的分析结果。" description="可重新分析，也可基于最新资料生成新稿。" /></div>}
-      {executionError(analysis.error) && <div role="alert"><Banner status="error" title={executionError(analysis.error)} /></div>}
+      {analysis.sources_current === false && <Banner role="status" status="warning" title="招标资料已有更新，以下是旧资料的分析结果。" description="可重新分析，也可基于最新资料生成新稿。" />}
+      {executionError(analysis.error) && <Banner role="alert" status="error" title={executionError(analysis.error)} />}
       {!!items.length && <div className="tender-filter"><TextInput label="搜索招标事项" type="search" placeholder="搜索事项原文…" value={query} onChange={setQuery} />
         <Selector label="事项类型" value={kind} onChange={setKind} options={[{ value: "", label: "全部类型" }, ...Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => ({ value, label: kindLabels[value] ?? value }))]} /></div>}
       {!items.length ? <EmptyState isCompact title="当前尚无可读取的事项" description="分析结束后在这里逐条查看。" /> : !shown.length ? <EmptyState isCompact title="没有匹配事项" description="换一个关键词或事项类型。" /> : shown.map((item, index) => <article className="tender-analysis-item" key={item.item_id ?? index}>{item.kind && <Badge variant="neutral" label={kindLabels[item.kind] ?? item.kind} />}<ItemContent item={item} /></article>)}

@@ -105,7 +105,6 @@ test("chapter arrangement saves stable identities, manual goals and an editable-
   expect(body.chapters[0].children[0].chapter_id).toMatch(/^manual-[0-9a-f-]{36}$/);
   expect(body.chapters[0].children[0].writing_goal).toBe("说明阶段安排和交付节点");
   expect(JSON.stringify(body)).not.toMatch(/targets|rule_refs|bookmarks|target-1/);
-  await page.locator(".outline-chapter-editor").evaluate(element => { element.scrollTop = 0; });
   await page.screenshot({ path: testInfo.outputPath("outline-planner.png"), fullPage: true });
   await page.getByLabel("编写目标", { exact: true }).fill("");
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
@@ -265,17 +264,18 @@ test("a conflict offers explicit full-structure replacement while retaining loca
   expect(f.state.outlineSaves[1].body.source_revision_id).toBe("outline-r1");
 });
 
-test("native drag supports nesting and rejects dragging a parent into its descendant", async ({ page }) => {
+test("the chapter tree nests a chapter through the position toolbar and saves it", async ({ page }) => {
   const f = await fixture(page); await f.ready();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
-  const rootRows = page.locator(".outline-arrangement > ol > li > button");
-  await rootRows.nth(1).dragTo(rootRows.nth(0));
+  const tree = page.getByRole("tree", { name: "大纲章节" });
+  await tree.getByRole("button", { name: "2 项目人员", exact: true }).click();
+  await expect(page.getByLabel("章节名称", { exact: true })).toHaveValue("项目人员");
+  await page.getByRole("button", { name: "降为子级", exact: true }).click();
+  await expect(tree.getByRole("button", { name: "1.1 项目人员", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
   await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 2");
   expect(f.state.outlineSaves[0].body.chapters[0].children[0].chapter_id).toBe("chapter-2");
-  await rootRows.nth(0).dragTo(page.locator(".outline-arrangement > ol > li > ol > li > button"));
-  await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 2");
-  await expect(page.getByRole("button", { name: "保存大纲草稿", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "降为子级", exact: true })).toBeDisabled();
 });
 
 test("an unknown outline generation restores the same request without auto-retrying", async ({ page }) => {

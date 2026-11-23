@@ -62,7 +62,7 @@ export function ProjectList({ email }: { email: string }) {
       panel={listPanel({ rows, view, query: panelQuery, onQuery: setPanelQuery, onCreate: () => setOpen(true) })}
     >
       <VStack gap={4} padding={6} isScrollable height="100%">
-        {listError && <div role="alert"><Banner status="error" title="项目读取失败，已有项目不会因此被清空。" endContent={<Button size="sm" label="重试读取项目" onClick={() => setListRetry((value) => value + 1)} />} /></div>}
+        {listError && <Banner role="alert" status="error" title="项目读取失败，已有项目不会因此被清空。" endContent={<Button size="sm" label="重试读取项目" onClick={() => setListRetry((value) => value + 1)} />} />}
         {rows === null ? listError ? null : (
           <Card><VStack gap={3}><Skeleton height={40} /><Skeleton height={40} /><Skeleton height={40} /></VStack></Card>
         ) : rows.length === 0 ? (
