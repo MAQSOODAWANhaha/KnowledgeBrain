@@ -6,9 +6,9 @@ import { Workbench } from "./bid/Workbench";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { Center } from "@astryxdesign/core/Center";
-import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Text } from "@astryxdesign/core/Text";
+import { useToast } from "@astryxdesign/core/Toast";
 import { VStack } from "@astryxdesign/core/VStack";
 import { go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
 import { LoginScreen } from "./login/LoginScreen";
@@ -69,9 +69,20 @@ export function App() {
   </Center>;
   const asset = parseAssetRoute(path);
   return <>
-    {sessionError && <div role="alert" style={{ position: "fixed", insetBlockStart: 56, insetInlineEnd: 16, zIndex: 50 }}>
-      <Card elevation="med"><HStack gap={3} vAlign="center"><Text>暂时无法验证登录状态，当前页面和登录信息已保留。</Text>{retrySession}</HStack></Card>
-    </div>}
+    <SessionToast isShown={sessionError} retry={() => setSessionRetry((value) => value + 1)} />
     {asset ? <Assets email={email} route={asset} /> : parseBidRoute(path) ? <Workbench email={email} /> : <ProjectList email={email} />}
   </>;
+}
+
+// A failed re-check keeps the page; the error toast stays until the session verifies again.
+function SessionToast({ isShown, retry }: { isShown: boolean; retry(): void }) {
+  const showToast = useToast();
+  useEffect(() => {
+    if (!isShown) return;
+    return showToast({
+      type: "error", uniqueID: "session", body: "暂时无法验证登录状态，当前页面和登录信息已保留。",
+      endContent: <Button size="sm" label="重试验证登录" onClick={retry} />,
+    });
+  }, [isShown, retry, showToast]);
+  return null;
 }

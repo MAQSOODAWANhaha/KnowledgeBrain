@@ -4,24 +4,16 @@ import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 
 const rawElements = ["a", "article", "aside", "b", "blockquote", "button", "code", "dd", "details", "div", "dl", "dt", "em", "fieldset",
-  "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "img", "input", "label", "legend", "li", "main", "nav",
+  "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "img", "input", "label", "legend", "li", "main", "nav",
   "ol", "p", "pre", "section", "select", "small", "span", "strong", "summary", "table", "tbody", "td", "textarea", "th", "thead",
   "tr", "ul"];
 
 // Files still on raw markup. Remove each entry when its migration lands; the list must end empty.
 const pendingAstryxMigration = [
-  "src/App.tsx",
-  "src/assets/Assets.tsx",
   "src/assets/DocumentDetail.tsx",
   "src/assets/FilePreview.tsx",
-  "src/bid/KnowledgeSelection.tsx",
-  "src/bid/ProjectList.tsx",
-  "src/bid/Workbench.tsx",
   "src/bid/authoring/AnalysisProgress.tsx",
-  "src/bid/authoring/ChapterRevision.tsx",
-  "src/bid/authoring/SavedWordReview.tsx",
   "src/bid/gfm.tsx",
-  "src/login/LoginScreen.tsx",
 ];
 
 export default tseslint.config(

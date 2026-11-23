@@ -125,11 +125,6 @@ a.btn { color: inherit; text-decoration: none; }
   font-size: 12px;
 }
 
-.btn.lg {
-  height: 40px;
-  padding: 0 16px;
-}
-
 .btn.block {
   width: 100%;
   justify-content: center;
@@ -207,10 +202,6 @@ button.chip {
   padding: 22px 24px;
 }
 
-.card.wash {
-  background: var(--iris-wash);
-}
-
 .card.pad-0 {
   padding: 0;
   overflow: hidden;
@@ -243,37 +234,6 @@ button.chip {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-table.grid {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13.5px;
-}
-
-table.grid th {
-  text-align: left;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--faint);
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--line-soft);
-  background: var(--fill);
-}
-
-table.grid td {
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line-soft);
-  vertical-align: middle;
-}
-
-table.grid tr:last-child td {
-  border-bottom: 0;
-}
-
-table.grid tr.on td,
-table.grid tr:hover td {
-  background: var(--iris-tint);
 }
 
 .toolbar {

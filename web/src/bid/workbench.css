@@ -1,18 +1,6 @@
 
-.tender-alert { display: flex; gap: 12px; align-items: center; padding: 12px 20px; background: var(--amber-soft); border-bottom: 1px solid var(--line); color: var(--ink); font-size: 13px; }
-.tender-note { font-size: 12px; color: var(--muted); line-height: 1.8; margin: 8px 0; }
 .tender-outline { min-width: 0; min-height: 0; background: #fff; overflow: auto; }
 .tender-outline { border-right: 1px solid var(--line); }
-.tender-context nav { display: flex; gap: 7px; border-bottom: 1px solid var(--line); padding: 4px 10px; }
-.tender-context nav button { border: 0; border-radius: 0; padding: 10px; color: var(--muted); }
-.tender-context nav button[aria-pressed="true"] { color: var(--iris); box-shadow: inset 0 -2px var(--iris); }
-.tender-info-card { border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
-.tender-info-card > p { margin: 5px 0; }
-.tender-info-card small { color: var(--faint); font-size: 10px; }
-.tender-context-warning { background: var(--amber-soft); border-color: var(--line); }
-.tender-context-warning { padding: 9px; font-size: 12px; line-height: 1.8; }
-.tender-info-card blockquote { border-left: 2px solid var(--line); padding-left: 12px; margin: 12px 0; white-space: pre-wrap; }
-.tender-gap-list { padding: 16px; margin-top: 20px; border: 1px solid var(--line); border-radius: 6px; background: var(--amber-soft); font-size: 13px; line-height: 1.8; }
 .outline-planner-panel { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .outline-planner { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--bg); }
 .outline-execution { padding: 8px 20px; margin: 0; background: transparent; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.6; color: var(--muted); }

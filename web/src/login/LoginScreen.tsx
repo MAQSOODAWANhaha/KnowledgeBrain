@@ -1,12 +1,17 @@
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Center } from "@astryxdesign/core/Center";
 import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { NavIcon } from "@astryxdesign/core/NavIcon";
+import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
+import { Gavel } from "lucide-react";
 import { useState } from "react";
 import { ApiError, api, setToken } from "../api";
 import { go } from "../hash";
-import "./login.css";
 
 export function LoginScreen() {
   const [email, setEmail] = useState("");
@@ -15,45 +20,38 @@ export function LoginScreen() {
   const [busy, setBusy] = useState(false);
 
   return (
-    <main className="grid min-h-dvh lg:grid-cols-[minmax(0,1.15fr)_minmax(420px,0.85fr)]">
-      <section className="flex flex-col justify-center gap-6 bg-sky px-6 py-16 text-white sm:px-10 lg:px-16">
-        <span className="block h-1 w-12 bg-wait" />
-        <Heading level={1} type="display-2" color="inherit">KnowledgeBrain</Heading>
-      </section>
-      <section className="flex items-center bg-sky-wash px-6 py-12 sm:px-12 lg:px-16">
+    <Center height="100dvh">
+      <Card width={400} padding={8} elevation="low">
         <form
-          className="w-full max-w-md"
-          data-testid="login-form"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            if (!email.trim() || !password) {
-              setErr("请填写账号和密码");
-              return;
-            }
-            setErr("");
-            setBusy(true);
-            try {
-              const result = await api.login(email.trim(), password);
-              setToken(result.token);
-              go("/");
-            } catch (ex) {
-              setErr(ex instanceof ApiError ? "登录失败，请再试一次" : ex instanceof Error ? ex.message : "网络错误");
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <VStack gap={5}>
-            <Heading level={2} type="display-3">登录</Heading>
-            <TextInput id="login-email" data-testid="login-email" label="账号" autoComplete="username" value={email} onChange={setEmail} containerClassName="login-field login-line" />
-            <TextInput id="login-password" data-testid="login-password" label="密码" autoComplete="current-password" type="password" value={password} onChange={setPassword} containerClassName="login-field login-line login-field-late" />
-            {err ? <Banner status="error" title={err} /> : null}
-            <div className="login-field-last">
-              <Button type="submit" width="100%" label={busy ? "进入中…" : "进入"} variant="primary" isLoading={busy} data-testid="login-submit" />
-            </div>
-          </VStack>
-        </form>
-      </section>
-    </main>
+            data-testid="login-form"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!email.trim() || !password) {
+                setErr("请填写账号和密码");
+                return;
+              }
+              setErr("");
+              setBusy(true);
+              try {
+                const result = await api.login(email.trim(), password);
+                setToken(result.token);
+                go("/");
+              } catch (ex) {
+                setErr(ex instanceof ApiError ? "登录失败，请再试一次" : ex instanceof Error ? ex.message : "网络错误");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <VStack gap={5}>
+              <HStack gap={3} vAlign="center"><NavIcon icon={<Gavel size={16} />} /><VStack gap={0}><Heading level={1}>投标管理平台</Heading><Text type="supporting">KnowledgeBrain</Text></VStack></HStack>
+              <TextInput id="login-email" data-testid="login-email" label="账号" autoComplete="username" value={email} onChange={setEmail} />
+              <TextInput id="login-password" data-testid="login-password" label="密码" autoComplete="current-password" type="password" value={password} onChange={setPassword} />
+              {err ? <Banner status="error" title={err} /> : null}
+              <Button type="submit" width="100%" label={busy ? "进入中…" : "登录"} variant="primary" isLoading={busy} data-testid="login-submit" />
+            </VStack>
+          </form>
+      </Card>
+    </Center>
   );
 }

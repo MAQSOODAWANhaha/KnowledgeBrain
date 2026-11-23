@@ -13,7 +13,8 @@
 - 组件外观只在 `web/src/theme.ts` 的 `components` 里覆盖，不写组件外的 CSS；主题做不到的效果（状态圆点、选中竖条）不做
 - 页面代码不写原生 HTML 元素和 `className`，由 `web/eslint.config.js` 的 `no-restricted-syntax` 检查；唯一例外是承载 ONLYOFFICE 的 `DocxEditor.tsx`
 - 组件没有完全对应的形态时，改设计去适配组件，不自己拼
-- 不用 Tailwind 工具类、不用第二套图标、不用 sonner；图标用 neutral 主题自带的图标
+- 不用 Tailwind 工具类、不用 sonner；提示用 Astryx `useToast`；图标统一用 `lucide-react`，不混用第二套图标
+- `<form>` 只承担提交语义，可以直接写；其他原生元素一律换成组件
 
 ## 2. 颜色
 

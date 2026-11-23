@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
 import { PageHeader } from "../shell/PageHeader";
 import { projectPanel } from "../shell/ProjectNav";
@@ -366,7 +366,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
           <Card><KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} /></Card>
           <Card padding={0}>{!view.documents.length ? <EmptyState title="尚未上传项目文件。" description="上传招标文件后即可分析招标事项。" /> : <ProjectFiles documents={view.documents} download={download} />}</Card>
         </VStack>}
-        <div hidden={step !== "analysis"} style={{ flex: 1, minHeight: 0, flexDirection: "column", display: step === "analysis" ? "flex" : "none" }}>
+        <Panel isShown={step === "analysis"} fill>
           {stacked
             ? <VStack isScrollable height="100%" gap={4}><AnalysisPane analysis={view.analysis} /><VStack padding={4} role="complementary" aria-label="分析处理"><VStack gap={4}>
               <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
@@ -378,10 +378,10 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
               <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
               <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
             </VStack></LayoutPanel>} />}
-        </div>
-        <div id="guide-panel" role="tabpanel" aria-label="材料引导" hidden={!(step === "authoring" && authoringMode === "guide")} style={{ overflow: "auto" }}><GuideScreen /></div>
-        <div id="outline-planner-panel" role="tabpanel" aria-label="大纲编排" hidden={!(step === "authoring" && authoringMode === "outline")} className="outline-planner-panel"><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></div>
-        <div id="word-editor-panel" role="tabpanel" aria-label="正文编辑" hidden={!bodyMode} style={{ flex: 1, minHeight: 0, flexDirection: "column", display: bodyMode ? "flex" : "none" }}>
+        </Panel>
+        <Panel id="guide-panel" role="tabpanel" aria-label="材料引导" isShown={step === "authoring" && authoringMode === "guide"} fill isScrollable><GuideScreen /></Panel>
+        <Panel id="outline-planner-panel" role="tabpanel" aria-label="大纲编排" isShown={step === "authoring" && authoringMode === "outline"} fill><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></Panel>
+        <Panel id="word-editor-panel" role="tabpanel" aria-label="正文编辑" isShown={bodyMode} fill>
           <Layout height="fill"
             start={leftClosed
               ? <LayoutPanel width={48} hasDivider label="文件与章节目录" role="complementary" padding={1}><IconButton variant="ghost" label="展开目录" icon={<PanelLeftOpen size={18} />} aria-expanded={false} onClick={() => setLeftClosed(false)} /></LayoutPanel>
@@ -403,10 +403,10 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             </VStack>}
             end={<LayoutPanel width={rightClosed ? 48 : 360} hasDivider label="要求、依据与待补" role="complementary" padding={rightClosed ? 1 : 0}>
                 {rightClosed && <IconButton variant="ghost" label="展开核对栏" icon={<PanelRightOpen size={18} />} aria-expanded={false} onClick={() => setRightClosed(false)} />}
-                <div hidden={rightClosed}><VStack gap={0}>
+                <Panel isShown={!rightClosed}>
                   <HStack hAlign="between" vAlign="center" padding={3}><Text weight="semibold">章节核对</Text><IconButton variant="ghost" size="sm" label="收起核对栏" icon={<PanelRightClose size={16} />} aria-expanded onClick={() => setRightClosed(true)} /></HStack>
                   {reviewShortcuts}
-                  <div hidden={tool !== "revision"}><VStack gap={2} padding={3}><HStack hAlign="between" vAlign="center"><Heading level={2}>按章节定向复核与修订</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
+                  <Panel isShown={tool === "revision"} padding={3} gap={2}><HStack hAlign="between" vAlign="center"><Heading level={2}>按章节定向复核与修订</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
                     <ChapterRevision
             source={revisionReady ? { execution_id: view.context_execution_id!, label: reviewSourceLabel, chapters: view.outline!.chapters } : null}
             disabled={!!ended && !(pending?.kind === "authoring" && !!pending.body?.review_request) || wordUnsafe || !!pending && !(pending.kind === "authoring" && !!pending.body?.review_request) || inProgress(view.authoring?.status) && !pending}
@@ -414,14 +414,14 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             pendingRequest={pending?.kind === "authoring" && pending.body?.previous_execution_id && pending.body.review_request ? { previous_execution_id: pending.body.previous_execution_id, review_request: pending.body.review_request } : null}
             manualWordRevision={displayedSource === "manual" || displayedSource === "recovered" ? displayedDraft?.revision : null}
             onSubmit={body => start("authoring", body)} onUnsafeChange={setRevisionUnsafe} />
-                  </VStack></div>
-                  <div hidden={tool !== "savedReview"}><VStack gap={2} padding={3}><HStack hAlign="between" vAlign="center"><Heading level={2}>核对已保存的 Word 内容</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
+                  </Panel>
+                  <Panel isShown={tool === "savedReview"} padding={3} gap={2}><HStack hAlign="between" vAlign="center"><Heading level={2}>核对已保存的 Word 内容</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
                     <SavedWordReview projectId={projectId} version={savedReviewVersion} readOnly={!!ended} disabled={wordUnsafe || busy} onUnsafeChange={setSavedReviewUnsafe} />
-                  </VStack></div>
-                  <div hidden={tool === "revision" || tool === "savedReview"}><ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></div>
-                </VStack></div>
+                  </Panel>
+                  <Panel isShown={tool !== "revision" && tool !== "savedReview"}><ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></Panel>
+                </Panel>
               </LayoutPanel>} />
-        </div>
+        </Panel>
         {step === "export" && <VStack gap={4} padding={6} isScrollable height="100%" role="region" aria-label="交付文件">
           <Card><VStack gap={2}>
             <Heading level={2}>已保存稿件</Heading>
@@ -459,4 +459,13 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
       </>}
     </VStack>
   </Shell>;
+}
+
+// Keeps an inactive view mounted (editor sessions, unsent input) while taking it out of layout and the accessibility tree.
+function Panel({ isShown, fill, isScrollable, padding, gap = 0, children, ...rest }: {
+  isShown: boolean; fill?: boolean; isScrollable?: boolean; padding?: 3; gap?: 0 | 2; children: ReactNode;
+  id?: string; role?: string; "aria-label"?: string;
+}) {
+  return <VStack {...rest} gap={gap} padding={padding} isScrollable={isScrollable} minHeight={fill ? 0 : undefined}
+    style={{ display: isShown ? undefined : "none", flex: fill ? 1 : undefined }}>{children}</VStack>;
 }

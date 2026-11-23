@@ -15,7 +15,7 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { Plus } from "lucide-react";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
+import { useToast } from "@astryxdesign/core/Toast";
 import {
   type Doc,
   type Product,
@@ -29,11 +29,6 @@ import { SideNavSection } from "@astryxdesign/core/SideNav";
 import { type AssetRoute, assetDocHref, assetVersionHref, go } from "../hash";
 import { Shell } from "../Shell";
 import { DocumentDetail } from "./DocumentDetail";
-
-function notify(msg: string, error = false) {
-  if (error) toast.error(msg);
-  else toast.success(msg);
-}
 
 const parseLabels: Record<string, string> = {
   pending: "排队中", processing: "解析中", finalizing: "建立索引", completed: "已解析",
@@ -87,6 +82,8 @@ function ancestors(route: AssetRoute): string[] {
 }
 
 export function Assets({ email, route }: { email: string; route: AssetRoute }) {
+  const showToast = useToast();
+  const notify = (msg: string, error = false) => showToast({ type: error ? "error" : "info", body: msg });
   const [err, setErr] = useState("");
   const [company, setCompany] = useState<Workspace | null>(null);
   const [folders, setFolders] = useState<Product[]>([]);
