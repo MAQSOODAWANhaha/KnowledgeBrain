@@ -163,7 +163,7 @@ test("structural warnings are deduplicated and clear only when their exact refer
   const recovery = page.getByRole("region", { name: "大纲历史与响应安排", exact: true });
   await expect(recovery.getByText("相关证明响应已移出", { exact: true })).toHaveCount(1);
   await expect(recovery.getByText("实施方法关联位置尚未安排", { exact: true })).toHaveCount(1);
-  const response = recovery.locator(".tender-info-card").filter({ has: page.getByText("相关证明", { exact: true }) });
+  const response = recovery.getByRole("group", { name: "相关证明", exact: true });
   await response.getByRole("button", { name: "安排到当前章节", exact: true }).click();
   await expect(recovery.getByText("相关证明响应已移出", { exact: true })).toHaveCount(0);
   await expect(recovery.getByText("实施方法关联位置尚未安排", { exact: true })).toHaveCount(0);

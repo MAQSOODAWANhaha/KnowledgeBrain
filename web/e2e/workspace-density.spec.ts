@@ -11,14 +11,14 @@ for (const width of [1440, 390]) {
     Object.assign(f.state.current!, { outline: { chapters } });
     f.view.outline = { chapters };
     await page.goto(`/#/bids/${project}/analysis`);
-    await expect(page.locator(".tender-analysis-item")).toHaveCount(300);
+    await expect(page.getByRole("region", { name: "招标事项" }).getByRole("article")).toHaveCount(300);
     await page.getByLabel("搜索招标事项").fill("第300项");
-    await expect(page.locator(".tender-analysis-item")).toHaveCount(1);
-    await expect(page.locator(".tender-analysis-item")).toContainText("第300项");
+    await expect(page.getByRole("region", { name: "招标事项" }).getByRole("article")).toHaveCount(1);
+    await expect(page.getByRole("region", { name: "招标事项" }).getByRole("article")).toContainText("第300项");
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
     await page.screenshot({ path: test.info().outputPath("analysis-filtered.png") });
     await page.getByLabel("搜索招标事项").clear();
-    await expect(page.locator(".tender-analysis-item")).toHaveCount(300);
+    await expect(page.getByRole("region", { name: "招标事项" }).getByRole("article")).toHaveCount(300);
     await page.goto(`/#/bids/${project}/authoring`);
     await expect(page.getByTestId("docx-status")).toContainText("当前保存版本已载入");
     if (width < 700) await page.getByRole("button", { name: "展开目录", exact: true }).click();

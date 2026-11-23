@@ -1,3 +1,14 @@
+import { Banner } from "@astryxdesign/core/Banner";
+import { Card } from "@astryxdesign/core/Card";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Item } from "@astryxdesign/core/Item";
+import { List, ListItem } from "@astryxdesign/core/List";
+import { Section } from "@astryxdesign/core/Section";
+import { Text } from "@astryxdesign/core/Text";
+import { Timestamp } from "@astryxdesign/core/Timestamp";
+import { VStack } from "@astryxdesign/core/VStack";
 import { Button } from "@astryxdesign/core/Button";
 import { Table } from "@astryxdesign/core/Table";
 import { useEffect, useState } from "react";
@@ -58,20 +69,26 @@ export function OutlineRecovery({ projectId, tree, sourceRevision, sourceExecuti
     catch (error) { setHistoryError(error instanceof Error ? error.message : "历史修订读取失败。"); }
     finally { setLoading(false); }
   }
-  return <section className="outline-recovery" aria-label="大纲历史与响应安排">
-    {catalogError?.source === source && <p role="alert">{catalogError.message}<Button onClick={() => setRetry(value => value + 1)} label="重新读取响应位置" /></p>}
-    {historyError && <p role="alert">{historyError} 请使用历史修订列表或预览按钮重试。</p>}
-    <details><summary>历史大纲</summary><Button isDisabled={loading} onClick={() => void readHistory()} label="读取历史修订" />
-      {!!history.length && <ul>{history.map(entry => <li key={entry.revision_id}>修订 {entry.revision} <time>{entry.created_at}</time> <Button isDisabled={loading} onClick={() => void readPreview(entry.revision_id)} label={`预览修订 ${entry.revision}`} /></li>)}</ul>}
-      {preview && <div aria-label="历史大纲预览"><h3>修订 {preview.revision} 与当前编排对照</h3>
+  return <Section role="region" aria-label="大纲历史与响应安排" padding={0} variant="transparent"><VStack gap={2}>
+    {catalogError?.source === source && <Banner role="alert" status="error" title={catalogError.message} endContent={<Button size="sm" onClick={() => setRetry(value => value + 1)} label="重新读取响应位置" />} />}
+    {historyError && <Banner role="alert" status="error" title={`${historyError} 请使用历史修订列表或预览按钮重试。`} />}
+    <Collapsible trigger="历史大纲" defaultIsOpen={false}><VStack gap={2}>
+      <HStack><Button variant="secondary" isDisabled={loading} onClick={() => void readHistory()} label="读取历史修订" /></HStack>
+      {!!history.length && <List density="compact" hasDividers>{history.map(entry => <ListItem key={entry.revision_id} label={`修订 ${entry.revision}`} description={<Timestamp value={entry.created_at} />} endContent={<Button size="sm" variant="secondary" isDisabled={loading} onClick={() => void readPreview(entry.revision_id)} label={`预览修订 ${entry.revision}`} />} />)}</List>}
+      {preview && <Section role="region" aria-label="历史大纲预览" variant="muted" padding={3}><VStack gap={2}><Heading level={3}>修订 {preview.revision} 与当前编排对照</Heading>
         <Table data={flatten(preview.outline.chapters)} columns={[{ key: "title", header: "历史章节" }, { key: "chapter_id", header: "当前同标识章节", renderCell: (chapter) => nodes.find(node => node.chapter_id === chapter.chapter_id)?.title ?? "已移出" }]} />
-        {!preview.sources_current && <p className="tender-note">此修订来源已过期，可读取或恢复；生成正文前需要更新来源大纲。</p>}
-        <p className="tender-note">载入后请保存为新修订，现有历史和 Word 稿件保留。</p><Button isDisabled={disabled || loading} onClick={() => onRestore(preview)} label="载入此历史大纲另存" />
-      </div>}
-    </details>
-    <details><summary>响应安排（{catalogReady ? `${unassigned.length} 项未安排` : "响应目录待读取"}）</summary><p className="tender-note">将原响应安排到当前选定章节，原要求、来源和表单随响应保留。保存后生效。</p>
-      {visibleIssues.map((issue, index) => <p key={`${issue.code}:${index}`}>{issue.detail}</p>)}
-      {[...targets.values()].map(target => <div className="tender-info-card" key={target.target_id}><strong>{target.purpose}</strong><p>{current.get(target.target_id)?.title ?? "尚未安排到章节"}</p><Button isDisabled={disabled || !selectedId || current.get(target.target_id)?.chapter_id === selectedId} onClick={() => selectedId && onChange(assignTarget(tree, target, selectedId))} label="安排到当前章节" /></div>)}
-    </details>
-  </section>;
+        {!preview.sources_current && <Text type="supporting">此修订来源已过期，可读取或恢复；生成正文前需要更新来源大纲。</Text>}
+        <Text type="supporting">载入后请保存为新修订，现有历史和 Word 稿件保留。</Text>
+        <HStack><Button variant="primary" isDisabled={disabled || loading} onClick={() => onRestore(preview)} label="载入此历史大纲另存" /></HStack>
+      </VStack></Section>}
+    </VStack></Collapsible>
+    <Collapsible trigger={`响应安排（${catalogReady ? `${unassigned.length} 项未安排` : "响应目录待读取"}）`} defaultIsOpen={false}><VStack gap={2}>
+      <Text type="supporting">将原响应安排到当前选定章节，原要求、来源和表单随响应保留。保存后生效。</Text>
+      {visibleIssues.map((issue, index) => <Text key={`${issue.code}:${index}`}>{issue.detail}</Text>)}
+      {[...targets.values()].map(target => <Card key={target.target_id} padding={3} role="group" aria-label={target.purpose}>
+        <Item density="compact" label={target.purpose} description={current.get(target.target_id)?.title ?? "尚未安排到章节"}
+          endContent={<Button size="sm" variant="secondary" isDisabled={disabled || !selectedId || current.get(target.target_id)?.chapter_id === selectedId} onClick={() => selectedId && onChange(assignTarget(tree, target, selectedId))} label="安排到当前章节" />} />
+      </Card>)}
+    </VStack></Collapsible>
+  </VStack></Section>;
 }

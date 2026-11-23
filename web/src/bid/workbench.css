@@ -1,47 +1,22 @@
 
 .tender-alert { display: flex; gap: 12px; align-items: center; padding: 12px 20px; background: var(--amber-soft); border-bottom: 1px solid var(--line); color: var(--ink); font-size: 13px; }
 .tender-note { font-size: 12px; color: var(--muted); line-height: 1.8; margin: 8px 0; }
-.tender-progress { flex-shrink: 0; margin: 0; padding: 8px 16px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
-.tender-progress strong { color: var(--ink); font-weight: 600; }
-.tender-section .tender-progress, .outline-planner .tender-progress { margin: 0; padding: 8px 16px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
-.tender-progress p { margin: 3px 0; }
-.tender-progress summary { cursor: pointer; color: var(--muted); }
-.tender-section { flex: 1; min-height: 0; overflow: auto; }
-.tender-section { padding: 16px 24px 24px; max-width: 1220px; width: 100%; margin: 0 auto; }
-.tender-section > h2 {
-  display: flex; align-items: center; height: 40px; margin: -16px -24px 16px; padding: 0 16px;
-  border-bottom: 1px solid var(--line); background: #fff; font-size: 13px; font-weight: 600;
-  position: sticky; top: 0; z-index: 2;
-}
 .tender-outline { min-width: 0; min-height: 0; background: #fff; overflow: auto; }
 .tender-outline { border-right: 1px solid var(--line); }
-.tender-material-text { white-space: pre-wrap; max-height: 400px; overflow: auto; }
-.tender-rule-details { white-space: pre-wrap; margin: 8px 0; padding: 8px; background: var(--fill); }
 .tender-context nav { display: flex; gap: 7px; border-bottom: 1px solid var(--line); padding: 4px 10px; }
 .tender-context nav button { border: 0; border-radius: 0; padding: 10px; color: var(--muted); }
 .tender-context nav button[aria-pressed="true"] { color: var(--iris); box-shadow: inset 0 -2px var(--iris); }
-.tender-context-body { padding: 12px; }
 .tender-info-card { border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .tender-info-card > p { margin: 5px 0; }
-.tender-info-card small, .tender-analysis-item small { color: var(--faint); font-size: 10px; }
-.tender-info-gap, .tender-context-warning { background: var(--amber-soft); border-color: var(--line); }
+.tender-info-card small { color: var(--faint); font-size: 10px; }
+.tender-context-warning { background: var(--amber-soft); border-color: var(--line); }
 .tender-context-warning { padding: 9px; font-size: 12px; line-height: 1.8; }
-.tender-filter { display: flex; gap: 12px; position: sticky; top: 0; z-index: 1; margin: 0 0 12px; padding: 8px 0; background: var(--color-background-body); }
-.tender-filter > :first-child { flex: 1; min-width: 0; }
-.tender-analysis-item { border: 1px solid var(--line); padding: 12px 14px; border-radius: 6px; margin-bottom: 8px; font-size: 13px; line-height: 1.55; background: #fff; }
-.tender-analysis-item blockquote, .tender-info-card blockquote { border-left: 2px solid var(--line); padding-left: 12px; margin: 12px 0; white-space: pre-wrap; }
+.tender-info-card blockquote { border-left: 2px solid var(--line); padding-left: 12px; margin: 12px 0; white-space: pre-wrap; }
 .tender-gap-list { padding: 16px; margin-top: 20px; border: 1px solid var(--line); border-radius: 6px; background: var(--amber-soft); font-size: 13px; line-height: 1.8; }
 .outline-planner-panel { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .outline-planner { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--bg); }
 .outline-execution { padding: 8px 20px; margin: 0; background: transparent; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.6; color: var(--muted); }
 .outline-execution button { margin-left: 8px; }
-.outline-recovery { flex-shrink: 0; max-height: 35vh; overflow: auto; padding: 10px 20px; border-bottom: 1px solid var(--line); background: #fff; font-size: 13px; }
-.outline-recovery details + details { margin-top: 10px; }
-.outline-recovery summary { cursor: pointer; padding: 4px 0; }
-.outline-recovery time { color: var(--muted); margin-left: 8px; }
-.outline-recovery .tender-info-card { margin: 8px 0; }
 @media (max-width: 700px) {
-  .tender-progress { padding: 10px 12px; }
   .tender-outline { position: relative; z-index: 30; overflow: visible; }
-  .tender-section { padding: 16px; }
 }

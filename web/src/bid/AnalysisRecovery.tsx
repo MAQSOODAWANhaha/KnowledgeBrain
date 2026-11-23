@@ -1,3 +1,9 @@
+import { Banner } from "@astryxdesign/core/Banner";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Section } from "@astryxdesign/core/Section";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import { Button } from "@astryxdesign/core/Button";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -75,25 +81,26 @@ export function AnalysisRecovery({ projectId, disabled, readOnly = false, onChan
     } finally { setSaving(false); }
   }
   if (!notice && !dirty && !pending && base?.status !== "failed") return null;
-  return <section className="tender-info-card" aria-label="分析任务恢复">
-    <h3>继续失败的分析</h3>
-    <p className="tender-note">继续原任务和原资料。未完成的模型调用仍可能产生费用。</p>
-    {notice && <p role="alert" className="tender-alert">{notice}</p>}
-    <Button isDisabled={saving} onClick={() => void read()} label="刷新分析恢复状态" />
+  return <Section role="region" aria-label="分析任务恢复" padding={0} variant="transparent"><VStack gap={3}>
+    <Heading level={3}>继续失败的分析</Heading>
+    <Text type="supporting">继续原任务和原资料。未完成的模型调用仍可能产生费用。</Text>
+    {notice && <Banner role="alert" status="error" title={notice} />}
+    <HStack><Button variant="secondary" isDisabled={saving} onClick={() => void read()} label="刷新分析恢复状态" /></HStack>
     {base && working && <>
-      <p>来源版本 {base.source_version}，分析修订 {base.domain_revision}；已保存成功回包 {base.saved_responses} 份。</p>
-      <p className={currentState?.can_retry ? "tender-note" : "tender-alert"}>{currentState?.notice}</p>
-      {(changed || conflict) && <div className="tender-alert" role="alert"><p>失败记录或任务状态已有变化，当前恢复理由仍保留。请刷新并核对原任务状态。</p>
-        {remote && <p>最新来源版本 {remote.source_version}，分析修订 {remote.domain_revision}。{remote.notice}</p>}
-        <Button isDisabled={saving || !!pending || !remote?.can_retry} onClick={() => {
+      <Text>来源版本 {base.source_version}，分析修订 {base.domain_revision}；已保存成功回包 {base.saved_responses} 份。</Text>
+      {currentState?.notice && (currentState.can_retry ? <Text type="supporting">{currentState.notice}</Text> : <Banner status="warning" title={currentState.notice} />)}
+      {(changed || conflict) && <Banner role="alert" status="warning" title="失败记录或任务状态已有变化，当前恢复理由仍保留。请刷新并核对原任务状态。"
+        description={remote ? `最新来源版本 ${remote.source_version}，分析修订 ${remote.domain_revision}。${remote.notice ?? ""}` : undefined}
+        endContent={<Button size="sm" isDisabled={saving || !!pending || !remote?.can_retry} onClick={() => {
           if (remote) { setWorking({ base: remote, reason: working.reason }); setConflict(false); setNotice("已载入最新失败记录，恢复理由保留；请核对后提交。"); }
-        }} label="按最新失败记录核对，保留理由" />
-      </div>}
+        }} label="按最新失败记录核对，保留理由" />} />}
       <TextArea label="分析恢复理由" htmlMaxLength={4000} isDisabled={disabled || readOnly || saving || !!pending} value={working.reason} onChange={reason => setWorking(current => current && { ...current, reason })} />
-      <Button variant="primary" isDisabled={disabled || saving || (!pending && (readOnly || !currentState?.can_retry || !working.reason.trim() || changed || conflict))} onClick={() => void retry()} label={pending ? "确认同一次恢复请求" : "继续原分析任务"} />
-      {dirty && !pending && <Button isDisabled={saving} onClick={() => {
-        if (window.confirm("放弃当前未提交的恢复理由？")) { setWorking(remote ? { base: remote, reason: "" } : null); setConflict(false); setNotice(null); }
-      }} label="放弃恢复理由" />}
+      <HStack gap={2} wrap="wrap">
+        <Button variant="primary" isDisabled={disabled || saving || (!pending && (readOnly || !currentState?.can_retry || !working.reason.trim() || changed || conflict))} onClick={() => void retry()} label={pending ? "确认同一次恢复请求" : "继续原分析任务"} />
+        {dirty && !pending && <Button variant="ghost" isDisabled={saving} onClick={() => {
+          if (window.confirm("放弃当前未提交的恢复理由？")) { setWorking(remote ? { base: remote, reason: "" } : null); setConflict(false); setNotice(null); }
+        }} label="放弃恢复理由" />}
+      </HStack>
     </>}
-  </section>;
+  </VStack></Section>;
 }
