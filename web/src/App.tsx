@@ -4,7 +4,6 @@ import { Assets } from "./assets/Assets";
 import { type BidProjectView } from "./bid/api";
 import { tenderApi } from "./bid/api/workbench";
 import { authoringHref } from "./bid/authoring/routes";
-import { BidTree } from "./bid/BidTree";
 import { Workbench } from "./bid/Workbench";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
@@ -13,10 +12,12 @@ import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { Table } from "@astryxdesign/core/Table";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { Crumbs } from "./Crumbs";
 import { go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
 import { LoginScreen } from "./login/LoginScreen";
 import { Shell } from "./Shell";
+import { PageHeader } from "./shell/PageHeader";
+import { OpenProjects } from "./shell/ProjectNav";
+import { Tab, TabList } from "@astryxdesign/core/TabList";
 
 const bidApi = tenderApi;
 
@@ -53,12 +54,17 @@ function Bids({ email }: { email: string }) {
     <Shell
       root="bids"
       email={email}
-      crumbs={<Crumbs items={[{ label: "投标项目" }, { label: "在办项目" }]} />}
-      title="在办项目"
-      extra={
-        <Button data-testid="new-bid" label="新建项目" variant="primary" onClick={() => setOpen(true)} />
-      }
-      tree={<BidTree rows={rows} />}
+      header={<PageHeader
+        crumbs={[{ label: "投标项目" }]}
+        title="投标项目"
+        actions={<Button data-testid="new-bid" label="新建项目" variant="primary" onClick={() => setOpen(true)} />}
+        tabs={<TabList value={filter} onChange={(value) => setFilter(value as typeof filter)} hasDivider={false}>
+          <Tab value="all" label="全部" />
+          <Tab value="open" label="在办" />
+          <Tab value="ended" label="已结束" />
+        </TabList>}
+      />}
+      nav={<OpenProjects rows={rows} />}
     >
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-6">
         {listError && <div role="alert"><Banner status="error" title="项目读取失败，已有项目不会因此被清空。" endContent={<Button size="sm" label="重试读取项目" onClick={() => setListRetry((value) => value + 1)} />} /></div>}
@@ -77,18 +83,7 @@ function Bids({ email }: { email: string }) {
         ) : (
           <div className="panel">
             <div className="toolbar">
-              <TextInput label="过滤项目" isLabelHidden placeholder="按项目名过滤…" value={query} onChange={setQuery} />
-              <div className="flex rounded-[6px] border border-line p-0.5">
-                {(
-                  [
-                    ["all", "全部"],
-                    ["open", "在办"],
-                    ["ended", "已结束"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <Button key={value} type="button" size="sm" label={label} variant={filter === value ? "primary" : "secondary"} onClick={() => setFilter(value)} />
-                ))}
-              </div>
+              <TextInput label="过滤项目" isLabelHidden placeholder="按项目名称搜索" value={query} onChange={setQuery} />
             </div>
             <Table hasHover data={shown} columns={[
               { key: "title", header: "项目", renderCell: (p) => <a href={`#${authoringHref(p.id, "files")}`}>{p.title}</a> },

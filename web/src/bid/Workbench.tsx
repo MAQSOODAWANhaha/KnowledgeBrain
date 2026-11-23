@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
-import { Crumbs } from "../Crumbs";
+import { PageHeader } from "../shell/PageHeader";
+import { ProjectStages, ProjectSwitcher } from "../shell/ProjectNav";
 import { guardHashNavigation, parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
-import { ProjectNav } from "./BidTree";
-import { type AuthoringStep } from "./authoring/routes";
+import { authoringHref, type AuthoringStep } from "./authoring/routes";
 import { DocxEditor, type DocxEditorHandle } from "./authoring/DocxEditor";
 import { OutlinePlanner } from "./authoring/OutlinePlanner";
 import type { WordNavigationRequest, WordNavigationResult } from "./authoring/wordNavigation";
@@ -331,9 +331,12 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     {step === "authoring" && <Button variant="primary" label="编排大纲" onClick={() => { setAuthoringMode("outline"); window.location.hash = `/bids/${projectId}/authoring`; }} />}
   </div>;
   const authoringTabs = <div className="tender-authoring-tabs" role="tablist" aria-label="标书编制视图" onKeyDown={event => { if (moveAuthoringMode(event.key)) event.preventDefault(); }}><Button role="tab" tabIndex={authoringMode === "guide" ? 0 : -1} aria-selected={authoringMode === "guide"} aria-controls="guide-panel" id="guide-tab" label="材料引导" variant={authoringMode === "guide" ? "primary" : "secondary"} onClick={() => setAuthoringMode("guide")} /><Button role="tab" tabIndex={authoringMode === "outline" ? 0 : -1} aria-selected={authoringMode === "outline"} aria-controls="outline-planner-panel" id="outline-planner-tab" label="大纲编排" variant={authoringMode === "outline" ? "primary" : "secondary"} onClick={() => setAuthoringMode("outline")} /><Button role="tab" tabIndex={authoringMode === "body" ? 0 : -1} aria-selected={authoringMode === "body"} aria-controls="word-editor-panel" id="word-editor-tab" label="正文编辑" variant={authoringMode === "body" ? "primary" : "secondary"} onClick={() => setAuthoringMode("body")} /></div>;
-  return <Shell root="bids" layout="workspace" email={email} onBeforeLeave={() => !unsafe}
-    crumbs={<Crumbs items={[{ label: "投标项目", href: "/" }, { label: view?.project.title ?? "投标项目" }, { label: sectionLabel }]} />}
-    title={sectionLabel} extra={pageActions} tree={<ProjectNav projectId={projectId} currentStep={step} title={view?.project.title ?? "投标项目"} />}>
+  const projectTitle = view?.project.title ?? "投标项目";
+  return <Shell root="bids" email={email} onBeforeLeave={() => !unsafe}
+    header={<PageHeader crumbs={[{ label: "投标项目", href: "/" }, { label: projectTitle, href: authoringHref(projectId, "files") }, { label: sectionLabel }]}
+      title={sectionLabel} actions={pageActions} />}
+    navTop={<ProjectSwitcher projectId={projectId} title={projectTitle} step={step} />}
+    nav={<ProjectStages projectId={projectId} step={step} />}>
     <div className={`tender-workspace${step === "authoring" ? " is-authoring" : ""}`}>
       {error && <div className="tender-alert" role="alert">{view ? "暂时无法更新工作台，已读取内容保持可用。" : "工作台读取失败："}{error}<Button label="重试" onClick={() => setRetry(value => value + 1)} /></div>}
       {notice && <div className="tender-alert" role="alert">{notice}<Button label="关闭提示" onClick={() => setNotice(null)} /></div>}

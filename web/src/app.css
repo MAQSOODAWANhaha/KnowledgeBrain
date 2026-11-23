@@ -119,56 +119,6 @@ html, body, #app {
 }
 
 
-.crumbs {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0;
-  margin: 0;
-  min-width: 0;
-  font-size: var(--fs-ui);
-  font-weight: 500;
-  line-height: 20px;
-  color: var(--crumb);
-}
-.crumb {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-}
-.crumbs a,
-.crumb-now {
-  max-width: 22ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.crumbs a {
-  color: var(--crumb);
-  padding: 1px 5px;
-  margin: 0 -2px;
-  border-radius: 6px;
-}
-.crumbs a:hover {
-  color: var(--ink);
-  background: var(--fill);
-}
-.crumb-sep {
-  width: 12px;
-  height: 12px;
-  margin: 0 2px;
-  flex-shrink: 0;
-  fill: none;
-  stroke: var(--faint);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.crumb-now {
-  max-width: 36ch;
-  color: var(--muted);
-  padding: 1px 2px;
-}
 
 
 a.btn { color: inherit; text-decoration: none; }
@@ -528,78 +478,7 @@ table.grid tr:hover td {
   .split-eq {
     grid-template-columns: 1fr;
   }
-  .login-/* Product bar: 64px, same height used by GitHub and Linear. Astryx items top out at 36px. */
-.kb-top {
-  box-sizing: border-box;
-  height: 64px !important;
-  min-height: 64px !important;
-  padding-inline: 20px !important;
-  background: var(--sky) !important;
-}
-.kb-top a {
-  color: #f7fafc !important;
-  font-size: 15px !important;
-  min-height: 40px !important;
-}
-.kb-top a[aria-current="page"] {
-  background: rgba(255, 255, 255, 0.16) !important;
-  border-radius: 6px;
-}
-.kb-account {
-  color: #f7fafc;
-  font-size: 14px;
-}
-
-/* Atlassian layout: top nav, side nav, one page header, main. */
-.kb-side {
-  width: var(--nav-w);
-  background: var(--color-rail) !important;
-  padding: 12px 8px;
-}
-.kb-page {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  min-width: 0;
-  overflow: hidden;
-  background: var(--bg);
-}
-.kb-page-header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-shrink: 0;
-  min-height: 72px;
-  padding: 12px 24px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-}
-.kb-page-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.kb-page-heading h1 {
-  margin: 0;
-  font-size: 20px;
-  line-height: 1.3;
-  font-weight: 650;
-}
-.kb-crumbs {
-  font-size: 12px;
-  line-height: 1.4;
-}
-.kb-page-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-  min-width: 0;
-}
-
-body {
+  .login-body {
     padding: 32px 24px 48px;
     gap: 32px;
   }
@@ -1002,7 +881,6 @@ body {
     overflow: visible;
     row-gap: 0;
   }
-  .kb-workspace-header .crumbs { display: none; }
   .kb-workspace-steps {
     flex: 1 0 100%;
     order: 5;

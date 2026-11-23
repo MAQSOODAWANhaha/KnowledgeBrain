@@ -103,7 +103,7 @@ test("structured correction conflict retains fields across reload and guards lea
   page.once("dialog", dialog => void dialog.dismiss());
   await page.getByRole("button", { name: "载入最新分析重新核对", exact: true }).click();
   await expect(page.getByLabel("事项 1 适用范围", { exact: true })).toHaveValue("人工编辑的固定范围");
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "返回项目列表", exact: true }).click();
+  await page.getByRole("navigation", { name: "导航", exact: true }).getByRole("link", { name: "投标项目", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/bids/${project}/analysis$`));
   await expect(page.getByRole("alert").filter({ hasText: "请先提交或放弃分析修改" })).toBeVisible();
   page.once("dialog", dialog => void dialog.accept()); await page.reload();

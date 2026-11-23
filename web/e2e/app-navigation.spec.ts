@@ -68,7 +68,7 @@ test("已验证会话遇到503时保留当前列表和输入", async ({ page }) 
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/#/");
-  const filter = page.getByPlaceholder("按项目名过滤…");
+  const filter = page.getByPlaceholder("按项目名称搜索");
   await filter.fill("导航回归");
   await page.evaluate(() => { location.hash = "/?refresh=1"; });
   await expect(page.getByRole("alert")).toContainText("当前页面和登录信息已保留");

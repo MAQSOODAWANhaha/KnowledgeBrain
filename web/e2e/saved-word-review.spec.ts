@@ -162,7 +162,7 @@ test("updated tender sources leave the review on its original analysis and displ
 test("an unsent reason guards navigation and explicit discard allows leaving", async ({ page }) => {
   const f = await reviewFixture(page); await f.ready(); const review = await f.open();
   await review.getByLabel("保存稿复核理由", { exact: true }).fill("尚未提交的人工核对意见。");
-  await page.getByRole("navigation", { name: "产品", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
+  await page.getByRole("navigation", { name: "导航", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "请先提交或放弃复核修改" })).toBeVisible();
   await expect(review.getByLabel("保存稿复核理由", { exact: true })).toHaveValue("尚未提交的人工核对意见。");
   page.on("dialog", dialog => void dialog.accept());

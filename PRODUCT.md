@@ -32,7 +32,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 - 关注册。LDAP 或本地口令。知识库与投标项目按创建人隔离，子资源继承归属；API Key 与其所属用户具有相同业务权限，不再区分成员角色或 Key 范围。
 - 招标文件不进 `documents`。公司资料走 Document 管线，看 `index_ready`。
-- Web 编制面：顶栏切换产品，左栏列项目并把 **文件 / 编制 / 导出** 挂在当前标下；编制步主列是 ONLYOFFICE，检查器可选。解析是文件状态；freeze 是文件页动作，不是第四导航，也不是「确认后才能改」的闸门。
+- Web 编制面：顶栏只放产品名和账号；左侧导航切换投标项目 / 知识资产，进入项目后显示项目切换器和 **项目资料 / 招标解读 / 标书编制 / 交付文件** 四步；编制步主列是 ONLYOFFICE，核对栏可收起。解析是文件状态；freeze 是文件页动作，不是第四导航，也不是「确认后才能改」的闸门。
 - 结构规划与章节导航保留，招标文件指定目录/表格优先；标题、顺序、层级和表格由 DOCX 承载，外部业务索引不能强制回写覆盖人工修改。人员独立数据不等于强制增加专章。
 - 文件未变且有可用结果则复用；只处理新增、变化或无结果文件，汇总当前完整集合。招标集合变化后新轮整稿，不局部修补或自动合并旧稿；仅改正文不重跑源解析。
 - 整稿重新生成产出新稿，不合并旧稿，用户自己选用哪一稿。编辑后由 AI 出候选并定点入稿的能力推迟，当前交付「整稿加人工编辑」。接入后的规则：AI 只出候选；用户接受后校验版本/目标和未保存编辑，定点入稿并确认保存，永不覆盖并发人工编辑。
@@ -47,9 +47,9 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 ## Brand Commitments
 
-- 名称：KnowledgeBrain / 投标。
-- 视觉钉死：冷灰仪器盘（画布 `#F4F5F7`、发丝线、钢蓝 `#1E3A5F` 只用于选中、主按钮和焦点）。中文 UI 字体 PingFang SC / Noto Sans SC，禁止运行时 Google Fonts。规范见 `DESIGN.md`。
-- 组件以 Astryx（`@astryxdesign/core` 与 `theme-neutral`）做壳。正文编辑由 ONLYOFFICE 承担；外壳字体和颜色规范不强加到 DOCX 招标版式或编辑器内部界面。
+- 名称：KnowledgeBrain 投标管理平台。
+- 视觉：企业级，参照 Microsoft Fluent 2。深海军蓝顶栏、中性灰阶、品牌蓝 `#0F6CBD` 只用于主按钮、选中、链接和焦点，语义色只表示状态。字体 Segoe UI / 微软雅黑，不加载网络字体。规范见 `DESIGN.md`。
+- 组件只用 Astryx（`@astryxdesign/core` 与 `theme-neutral`）现成组件，品牌外观通过主题 token 覆盖。正文编辑由 ONLYOFFICE 承担；外壳字体和颜色规范不强加到 DOCX 招标版式或编辑器内部界面。
 - 禁止把招标文件或人补图写回产品库。
 
 ## Evidence on Hand
@@ -58,7 +58,6 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 - [业务入口](docs/bidding/README.md)、[招标工作流](docs/design/python-tender-phase1/README.md)、[ONLYOFFICE](docs/bidding/onlyoffice.md)
 - `docs/knowledge-base/domain.md`（知识库领域与证据检索端口）
-- `1.png`：Plannotator 三栏编辑器仅作结构参照（左树 / 中文稿 / 右检查器）。外壳以 `DESIGN.md` 的冷灰仪器盘为准：不仿 iCloud，不用暖纸，也不把侧栏做成暗色
 - 无客户照片、无真实标书样张可当品牌图
 
 ## Product Principles

@@ -1,5 +1,7 @@
+import { InternationalizationProvider } from "@astryxdesign/core/i18n";
+import zhCN from "@astryxdesign/core/locales/zh-CN.generated.js";
 import { Theme } from "@astryxdesign/core/theme";
-import { neutralTheme } from "@astryxdesign/theme-neutral/built";
+import { brandTheme } from "./theme";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Toaster } from "sonner";
@@ -8,7 +10,8 @@ import "./app.css";
 
 ReactDOM.createRoot(document.getElementById("app")!).render(
   <React.StrictMode>
-    <Theme theme={neutralTheme}>
+    <InternationalizationProvider locale="zh-CN" messages={{ "zh-CN": zhCN }}>
+    <Theme theme={brandTheme} mode="light">
     <App />
     <Toaster
       position="top-center"
@@ -19,5 +22,6 @@ ReactDOM.createRoot(document.getElementById("app")!).render(
       }}
     />
     </Theme>
+    </InternationalizationProvider>
   </React.StrictMode>,
 );

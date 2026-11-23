@@ -15,7 +15,8 @@ import {
   api,
   slugify,
 } from "../api";
-import { Crumbs, type Crumb } from "../Crumbs";
+import { PageHeader, type Crumb } from "../shell/PageHeader";
+import { SideNavSection } from "@astryxdesign/core/SideNav";
 import { type AssetRoute, assetDocHref, assetVersionHref, go } from "../hash";
 import { Shell } from "../Shell";
 import { DocumentDetail } from "./DocumentDetail";
@@ -359,17 +360,16 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     <Shell
       root="assets"
       email={email}
-      crumbs={<Crumbs items={crumbs} />}
-      title={title}
-      extra={
+      header={<PageHeader crumbs={crumbs} title={title} actions={
         route.kind === "doc" ? undefined : route.kind === "version" || (route.kind === "folder" && version) ? (
           <FileInput label="上传" isMultiple value={null} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list).catch((error) => notify(error instanceof Error ? error.message : "上传失败", true)); }} />
         ) : (
           <Button type="button" label={createHint} variant="primary" onClick={openCreateFromSelection} />
         )
-      }
-      tree={
-        <nav className="tree">
+      } />}
+      nav={
+        <SideNavSection title="资料目录">
+        <nav className="tree" aria-label="资料目录">
           <TreeRow
             depth={0}
             label="公司资料"
@@ -464,6 +464,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
               </div>
             ))}
         </nav>
+        </SideNavSection>
       }
     >
       <div className="wrap stack">

@@ -289,7 +289,7 @@ for (const saved of [true, false]) {
     const discard = page.getByRole("button", { name: "放弃当前调整", exact: true });
     await expect(discard).toBeEnabled(); page.once("dialog", dialog => void dialog.accept()); await discard.click();
     await expect(page.getByTestId("outline-save-status")).not.toHaveText("有未保存修改");
-    await page.getByRole("navigation", { name: "产品", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
+    await page.getByRole("navigation", { name: "导航", exact: true }).getByRole("link", { name: "知识资产", exact: true }).click();
     await expect(page).toHaveURL(/#\/library$/);
     expect(f.state.outlineSaves).toEqual([]);
   });
