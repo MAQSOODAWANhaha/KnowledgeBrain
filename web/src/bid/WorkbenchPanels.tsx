@@ -1,3 +1,6 @@
+import { pixel, Table } from "@astryxdesign/core/Table";
+import { Pagination } from "@astryxdesign/core/Pagination";
+import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { Toolbar } from "@astryxdesign/core/Toolbar";
 import { Link } from "@astryxdesign/core/Link";
 import { Item } from "@astryxdesign/core/Item";
@@ -9,7 +12,6 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/HStack";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Banner } from "@astryxdesign/core/Banner";
-import { Selector } from "@astryxdesign/core/Selector";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -151,7 +153,8 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
   </VStack>;
 }
 
-const kindLabels: Record<string, string> = { obligation: "要求", requirement: "要求", scoring_rule: "评分规则", consequence_rule: "后果规则", submission_requirement: "提交要求", fact: "背景事实" };
+export const kindLabels: Record<string, string> = { obligation: "要求", requirement: "要求", scoring_rule: "评分", consequence_rule: "后果", submission_requirement: "提交要求", fact: "背景事实" };
+const kindOf = (item: TenderItem) => kindLabels[item.kind ?? ""] ?? item.kind ?? "未分类";
 const phasePrefix = /^(register|freeze|ocr|pack-plan|extract|analysis-review|analysis-locate|analysis-associate|analysis-joint|verify|confirm)\s+/;
 function groupedIssues(issues: { detail: string }[]) {
   const counts = new Map<string, number>();
@@ -161,23 +164,86 @@ function groupedIssues(issues: { detail: string }[]) {
   }
   return [...counts.entries()];
 }
-export function AnalysisPane({ analysis }: { analysis: WorkbenchView["analysis"] }) {
+
+export type Placement = { chapters: string[]; gap: boolean };
+// Where each item lands in the outline: chapters whose targets cite it, and whether any of those targets has a gap.
+export function itemPlacements(view: WorkbenchView): Map<string, Placement> {
+  const gapTargets = new Set(view.gaps.map(gap => gap.target_id).filter((id): id is string => !!id));
+  const result = new Map<string, Placement>();
+  for (const chapter of flattenChapters(view.outline?.chapters ?? [])) {
+    for (const target of chapter.targets) {
+      for (const ref of target.rule_refs ?? []) {
+        const entry = result.get(ref.item_ref.item_id) ?? { chapters: [], gap: false };
+        if (!entry.chapters.includes(chapter.title)) entry.chapters.push(chapter.title);
+        entry.gap ||= gapTargets.has(target.target_id);
+        result.set(ref.item_ref.item_id, entry);
+      }
+    }
+  }
+  return result;
+}
+export const itemKey = (item: TenderItem, index: number) => item.item_id ?? `index-${index}`;
+function checkBadge(placement?: Placement) {
+  if (!placement) return <Badge variant="neutral" label="未落位" />;
+  return placement.gap ? <Badge variant="warning" label="待补" /> : <Badge variant="success" label="已落位" />;
+}
+export function analysisTabs(items: TenderItem[]) {
+  const counts = new Map<string, number>();
+  for (const item of items) counts.set(kindOf(item), (counts.get(kindOf(item)) ?? 0) + 1);
+  return [{ value: "", label: "全部事项", count: items.length }, ...[...counts.entries()].map(([label, count]) => ({ value: label, label, count }))];
+}
+
+const PAGE = 50;
+export function AnalysisPane({ analysis, placements, kind, selected, onSelect }: {
+  analysis: WorkbenchView["analysis"]; placements: Map<string, Placement>; kind: string;
+  selected: string | null; onSelect(key: string): void;
+}) {
   const [query, setQuery] = useState("");
-  const [kind, setKind] = useState("");
-  const items = analysis?.items ?? [];
-  const shown = items.filter(item => (!kind || item.kind === kind) && (!query.trim() || item.text.includes(query.trim())));
+  const [page, setPage] = useState(1);
+  const items = (analysis?.items ?? []).map((item, index) => ({ item, key: itemKey(item, index) }));
+  const shown = items.filter(({ item }) => (!kind || kindOf(item) === kind) && (!query.trim() || item.text.includes(query.trim())));
+  const pages = Math.max(1, Math.ceil(shown.length / PAGE));
+  const current = Math.min(page, pages);
+  const rows = shown.slice((current - 1) * PAGE, current * PAGE).map(({ item, key }) => ({ key, item }));
   const taskVisible = !!analysis && (inProgress(analysis.status) || analysis.status === "failed" || analysis.status === "blocked" || !!analysis.progress?.request_states.uncertain);
   const issues = analysis ? groupedIssues(analysis.issues) : [];
-  return <VStack gap={3} padding={6} maxWidth={1220} role="region" aria-label="招标事项">
-    {!analysis ? <EmptyState title="尚无分析结果" description="上传文件后可开始分析，也可先编制可用稿件。" /> : <>
-      {!taskVisible && <HStack gap={2} vAlign="center"><Badge variant={analysis.confirmed ? "success" : "warning"} label={analysis.confirmed ? "已确认" : "未确认"} /><Text type="supporting" hasTabularNumbers>来源版本 {analysis.source_version}，修订 {analysis.domain_revision}</Text></HStack>}
-      <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />
+  return <VStack gap={3} paddingInline={6} paddingBlock={4} role="region" aria-label="招标事项">
+    {!analysis ? <Card><EmptyState title="尚无分析结果" description="上传文件后可开始分析，也可先编制可用稿件。" /></Card> : <>
+      {taskVisible && <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />}
       {analysis.sources_current === false && <Banner role="status" status="warning" title="招标资料已有更新，以下是旧资料的分析结果。" description="可重新分析，也可基于最新资料生成新稿。" />}
       {executionError(analysis.error) && <Banner role="alert" status="error" title={executionError(analysis.error)} />}
-      {!!items.length && <Toolbar label="筛选招标事项" startContent={<TextInput label="搜索招标事项" type="search" placeholder="搜索事项原文…" value={query} onChange={setQuery} />}
-        endContent={<Selector label="事项类型" value={kind} onChange={setKind} options={[{ value: "", label: "全部类型" }, ...Array.from(new Set(items.map(item => item.kind).filter((value): value is string => !!value))).map(value => ({ value, label: kindLabels[value] ?? value }))]} />} />}
-      {!items.length ? <EmptyState isCompact title="当前尚无可读取的事项" description="分析结束后在这里逐条查看。" /> : !shown.length ? <EmptyState isCompact title="没有匹配事项" description="换一个关键词或事项类型。" /> : shown.map((item, index) => <Card key={item.item_id ?? index} padding={3} role="article" aria-label={item.text}><VStack gap={2}>{item.kind && <HStack><Badge variant="neutral" label={kindLabels[item.kind] ?? item.kind} /></HStack>}<ItemContent item={item} /></VStack></Card>)}
+      <Card padding={0}><VStack gap={0}>
+        <Toolbar label="筛选招标事项" dividers={["bottom"]}
+          startContent={<TextInput label="搜索招标事项" isLabelHidden type="search" placeholder="搜索事项原文" value={query} onChange={value => { setQuery(value); setPage(1); }} />}
+          endContent={<Text type="supporting" hasTabularNumbers>{shown.length ? `第 ${(current - 1) * PAGE + 1}–${Math.min(current * PAGE, shown.length)} 条，共 ${shown.length} 条` : "共 0 条"}</Text>} />
+        {!items.length ? <EmptyState isCompact title="当前尚无可读取的事项" description="分析结束后在这里逐条查看。" />
+          : !shown.length ? <EmptyState isCompact title="没有匹配事项" description="换一个关键词或事项类型。" />
+          : <Table hasHover idKey="key" data={rows} columns={[
+            { key: "item", header: "招标事项", renderCell: ({ item, key }) => <Link href={`#item-${key}`} aria-current={key === selected ? "true" : undefined} onClick={event => { event.preventDefault(); onSelect(key); }}>{item.text}</Link> },
+            { key: "kind", header: "类型", width: pixel(100), renderCell: ({ item }) => <Badge variant="neutral" label={kindOf(item)} /> },
+            { key: "source", header: "原件位置", width: pixel(140), renderCell: ({ item }) => <Text type="supporting">{item.evidence?.[0]?.range_id ?? "—"}</Text> },
+            { key: "place", header: "标书位置", width: pixel(180), renderCell: ({ item }) => <Text>{placements.get(item.item_id ?? "")?.chapters.join("、") || "—"}</Text> },
+            { key: "check", header: "核对", width: pixel(96), renderCell: ({ item }) => checkBadge(placements.get(item.item_id ?? "")) },
+          ]} />}
+        {pages > 1 && <Toolbar label="分页" dividers={["top"]} startContent={<Text type="supporting">每页 {PAGE} 条</Text>}
+          endContent={<Pagination page={current} onChange={setPage} totalItems={shown.length} pageSize={PAGE} />} />}
+      </VStack></Card>
       {!!issues.length && <VStack gap={1}>{issues.map(([text, count]) => <Text key={text} type="supporting">{count > 1 ? `${count} 个阶段同一情况：` : ""}{text}</Text>)}</VStack>}
     </>}
   </VStack>;
+}
+
+export function ItemDetail({ item, placement }: { item: TenderItem; placement?: Placement }) {
+  return <Card padding={0} role="region" aria-label="事项详情"><VStack gap={0}>
+    <Toolbar label="事项详情标题" dividers={["bottom"]} startContent={<Text weight="semibold">事项详情</Text>} />
+    <VStack gap={3} padding={4}>
+      <MetadataList label={{ width: 72 }}>
+        <MetadataListItem label="类型">{kindOf(item)}</MetadataListItem>
+        <MetadataListItem label="原件位置">{item.evidence?.[0]?.range_id ?? "—"}</MetadataListItem>
+        <MetadataListItem label="标书位置">{placement?.chapters.join("、") || "尚未安排到章节"}</MetadataListItem>
+        <MetadataListItem label="核对">{checkBadge(placement)}</MetadataListItem>
+      </MetadataList>
+      <ItemContent item={item} />
+    </VStack>
+  </VStack></Card>;
 }

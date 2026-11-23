@@ -35,7 +35,7 @@ import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "
 import { FileInput } from "@astryxdesign/core/FileInput";
 import { pixel, Table } from "@astryxdesign/core/Table";
 import { GuideScreen } from "../guide/GuideScreen";
-import { AnalysisPane, ChapterInspector, ChapterTree, flattenChapters } from "./WorkbenchPanels";
+import { AnalysisPane, analysisTabs, ChapterInspector, ChapterTree, flattenChapters, ItemDetail, itemKey, itemPlacements, type Placement } from "./WorkbenchPanels";
 import { AnalysisReview } from "./AnalysisReview";
 import { AnalysisRecovery } from "./AnalysisRecovery";
 import { ChapterRevision } from "./authoring/ChapterRevision";
@@ -196,6 +196,8 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const [dismissedDraft, setDismissedDraft] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [analysisKind, setAnalysisKind] = useState("");
+  const [selectedItem, setSelectedItem] = useState<string | null>(null);
   const executionAttempts = useRef(new Map<string, MutationAttempt>());
   const actionKey = `kb.tender-action:${projectId}`;
   const [pending, setPending] = useState<PendingAction | null>(() => {
@@ -368,6 +370,14 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     {step === "analysis" && <Button variant="primary" label={pending?.kind === "analysis" ? "确认同一次分析请求" : "分析招标文件"} isDisabled={busy || ended && pending?.kind !== "analysis" || inProgress(view.analysis?.status) && pending?.kind !== "analysis" || !!pending && pending.kind !== "analysis"} onClick={() => void start("analysis")} />}
     {step === "authoring" && <Button variant="primary" label="编排大纲" onClick={() => { setAuthoringMode("outline"); window.location.hash = `/bids/${projectId}/authoring`; }} />}
   </HStack>;
+  const placements = view ? itemPlacements(view) : new Map<string, Placement>();
+  const analysisItems = view?.analysis?.items ?? [];
+  const focusedIndex = analysisItems.findIndex((item, index) => itemKey(item, index) === selectedItem);
+  const focusedItem = analysisItems[focusedIndex >= 0 ? focusedIndex : 0];
+  const itemDetail = focusedItem && <ItemDetail item={focusedItem} placement={placements.get(focusedItem.item_id ?? "")} />;
+  const analysisTabList = step === "analysis" && analysisItems.length ? <TabList aria-label="事项类型" value={analysisKind} onChange={setAnalysisKind}>
+    {analysisTabs(analysisItems).map(tab => <Tab key={tab.value || "all"} value={tab.value} label={`${tab.label} ${tab.count}`} />)}
+  </TabList> : undefined;
   const authoringTabs = step === "authoring" ? <TabList role="tablist" value={authoringMode === "body" || authoringMode === "guide" ? authoringMode : "outline"} onChange={value => setAuthoringMode(value as "guide" | "outline" | "body")}>
     <Tab value="guide" label="材料引导" panelId="guide-panel" />
     <Tab value="outline" label="大纲编排" panelId="outline-planner-panel" />
@@ -388,7 +398,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const projectTitle = view?.project.title ?? "投标项目";
   return <Shell root="bids" email={email} onBeforeLeave={() => !unsafe}
     header={<PageHeader crumbs={[{ label: "投标项目", href: "/" }, { label: projectTitle, href: authoringHref(projectId, "files") }, { label: sectionLabel }]}
-      title={sectionLabel} status={headerStatus} meta={headerMeta} actions={pageActions} tabs={authoringTabs} />}
+      title={sectionLabel} status={headerStatus} meta={headerMeta} actions={pageActions} tabs={authoringTabs ?? analysisTabList} />}
     panel={projectPanel({ projectId, step, view })}>
     <VStack gap={0} height="100%" minHeight={0}>
       {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || view?.authoring)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
@@ -423,13 +433,15 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
         })()}
         <Panel isShown={step === "analysis"} fill>
           {stacked
-            ? <VStack isScrollable height="100%" gap={4}><AnalysisPane analysis={view.analysis} /><VStack padding={4} role="complementary" aria-label="分析处理"><VStack gap={4}>
+            ? <VStack isScrollable height="100%" gap={4}><AnalysisPane analysis={view.analysis} placements={placements} kind={analysisKind} selected={selectedItem} onSelect={setSelectedItem} /><VStack padding={4} role="complementary" aria-label="分析处理"><VStack gap={4}>
+              {itemDetail}
               <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
               <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
             </VStack></VStack></VStack>
             : <Layout height="fill"
-              content={<LayoutContent padding={0}><AnalysisPane analysis={view.analysis} /></LayoutContent>}
+              content={<LayoutContent padding={0}><AnalysisPane analysis={view.analysis} placements={placements} kind={analysisKind} selected={selectedItem} onSelect={setSelectedItem} /></LayoutContent>}
               end={<LayoutPanel width={380} hasDivider label="分析处理" role="complementary" padding={4}><VStack gap={4}>
+              {itemDetail}
               <AnalysisReview projectId={projectId} disabled={!!ended} onChanged={reload} onUnsafeChange={setAnalysisUnsafe} />
               <AnalysisRecovery projectId={projectId} readOnly={!!ended} disabled={busy || !!pending} onChanged={reload} onUnsafeChange={setRecoveryUnsafe} />
             </VStack></LayoutPanel>} />}

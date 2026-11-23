@@ -14,7 +14,7 @@ test("a project exposes files, source analysis, one Word editor and versioned de
   await expect(page.getByRole("cell", { name: "合成招标.pdf" })).toBeVisible();
   await nav.getByRole("link", { name: /^招标解读/ }).click();
   await expect(page.getByRole("heading", { name: "招标解读" })).toBeVisible();
-  await expect(page.getByText("应提交实施安排。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "招标事项" }).getByRole("link", { name: "应提交实施安排。", exact: true })).toBeVisible();
   await nav.getByRole("link", { name: /^标书编制/ }).click();
   await expect(page.getByTestId("docx-editor")).toBeVisible();
   await expect(page.getByRole("complementary", { name: "文件与章节目录" })).toBeVisible();
