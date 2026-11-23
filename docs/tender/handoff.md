@@ -1,6 +1,6 @@
 # Python 招标交接
 
-动态状态只写在这里。字段看[字段字典](field-dictionary.md)，发送次数看[业务工作流](business-workflow.md)，问题看[问题记录](bug-fix.md)。
+动态状态只写在这里。字段看[字段字典](field-dictionary.md)，发送次数看[业务工作流](workflow.md)，问题看[问题记录](bug-fix.md)。
 
 ## 现在
 

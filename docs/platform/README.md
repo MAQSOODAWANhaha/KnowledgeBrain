@@ -34,6 +34,6 @@
 ## 当前参考
 
 - 配置：只支持全新部署，一套应用数据库账号。用户必须提供的配置见 [AGENTS.md](../../AGENTS.md)「本机开发栈」和 [deploy/README.md](../../deploy/README.md)。
-- 招标分析与编制：[Python 招标](../design/python-tender-phase1/README.md)。正文保存见 [ONLYOFFICE](../bidding/onlyoffice.md)。
-- 数据库结构：[数据库设计](../design/database-initialization.md)、[命名约定](../design/database-naming.md)
+- 招标分析与编制：[Python 招标](../tender/README.md)。正文保存见 [ONLYOFFICE](../tender/onlyoffice.md)。
+- 数据库结构：[数据库设计](database-initialization.md)、[命名约定](database-naming.md)
 - 日志：API 和 worker 用 `platform::init_tracing()` 初始化 `tracing`。`api/routes.rs`、`worker/main.rs`、`platform/jobs.rs`、`platform/s3.rs` 等生产路径仍有少量 `eprintln!`，尚未统一。

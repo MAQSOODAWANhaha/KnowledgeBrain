@@ -9,7 +9,7 @@
 目标主流程为 **register → freeze → extract → verify → confirm**，人工确认当前无阻断的
 分析结果后到 `analysis-ready`。目标产物为来源清单、统一事项台账、来源覆盖与独立核验结果、
 问题及有证据的决议。实际内容由招标原文决定，包括评分、否决、技术、服务、售后、人员及
-其他要求；不按业务类别建立不同发现流程。详细顺序见[业务工作流](business-workflow.md)。
+其他要求；不按业务类别建立不同发现流程。详细顺序见[业务工作流](workflow.md)。
 
 本期不处理企业响应数据，不生成响应计划、响应动作或准备待办，不决定评分机会是否采纳，
 不计算企业实际得分。原文明示的填表、附件、签章和证明材料要求仍须分析，但不能据此生成
@@ -207,7 +207,7 @@ target_kind 为 body/table_field/attachment/manual_action；target 是具体位�
 ## 历史正确性评审合同（2026-10-14，保留依据）
 
 以下保留此前针对六阶段实现的约束目标及依据；计划相关目标不纳入新一期。字面及词表
-检查的局限及分析阶段已实现的独立审阅路径以上文及[业务工作流](business-workflow.md)为准；
+检查的局限及分析阶段已实现的独立审阅路径以上文及[业务工作流](workflow.md)为准；
 来源解析与旧独立工具的历史启发式仍保留，新流程真实模型语义验收未完成。
 
 - 验证模型的 `blocking` 只能提高阻断级别。宿主对漏项、证据/数字/条件/适用性/冲突等
@@ -226,4 +226,4 @@ target_kind 为 body/table_field/attachment/manual_action；target 是具体位�
 真实 PDF 离线预检的原件、解析正文、图片和冻结包只写私有目录；Git 只收摘要 hash、计数、
 页码、问题类别、覆盖断言与 token 估算方法。估算不是模型实际用量，OCR 未执行不能写成功。
 
-最新结构分包与各层内容去重合同以[业务工作流](business-workflow.md)和[字段字典](field-dictionary.md)为准。旧分包 inline body/supporting 持久格式与 verify 回显 requirements 不作为当前实现。
+最新结构分包与各层内容去重合同以[业务工作流](workflow.md)和[字段字典](field-dictionary.md)为准。旧分包 inline body/supporting 持久格式与 verify 回显 requirements 不作为当前实现。

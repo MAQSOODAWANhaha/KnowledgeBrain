@@ -5,18 +5,18 @@
 每条包含：**规则 / 原因 / 证据（commit 或 BUG）/ Seen 计数（按不同日期或里程碑计）**。
 
 - **晋升**：同一规则在 **3 个不同日期或里程碑**出现（`Seen 3×`），晋升进 [工程与验收标准](docs/code-standards.md) 或下沉为自动化 Guard Test，并从本页移出。
-- **不替代**：单次事故详情记 [问题记录](docs/design/python-tender-phase1/bug-fix.md)；动态运行状态记 [交接](docs/design/python-tender-phase1/handoff.md)。
+- **不替代**：单次事故详情记 [问题记录](docs/tender/bug-fix.md)；动态运行状态记 [交接](docs/tender/handoff.md)。
 
 ## 活跃规则
 
 1. **Prompt 允许的输出形态与宿主校验器必须共用单一真源或有双向断言测试。**
    - 原因：提示允许某种输出形态或省略默认空字段，宿主校验却按旧口径拒收，会导致合法回包整包失败或覆盖重复记账。
-   - 证据：历史招标分析与编制多轮回包拒收回归（见 `docs/design/python-tender-phase1/bug-fix.md`）。
+   - 证据：历史招标分析与编制多轮回包拒收回归（见 `docs/tender/bug-fix.md`）。
    - Seen 2×（2026-11-18，2026-11-23）。
 
 2. **内部/编译态定位字段不得越过公开投影边界。**
    - 原因：内部排序或定位元数据直出到下游合同或身份摘要，会触发严格 Schema 拒收或缓存误失效。
-   - 证据：冻结来源与大纲编译路径的公开投影边界回归（见 `docs/design/python-tender-phase1/bug-fix.md`）。
+   - 证据：冻结来源与大纲编译路径的公开投影边界回归（见 `docs/tender/bug-fix.md`）。
    - Seen 2×（2026-11-18，2026-11-23）。
 
 3. **读失败、解析失败、映射缺失或回包不完整只能表示“未知”，绝不降级成空列表或 0 项。**

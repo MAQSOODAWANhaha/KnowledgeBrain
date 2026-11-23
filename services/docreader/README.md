@@ -8,7 +8,7 @@ KnowledgeBrain Python 解析与招标桥接进程。协议 **仅 gRPC**（`servi
 - `TenderBridge.Command`：鉴权后的招标业务桥接命令（要求显式配置 `GRPC_AUTH_TOKEN`，详见 `services/docreader/main.py`）。
 
 纯解析路径（`Read` / `ReadStream`）**不分块、不 OCR、不写对象存储、不写业务库**；扫描页只出 JPEG，知识库 OCR/caption 在 Rust worker。
-招标分析与编制由同工程的 [Python 招标工作流](../../docs/design/python-tender-phase1/README.md) 承担（LangGraph + PostgreSQL + Dramatiq/Redis），独立启动与运维见 [运行手册](../../docs/design/python-tender-phase1/runbook.md)。
+招标分析与编制由同工程的 [Python 招标工作流](../../docs/tender/README.md) 承担（LangGraph + PostgreSQL + Dramatiq/Redis），独立启动与运维见 [运行手册](../../docs/tender/runbook.md)。
 
 ## 引擎
 

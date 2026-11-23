@@ -85,8 +85,8 @@ ONLYOFFICE 部署版本，不默认依赖 Developer 版专属的 Automation API�
 Python 合同，只有显式编制或复核动作才触发对应执行；页面轮询、刷新和恢复查询不能
 重复创建付费任务。
 
-业务语义以 [Python 业务流程](python-tender-phase1/business-workflow.md)及
-[字段字典](python-tender-phase1/field-dictionary.md)为准。
+业务语义以 [Python 业务流程](workflow.md)及
+[字段字典](field-dictionary.md)为准。
 
 ## 实施与验收顺序
 

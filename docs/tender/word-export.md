@@ -1,12 +1,6 @@
-# 招投标文档入口
+# 来源格式进 Word
 
-当前招标分析与编制统一使用 [Python 工作流](../design/python-tender-phase1/business-workflow.md)，字段以 [字段字典](../design/python-tender-phase1/field-dictionary.md) 为准，实施与实际验证见 [交接文档](../design/python-tender-phase1/handoff.md)。
-
-旧 Rust 招标工作流、专用 API、worker、表和存储过程已删除，不保留兼容运行入口。Rust 的 API 桥接、知识库、对象存储和通用后台服务继续使用。全新初始化及创建人权限见 [数据库设计](../design/database-initialization.md)。
-
-本目录只保留 [ONLYOFFICE Word 编辑、保存和出件](onlyoffice.md) 与来源格式进 Word 规则。分析次数、字段和运行状态分别看业务工作流、字段字典和交接，不在这里再写一套。发布工具边界见 [发布入口](../../deploy/release-entry.md)。文档怎么维护见 [文档导航](../README.md)。
-
-## 来源格式怎么进 Word
+招投标分析与编制入口见 [招投标文档入口](README.md)，ONLYOFFICE 编辑与同版导出见 [ONLYOFFICE](onlyoffice.md)，字段与运行状态分别看 [字段字典](field-dictionary.md) 与 [交接](handoff.md)。
 
 投标文件只产出 Word。PDF、DOCX、Excel 都冻结成同一批来源对象，格式定义只在来源存一份。Word 还原的是来源里已经记下的格式，不按原 PDF 逐页排版。
 

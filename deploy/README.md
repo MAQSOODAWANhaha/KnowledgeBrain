@@ -71,7 +71,7 @@ Python init只读核验业务表并初始化LangGraph checkpoint；DocReader与�
 
 ONLYOFFICE 不是招标分析和大纲生成的前置条件。需要编辑时显式启用
 `editing` profile，提供其 JWT/能力密钥及浏览器/API origin；没有固定秘密回退。
-编辑、保存和验收要求见 [ONLYOFFICE](../docs/bidding/onlyoffice.md)。
+编辑、保存和验收要求见 [ONLYOFFICE](../docs/tender/onlyoffice.md)。
 
 ## 数据库初始化与升级
 
@@ -104,7 +104,7 @@ checkpoint，最后启动worker/dispatcher。
 角色进程、数据库必要表/列及Redis；探针总时限8秒，Compose健康检查时限10秒。
 探针核对统一业务表及checkpoint；缺表/缺列即失败，不由首次页面请求补建业务表。
 三者没有新增宿主端口。该 profile 不自动切换 Rust 链路，也不会自行提交文件或调用模型。
-原件提交、状态核对和人工确认见[工作流运行手册](../docs/design/python-tender-phase1/runbook.md)。
+原件提交、状态核对和人工确认见[工作流运行手册](../docs/tender/runbook.md)。
 
 生产发布使用 `deploy/release-descriptor-v1.json`：
 
@@ -218,7 +218,7 @@ OnlyOffice 的浏览器 origin。
 
 失败任务通过现有重试/恢复接口继续，保留租约围栏、模型调用回执和已完成产物。Word 保存保留版本并发检查，缺少资料的响应位置继续留空。上传暂存与对象引用由业务事务登记，retention 负责无引用对象回收。
 
-当前流程与真实验收状态见 [Python 交接文档](../docs/design/python-tender-phase1/handoff.md)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
+当前流程与真实验收状态见 [Python 交接文档](../docs/tender/handoff.md)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
 
 ## 健康与验收
 

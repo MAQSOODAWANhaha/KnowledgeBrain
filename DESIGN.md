@@ -2,7 +2,7 @@
 
 外壳是冷灰仪器盘：日光下长时间核对招标与稿件用的工作台。密、静、发丝线，钢蓝只标当前选中、主按钮和焦点。本文只约束 Web 外壳，不强加到 ONLYOFFICE 或 DOCX 正文。
 
-稿件保存、锚点、下载和编制行为以 [frontend-workbench-design.md](docs/design/frontend-workbench-design.md) 为准。页面几何与交互以本文为准。
+稿件保存、锚点、下载和编制行为以 [frontend-workbench-design.md](docs/tender/workbench.md) 为准。页面几何与交互以本文为准。
 
 ## 1. Visual Theme
 

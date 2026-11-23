@@ -18,7 +18,7 @@ from docreader.tender.semantic_evaluation import (
 )
 
 
-CORPUS = Path(__file__).resolve().parents[4] / "docs/design/python-tender-phase1/semantic-cases.json"
+CORPUS = Path(__file__).resolve().parents[4] / "docs/tender/semantic-cases.json"
 
 
 def cases(count=2):

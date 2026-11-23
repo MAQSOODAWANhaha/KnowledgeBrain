@@ -54,9 +54,9 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 ## Evidence on Hand
 
-生成合同在 `docs/bidding/`。本页是工作台的产品设想。
+生成合同在 `docs/tender/`。本页是工作台的产品设想。
 
-- [业务入口](docs/bidding/README.md)、[招标工作流](docs/design/python-tender-phase1/README.md)、[ONLYOFFICE](docs/bidding/onlyoffice.md)
+- [业务入口](docs/tender/word-export.md)、[招标工作流](docs/tender/README.md)、[ONLYOFFICE](docs/tender/onlyoffice.md)
 - `docs/knowledge-base/domain.md`（知识库领域与证据检索端口）
 - `1.png`：Plannotator 三栏编辑器仅作结构参照（左树 / 中文稿 / 右检查器）。外壳以 `DESIGN.md` 的冷灰仪器盘为准：不仿 iCloud，不用暖纸，也不把侧栏做成暗色
 - 无客户照片、无真实标书样张可当品牌图

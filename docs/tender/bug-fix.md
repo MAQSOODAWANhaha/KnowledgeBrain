@@ -109,7 +109,7 @@ D1改变“确认不能处理问题”的现行表述，实施P1时同步业务�
 
 ### 常设防线
 
-- **G1 设计检查单**：修改协议、流程、分包或Prompt前回答五个问题，见[AGENTS](../../../AGENTS.md)。
+- **G1 设计检查单**：修改协议、流程、分包或Prompt前回答五个问题，见[AGENTS](../../AGENTS.md)。
 - **G2 离线全链路规划回归**：用最近一次真实运行导出的私有回放素材，部署前重规划全部阶段，
   报告各阶段请求数、累计输入估算和超预算数并与基线比较；素材不放`/tmp`。
 - **G3 运行时偏差监控**：预算观察报告逐请求比较估算与`prompt_tokens`、输出与预留、首包等待
@@ -190,7 +190,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 验证：106 页文件离线预检覆盖 796 范围，无缺漏、重复或错误区间；239 表格行、805 cells
   与规范来源一致。Wire 减少属于字节测量，不能当作 Token 降幅或模型理解质量已通过。
   证据：`/tmp/kb-v2-preflight-celltext-9ghbrybb/report.json`；回归见
-  [来源视图测试](../../../services/docreader/tests/unit/test_tender_source_view.py)。
+  [来源视图测试](../../services/docreader/tests/unit/test_tender_source_view.py)。
 
 ### BUG-002 模型省略原文换行导致合法引文被拒收
 
@@ -200,7 +200,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 解决方案：精确匹配优先；仅在实际发送的同一可见文本中，允许恢复唯一原区间内省略的
   `U+000A`，记录诊断。不做 NFKC、任意空白或标点替换，不使用隐藏原文。
 - 验证：旧 4 包离线恢复 92 处引文中的 137 个 LF，原始回包和冻结来源不变；歧义、越界
-  与其他字符改动仍拒绝。见[引文恢复测试](../../../services/docreader/tests/unit/test_evidence_quote_recovery.py)
+  与其他字符改动仍拒绝。见[引文恢复测试](../../services/docreader/tests/unit/test_evidence_quote_recovery.py)
   及 `/tmp/kb-final-protocol-VvBnef/raw-replay-report.json`。引文可追溯不证明事项语义正确。
 
 ### BUG-003 让模型重复维护处置反向索引
@@ -211,7 +211,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 解决方案：模型判断处置状态和理由，宿主按事项直接证据派生 `item_ids`。处置缺失或矛盾时
   保留有效事项和具体问题送独立核验，不补造语义结论，也不清除模型明确的 `unresolved`。
 - 验证：旧回包离线重建 2 处索引，原有 14 个明确来源未决保留；处置矛盾仍待独立核对。
-  见[回包恢复测试](../../../services/docreader/tests/unit/test_analysis_response_recovery.py)
+  见[回包恢复测试](../../services/docreader/tests/unit/test_analysis_response_recovery.py)
   及 `/tmp/kb-final-protocol-VvBnef/raw-replay-report.json`。
 
 ### BUG-004 可选数字字段错误导致有效事项被拒收
@@ -224,7 +224,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 解决方案：不完整或不可追溯时省略整个可选 `numbers` 并记录诊断，完整 `text/evidence`
   保留。数字归属、单位、比较关系及条件由独立 LLM 核验，不新增业务正则裁决。
 - 验证：旧回包离线省略 2 个事项的 numbers；合法零值、同一已引用范围内互补引文保留。
-  见[回包恢复测试](../../../services/docreader/tests/unit/test_analysis_response_recovery.py)。
+  见[回包恢复测试](../../services/docreader/tests/unit/test_analysis_response_recovery.py)。
   此修复不代表数字关系已经验证正确。
 
 ### BUG-005 完整流中的 JSON 无效
@@ -290,8 +290,8 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
   同修订幂等恢复命令，保留 start/resume 参数并复用成功产物。取消、失效围栏及
   sent/uncertain 仍停止；并发异常优先传播付费不确定性，不叠加 SDK 重试。
 - 验证：该轮定向 197 个独立用例通过，真实失败抽取包已恢复。见
-  [恢复验收](../../../services/docreader/tests/acceptance/test_analysis_retry.py)、
-  [显式恢复测试](../../../services/docreader/tests/workflow/test_explicit_retry.py)
+  [恢复验收](../../services/docreader/tests/acceptance/test_analysis_retry.py)、
+  [显式恢复测试](../../services/docreader/tests/workflow/test_explicit_retry.py)
   及 `/tmp/kb-bounded-retry-vawj54vv/`。这些结果未覆盖完整 JSON 被宿主拒收后的有效恢复。
   新run于2026-10-16 05:49 UTC的discovery-13收到明确HTTP 500，命令第二次执行后该包
   succeeded，先前成功包保留；共享失败计数为1。这验证了一次真实基础设施重试，供应商
@@ -370,7 +370,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
   plan/request 摘要及生产预算保持一致，不靠加长租约掩盖事件循环阻塞。
 - 验证：4 个失败回归修复后通过；真实文件离线 17 包覆盖 796/796 范围，全部准入，
   最大输入估算 110490/110592。702 次模拟心跳最大间隔 0.149 秒；真实运行已进入 review。
-  见[心跳回归](../../../services/docreader/tests/unit/test_analysis_responsiveness.py)
+  见[心跳回归](../../services/docreader/tests/unit/test_analysis_responsiveness.py)
   及 `/tmp/kb-lease-repair-_aszzk_8/`。后续流程仍受 BUG-009/010 阻断。
 
 ### BUG-008 失租接管未结算共享失败预算
@@ -381,7 +381,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 解决方案：领取时一次结算过期 `lease_command_id` 的失败；以已有 execution_count 补偿
   历史漏计，沿用首次加 3 次的共享上限。重复投递不重复计数，旧 Worker 仍受写围栏保护。
 - 验证：8 个针对用例先复现再修复；旧 8 次执行命令正式终结，未新增模型调用。
-  见[失租测试](../../../services/docreader/tests/workflow/test_expired_retry.py)
+  见[失租测试](../../services/docreader/tests/workflow/test_expired_retry.py)
   及 `/tmp/kb-lease-repair-_aszzk_8/expired-retry-fixed.xml`。
 
 ### BUG-009 父定位 ID 被误列为已审阅范围
@@ -399,7 +399,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
   合法可读父 ID/alias 保留，findings 引用边界不放宽，原始回包不改。
 - 验证：真实请求摘要及完整 17 包计划离线精确匹配；归属诊断为
   `/tmp/kb-review3-origin-9rmepgx_/report.json`。新增
-  [身份恢复回归](../../../services/docreader/tests/unit/test_analysis_review_id_recovery.py)
+  [身份恢复回归](../../services/docreader/tests/unit/test_analysis_review_id_recovery.py)
   补齐冗余父 ID 重复用例后基线 3 失败、12 通过，修复后全部通过。包含真实客户端缓存
   恢复、核验边界、流式及隔离数据库工作流的本轮定向回归共 330 个独立用例通过，零跳过、
   失败或错误；Ruff、diff 检查通过。真实第 3 包禁网只读回放从 92 个 ID 恢复为 85 个，
@@ -430,8 +430,8 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
   输入投影缺陷拒收，首次加3次的共享命令预算已耗尽，最终failed。不是同缓存空转，
   也不能据此宣称合同纠正足以补救宿主输入缺陷。
 - 历史证据：`/tmp/kb-lease-repair-_aszzk_8/latest-failure-summary.json`。
-  实现见[拒收恢复](../../../services/docreader/llm/recovery.py)和
-  [恢复验收](../../../services/docreader/tests/acceptance/test_analysis_retry.py)。
+  实现见[拒收恢复](../../services/docreader/llm/recovery.py)和
+  [恢复验收](../../services/docreader/tests/acceptance/test_analysis_retry.py)。
 
 ### BUG-011 模型 Key 并发超限
 
@@ -517,7 +517,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 验证：该轮模型/流式离线回归 139 通过；后续镜像源码指纹核对一致，旧 2 条 uncertain 保留，
   本次v6真实抽取已收到`server_error/request_timeout`帧，回执准确保存type/code并记uncertain，
   自动重试已触发；这证明错误识别及恢复入口工作，不代表该工作单元已成功或根因已解决。
-  见[流式测试](../../../services/docreader/tests/unit/test_tender_streaming.py)
+  见[流式测试](../../services/docreader/tests/unit/test_tender_streaming.py)
   及 `/tmp/kb-workflow-start-g8vpogcy/recovery-green.xml`；后续部署核对证据为
   `/tmp/kb-lease-repair-_aszzk_8/{deployment-verification,final-source-verification}.json`。
 - 新完整复跑再次捕获供应商`api_error`：抽取已接收内容与推理增量，约358秒后
@@ -666,7 +666,7 @@ P3 源码已按此实现。当前单元 926 passed，Ruff 通过；隔离 workfl
 - 根因：镜像没有安装 Calc 组件。
 - 解决方案：在现有 DocReader 镜像补齐 `libreoffice-calc-nogui`，不增加服务或配置项。
 - 验证：修复后单项通过，完整复验 716 passed / 15 skipped，309.11 秒；该历史轮次的
-  15 项因缺少文件样本跳过。见[镜像定义](../../../deploy/Dockerfile.docreader)
+  15 项因缺少文件样本跳过。见[镜像定义](../../deploy/Dockerfile.docreader)
   及 `/tmp/kb-python-tests-zu7cbv56/summary.json`。不以此替代新协议或真实流程验收。
 
 ### BUG-016 文档入口保留了过期的当前进度
@@ -1454,7 +1454,7 @@ locate关系供给已同步共享Prompt引用说明，见BUG-025；
   尚无真实大纲证明已发生上述错误生成，不能把风险写成实测漏项。
 - 根因：authoring.py读取全部current_items，并只按targets中的rule_ids计算assigned；
   当前合同尚未表示约束文件或交付行为的用途。结构覆盖与业务落实的口径没有分开。
-- 解决方案：先在[编制架构草案](authoring-architecture.md)和字段字典明确内容响应与
+- 解决方案：先在[编制架构草案](authoring.md)和字段字典明确内容响应与
   编制/交付约束；LLM判断适用用途，宿主绑定引用及派生覆盖。签章可约束具体表单，上传
   期限保留为交付约束，不为消除提示新增正文。实际交付合同实施时补最小引用表达，不新增
   ItemKind、通用任务框架或全局门禁；当前未分配问题不得提前视为已解决。
@@ -2713,7 +2713,7 @@ locate关系供给已同步共享Prompt引用说明，见BUG-025；
 - 现象：新 Python 招标入口仍依赖旧 SQL 发布过程，旧 worker 仍注册 Rust 招标处理器；Python 与 Rust 分别维护建表入口。知识库 require_ws 忽略实际用户，将所有认证主体视为 Owner。
 - 影响：只清理迁移会使现有上传/编辑失败；只删除成员角色会留下跨用户可见与可写；结束项目上传在 Rust 登记后才被 Python 拒绝，会产生部分记录。
 - 根因：业务归属、对象一致性与历史工作流职责混在 SQL 授权入口，API 的成员校验是占位实现，初始化表结构存在多份来源。
-- 解决方案：按 [数据库初始化与业务归属](../database-initialization.md) 重写全新初始化；归属统一由业务层校验，Key 绑定用户而无独立权限范围；迁移实际调用端并退出旧流程，保留事务、引用、outbox、租约、付费回执。现有库无需兼容，不对其执行重置。
+- 解决方案：按 [数据库初始化与业务归属](../platform/database-initialization.md) 重写全新初始化；归属统一由业务层校验，Key 绑定用户而无独立权限范围；迁移实际调用端并退出旧流程，保留事务、引用、outbox、租约、付费回执。现有库无需兼容，不对其执行重置。
 - 验证：命名后的知识库、对象生命周期、Python存储与真实项目/Word隔离回归已通过；标准迁移已验证台账、增量、单文件回滚/恢复、并发与校验和。状态类型专项、Rust全workspace及Clippy检查已通过；Python整组唯一夹具缺状态问题修正后定向复测通过，具体计数和证据见交接文档。尚未部署或重新运行真实模型。
 - 关联审查：只检查路径中的产品归属，未校验显式版本和克隆来源属于该产品，会让其他人的版本经列表/克隆旁路读出；初始化仅见 users 就判成功，会把部分 schema 当完成。补双用户实际接口反例、部分初始化反例后，统一使用产品—版本解析入口及三领域初始化根表检查，不引入数据库权限函数或 schema 哈希门禁。
 - 迁移流程补查：三份无版本 baseline 只支持首次建库，见到领域根表即跳过，没有版本台账、校验和与后续增量入口。根因是将“不兼容旧业务数据”误收窄为“只需初始化”。改为时间戳 SQL 和标准 SQLx 迁移器，保留现有部署入口；数据库锁、单文件事务和台账由 SQLx 管理。未来变化追加版本，不重写已发布并执行的 SQL。验收补首次登记、重复执行、增量、失败恢复、校验和与并发执行，实际结果记录在交接文档。
