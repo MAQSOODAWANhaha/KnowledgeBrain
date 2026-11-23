@@ -2734,7 +2734,7 @@ P2、P3 按当时多轮核验写的五问已过时，不继续当作当前调用
 - 现象与影响：分析和编制的执行规格都带 `budget.spec()`。只改一个任务的 Prompt 或输出契约，用不到它的执行身份也会变，在途执行无法用新镜像续跑，只能新建。另外只有单请求预算和「每个请求最多 4 次」，没有按运行或按文件的总调用数、总 Token 上限。
 - 根因：原条目写的「默认载入所有任务的 Prompt」不准确：分析只带 `extract`、`verify`、`ocr`，编制只带编制 Prompt。实际耦合有三处：`output_contract_spec()` 不分任务，把分析和编制的全部输出契约（含已退役的 `LocateResult`、`AssociationResult`、`Plan`）都算进身份；大纲执行和固定大纲的正文执行共用全部 23 个编制 Prompt；`budget.prompts.get(...) or 读文件` 的回退可以调用未计入身份的 Prompt。预算只设计了单请求和单逻辑请求两层。
 - 改法：执行身份只含本执行会调用的任务，规则见[字段字典](field-dictionary.md#调用预算恢复与修订)第 6 条，五问见[业务工作流](business-workflow.md#执行身份范围)。输出契约按 Prompt 登记，未登记的 Prompt 不能进入身份；编制按大纲、正文、整稿取任务集合；回退改为统一入口，带编制 Prompt 的执行缺某个 Prompt 时报配置错误。运行级上限见[改进路线](../../../plans/improvement-roadmap.md) W3.2。
-- 验证：`test_execution_identity_scope.py` 覆盖：分析身份只含分析契约；编制身份不含分析契约；正文执行身份不含大纲 Prompt 和契约；改 verify Prompt 时编制身份不变；身份外 Prompt 报错。上线会让现有在途执行身份一次性改变。运行级上限的用例待 W3.2。
+- 验证：`test_execution_identity_scope.py` 覆盖：分析身份只含分析契约；编制身份不含分析契约；正文执行身份不含大纲 Prompt 和契约；改 verify Prompt 时编制身份不变；身份外 Prompt 报错。上线会让现有在途执行身份一次性改变。续核：`bid_format_outline.md` 原未登记，一直经回退读文件、不在身份内；加检查后该路径会报配置错误。已登记为大纲 Prompt，并加用例要求每个打包 Prompt 都属于某个身份。运行级上限的用例待 W3.2。
 
 ## BUG-260：传输故障与合同纠正共用重试额度，429 时并发槽位互相抢占
 

@@ -24,6 +24,7 @@ class AuthoringPrompt(StrEnum):
     OUTLINE = AuthoringTask.OUTLINE
     ASSEMBLE = "outline_assemble"
     DIRECTORY_PLAN = AuthoringTask.DIRECTORY_PLAN
+    BID_FORMAT_OUTLINE = "bid_format_outline"
     DIRECTORY_REF_PLAN = "directory_ref_plan"
     DIRECTORY_REF_PLAN_V2 = "directory_ref_plan_v2"
     DIRECTORY_REQUIREMENT = AuthoringTask.DIRECTORY_REQUIREMENT

@@ -71,3 +71,18 @@ def test_scoped_execution_rejects_a_prompt_outside_its_identity():
 def test_unscoped_test_budget_still_reads_the_packaged_prompt():
     analysis_only = {task: get_prompt(task) for task in ANALYSIS_PROMPT_TASKS}
     assert execution_prompt(analysis_only, "authoring_write") == document_execution.load_prompts()["authoring_write"]
+
+
+def test_every_packaged_prompt_belongs_to_an_identity():
+    from importlib.resources import files
+
+    packaged = {path.name[:-3] for path in files("docreader.tender.prompts").iterdir() if path.name.endswith(".md")}
+    registered = set(document_execution.load_prompts()) | set(ANALYSIS_PROMPT_TASKS) | {"plan"}
+    assert packaged == registered
+
+
+def test_outline_execution_can_send_the_bid_format_prompt():
+    outline = document_execution.execution_prompt_names(outline_only=True, fixed_outline=False)
+    prompts = {name: document_execution.load_prompts()[name] for name in outline}
+    assert execution_prompt(prompts, "bid_format_outline")
+    assert "BidFormatOutline" in authoring_spec(outline)["output_contracts"]

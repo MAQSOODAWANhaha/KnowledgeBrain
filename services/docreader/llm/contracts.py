@@ -124,7 +124,7 @@ def _contracts_by_prompt():
         'extract': {ExtractionOutput, Extraction}, 'verify': {*_VERIFY.values(), Verification},
         'ocr': {OCRResponse}, 'plan': {Plan},
         'outline': outline, 'outline_assemble': outline,
-        'directory_plan': directory_plan, 'directory_ref_plan': directory_plan, 'directory_ref_plan_v2': directory_plan,
+        'directory_plan': directory_plan, 'directory_ref_plan': directory_plan, 'directory_ref_plan_v2': directory_plan, 'bid_format_outline': directory_plan,
         'directory_requirement': requirement, 'directory_requirement_native': requirement,
         'directory_material': material, 'directory_material_response_forms': material,
         'directory_material_source_groups': material, 'directory_material_closure': material,

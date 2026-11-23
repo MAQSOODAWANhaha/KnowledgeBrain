@@ -71,6 +71,7 @@ _PROMPT_FILES = {
     AuthoringPrompt.STRUCTURE: "authoring_structure.md",
     AuthoringPrompt.ASSEMBLE: "outline_assemble.md",
     AuthoringPrompt.DIRECTORY_PLAN: "directory_plan.md",
+    AuthoringPrompt.BID_FORMAT_OUTLINE: "bid_format_outline.md",
     AuthoringPrompt.DIRECTORY_REF_PLAN: "directory_ref_plan.md",
     AuthoringPrompt.DIRECTORY_REF_PLAN_V2: "directory_ref_plan_v2.md",
     AuthoringPrompt.DIRECTORY_REQUIREMENT: "directory_requirement.md",
