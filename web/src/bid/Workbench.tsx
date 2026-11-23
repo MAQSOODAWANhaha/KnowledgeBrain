@@ -1,3 +1,6 @@
+import { Toolbar } from "@astryxdesign/core/Toolbar";
+import { Link } from "@astryxdesign/core/Link";
+import { Code } from "@astryxdesign/core/Code";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
 import { PageHeader } from "../shell/PageHeader";
@@ -10,7 +13,7 @@ import { OutlinePlanner } from "./authoring/OutlinePlanner";
 import type { WordNavigationRequest, WordNavigationResult } from "./authoring/wordNavigation";
 import { TENDER_INPUT_ACCEPT } from "./authoring/media";
 import type { DocxCurrent, DocxIdentity } from "./api/docx";
-import { downloadTenderFile, downloadTenderPdf, executionError, tenderApi, tenderDocxApi, type DocumentStart, type TenderChapter, type TenderDocxCurrent, type TenderDraft, type WorkbenchView } from "./api/workbench";
+import { downloadTenderFile, downloadTenderPdf, executionError, tenderApi, tenderDocxApi, type DocumentStart, type TenderChapter, type TenderDocxCurrent, type TenderDraft, type WorkbenchView, type TenderDocument } from "./api/workbench";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -30,7 +33,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { FileInput } from "@astryxdesign/core/FileInput";
-import { Table } from "@astryxdesign/core/Table";
+import { pixel, Table } from "@astryxdesign/core/Table";
 import { GuideScreen } from "../guide/GuideScreen";
 import { AnalysisPane, ChapterInspector, ChapterTree, flattenChapters } from "./WorkbenchPanels";
 import { AnalysisReview } from "./AnalysisReview";
@@ -41,13 +44,45 @@ import { KnowledgeSelection, type KnowledgeSelection as KnowledgeChoice } from "
 import { inProgress, executionStatus } from "./executionStatus";
 import { TaskProgress } from "./TaskProgress";
 
-function ProjectFiles({ documents, download }: { documents: WorkbenchView["documents"]; download(url: string, name: string): Promise<void> }) {
-  return <Table data={documents} columns={[
-    { key: "file_name", header: "文件" },
-    { key: "byte_length", header: "大小", renderCell: (document) => `${Math.ceil(document.byte_length / 1024)} KB` },
-    { key: "parse_status", header: "处理状态", renderCell: (document) => <Badge variant={document.parse_status ? "neutral" : "info"} label={document.parse_status ?? "已上传，执行时读取"} /> },
-    { key: "id", header: "原件", renderCell: (document) => document.download_url ? <Button size="sm" label="下载原件" onClick={() => void download(document.download_url!, document.file_name)} /> : "—" },
+const fileKind = (document: TenderDocument) => {
+  const name = document.file_name.toLowerCase();
+  if (document.media_type === "application/pdf" || name.endsWith(".pdf")) return "PDF";
+  if (/wordprocessingml|msword/.test(document.media_type) || /\.docx?$/.test(name)) return "Word";
+  if (/spreadsheetml|ms-excel|csv/.test(document.media_type) || /\.(xlsx?|csv)$/.test(name)) return "Excel";
+  return name.split(".").pop()?.toUpperCase() ?? "文件";
+};
+const fileSize = (bytes: number) => bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
+const readStatus = (document: TenderDocument) => document.parse_status
+  ? <Badge variant={/fail|error/.test(document.parse_status) ? "error" : /ready|complete|succeed/.test(document.parse_status) ? "success" : "neutral"} label={document.parse_status} />
+  : <Badge variant="info" label="已上传，执行时读取" />;
+
+function ProjectFiles({ documents, selectedId, onSelect }: { documents: TenderDocument[]; selectedId?: string; onSelect(id: string): void }) {
+  return <Table hasHover idKey="id" data={documents} columns={[
+    { key: "file_name", header: "文件", renderCell: (document) => <Link href={`#select-${document.id}`} aria-current={document.id === selectedId ? "true" : undefined}
+      onClick={(event) => { event.preventDefault(); onSelect(document.id); }}>{document.file_name}</Link> },
+    { key: "media_type", header: "类型", width: pixel(96), renderCell: (document) => <Badge variant="neutral" label={fileKind(document)} /> },
+    { key: "byte_length", header: "大小", width: pixel(110), renderCell: (document) => <Text hasTabularNumbers>{fileSize(document.byte_length)}</Text> },
+    { key: "parse_status", header: "处理状态", width: pixel(180), renderCell: readStatus },
   ]} />;
+}
+
+function FileDetail({ document, download }: { document: TenderDocument; download(url: string, name: string): Promise<void> }) {
+  return <Card padding={0} role="region" aria-label="文件详情">
+    <VStack gap={0}>
+      <Toolbar label="文件详情标题" dividers={["bottom"]} startContent={<Text weight="semibold" maxLines={1}>{document.file_name}</Text>} />
+      <VStack gap={3} padding={4}>
+        <MetadataList label={{ width: 88 }}>
+          <MetadataListItem label="类型">{fileKind(document)}</MetadataListItem>
+          <MetadataListItem label="大小">{fileSize(document.byte_length)}</MetadataListItem>
+          <MetadataListItem label="状态">{readStatus(document)}</MetadataListItem>
+          {document.content_sha256 && <MetadataListItem label="指纹"><Code>{document.content_sha256.slice(0, 16)}</Code></MetadataListItem>}
+        </MetadataList>
+        <HStack gap={2}>
+          {document.download_url && <Button variant="secondary" label="下载原件" onClick={() => void download(document.download_url!, document.file_name)} />}
+        </HStack>
+      </VStack>
+    </VStack>
+  </Card>;
 }
 
 function SavedPdfDownload({ projectId, version }: { projectId: string; version: TenderDraft }) {
@@ -160,6 +195,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   }, []);
   const [dismissedDraft, setDismissedDraft] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const executionAttempts = useRef(new Map<string, MutationAttempt>());
   const actionKey = `kb.tender-action:${projectId}`;
   const [pending, setPending] = useState<PendingAction | null>(() => {
@@ -338,10 +374,21 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     <Tab value="body" label="正文编辑" panelId="word-editor-panel" />
   </TabList> : undefined;
   const closeTool = (open: boolean) => { if (!open) setTool(null); };
+  const latestVersion = view?.versions.reduce<TenderDraft | null>((best, item) => !best || item.revision > best.revision ? item : best, null) ?? null;
+  const headerStatus = !view ? undefined
+    : step === "analysis" ? (view.analysis ? <Badge variant={view.analysis.confirmed ? "success" : "warning"} label={view.analysis.confirmed ? "已确认" : "待人工确认"} /> : <Badge variant="neutral" label="尚未分析" />)
+    : step === "authoring" ? (view.current_docx ? <Badge variant="success" label={`已保存 v${view.current_docx.revision}`} /> : <Badge variant="neutral" label="尚无稿件" />)
+    : step === "export" ? (latestVersion ? <Badge variant="success" label={`最新 v${latestVersion.revision}`} /> : <Badge variant="neutral" label="尚无稿件" />)
+    : undefined;
+  const headerMeta: Array<[string, ReactNode]> | undefined = !view ? undefined
+    : step === "files" ? [["原件", `${view.documents.length} 份`], ["合计", fileSize(view.documents.reduce((sum, document) => sum + document.byte_length, 0))]]
+    : step === "analysis" ? (view.analysis ? [["来源版本", view.analysis.source_version], ["分析修订", view.analysis.domain_revision], ["招标事项", `${view.analysis.items?.length ?? 0} 条`]] : undefined)
+    : step === "authoring" ? [["大纲章节", `${flattenChapters(view.outline?.chapters ?? []).length} 个`], ["待补资料", `${view.gaps.length} 条`], ["当前稿", view.current_docx ? `Word v${view.current_docx.revision}` : "—"]]
+    : [["已保存版本", `${view.versions.length} 个`], ["当前稿", view.current_docx ? `v${view.current_docx.revision}` : "—"]];
   const projectTitle = view?.project.title ?? "投标项目";
   return <Shell root="bids" email={email} onBeforeLeave={() => !unsafe}
     header={<PageHeader crumbs={[{ label: "投标项目", href: "/" }, { label: projectTitle, href: authoringHref(projectId, "files") }, { label: sectionLabel }]}
-      title={sectionLabel} actions={pageActions} tabs={authoringTabs} />}
+      title={sectionLabel} status={headerStatus} meta={headerMeta} actions={pageActions} tabs={authoringTabs} />}
     panel={projectPanel({ projectId, step, view })}>
     <VStack gap={0} height="100%" minHeight={0}>
       {(error || notice || !view || pending || candidate || step === "authoring" && (authoringMode === "outline" && !bodyOpened && view?.current_docx || view?.authoring)) && <VStack gap={2} paddingInline={6} paddingBlockStart={4}>
@@ -355,16 +402,25 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
         {view && step === "authoring" && view.authoring && <TaskProgress label={view.authoring.operation === "outline" ? "大纲任务" : "正文任务"} status={view.authoring.status} progress={view.authoring.progress} />}
       </VStack>}
       {view && <>
-        {step === "files" && <VStack gap={4} padding={6} isScrollable height="100%" role="region" aria-label="项目资料">
-          {!ended && <Card><VStack gap={3}>
-            <Heading level={2}>上传项目文件</Heading>
-            <Text type="supporting">招标文件、附件、补遗和澄清都放在这里。分析会自行读取结构和内容，新资料用于后续编制快照，已有稿件保留。</Text>
-            <FileInput label="选择项目文件" mode="dropzone" isMultiple accept={TENDER_INPUT_ACCEPT} value={null} isDisabled={busy} isLoading={uploading.length > 0} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list); }} />
-            {uploading.map(name => <Text key={name} role="status">正在上传：{name}</Text>)}
-          </VStack></Card>}
-          <Card><KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} /></Card>
-          <Card padding={0}>{!view.documents.length ? <EmptyState title="尚未上传项目文件。" description="上传招标文件后即可分析招标事项。" /> : <ProjectFiles documents={view.documents} download={download} />}</Card>
-        </VStack>}
+        {step === "files" && (() => {
+          const selectedFile = view.documents.find(document => document.id === selectedFileId) ?? view.documents[0];
+          const main = <Card padding={0}><VStack gap={0}>
+            <Toolbar label="项目文件" dividers={["bottom"]} startContent={<Text weight="semibold">项目文件</Text>} endContent={<Text type="supporting" hasTabularNumbers>共 {view.documents.length} 份</Text>} />
+            {view.documents.length ? <ProjectFiles documents={view.documents} selectedId={selectedFile?.id} onSelect={setSelectedFileId} /> : <EmptyState isCompact title="尚未上传项目文件" description="上传招标文件后即可分析招标事项。" />}
+            {!ended && <VStack gap={2} padding={4}>
+              <FileInput label="选择项目文件" isLabelHidden mode="dropzone" description="拖入招标文件、附件、补遗或澄清，或点击选择文件" isMultiple accept={TENDER_INPUT_ACCEPT} value={null} isDisabled={busy} isLoading={uploading.length > 0} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list); }} />
+              <Text type="supporting">招标文件、附件、补遗和澄清都放在这里。分析会自行读取结构和内容，新资料用于后续编制快照，已有稿件保留。</Text>
+              {uploading.map(name => <Text key={name} role="status">正在上传：{name}</Text>)}
+            </VStack>}
+          </VStack></Card>;
+          const side = <VStack gap={4} width={stacked ? undefined : 340}>
+            {selectedFile && <FileDetail document={selectedFile} download={download} />}
+            <Card><KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} /></Card>
+          </VStack>;
+          return <VStack isScrollable height="100%" paddingInline={6} paddingBlock={4} role="region" aria-label="项目资料">
+            {stacked ? <VStack gap={4}>{main}{side}</VStack> : <HStack gap={4} vAlign="start"><VStack style={{ flex: 1, minWidth: 0 }}>{main}</VStack>{side}</HStack>}
+          </VStack>;
+        })()}
         <Panel isShown={step === "analysis"} fill>
           {stacked
             ? <VStack isScrollable height="100%" gap={4}><AnalysisPane analysis={view.analysis} /><VStack padding={4} role="complementary" aria-label="分析处理"><VStack gap={4}>
