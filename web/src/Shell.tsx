@@ -3,16 +3,16 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/HStack";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { Layout, LayoutHeader } from "@astryxdesign/core/Layout";
-import { SideNav } from "@astryxdesign/core/SideNav";
+import { NavIcon } from "@astryxdesign/core/NavIcon";
+import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { Text } from "@astryxdesign/core/Text";
 import { Theme } from "@astryxdesign/core/theme";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
 import { VStack } from "@astryxdesign/core/VStack";
-import { BookOpen, ChevronsLeft, ChevronsRight, FolderKanban } from "lucide-react";
+import { BookOpen, ChevronsLeft, ChevronsRight, FolderKanban, Gavel } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { setToken } from "./api";
 import { go } from "./hash";
-import "./shell/shell.css";
 import { brandTheme } from "./theme";
 
 export type ContextPanel = {
@@ -62,35 +62,38 @@ export function Shell({ root, email, header, panel, children, onBeforeLeave }: P
         <Theme theme={brandTheme} mode="dark">
           <TopNav
             label="产品"
-            heading={<TopNavHeading heading="投标管理平台" headingHref="#/" logo={<span className="kb-logo">KB</span>} logoLabel="KnowledgeBrain 投标管理平台" />}
+            heading={<TopNavHeading heading="投标管理平台" headingHref="#/" logo={<NavIcon icon={<Gavel size={14} />} />} logoLabel="KnowledgeBrain 投标管理平台" />}
             endContent={<HStack gap={3} vAlign="center"><Text color="secondary">{email}</Text><Button variant="ghost" label="退出" onClick={leave} /></HStack>}
           />
         </Theme>
       }
       sideNav={
-        <div className="kb-nav">
-          <nav className="kb-rail" aria-label="导航">
-            <a href="#/" aria-current={root === "bids" ? "page" : undefined}><FolderKanban size={20} aria-hidden />投标项目</a>
-            <a href="#/library" aria-current={root === "assets" ? "page" : undefined}><BookOpen size={20} aria-hidden />知识资产</a>
-            {!open && <button type="button" className="kb-rail-end" aria-label={`展开${panel.title}面板`} onClick={() => setPanel(true)}><ChevronsRight size={18} aria-hidden />展开</button>}
-          </nav>
+        <HStack gap={0} height="100%" minHeight={0}>
+          <SideNav
+            aria-label="导航"
+            collapsible={{ isCollapsed: true, hasButton: false }}
+            footerIcons={!open ? <IconButton variant="ghost" label={`展开${panel.title}面板`} icon={<ChevronsRight size={18} />} onClick={() => setPanel(true)} /> : undefined}
+          >
+            <SideNavSection title="模块" isHeaderHidden>
+              <SideNavItem label="投标项目" href="#/" icon={FolderKanban} isSelected={root === "bids"} />
+              <SideNavItem label="知识资产" href="#/library" icon={BookOpen} isSelected={root === "assets"} />
+            </SideNavSection>
+          </SideNav>
           {open && (
-            <div className="kb-ctx">
-              <SideNav
-                aria-label={panel.label}
-                header={
-                  <HStack gap={1} vAlign="center" hAlign="between" paddingInlineStart={2} minHeight={48}>
-                    <Text weight="semibold">{panel.title}</Text>
-                    <HStack gap={1} vAlign="center">{panel.actions}<IconButton size="sm" variant="ghost" label="收起面板" icon={<ChevronsLeft size={16} />} onClick={() => setPanel(false)} /></HStack>
-                  </HStack>
-                }
-                topContent={panel.top}
-              >
-                {panel.children}
-              </SideNav>
-            </div>
+            <SideNav
+              aria-label={panel.label}
+              header={
+                <HStack gap={1} vAlign="center" hAlign="between" paddingInlineStart={2} minHeight={48}>
+                  <Text weight="semibold">{panel.title}</Text>
+                  <HStack gap={1} vAlign="center">{panel.actions}<IconButton size="sm" variant="ghost" label="收起面板" icon={<ChevronsLeft size={16} />} onClick={() => setPanel(false)} /></HStack>
+                </HStack>
+              }
+              topContent={panel.top}
+            >
+              {panel.children}
+            </SideNav>
           )}
-        </div>
+        </HStack>
       }
     >
       <Layout

@@ -6,7 +6,7 @@ test("the Word workspace keeps project actions in view when navigating chapters"
   const f = await fixture(page); await f.ready();
   await page.getByRole("complementary", { name: "文件与章节目录" }).getByRole("button", { name: /项目人员/ }).click();
   await expect(page.getByRole("button", { name: "编排大纲", exact: true })).toBeInViewport({ ratio: 1 });
-  await expect(page.getByRole("navigation", { name: "项目分区" })).toBeInViewport({ ratio: 1 });
+  await expect(page.getByRole("navigation", { name: "项目导航" })).toBeInViewport({ ratio: 1 });
   const editor = page.locator(".docx-editor-frame");
   await editor.scrollIntoViewIfNeeded();
   await expect(editor).toBeInViewport({ ratio: 0.99 });
@@ -64,7 +64,7 @@ test("a correlated save updates metadata and rebinds navigation without remounti
   await expect.poll(() => page.evaluate(() => (window as unknown as WordTestWindow).wordTest.navigated.length)).toBe(1);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view", "edit"]);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.destroyed)).toBe(1);
-  const nav = page.getByRole("navigation", { name: "项目分区" });
+  const nav = page.getByRole("navigation", { name: "项目导航" });
   await nav.getByRole("link", { name: "项目资料" }).click();
   await nav.getByRole("link", { name: "标书编制" }).click();
   await expect(page.getByTestId("docx-status")).toHaveText("已保存");
@@ -177,7 +177,7 @@ test("saving the pinned Word downgrades its coverage without replacing the docum
   f.publish(); await page.clock.runFor(1100);
   await expect(page.getByTestId("docx-status")).toHaveText("已保存");
   await expect(page.getByTestId("docx-version")).toHaveText("保存版本 2");
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "交付文件" }).click();
+  await page.getByRole("navigation", { name: "项目导航" }).getByRole("link", { name: "交付文件" }).click();
   await expect(page.getByTestId("word-coverage")).toHaveText("当前查看稿 v2：覆盖待核");
   await expect(page.getByTestId("generated-coverage")).toHaveText("生成稿 v1的覆盖统计：草稿已生成，0项待补、0项待核");
 });

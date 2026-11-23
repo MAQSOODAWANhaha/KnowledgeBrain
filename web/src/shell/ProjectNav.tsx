@@ -1,11 +1,15 @@
+import { Avatar } from "@astryxdesign/core/Avatar";
 import { Badge } from "@astryxdesign/core/Badge";
+import { Card } from "@astryxdesign/core/Card";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
+import { HStack } from "@astryxdesign/core/HStack";
 import { IconButton } from "@astryxdesign/core/IconButton";
+import { Item } from "@astryxdesign/core/Item";
 import { SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
-import { ChevronsUpDown, Plus } from "lucide-react";
-import { type ComponentType, type SVGProps, useEffect, useState } from "react";
+import { ChevronsUpDown, CircleCheck, CircleX, FileText, FolderOpen, Info, ListChecks, PackageCheck, PenLine, Plus, TriangleAlert } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { BidProjectView } from "../bid/api";
 import { tenderApi, type WorkbenchView } from "../bid/api/workbench";
 import { AUTHORING_STEPS, authoringHref, type AuthoringStep } from "../bid/authoring/routes";
@@ -13,34 +17,8 @@ import { inProgress } from "../bid/executionStatus";
 import type { ContextPanel } from "../Shell";
 
 type Tone = "neutral" | "info" | "success" | "warning" | "error";
-const TONE_COLOR: Record<Tone, string> = { neutral: "#B3B3B3", info: "#0F6CBD", success: "#107C10", warning: "#BC4B09", error: "#C50F1F" };
-
-// SideNavItem icons are SVG components: a numbered flow node and a status dot.
-type Svg = ComponentType<SVGProps<SVGSVGElement>>;
-const nodes = new Map<string, Svg>();
-function stepNode(index: number, done: boolean): Svg {
-  const key = `${index}:${done}`;
-  if (!nodes.has(key)) {
-    const Node: Svg = (props) => (
-      <svg viewBox="0 0 22 22" width={22} height={22} aria-hidden {...props}>
-        <circle cx="11" cy="11" r="10" fill={done ? TONE_COLOR.success : "#FFFFFF"} stroke={done ? TONE_COLOR.success : "currentColor"} strokeWidth="1.5" />
-        {done
-          ? <path d="M6.5 11.2l3 3 6-6.4" fill="none" stroke="#FFFFFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          : <text x="11" y="15.5" textAnchor="middle" fontSize="13" fontWeight="700" fill="currentColor">{index + 1}</text>}
-      </svg>
-    );
-    nodes.set(key, Node);
-  }
-  return nodes.get(key)!;
-}
-const dots = new Map<Tone, Svg>();
-function dot(tone: Tone): Svg {
-  if (!dots.has(tone)) {
-    const Dot: Svg = (props) => <svg viewBox="0 0 16 16" width={16} height={16} aria-hidden {...props}><circle cx="8" cy="8" r="4" fill={TONE_COLOR[tone]} /></svg>;
-    dots.set(tone, Dot);
-  }
-  return dots.get(tone)!;
-}
+const STEP_ICON = { files: FolderOpen, analysis: ListChecks, authoring: PenLine, export: PackageCheck } as const;
+const TODO_ICON = { neutral: Info, info: Info, success: CircleCheck, warning: TriangleAlert, error: CircleX } as const;
 
 const DAY = 24 * 60 * 60 * 1000;
 const shortDate = (value?: string | null) => (value ? value.slice(5, 16).replace("T", " ") : null);
@@ -68,25 +46,35 @@ function ProjectCard({ project, step }: { project: BidProjectView; step: Authori
   const others = (rows ?? []).filter((row) => row.id !== project.id && row.status !== "ended");
   const due = dueText(project);
   return (
-    <DropdownMenu
-      menuWidth={300}
-      items={[
-        ...others.map((row) => ({ label: row.title, description: shortDate(row.ends_at) ? `截止 ${shortDate(row.ends_at)}` : undefined, href: `#${authoringHref(row.id, step)}` })),
-        ...(others.length ? [{ type: "divider" as const }] : []),
-        { label: "查看全部项目", href: "#/" },
-      ]}
-      renderTrigger={(trigger) => (
-        <button type="button" className="kb-pcard" aria-label={`当前项目：${project.title}，切换项目`} {...trigger}>
-          <span className="kb-pmark" aria-hidden>{project.title.slice(0, 1)}</span>
-          <span className="kb-pname">{project.title}<small>{shortDate(project.ends_at) ? `截止 ${shortDate(project.ends_at)}` : "未设截止时间"}</small></span>
-          <ChevronsUpDown size={14} aria-hidden />
-          <span className="kb-pfoot">
-            <Badge variant={project.status === "ended" ? "neutral" : "info"} label={project.status === "ended" ? "已结束" : "在办"} />
-            {project.ends_at && <span data-tone={due.tone}>{due.text}</span>}
-          </span>
-        </button>
-      )}
-    />
+    <Card padding={3}>
+      <VStack gap={2}>
+        <Item
+          density="compact"
+          align="start"
+          startContent={<Avatar name={project.title} size={32} shape="rounded" tooltip={false} />}
+          label={project.title}
+          labelLines={2}
+          description={shortDate(project.ends_at) ? `截止 ${shortDate(project.ends_at)}` : "未设截止时间"}
+          endContent={
+            <DropdownMenu
+              menuWidth={300}
+              alignment="end"
+              hasChevron={false}
+              button={{ label: "切换项目", variant: "ghost", size: "sm", icon: <ChevronsUpDown size={14} />, isIconOnly: true, "aria-label": `当前项目：${project.title}，切换项目` }}
+              items={[
+                ...others.map((row) => ({ label: row.title, description: shortDate(row.ends_at) ? `截止 ${shortDate(row.ends_at)}` : undefined, href: `#${authoringHref(row.id, step)}` })),
+                ...(others.length ? [{ type: "divider" as const }] : []),
+                { label: "查看全部项目", href: "#/" },
+              ]}
+            />
+          }
+        />
+        <HStack gap={2} vAlign="center" hAlign="between">
+          <Badge variant={project.status === "ended" ? "neutral" : "info"} label={project.status === "ended" ? "已结束" : "在办"} />
+          {project.ends_at && <Badge variant={due.tone} label={due.text} />}
+        </HStack>
+      </VStack>
+    </Card>
   );
 }
 
@@ -132,30 +120,28 @@ export function projectPanel({ projectId, step, view }: { projectId: string; ste
     label: "项目导航",
     top: view ? <ProjectCard project={view.project} step={step} /> : undefined,
     children: <>
-      <nav aria-label="项目分区">
-        <SideNavSection title="投标流程">
-          {AUTHORING_STEPS.map((item, index) => {
+      <SideNavSection title="投标流程">
+          {AUTHORING_STEPS.map((item) => {
             const stage = state[item.key];
             return (
               <SideNavItem
                 key={item.key}
                 label={item.label}
-                icon={stepNode(index, stage.done && step !== item.key)}
+                icon={stage.done && step !== item.key ? CircleCheck : STEP_ICON[item.key]}
                 href={`#${authoringHref(projectId, item.key)}`}
                 isSelected={step === item.key}
-                endContent={stage.pill ? <span className="kb-pill" data-tone={stage.tone ?? "neutral"}>{stage.pill}</span> : undefined}
+                endContent={stage.pill ? <Badge variant={stage.done ? "success" : stage.tone ?? "neutral"} label={stage.pill} /> : undefined}
                 data-testid={`wizard-${item.key}`}
               />
             );
           })}
         </SideNavSection>
-      </nav>
       {pending.length > 0 && (
         <SideNavSection title={`需要处理 ${pending.length + more}`}>
           {pending.map((todo) => (
-            <SideNavItem key={todo.key} label={todo.label} icon={dot(todo.tone)} href={`#${authoringHref(projectId, todo.step)}`} />
+            <SideNavItem key={todo.key} label={todo.label} icon={TODO_ICON[todo.tone]} href={`#${authoringHref(projectId, todo.step)}`} />
           ))}
-          {more > 0 && <SideNavItem label={`另有 ${more} 条待补记录`} icon={dot("neutral")} href={`#${authoringHref(projectId, "authoring")}`} />}
+          {more > 0 && <SideNavItem label={`另有 ${more} 条待补记录`} icon={Info} href={`#${authoringHref(projectId, "authoring")}`} />}
         </SideNavSection>
       )}
     </>,
@@ -194,7 +180,7 @@ export function listPanel({ rows, view, query, onQuery, onCreate }: {
           const count = (rows ?? []).filter((row) => inView(row, item.key)).length;
           return (
             <SideNavItem key={item.key} label={item.label} href={item.key === "all" ? "#/" : `#/?view=${item.key}`} isSelected={view === item.key}
-              endContent={rows ? <span className="kb-pill" data-tone={item.key === "due" && count ? "warning" : "neutral"}>{count}</span> : undefined} />
+              endContent={rows ? <Badge variant={item.key === "due" && count ? "warning" : "neutral"} label={String(count)} /> : undefined} />
           );
         })}
       </SideNavSection>
@@ -203,8 +189,8 @@ export function listPanel({ rows, view, query, onQuery, onCreate }: {
           {!open.length && <SideNavItem label="没有匹配的在办项目" isDisabled />}
           {open.map((row) => {
             const due = dueText(row);
-            return <SideNavItem key={row.id} label={row.title} icon={dot(due.tone === "neutral" ? "info" : due.tone)} href={`#${authoringHref(row.id, "files")}`}
-              endContent={shortDate(row.ends_at) ? <span className="kb-pill" data-tone={due.tone}>{row.ends_at!.slice(5, 10)}</span> : undefined} />;
+            return <SideNavItem key={row.id} label={row.title} icon={FileText} href={`#${authoringHref(row.id, "files")}`}
+              endContent={row.ends_at ? <Badge variant={due.tone === "neutral" ? "neutral" : due.tone} label={row.ends_at.slice(5, 10)} /> : undefined} />;
           })}
         </SideNavSection>
       )}

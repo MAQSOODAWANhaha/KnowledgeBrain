@@ -10,8 +10,9 @@
 
 - 先查组件：`npx astryx component <Name>`；先查模板：`npx astryx template --list`
 - 不自己写与 Astryx 组件同类的导航、按钮、表格、标签、对话框、抽屉、提示
-- 组件外观在 `web/src/theme.ts` 的 `components` 里覆盖；主题做不到的伪元素（状态圆点、选中竖条）和图标栏写在 `web/src/shell/shell.css`，只用 Astryx 的 `data-*` 属性选择器和 token
-- 其他自定义 CSS 只允许用于 ONLYOFFICE 编辑框尺寸
+- 组件外观只在 `web/src/theme.ts` 的 `components` 里覆盖，不写组件外的 CSS；主题做不到的效果（状态圆点、选中竖条）不做
+- 页面代码不写原生 HTML 元素和 `className`，由 `web/eslint.config.js` 的 `no-restricted-syntax` 检查；唯一例外是承载 ONLYOFFICE 的 `DocxEditor.tsx`
+- 组件没有完全对应的形态时，改设计去适配组件，不自己拼
 - 不用 Tailwind 工具类、不用第二套图标、不用 sonner；图标用 neutral 主题自带的图标
 
 ## 2. 颜色
@@ -64,10 +65,10 @@
 
 两级导航：
 
-- **图标栏**（64，`nav` 名为「导航」）：模块入口 投标项目、知识资产。图标在上、文字在下；当前模块浅蓝底、蓝字、左侧 3px 蓝条。上下文面板收起后，底部出现「展开」
-- **上下文面板**（232，`SideNav`）：显示当前模块内的位置，头部是模块名和「收起」按钮
+- **图标栏**（收起状态的 `SideNav`，名为「导航」）：模块入口 投标项目、知识资产，只显示图标，悬停显示名称。上下文面板收起后，底部出现「展开」
+- **上下文面板**（`SideNav`）：显示当前模块内的位置，头部是模块名和「收起」按钮
   - **投标项目列表**：筛选项目的搜索框；「视图」分组（全部、在办、本周截止、已结束，带数量）；「在办项目」分组（状态圆点、名称、截止日期）
-  - **进入项目后**：项目卡（首字标记、名称、截止时间、状态 `Badge`、剩余天数，点击切换项目）；「投标流程」四步，每步有编号圆点、名称和一行状态（资料数、待确认、待补数、最新版本），已完成为绿色勾；「需要处理」分组列出待确认的解读和待补记录，点击进入对应步骤
+  - **进入项目后**（面板名为「项目导航」）：项目卡（`Card` + `Item` + `Avatar`：名称、截止时间、状态和剩余天数 `Badge`，`DropdownMenu` 切换项目）；「投标流程」四步，每步是 `SideNavItem` 链接，右侧 `Badge` 显示状态（资料数、待确认、待补数、最新版本），已完成显示勾选图标；「需要处理」分组列出待确认的解读和待补记录，点击进入对应步骤
   - **知识资产**：资料目录 `TreeList`，每个节点有「+」新建
 - 窄于 900px 时上下文面板隐藏，只留图标栏
 
@@ -83,16 +84,19 @@
 
 | 场景 | 组件 |
 | --- | --- |
-| 外壳 | `AppShell`、`TopNav`、`TopNavHeading`；图标栏是带图标和文字的链接（Astryx 没有双层导航组件，样式在 `web/src/shell/shell.css`）；上下文面板 `SideNav`、`SideNavSection`、`SideNavItem` |
+| 外壳 | `AppShell`、`TopNav`、`TopNavHeading`、`NavIcon`；图标栏和上下文面板都是 `SideNav`（图标栏为收起状态） |
 | 项目切换、账号菜单、更多操作 | `DropdownMenu`、`MoreMenu` |
 | 页头 | `Breadcrumbs`、`Heading`、`Badge`、`Button`、`TabList` |
 | 视图切换（同一数据不同呈现） | `SegmentedControl` |
 | 列表 | `Table`（`hasHover`，行选中时打开详情面板），`Pagination` |
 | 搜索、筛选 | `TextInput`（search）、`Selector` |
-| 章节目录 | `TreeList` |
+| 章节目录、大纲编排、资料目录 | `TreeList`；章节移动用行末 `MoreMenu`（上移、下移、降为子级、提升一级），不做拖放 |
 | 详情面板 | `Layout` + `LayoutPanel`；窄屏排到内容下方 |
 | 元数据 | `MetadataList` |
-| 状态 | `Badge`（success / warning / error / info / neutral）：浅底、细边框、前置圆点，见 `web/src/theme.ts` |
+| 列表行、卡片内的标题行 | `Item`、`List` |
+| 折叠说明、次要细节 | `Collapsible` |
+| 页面区块 | `Section`；可点击卡片 `ClickableCard` |
+| 状态 | `Badge`（success / warning / error / info / neutral）：浅底、细边框，见 `web/src/theme.ts`；单独的状态点用 `StatusDot` |
 | 页内必须看见的提示 | `Banner`，可带重试按钮 |
 | 短成功 / 短失败 | Astryx `Toast` |
 | 确认、表单弹窗 | `AlertDialog`、`Dialog` |

@@ -266,7 +266,7 @@ test("ending a project still permits the exact unknown chapter revision receipt"
 test("an ended project keeps downloads but blocks selecting another current draft", async ({ page }) => {
   const f = await fixture(page); f.view.project.status = "ended"; f.candidate(); await f.ready();
   await expect(page.getByRole("button", { name: "查看新稿", exact: true })).toBeDisabled();
-  await page.getByRole("navigation", { name: "项目分区", exact: true }).getByRole("link", { name: /^交付文件/ }).click();
+  await page.getByRole("navigation", { name: "项目导航", exact: true }).getByRole("link", { name: /^交付文件/ }).click();
   await expect(page.getByRole("button", { name: "选为当前稿 v2", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "下载 DOCX v2", exact: true })).toBeEnabled();
   expect(f.state.calls.filter(call => call === "select")).toEqual([]);

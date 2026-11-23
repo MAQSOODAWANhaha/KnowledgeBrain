@@ -75,7 +75,7 @@ test("published analysis blocks new requests but permits confirmation of its fro
   const f = await fixture(page);
   f.view.analysis!.status = "published";
   await f.ready();
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "招标解读" }).click();
+  await page.getByRole("navigation", { name: "项目导航" }).getByRole("link", { name: "招标解读" }).click();
   await expect(page.getByRole("button", { name: "分析招标文件", exact: true })).toBeDisabled();
   const attempt = { idempotencyKey: "queue-confirm-analysis" };
   await page.evaluate(({ project, attempt }) => sessionStorage.setItem(`kb.tender-action:${project}`, JSON.stringify({ kind: "analysis", body: {}, attempt })), { project, attempt });

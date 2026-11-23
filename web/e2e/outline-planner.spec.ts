@@ -78,7 +78,7 @@ test("the default read-only reload releases completed save status while keeping 
   await expect(page.getByTestId("docx-mode")).toBeEnabled();
   expect(f.state.opens).toHaveLength(initialOpens);
   expect(await page.evaluate(() => (window as unknown as WordTestWindow).wordTest.modes)).toEqual(["view"]);
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "项目资料" }).click();
+  await page.getByRole("navigation", { name: "项目导航" }).getByRole("link", { name: "项目资料" }).click();
   await expect(page).toHaveURL(new RegExp(`/bids/${project}/files$`));
 });
 

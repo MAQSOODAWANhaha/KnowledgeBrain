@@ -124,7 +124,7 @@ test("a changed generation cannot silently reuse the previous selection and its 
   page.on("dialog", dialog => void dialog.accept());
   await revision.getByRole("button", { name: "放弃本次复核选择", exact: true }).click();
   await expect(revision.getByLabel("复核与修订理由", { exact: true })).toHaveValue("");
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "项目资料" }).click();
+  await page.getByRole("navigation", { name: "项目导航" }).getByRole("link", { name: "项目资料" }).click();
   await expect(page.getByRole("heading", { name: "项目资料", exact: true })).toBeVisible();
   expect(f.state.starts).toEqual([]);
 });

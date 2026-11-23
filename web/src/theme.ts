@@ -37,7 +37,7 @@ export const brandTheme = defineTheme({
     "layout-content": { base: { backgroundColor: "var(--color-background-body)" } },
     "layout-header": { base: { backgroundColor: "var(--color-background-surface)" } },
     "layout-panel": { base: { backgroundColor: "var(--color-background-surface)" } },
-    // Status tags: tinted ground, thin border, leading dot (dot in shell/shell.css).
+    // Status tags: tinted ground, thin border.
     badge: {
       base: { borderRadius: "4px", borderWidth: "1px", borderStyle: "solid", fontSize: "12px", fontWeight: "600", paddingInline: "8px", minHeight: "22px" },
       "variant:success": { backgroundColor: "#F1FAF1", color: "#107C10", borderColor: "#9FD89F" },

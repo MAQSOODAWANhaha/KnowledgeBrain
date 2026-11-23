@@ -40,7 +40,7 @@ test("reference versions require explicit selection and keep product and library
   await expect(section.getByRole("listitem")).toHaveCount(2);
   await expect(section).toContainText("设备甲");
   await expect(section).toContainText("资质证照");
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "标书编制" }).click();
+  await page.getByRole("navigation", { name: "项目导航" }).getByRole("link", { name: "标书编制" }).click();
   await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
   await page.getByRole("button", { name: "按修订 1 生成正文", exact: true }).click();
   await expect.poll(() => f.state.starts.length).toBe(1);

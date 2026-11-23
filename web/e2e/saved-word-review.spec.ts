@@ -167,7 +167,7 @@ test("an unsent reason guards navigation and explicit discard allows leaving", a
   await expect(review.getByLabel("保存稿复核理由", { exact: true })).toHaveValue("尚未提交的人工核对意见。");
   page.on("dialog", dialog => void dialog.accept());
   await review.getByRole("button", { name: "放弃保存稿复核理由", exact: true }).click();
-  await page.getByRole("navigation", { name: "项目分区" }).getByRole("link", { name: "项目资料" }).click();
+  await page.getByRole("navigation", { name: "项目导航" }).getByRole("link", { name: "项目资料" }).click();
   await expect(page.getByRole("heading", { name: "项目资料", exact: true })).toBeVisible();
   expect(f.reviewState.posts).toEqual([]);
 });
