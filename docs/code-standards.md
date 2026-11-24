@@ -50,7 +50,7 @@
 
 | 级别 | 必跑命令与范围 | 触发条件 |
 | :--- | :--- | :--- |
-| **L0 静态与守卫** | `python3 scripts/ci_check_docs.py`、`bash scripts/ci_check_sources.sh`（加载 `.github/ci.env` 与 `DEFAULT_BRANCH=main`）；Rust `cargo fmt --all -- --check` + `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`；Python `ruff` / 类型检查；Web `npm --prefix web run lint` + `npm --prefix web run build` | **每次提交必跑**（按触碰栈执行 + 文档/CI 守卫） |
+| **L0 静态与守卫** | `bash scripts/pre_push_check.sh`（按变更目录自动串联 `ci_check_sources.sh`、`ci_check_docs.py`、Rust `fmt`/`clippy -D warnings`、Python `ruff`/fixture、Web `npm ci --dry-run`/`lint`/`build`；`--all` 跑全栈，可软链为 `.git/hooks/pre-push`） | **每次提交/推送前必跑**（按触碰栈执行 + 文档/CI 守卫） |
 | **L1 离线单测 + 反证** | Rust `cargo test --locked --workspace`；Python `uv run --frozen pytest tests/unit -q`；Web `npm --prefix web test` | **每次提交必跑**（触碰哪一栈跑该栈**全量**单测，禁止只跑 `-k` 代替） |
 | **L2 隔离集成与 E2E** | Rust 隔离 PG/Redis 验收（见 `.github/workflows/ci.yml`）；Python `uv run --frozen pytest tests/workflow tests/acceptance -q`；Web `npm --prefix web run test:e2e`；Word/PDF 变更跑隔离 ONLYOFFICE 探针 | 改 DB/队列/API/跨进程桥接/前端页面/Word 导出时**合并前必跑** |
 | **L3 真实业务验收** | 真实文档与业务链路验收 + 人工原文抽查（招标线见 [验收](tender/acceptance.md)），证据落仓库外目录 | 协议/Prompt/检索/核心导出变更、里程碑放行前 |
