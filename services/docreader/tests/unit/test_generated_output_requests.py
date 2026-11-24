@@ -142,7 +142,7 @@ async def test_changed_schema_has_a_new_digest_and_cannot_claim_the_old_paid_cac
 
 
 @pytest.mark.parametrize("accept_on", [2, None])
-async def test_contract_feedback_preserves_schema_and_original_payload_with_four_attempts(tmp_path, monkeypatch, accept_on):
+async def test_contract_feedback_preserves_schema_and_original_payload_with_two_corrections(tmp_path, monkeypatch, accept_on):
     budget = RequestBudget(model="gpt-4o", context_tokens=32768, prompts={}, output_reserve=4096)
     payload = {"title_path": ["技术响应"], "targets": [], "supports": []}
     request = build_request(budget.model, "Write only supported content.", payload, task="authoring_write")
@@ -175,7 +175,7 @@ async def test_contract_feedback_preserves_schema_and_original_payload_with_four
                 await adapter(request, validate)
         else:
             assert await adapter(request, validate) == {"blocks": []}
-    assert len(calls) == (accept_on or 4)
+    assert len(calls) == (accept_on or 3)
     assert request == original and calls[0] == original
     for ordinal, sent in enumerate(calls):
         assert_embedded_schema(sent, WritingResponse)
@@ -190,5 +190,5 @@ async def test_contract_feedback_preserves_schema_and_original_payload_with_four
     rows = list(audit.rows.values())
     assert len({row["metadata"]["logical_request_digest"] for row in rows}) == 1
     assert len({row["metadata"]["request_digest"] for row in rows}) == len(calls)
-    assert len([key for key in audit.receipts if key[0] == "model-rejection"]) == (4 if accept_on is None else 1)
-    assert [call.args[0] for call in sleep.await_args_list] == ([1, 2, 4] if accept_on is None else [1])
+    assert len([key for key in audit.receipts if key[0] == "model-rejection"]) == (3 if accept_on is None else 1)
+    assert [call.args[0] for call in sleep.await_args_list] == ([1, 2] if accept_on is None else [1])

@@ -334,7 +334,7 @@ async def test_single_item_correction_resends_only_affected_verify_requests(runt
     assert second_digests <= planned
 
 
-@pytest.mark.parametrize("interruptions", [1, 4], ids=["retry-and-restart", "four-attempt-limit"])
+@pytest.mark.parametrize("interruptions", [1, 5], ids=["retry-and-restart", "resend-limit"])
 async def test_interrupted_sse_retries_preserve_receipts_and_completed_response_cache(runtime, monkeypatch, interruptions):
     store, artifacts, settings, _ = runtime
     run = await _submit(runtime, suffixes="ab")
@@ -405,14 +405,14 @@ async def test_interrupted_sse_retries_preserve_receipts_and_completed_response_
     assert all(not response["done"] and response["usage"] is None for response in receipts.values())
     assert all(response["activity"]["raw_received_chunks"] > 0 and response["activity"]["content_deltas"] == 1
                for response in receipts.values())
-    expected_sends = 2 if interruptions == 1 else 4
+    expected_sends = 2 if interruptions == 1 else 5
     assert sum(task == "extract" for task, _ in sent) == expected_sends
-    if interruptions == 4:
+    if interruptions == 5:
         assert first["status"] == "failed"
         assert first["commands"][-1]["infrastructure_failures"] == 0
         await execute()
         assert (await store.get_run(run["run_id"]))["usage"] == first["usage"]
-        assert len(sent) == 4
+        assert len(sent) == 5
         return
 
     assert first["status"] == "pending" and first["commands"][-1]["infrastructure_failures"] == 1
@@ -423,7 +423,7 @@ async def test_interrupted_sse_retries_preserve_receipts_and_completed_response_
         assert next(current for current in waiting["usage"] if current["request_id"] == request["request_id"]) == request
     for request in unknown:
         assert artifacts.read_json(request["response_ref"]) == receipts[request["request_id"]]
-    assert all(count <= 4 for count in Counter(
+    assert all(count <= 7 for count in Counter(
         (request["task"], request["metadata"]["logical_request_digest"]) for request in waiting["usage"]).values())
     before_confirm = len(sent)
     await store.confirm(run["run_id"], 1, waiting["checklist_digest"], "confirm-interrupted-sse-recovery")

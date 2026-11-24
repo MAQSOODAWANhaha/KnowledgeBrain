@@ -33,25 +33,24 @@ class OCRModel:
 
 async def test_invalid_ocr_fields_retry_with_feedback_and_the_same_image(tmp_path):
     valid = {'text': '图中原文', 'status': 'complete', 'issues': []}
-    model = OCRModel([{**valid, 'text': None}, {**valid, 'status': 'done'},
-                      {**valid, 'issues': 'none'}, valid])
+    model = OCRModel([{**valid, 'text': None}, {**valid, 'status': 'done'}, valid])
     store = Receipts()
     nodes = TenderNodes(store, ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'), model)
     image = 'data:image/png;base64,YWJj'
     assert await nodes.call('ocr', {'image_sha256': 'image'}, images=[image]) == valid
-    assert len(model.calls) == 4
-    assert [call[2] for call in model.calls] == [[image]] * 4
+    assert len(model.calls) == 3
+    assert [call[2] for call in model.calls] == [[image]] * 3
     assert [call[1]['contract_feedback']['errors'][0]['path'] for call in model.calls[1:]] == [
-        ['text'], ['status'], ['issues']]
-    assert len(store.rows) == 3
+        ['text'], ['status']]
+    assert len(store.rows) == 2
 
 
-async def test_invalid_ocr_response_exhausts_the_same_four_attempts(tmp_path):
+async def test_invalid_ocr_response_exhausts_after_two_corrections(tmp_path):
     model = OCRModel([{'status': 'complete'}] * 5)
     nodes = TenderNodes(Receipts(), ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'), model)
     with pytest.raises(ModelWorkUnitExhausted):
         await nodes.call('ocr', {'image_sha256': 'image'})
-    assert len(model.calls) == 4
+    assert len(model.calls) == 3
 
 
 @pytest.mark.parametrize('status', ['partial', 'unresolved'])

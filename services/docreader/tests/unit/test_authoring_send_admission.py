@@ -145,7 +145,7 @@ async def test_over_estimate_contract_correction_reaches_provider(tmp_path, monk
 
 
 @pytest.mark.parametrize("task,operation", OPERATIONS)
-async def test_provider_context_rejection_uses_only_four_attempts(tmp_path, monkeypatch, task, operation):
+async def test_provider_context_rejection_uses_only_the_transport_allowance(tmp_path, monkeypatch, task, operation):
     budget, request = oversized_request(operation)
     calls, audit = [], JournalAudit()
     artifacts = CountedArtifacts(tmp_path)
@@ -162,6 +162,6 @@ async def test_provider_context_rejection_uses_only_four_attempts(tmp_path, monk
     async with client:
         with pytest.raises(ModelWorkUnitExhausted):
             await adapter(request, lambda value: value)
-    assert calls == [request] * 4
-    assert [row["status"] for row in audit.rows.values()] == ["failed"] * 4
-    assert [call.args[0] for call in sleep.await_args_list] == [1, 2, 4]
+    assert calls == [request] * 5
+    assert [row["status"] for row in audit.rows.values()] == ["failed"] * 5
+    assert [call.args[0] for call in sleep.await_args_list] == [1, 2, 4, 4]

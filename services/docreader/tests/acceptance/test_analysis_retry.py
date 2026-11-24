@@ -57,9 +57,9 @@ def _executor(runtime, failure_count):
     return execute, calls, failed_requests
 
 
-async def test_explicit_retry_reuses_successful_packs_after_three_automatic_retries(runtime):
+async def test_explicit_retry_reuses_successful_packs_after_four_automatic_resends(runtime):
     store, artifacts, _, run = runtime
-    execute, calls, failed_requests = _executor(runtime, 4)
+    execute, calls, failed_requests = _executor(runtime, 5)
     initial = (await store.get_run(run["run_id"]))["commands"][-1]
     with pytest.raises(ModelWorkUnitExhausted):
         await execute(initial)
@@ -75,13 +75,13 @@ async def test_explicit_retry_reuses_successful_packs_after_three_automatic_retr
     plan = output(artifacts, failed, "pack-plan")
     assert successful_packs and len(successful_packs) == len(plan["packs"]) - 1
     assert not any(item["stage"] == "verify" for item in failed["artifacts"])
-    assert len(failed_requests) == 4
+    assert len(failed_requests) == 5
     failed_audits = [request for request in failed["usage"] if request["request_id"] in failed_requests]
-    assert len(failed_audits) == 4
+    assert len(failed_audits) == 5
     assert all(request["status"] == "failed" and request["response_ref"] for request in failed_audits)
     failed_responses = {request["request_id"]: artifacts.read_json(request["response_ref"])
                         for request in failed_audits}
-    assert len([request for request in failed["usage"] if request["task"] == "extract"]) == len(plan["packs"]) + 3
+    assert len([request for request in failed["usage"] if request["task"] == "extract"]) == len(plan["packs"]) + 4
 
     await execute(initial)
     assert (await store.get_run(run["run_id"]))["usage"] == failed["usage"]
@@ -118,12 +118,12 @@ async def test_explicit_retry_reuses_successful_packs_after_three_automatic_retr
     assert set(extraction_calls) == {entry["pack_id"] for entry in plan["packs"]}
     assert all(extraction_calls[pack_id] == 1 for pack_id in successful_packs)
     failed_pack = (extraction_calls.keys() - successful_packs).pop()
-    assert extraction_calls[failed_pack] == 5
+    assert extraction_calls[failed_pack] == 6
     extraction_requests = [request for request in recovered["usage"] if request["task"] == "extract"]
-    assert len(extraction_requests) == len(plan["packs"]) + 4
+    assert len(extraction_requests) == len(plan["packs"]) + 5
     same_digest = [request for request in extraction_requests
                    if request["metadata"]["request_digest"] == failed_audits[0]["metadata"]["request_digest"]]
-    assert Counter(request["status"] for request in same_digest) == {"failed": 4, "succeeded": 1}
+    assert Counter(request["status"] for request in same_digest) == {"failed": 5, "succeeded": 1}
     for request in failed_audits:
         assert next(row for row in recovered["usage"] if row["request_id"] == request["request_id"]) == request
         assert artifacts.read_json(request["response_ref"]) == failed_responses[request["request_id"]]
@@ -204,7 +204,7 @@ async def test_explicit_retry_preserves_failed_resume_confirmation_without_model
     assert result(artifacts, ready, "confirm") == approved["payload"]
 
 
-async def test_complete_host_rejection_uses_shared_work_unit_retry_budget(runtime):
+async def test_complete_host_rejection_uses_the_correction_allowance(runtime):
     store, artifacts, settings, run = runtime
     replies, calls = {}, []
 
@@ -236,22 +236,22 @@ async def test_complete_host_rejection_uses_shared_work_unit_retry_budget(runtim
     planned_units = {entry['work_unit_id'] for entry in plan['requests'] if entry['budget']['fits'] is not False}
     units = set(replies)
     assert units <= planned_units and 1 <= len(units) <= 2
-    assert Counter(value['work_unit_id'] for value in reviews) == Counter({unit: 4 for unit in units})
+    assert Counter(value['work_unit_id'] for value in reviews) == Counter({unit: 3 for unit in units})
     for unit in units:
         attempts = [value for value in reviews if value['work_unit_id'] == unit]
         assert 'contract_feedback' not in attempts[0]
         assert all(value['contract_feedback']['errors'][0]['path'] == ['findings'] for value in attempts[1:])
-        assert [value['contract_feedback']['rejection_count'] for value in attempts[1:]] == [1, 2, 3]
+        assert [value['contract_feedback']['rejection_count'] for value in attempts[1:]] == [1, 2]
     rejections = [row for row in current['artifacts'] if row['stage'] == 'model-rejection']
-    assert len(rejections) == 4 * len(units)
+    assert len(rejections) == 3 * len(units)
     rejected_units = Counter(artifacts.read_json(artifacts.read_json(row['artifact_ref'])['request_ref'])['work_unit_id']
                              for row in rejections)
-    assert rejected_units == Counter({unit: 4 for unit in units})
+    assert rejected_units == Counter({unit: 3 for unit in units})
     review_usage = [row for row in current['usage'] if row['task'] == 'verify']
     logical_digests = {fixture_request_digest('verify', next(value for value in reviews
         if value['work_unit_id'] == unit)) for unit in units}
     assert Counter(row['metadata']['logical_request_digest'] for row in review_usage) == Counter({
-        digest: 4 for digest in logical_digests})
+        digest: 3 for digest in logical_digests})
     assert len(current['usage']) == len(calls)
     assert all(row['status'] == 'succeeded' for row in current['usage'])
 

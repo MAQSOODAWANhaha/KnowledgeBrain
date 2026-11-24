@@ -211,7 +211,7 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
         == 2
     )
     assert "fixture-key" not in json.dumps(row["execution_spec"])
-    assert row["execution_spec"]["retry_policy"] == "bounded_work_unit_deadline_v1"
+    assert row["execution_spec"]["retry_policy"] == "split_transport_contract_v1"
     assert (
         row["execution_spec"]["outline_assembly_planning_contract"]
         == "complete_evidence_scoped_batches_v1"
@@ -910,7 +910,7 @@ async def test_actual_pipeline_exports_forms_and_evidence_despite_one_exhausted_
     units = [artifacts.read_json(ref) for ref in value["unit_refs"]]
     assert len(units) == 4
     assert sum(unit["status"] == "placeholder" for unit in units) == 1
-    assert len(service_calls) == 4
+    assert len(service_calls) == 5
     assert len(assembly_calls) == len(structure_calls) == 1
     outline_value = artifacts.read_json(value["outline_ref"])
     form_targets = [
@@ -939,10 +939,10 @@ async def test_actual_pipeline_exports_forms_and_evidence_despite_one_exhausted_
         )
     row = await AuthoringStore(settings.dsn).get_execution(execution_id)
     assert row["status"] == "succeeded"
-    assert sum(request["status"] == "failed" for request in row["requests"]) == 4
+    assert sum(request["status"] == "failed" for request in row["requests"]) == 5
     assert (
-        value["usage"]["retry_requests"] == 3
-        and value["usage"]["unknown_usage_requests"] == 4
+        value["usage"]["retry_requests"] == 4
+        and value["usage"]["unknown_usage_requests"] == 5
     )
     sent_before = len(sent)
     assert (
@@ -959,7 +959,7 @@ async def test_actual_pipeline_exports_forms_and_evidence_despite_one_exhausted_
         materials=[proof, methods],
         previous_execution_id=execution_id,
     )
-    assert len(service_calls) == 5
+    assert len(service_calls) == 6
     # Only the recovered service unit and its updated content review are sent.
     assert artifacts.read_json(second)["usage"]["sent_requests"] == 2
     recovered_requests = sent[sent_before:]

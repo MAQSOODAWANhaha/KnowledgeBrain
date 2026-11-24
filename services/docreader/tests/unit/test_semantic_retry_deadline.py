@@ -72,9 +72,9 @@ async def test_legacy_semantic_retry_records_missing_timing_once(tmp_path, monke
         assert artifacts.read_json(fallback["artifact_ref"])["timing_origin"] == "legacy_unavailable"
 
 
-async def test_semantic_retry_restart_never_grants_a_fifth_attempt(tmp_path, monkeypatch):
+async def test_semantic_retry_restart_never_grants_a_third_correction(tmp_path, monkeypatch):
     store, artifacts, lease = Store(), ArtifactStore(tmp_path), Lease("run", 1, 1, "cmd")
-    model, now = Model([{"findings": None}] * 4), [1000.0]
+    model, now = Model([{"findings": None}] * 3), [1000.0]
     monkeypatch.setattr(time, "time", lambda: now[0])
 
     async def interrupted(seconds):
@@ -82,10 +82,10 @@ async def test_semantic_retry_restart_never_grants_a_fifth_attempt(tmp_path, mon
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(asyncio, "sleep", interrupted)
-    for _ in range(3):
+    for _ in range(2):
         with pytest.raises(asyncio.CancelledError):
             await call_validated(model, store, artifacts, lease, "verify", {}, validate)
     for _ in range(2):
         with pytest.raises(ModelWorkUnitExhausted):
             await call_validated(model, store, artifacts, lease, "verify", {}, validate)
-    assert len(model.calls) == len(store.rows) == 4
+    assert len(model.calls) == len(store.rows) == 3

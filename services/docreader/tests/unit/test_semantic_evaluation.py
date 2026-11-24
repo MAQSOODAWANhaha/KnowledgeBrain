@@ -190,11 +190,11 @@ async def test_exhausted_case_stays_in_denominator_and_does_not_stop_other_cases
     _, report = await invoke(values, state)
     assert report["total_cases"] == 2 and report["counts"]["exhausted"] == 1
     assert report["counts"]["succeeded"] == 1
-    assert len(state[2].calls) == 5
-    assert report["usage"]["unknown_usage_requests"] == 5
+    assert len(state[2].calls) == 6
+    assert report["usage"]["unknown_usage_requests"] == 6
     assert "private transport details" not in json.dumps(report)
     await invoke(values, state)
-    assert len(state[2].calls) == 5
+    assert len(state[2].calls) == 6
 
 
 async def test_budget_exceeded_is_unsent_and_does_not_block_admitted_cases(tmp_path):

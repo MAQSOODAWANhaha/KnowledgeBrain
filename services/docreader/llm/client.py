@@ -30,6 +30,7 @@ from docreader.llm.request import (
     ModelRateLimitError,
     ModelSemanticError,
     UncertainModelResponse,
+    model_retry_delay,
     request_digest,
     validate_request_reasoning,
 )
@@ -43,6 +44,16 @@ from docreader.llm.streaming import (
 from docreader.tender.prompts import ANALYSIS_PROMPT_TASKS
 from docreader.tender.schema import ArtifactRef, ModelRequestStatus, Task
 from docreader.workflow.state import WORKFLOW_PROTOCOL
+
+
+# One cooldown per endpoint for every slot in this process: after a 429 no
+# slot sends to that endpoint until the window ends (BUG-260).
+_RATE_LIMITED_UNTIL: dict[str, float] = {}
+
+
+async def _wait_rate_limit(base_url):
+    while (remaining := _RATE_LIMITED_UNTIL.get(base_url, 0) - time.time()) > 0:
+        await asyncio.sleep(remaining)
 
 
 class OpenAIModel:
@@ -291,6 +302,7 @@ class OpenAIModel:
             not_before = await request_not_before(self.lease, task, logical_digest)
             if not_before is not None and (remaining := not_before - time.time()) > 0:
                 await asyncio.sleep(remaining)
+        await _wait_rate_limit(endpoint.base_url)
         # Durable attempt limits and active-send fencing happen before HTTP.
         await self.store.finish_request(request_id, ModelRequestStatus.SENT)
         started = time.monotonic()
@@ -366,6 +378,10 @@ class OpenAIModel:
                 retry_after_seconds=retry_after_seconds,
             )
             if status == 429:
+                _RATE_LIMITED_UNTIL[endpoint.base_url] = max(
+                    _RATE_LIMITED_UNTIL.get(endpoint.base_url, 0),
+                    time.time() + model_retry_delay(0, rate_limited=True, retry_after_seconds=retry_after_seconds),
+                )
                 raise ModelRateLimitError(retry_after_seconds) from None
             _, failure = http_failure(status)
             if failure is ModelInfrastructureError:

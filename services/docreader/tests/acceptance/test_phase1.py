@@ -142,7 +142,7 @@ async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sou
     assert failed["status"] == "failed"
     assert command["status"] == "completed" and command["receipt"]["status"] == "failed"
     assert command["infrastructure_failures"] == 0
-    assert len([request for request in failed["usage"] if request["status"] == "failed"]) == 4
+    assert len([request for request in failed["usage"] if request["status"] == "failed"]) == 5
     saved = {(a["stage"], a["scope"]): a for a in failed["artifacts"]}
     assert any(stage == "extract-pack" for stage, _ in saved)
     assert ("freeze", "") in saved
@@ -161,7 +161,7 @@ async def test_partial_pack_infrastructure_failure_reuses_success_and_frozen_sou
     assert successful_initial
 
 
-async def test_uncertain_and_refused_siblings_each_stop_after_four_attempts(runtime):
+async def test_uncertain_and_refused_siblings_each_stop_after_four_resends(runtime):
     store, _, settings, run = runtime
 
     class MixedFailureModel(AnalysisFixtureModel):
@@ -191,8 +191,8 @@ async def test_uncertain_and_refused_siblings_each_stop_after_four_attempts(runt
     assert row["commands"][-1]["receipt"]["status"] == "failed"
     assert row["commands"][-1]["infrastructure_failures"] == 0
     uncertain = [request for request in row["usage"] if request["status"] == "uncertain"]
-    assert len(uncertain) == 4 and all(request["response_ref"] for request in uncertain)
-    assert len([request for request in row["usage"] if request["status"] == "failed"]) == 4
+    assert len(uncertain) == 5 and all(request["response_ref"] for request in uncertain)
+    assert len([request for request in row["usage"] if request["status"] == "failed"]) == 5
     assert any(item["stage"] == "extract-pack" for item in row["artifacts"])
     await execute_command(run["run_id"], cmd["command_id"], 1, settings, factory)
     assert (await store.get_run(run["run_id"]))["usage"] == row["usage"]
@@ -209,11 +209,11 @@ async def test_protocol_failure_is_failed_and_successful_siblings_survive_source
     assert row["commands"][-1]["infrastructure_failures"] == 0
     await execute(store, settings, run, malformed_document="annex")
     assert (await store.get_run(run["run_id"]))["usage"] == row["usage"]
-    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 4
+    assert len([a for a in row["artifacts"] if a["stage"] == "model-rejection"]) == 3
     rejected_digests = {request["metadata"]["request_digest"] for request in row["usage"]
                         if request["task"] == "extract" and artifacts.read_json(request["response_ref"]) == {
                             "not_an_extraction": True}}
-    assert len(rejected_digests) == 4
+    assert len(rejected_digests) == 3
     assert any(item["stage"] == "extract-pack" for item in row["artifacts"])
     assert not any(item["stage"] == "verify" for item in row["artifacts"])
     with pytest.raises(InvalidConfirmation):

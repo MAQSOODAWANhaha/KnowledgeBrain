@@ -19,7 +19,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from docreader.llm.request import ModelWorkUnitExhausted, model_retry_delay
+from docreader.llm.request import ModelWorkUnitExhausted, model_retry_delay, send_allowance_exhausted
 from docreader.tender.schema import Task, validate_issue_resolutions
 from docreader.tender.status import CommandStatus, ModelRequestStatus, RunStatus, status_row
 from docreader.workflow.state import WORKFLOW_PROTOCOL
@@ -63,6 +63,11 @@ class Lease:
 
 
 SOURCE_STAGES = frozenset({"register", "freeze", "freeze-document", "ocr", "source-spec"})
+
+
+def _column(row: Any, name: str) -> Any:
+    # Rows come from the dict_row factory; psycopg types them as tuples.
+    return row[name]
 
 
 def _request_retry_delay(error, attempt):
@@ -975,7 +980,8 @@ class Store:
                     # The run lock serializes sends across executors and feedback
                     # digests. Preparations and cache reads do not consume attempts.
                     attempts = [status_row(entry, ModelRequestStatus) for entry in await (await conn.execute(
-                        "SELECT request_id, status, metadata->>'command_id' AS command_id "
+                        "SELECT request_id, status, metadata->>'command_id' AS command_id, "
+                        "metadata->>'request_digest' AS request_digest "
                         "FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s "
                         "AND domain_revision = %s AND task = %s AND metadata->>'logical_request_digest' = %s "
                         "AND (sent_at IS NOT NULL OR status IN ('sent', 'uncertain')) "
@@ -985,7 +991,10 @@ class Store:
                     for attempt in attempts:
                         if attempt["status"] == ModelRequestStatus.SENT:
                             raise RequestReplayBlocked(attempt["request_id"], attempt["status"])
-                    if sum(attempt["command_id"] == row["metadata"]["command_id"] for attempt in attempts) >= 4:
+                    if send_allowance_exhausted(
+                            [_column(attempt, "request_digest") for attempt in attempts
+                             if attempt["command_id"] == row["metadata"]["command_id"]],
+                            _column(row, "metadata")["request_digest"]):
                         raise ModelWorkUnitExhausted(row["task"])
             if response_ref is not None and row["response_ref"] is not None and row["response_ref"] != response_ref:
                 raise Conflict("model request already identifies a different immutable response")

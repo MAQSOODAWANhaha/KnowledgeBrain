@@ -7,8 +7,9 @@ import time
 
 from docreader.integrations.store import Cancelled, StaleExecution
 from docreader.llm.request import (
-    ModelContractError, ModelCorrectionStalled, ModelInfrastructureError, ModelJSONError,
-    ModelRateLimitError, ModelSemanticError, ModelWorkUnitExhausted, image_data_url, model_retry_delay,
+    MODEL_CONTRACT_ATTEMPTS, MODEL_TRANSPORT_RETRIES, ModelContractError, ModelCorrectionStalled,
+    ModelInfrastructureError, ModelJSONError, ModelRateLimitError, ModelSemanticError, ModelWorkUnitExhausted,
+    image_data_url, model_retry_delay,
 )
 
 
@@ -85,7 +86,7 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         sequence += 1
         restored = row, rejection, scope
 
-    if sequence >= 4:
+    if sequence >= MODEL_CONTRACT_ATTEMPTS:
         raise ModelWorkUnitExhausted(task)
     if restored:
         row, rejection, scope = restored
@@ -108,7 +109,20 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
                 deadline = wait['not_before']
         await wait_rejection(deadline, scope)
 
-    for attempt in range(sequence, 4):
+    # Corrections are counted by durable receipts; transport and other call
+    # failures resend the same request under their own allowance. The stores
+    # enforce both limits again at send time, so restarts cannot reset them.
+    transport = 0
+
+    async def resend(error, *, rate_limited=False, retry_after_seconds=None):
+        nonlocal transport
+        transport += 1
+        if transport > MODEL_TRANSPORT_RETRIES:
+            raise ModelWorkUnitExhausted(task) from error
+        await asyncio.sleep(model_retry_delay(transport - 1, rate_limited=rate_limited,
+                                              retry_after_seconds=retry_after_seconds))
+
+    while True:
         response_kind = 'parsed'
         try:
             response = await model.call(task, current, images=images) if images else await model.call(task, current)
@@ -117,11 +131,8 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         except ModelInfrastructureError as error:
             # This model transport error subclasses OSError; a caller passing
             # storage OSError through must still retain the paid-call retries.
-            if attempt == 3:
-                raise ModelWorkUnitExhausted(task) from error
-            delay = model_retry_delay(attempt, rate_limited=isinstance(error, ModelRateLimitError),
-                                      retry_after_seconds=getattr(error, "retry_after_seconds", None))
-            await asyncio.sleep(delay)
+            await resend(error, rate_limited=isinstance(error, ModelRateLimitError),
+                         retry_after_seconds=getattr(error, "retry_after_seconds", None))
             continue
         except passthrough_exceptions:
             raise
@@ -133,11 +144,9 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
                                    'detail': 'The cached model response could not be validated.'}], 'fragments': []}
             response, response_kind = {'cache_error': feedback}, 'invalid_cache'
         except Exception as error:
-            # Transport, configuration, uncertain payment and other call errors
-            # share the same allowance; private exception text is not model input.
-            if attempt == 3:
-                raise ModelWorkUnitExhausted(task) from error
-            await asyncio.sleep(2 ** attempt)
+            # Configuration, uncertain payment and other call errors use the
+            # transport allowance; private exception text is not model input.
+            await resend(error)
             continue
         else:
             try:
@@ -153,9 +162,7 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
                 feedback = {'errors': errors, 'fragments': (deepcopy(fragments) if fragments is not None
                                                            else _fragments(response, errors))}
             except Exception as error:
-                if attempt == 3:
-                    raise ModelWorkUnitExhausted(task) from error
-                await asyncio.sleep(2 ** attempt)
+                await resend(error)
                 continue
 
         # Receipt/DB errors escape to the command's infrastructure policy.
@@ -167,12 +174,12 @@ async def call_validated(model, store, artifacts, lease, task, payload, validate
         rejection = {'task': task, 'input_digest': identity, 'request_ref': request_ref,
                      'response_ref': response_ref, 'errors': errors, **owner,
                      'response_kind': response_kind, 'feedback': feedback,
-                     'not_before': time.time() + model_retry_delay(attempt)}
+                     'not_before': time.time() + model_retry_delay(sequence)}
         ref = await asyncio.to_thread(artifacts.put_json, rejection)
         scope = f'{identity}:{sequence}'
         await store.commit_artifact(lease, 'model-rejection', ref, scope=scope, input_digest=identity)
         sequence += 1
         current = {**deepcopy(payload), 'contract_feedback': feedback}
-        if attempt == 3:
+        if sequence >= MODEL_CONTRACT_ATTEMPTS:
             raise ModelWorkUnitExhausted(task)
         await wait_rejection(rejection['not_before'], scope)

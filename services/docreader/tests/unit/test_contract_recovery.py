@@ -65,14 +65,14 @@ async def test_rejection_is_durable_and_same_execution_gets_real_feedback(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_same_invalid_correction_gets_three_real_retries_before_exhaustion(tmp_path):
+async def test_same_invalid_correction_gets_two_real_corrections_before_exhaustion(tmp_path):
     store, artifacts = Store(), ArtifactStore(tmp_path)
     lease = Lease('run', 1, 1, 'command')
-    model = Model([{'findings': None}] * 4 + [{'findings': []}])
+    model = Model([{'findings': None}] * 3 + [{'findings': []}])
     with pytest.raises(ModelWorkUnitExhausted):
         await call_validated(model, store, artifacts, lease, 'verify', {}, validate)
-    assert len(model.calls) == 4 and len(store.rows) == 4
-    assert [call['contract_feedback']['rejection_count'] for call in model.calls[1:]] == [1, 2, 3]
+    assert len(model.calls) == 3 and len(store.rows) == 3
+    assert [call['contract_feedback']['rejection_count'] for call in model.calls[1:]] == [1, 2]
     assert all(call['contract_feedback']['fragments'] == [{'path': ['findings'], 'value': None}]
                for call in model.calls[1:])
 
@@ -115,14 +115,14 @@ async def test_validation_code_errors_retry_without_sending_the_stack_to_the_mod
 
 
 @pytest.mark.asyncio
-async def test_validation_code_errors_exhaust_without_a_fifth_call(tmp_path):
-    store, model = Store(), Model([{}] * 5)
+async def test_validation_code_errors_exhaust_without_a_sixth_call(tmp_path):
+    store, model = Store(), Model([{}] * 6)
     def broken(value):
         raise RuntimeError('private programming fault')
     with pytest.raises(ModelWorkUnitExhausted) as exhausted:
         await call_validated(model, store, ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'),
                              'verify', {}, broken)
-    assert len(model.calls) == 4 and not store.rows
+    assert len(model.calls) == 5 and not store.rows
     assert isinstance(exhausted.value.__cause__, RuntimeError)
 
 
@@ -154,14 +154,14 @@ async def test_separate_work_units_each_recover_from_transient_failures(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_work_unit_stops_after_four_confirmed_failures(tmp_path):
+async def test_work_unit_stops_after_four_transport_retries(tmp_path):
     from docreader.llm.request import ModelWorkUnitExhausted
 
-    model = Model([ModelInfrastructureError('HTTP 500')] * 4 + [{'findings': []}])
+    model = Model([ModelInfrastructureError('HTTP 500')] * 5 + [{'findings': []}])
     with pytest.raises(ModelWorkUnitExhausted):
         await call_validated(model, Store(), ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'),
                              'verify', {}, validate)
-    assert len(model.calls) == 4
+    assert len(model.calls) == 5
 
 
 @pytest.mark.asyncio
@@ -177,21 +177,21 @@ async def test_configuration_http_rejections_retry_within_the_work_unit(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_configuration_and_transport_failures_share_the_four_attempt_limit(tmp_path):
+async def test_configuration_and_transport_failures_share_the_transport_allowance(tmp_path):
     from docreader.llm.request import ModelWorkUnitExhausted
 
     model = Model([ModelConfigurationError('HTTP 401'), ModelInfrastructureError('HTTP 500'),
-                   ModelConfigurationError('HTTP 403'), ModelConfigurationError('HTTP 404'),
-                   {'findings': []}])
+                   ModelConfigurationError('HTTP 403'), ModelInfrastructureError('HTTP 502'),
+                   ModelConfigurationError('HTTP 404'), {'findings': []}])
     with pytest.raises(ModelWorkUnitExhausted) as exhausted:
         await call_validated(model, Store(), ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'),
                              'verify', {}, validate)
-    assert len(model.calls) == 4
+    assert len(model.calls) == 5
     assert isinstance(exhausted.value.__cause__, ModelConfigurationError)
 
 
 @pytest.mark.asyncio
-async def test_json_contract_and_transport_recovery_share_four_attempts(tmp_path):
+async def test_json_contract_rejections_exhaust_after_two_corrections_despite_transport_room(tmp_path):
     from docreader.llm.request import ModelJSONError, ModelWorkUnitExhausted
 
     invalid = ModelJSONError('json_syntax_error', 'Extra data', '{"findings":[]}]}',
@@ -210,6 +210,40 @@ async def test_json_contract_and_transport_recovery_share_four_attempts(tmp_path
     assert ']}' in feedback['fragments'][0]['value']
     assert len(store.rows) == 3
     assert all(call['source_views'] == [{'text': '必须保留原文'}] for call in model.calls)
+
+
+@pytest.mark.asyncio
+async def test_rate_limits_keep_the_full_correction_allowance(tmp_path, monkeypatch):
+    from docreader.llm.request import ModelRateLimitError
+
+    async def no_wait(_):
+        return None
+    monkeypatch.setattr(asyncio, 'sleep', no_wait)
+    store = Store()
+    model = Model([ModelRateLimitError(None)] * 3 + [{'findings': None}, {'findings': None}, {'findings': []}])
+    assert await call_validated(model, store, ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'),
+                                'verify', {}, validate) == {'findings': []}
+    assert len(model.calls) == 6 and len(store.rows) == 2
+    assert model.calls[-1]['contract_feedback']['rejection_count'] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extra, sends', [([], 7), ([ModelInfrastructureError('HTTP 500')], 7)])
+async def test_transport_retries_accumulate_across_corrections(tmp_path, monkeypatch, extra, sends):
+    async def no_wait(_):
+        return None
+    monkeypatch.setattr(asyncio, 'sleep', no_wait)
+    failure = ModelInfrastructureError('HTTP 500')
+    model = Model([failure, {'findings': None}, failure, {'findings': None}, failure, failure,
+                   *extra, {'findings': []}])
+    run = call_validated(model, Store(), ArtifactStore(tmp_path), Lease('run', 1, 1, 'command'),
+                         'verify', {}, validate)
+    if extra:
+        with pytest.raises(ModelWorkUnitExhausted):
+            await run
+    else:
+        assert await run == {'findings': []}
+    assert len(model.calls) == sends
 
 
 @pytest.mark.asyncio

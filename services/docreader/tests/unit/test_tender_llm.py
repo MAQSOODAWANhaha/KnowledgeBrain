@@ -639,7 +639,7 @@ def test_execution_spec_is_non_secret_json_with_all_actual_prompts():
         for task, prompt in prompts.items()
     }
     assert spec["timeout_seconds"] == 45
-    assert spec["retry_policy"] == "bounded_work_unit_deadline_v1"
+    assert spec["retry_policy"] == "split_transport_contract_v1"
     assert spec["concurrency"] == 3
     encoded = json.dumps(spec)
     for private in (

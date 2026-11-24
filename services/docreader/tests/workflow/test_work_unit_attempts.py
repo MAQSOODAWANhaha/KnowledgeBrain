@@ -1,4 +1,4 @@
-"""Persisted work-unit attempts share one budget across response corrections."""
+"""Persisted work-unit attempts: two corrections and four resends, counted separately."""
 
 import asyncio
 
@@ -35,17 +35,17 @@ async def test_command_identity_is_host_owned_and_logical_digest_is_canonical(st
                                       request_metadata("invalid", logical_request_digest=digest))
 
 
-async def test_corrections_share_four_sent_attempts_and_a_fifth_cannot_send(store):
+async def test_two_corrections_then_a_third_cannot_send(store):
     from docreader.llm.request import ModelWorkUnitExhausted
 
     run, command, lease = await leased(store)
-    for attempt in range(4):
+    for attempt in range(3):
         await failed_attempt(store, lease, f"correction-{attempt}")
-    await store.begin_request(lease, "fifth", "fixture", "verify", metadata("fifth"))
+    await store.begin_request(lease, "third-correction", "fixture", "verify", metadata("third-correction"))
     with pytest.raises(ModelWorkUnitExhausted):
-        await store.finish_request("fifth", "sent")
+        await store.finish_request("third-correction", "sent")
     current = await store.get_run(run["run_id"])
-    assert len([row for row in current["usage"] if row["sent_at"]]) == 4
+    assert len([row for row in current["usage"] if row["sent_at"]]) == 3
     assert current["usage"][-1]["status"] == "prepared"
     assert current["usage"][-1]["sent_at"] is None
     unchanged = await store.get_command(command["command_id"])
@@ -53,12 +53,29 @@ async def test_corrections_share_four_sent_attempts_and_a_fifth_cannot_send(stor
     assert unchanged["execution_count"] == 1
 
 
+async def test_resends_do_not_spend_corrections_and_survive_in_the_ledger(store):
+    from docreader.llm.request import ModelWorkUnitExhausted
+
+    run, _, lease = await leased(store)
+    for attempt in range(5):
+        identity = f"rate-limited-{attempt}"
+        await store.begin_request(lease, identity, "fixture", "verify", metadata("original"))
+        await store.finish_request(identity, "sent")
+        await store.finish_request(identity, "failed", error={"type": "http_429"})
+    for attempt in range(2):
+        await failed_attempt(store, lease, f"correction-{attempt}")
+    await store.begin_request(lease, "sixth-resend", "fixture", "verify", metadata("original"))
+    with pytest.raises(ModelWorkUnitExhausted):
+        await store.finish_request("sixth-resend", "sent")
+    assert len([row for row in (await store.get_run(run["run_id"]))["usage"] if row["sent_at"]]) == 7
+
+
 async def test_separate_work_units_have_independent_budgets(store):
     run, _, lease = await leased(store)
     for logical in ("unit-a", "unit-b"):
-        for attempt in range(4):
+        for attempt in range(3):
             await failed_attempt(store, lease, f"{logical}-{attempt}", logical)
-    assert len([row for row in (await store.get_run(run["run_id"]))["usage"] if row["sent_at"]]) == 8
+    assert len([row for row in (await store.get_run(run["run_id"]))["usage"] if row["sent_at"]]) == 6
 
 
 async def test_attempts_survive_executor_loss_and_unsent_preparations_do_not_count(store):
@@ -70,23 +87,22 @@ async def test_attempts_survive_executor_loss_and_unsent_preparations_do_not_cou
     await store.begin_request(lease, "abandoned-preparation", "fixture", "verify", metadata("abandoned"))
     await expire(store, run["run_id"])
     replacement = await store.acquire(run["run_id"], command["command_id"], 1)
-    for attempt in range(2):
-        await failed_attempt(store, replacement, f"after-restart-{attempt}")
-    await store.begin_request(replacement, "fifth", "fixture", "verify", metadata("fifth"))
+    await failed_attempt(store, replacement, "after-restart")
+    await store.begin_request(replacement, "third-correction", "fixture", "verify", metadata("third-correction"))
     with pytest.raises(ModelWorkUnitExhausted):
-        await store.finish_request("fifth", "sent")
+        await store.finish_request("third-correction", "sent")
     current = await store.get_run(run["run_id"])
     abandoned = next(row for row in current["usage"] if row["request_id"] == "abandoned-preparation")
     assert abandoned["status"] == "failed" and abandoned["sent_at"] is None
-    assert len([row for row in current["usage"] if row["sent_at"]]) == 4
+    assert len([row for row in current["usage"] if row["sent_at"]]) == 3
     assert (await store.get_command(command["command_id"]))["infrastructure_failures"] == 1
 
 
-async def test_success_cache_remains_reusable_after_four_sent_attempts(store):
+async def test_success_cache_remains_reusable_after_the_last_correction(store):
     from docreader.llm.request import ModelWorkUnitExhausted
 
     run, _, lease = await leased(store)
-    for attempt in range(3):
+    for attempt in range(2):
         await failed_attempt(store, lease, f"failed-{attempt}")
     await store.begin_request(lease, "accepted", "fixture", "verify", metadata("accepted"))
     await store.finish_request("accepted", "sent")
@@ -94,7 +110,7 @@ async def test_success_cache_remains_reusable_after_four_sent_attempts(store):
     await store.finish_request("accepted", "succeeded", response_ref=ref)
     reused = await store.begin_request(lease, "cache-read", "fixture", "verify", metadata("accepted"))
     assert reused["request_id"] == "accepted" and reused["status"] == "succeeded"
-    assert len((await store.get_run(run["run_id"]))["usage"]) == 4
+    assert len((await store.get_run(run["run_id"]))["usage"]) == 3
     await store.begin_request(lease, "new-feedback", "fixture", "verify", metadata("new-feedback"))
     with pytest.raises(ModelWorkUnitExhausted):
         await store.finish_request("new-feedback", "sent")
@@ -104,14 +120,14 @@ async def test_complete_but_host_rejected_response_consumes_an_attempt(store):
     from docreader.llm.request import ModelWorkUnitExhausted
 
     _, _, lease = await leased(store)
-    for attempt in range(4):
+    for attempt in range(3):
         identity = f"host-rejected-{attempt}"
         await store.begin_request(lease, identity, "fixture", "verify", metadata(identity))
         await store.finish_request(identity, "sent")
         await store.finish_request(identity, "succeeded", response_ref=store.test_artifacts.put_json({"findings": None}))
-    await store.begin_request(lease, "fifth-correction", "fixture", "verify", metadata("fifth-correction"))
+    await store.begin_request(lease, "third-correction", "fixture", "verify", metadata("third-correction"))
     with pytest.raises(ModelWorkUnitExhausted):
-        await store.finish_request("fifth-correction", "sent")
+        await store.finish_request("third-correction", "sent")
 
 
 async def test_feedback_digest_cannot_bypass_an_active_send(store):
@@ -125,12 +141,12 @@ async def test_feedback_digest_cannot_bypass_an_active_send(store):
 
 
 @pytest.mark.parametrize("same_digest", [True, False])
-async def test_uncertain_attempts_can_retry_within_the_same_four_attempt_budget(store, same_digest):
+async def test_uncertain_attempts_can_retry_within_their_allowance(store, same_digest):
     from docreader.llm.request import ModelWorkUnitExhausted
 
     run, _, lease = await leased(store)
     originals = []
-    for attempt in range(4):
+    for attempt in range(5 if same_digest else 3):
         identity = f"unknown-{attempt}"
         await store.begin_request(lease, identity, "fixture", "verify",
                                   metadata("same-request" if same_digest else identity))
@@ -182,19 +198,19 @@ async def test_explicit_retry_continues_new_protocol_unknown_attempts_without_er
     await store.release(lease, "failed", metadata={"reason": "model_work_unit_retries_exhausted"})
     retried = await store.retry(run["run_id"], 1, 1, command["command_id"], "retry-unknown", "Continue all failures")
     replacement = await store.acquire(run["run_id"], retried["command_id"], 1)
-    for attempt in range(4):
+    for attempt in range(5):
         identity = f"new-attempt-{attempt}"
         await store.begin_request(replacement, identity, "fixture", "verify", fields)
         await store.finish_request(identity, "sent")
         await store.finish_request(identity, "failed", error={"type": "http_500"})
-    await store.begin_request(replacement, "fifth", "fixture", "verify", fields)
+    await store.begin_request(replacement, "sixth", "fixture", "verify", fields)
     with pytest.raises(ModelWorkUnitExhausted):
-        await store.finish_request("fifth", "sent")
+        await store.finish_request("sixth", "sent")
     usage = (await store.get_run(run["run_id"]))["usage"]
     assert usage[0]["status"] == "uncertain"
     for field in ("request_id", "metadata", "response_ref", "usage", "sent_at"):
         assert usage[0][field] == original[field]
-    assert len([row for row in usage[1:] if row["sent_at"]]) == 4
+    assert len([row for row in usage[1:] if row["sent_at"]]) == 5
     assert all(row["metadata"]["command_id"] == retried["command_id"] for row in usage[1:])
 
 
@@ -211,7 +227,7 @@ async def test_concurrent_prepared_corrections_cannot_both_send(store):
     from docreader.llm.request import ModelWorkUnitExhausted
 
     run, _, lease = await leased(store)
-    for attempt in range(3):
+    for attempt in range(2):
         await failed_attempt(store, lease, f"earlier-{attempt}")
     for identity in ("parallel-a", "parallel-b"):
         await store.begin_request(lease, identity, "fixture", "verify", metadata(identity))
@@ -219,12 +235,12 @@ async def test_concurrent_prepared_corrections_cannot_both_send(store):
                                       ("parallel-a", "parallel-b")), return_exceptions=True)
     assert sum(outcome is None for outcome in outcomes) == 1
     assert sum(isinstance(outcome, (RequestReplayBlocked, ModelWorkUnitExhausted)) for outcome in outcomes) == 1
-    assert len([row for row in (await store.get_run(run["run_id"]))["usage"] if row["sent_at"]]) == 4
+    assert len([row for row in (await store.get_run(run["run_id"]))["usage"] if row["sent_at"]]) == 3
 
 
 async def test_explicit_retry_gets_a_new_budget_and_preserves_old_audits(store):
     run, command, lease = await leased(store)
-    for attempt in range(4):
+    for attempt in range(3):
         await failed_attempt(store, lease, f"failed-{attempt}")
     old = (await store.get_run(run["run_id"]))["usage"]
     await store.release(lease, "failed", metadata={"reason": "model_work_unit_retries_exhausted"})

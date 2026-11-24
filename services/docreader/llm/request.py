@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from typing import Literal, Sequence, cast
 
 
-MODEL_RETRY_POLICY = "bounded_work_unit_deadline_v1"
+MODEL_RETRY_POLICY = "split_transport_contract_v1"
+# Per logical request: the first send plus two corrections are distinct
+# complete requests; transport retries resend one of them unchanged.
+MODEL_CONTRACT_ATTEMPTS = 3
+MODEL_TRANSPORT_RETRIES = 4
 ReasoningEffort = Literal["low", "medium", "high"]
 
 
@@ -69,8 +73,15 @@ class ModelJSONError(ModelSemanticError):
             radius //= 2
 
 
+def send_allowance_exhausted(sent_digests, next_digest):
+    """Durable send fence: complete request digests separate corrections from resends."""
+    digests = [*sent_digests, next_digest]
+    distinct = len(set(digests))
+    return distinct > MODEL_CONTRACT_ATTEMPTS or len(digests) - distinct > MODEL_TRANSPORT_RETRIES
+
+
 class ModelWorkUnitExhausted(RuntimeError):
-    """A logical work unit has used its initial call and three retries."""
+    """A logical work unit has used its correction or transport allowance."""
 
     def __init__(self, task=None):
         self.task = task

@@ -71,7 +71,7 @@ async def save_extraction(nodes):
 
 @pytest.mark.parametrize("ending", ["eof", "gzip_crc"])
 @pytest.mark.parametrize("usage", [None, {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}])
-async def test_partial_responses_share_four_send_budget_without_domain_commit(store, monkeypatch, ending, usage):
+async def test_partial_responses_use_the_resend_allowance_without_domain_commit(store, monkeypatch, ending, usage):
     run, command, old = await leased(store)
     partial = event('{"requirements":') + (event(usage=usage) if usage else b"")
     calls, streams, commits = [], [], []
@@ -93,10 +93,10 @@ async def test_partial_responses_share_four_send_budget_without_domain_commit(st
             await save_extraction(first)
     finally:
         await first.close()
-    assert not commits and len(calls) == 4 and all(stream.closed for stream in streams)
+    assert not commits and len(calls) == 5 and all(stream.closed for stream in streams)
     before = await store.get_run(run["run_id"])
-    assert len(before["usage"]) == 4 and not before["artifacts"]
-    assert len({request["request_id"] for request in before["usage"]}) == 4
+    assert len(before["usage"]) == 5 and not before["artifacts"]
+    assert len({request["request_id"] for request in before["usage"]}) == 5
     for request in before["usage"]:
         assert request["sent_at"] and request["status"] == "uncertain" and request["usage"] == usage
         assert request["metadata"]["command_id"] == command["command_id"]
@@ -116,7 +116,7 @@ async def test_partial_responses_share_four_send_budget_without_domain_commit(st
             await save_extraction(resumed)
     finally:
         await resumed.close()
-    assert len(calls) == 4 and not commits
+    assert len(calls) == 5 and not commits
     after = await store.get_run(run["run_id"])
     assert [row for row in after["usage"] if row["sent_at"]] == before["usage"]
     assert all(row["status"] == "prepared" for row in after["usage"] if not row["sent_at"])
@@ -167,7 +167,7 @@ async def test_decoding_uncertainty_survives_audit_failure_and_recovery(store, m
                 await save_extraction(first)
         finally:
             await first.close()
-    initial_calls = 4 if fault == "audit_after_commit" else 1
+    initial_calls = 5 if fault == "audit_after_commit" else 1
     assert len(calls) == initial_calls and faults == [fault] * initial_calls
     assert len(writes) == initial_calls and all(stream.closed for stream in streams)
     for envelope in writes:
@@ -194,9 +194,9 @@ async def test_decoding_uncertainty_survives_audit_failure_and_recovery(store, m
     finally:
         await resumed.close()
     after = await store.get_run(run["run_id"])
-    assert len(calls) == 4 and all(stream.closed for stream in streams) and not after["artifacts"]
+    assert len(calls) == 5 and all(stream.closed for stream in streams) and not after["artifacts"]
     sent = [row for row in after["usage"] if row["sent_at"]]
-    assert len(sent) == 4 and all(row["status"] == "uncertain" and row["usage"] is None for row in sent)
+    assert len(sent) == 5 and all(row["status"] == "uncertain" and row["usage"] is None for row in sent)
     for original, recovered in zip(before["usage"], sent):
         if fault == "audit_after_commit":
             assert recovered == original

@@ -182,7 +182,7 @@ async def test_publication_failure_reuses_same_execution_accepted_response(runti
 async def test_saved_review_legacy_retry_policy_cannot_resume_under_new_execution(runtime):
     await runtime.execute()
     spec = runtime.rows["saved-review"]["execution_spec"]
-    assert spec.pop("retry_policy") == "bounded_work_unit_deadline_v1"
+    assert spec.pop("retry_policy") == "split_transport_contract_v1"
     with pytest.raises(Conflict, match="immutable review"):
         await runtime.execute()
     assert len(runtime.calls) == 1

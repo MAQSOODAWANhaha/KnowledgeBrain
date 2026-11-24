@@ -21,7 +21,7 @@
 
 ### 当前发送边界
 
-1. **分析调用数**：实际准入的抽取包数 + 准入的 `review` 请求数（OCR 另计）；分开统计计划条目、唯一逻辑请求与物理发送；每个逻辑请求最多初发 1 次 + 恢复 3 次（传输重试与合同纠正共享额度），成功回执按完整摘要复用。
+1. **分析调用数**：实际准入的抽取包数 + 准入的 `review` 请求数（OCR 另计）；分开统计计划条目、唯一逻辑请求与物理发送；每个逻辑请求最多合同纠正 2 次、传输重发 4 次，两类分开计数，物理发送上界 7 次（见 [字段字典 · 失败执行的显式恢复](field-dictionary.md#失败执行的显式恢复)），成功回执按完整摘要复用。
 2. **准入预算**：在 `131072` 上下文、输出预留 `32768`、安全余量 `4096` 下，单次输入准入上限 `94208`（抽取按 UTF-8 字节估算，review 按校准 Token 估算）。
 3. **抽取软目标与紧凑处置**：多范围抽取包输入软目标 ≤ `55,000` 字节且单包正文范围 ≤ `200`（单条不可拆大范围按 `94208` 准入）；`non_item` 用固定理由码逐范围声明。
 4. **严格 Schema 与触发条件**：v2 文本抽取通过 `response_format.json_schema` 传同源 Schema（计入执行身份）；多个独立触发条件共用后果须列全各条件并保留原文引证。
@@ -100,7 +100,7 @@
 
 ## 编制实际模型调用
 
-Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；保存 Word 后可单独复核。已保存版 [PDF 出件](workbench.md#pdf-与报告) 与常规组装新增模型调用为 0。下文均为逻辑请求数，各沿用首次加 3 次恢复额度。
+Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；保存 Word 后可单独复核。已保存版 [PDF 出件](workbench.md#pdf-与报告) 与常规组装新增模型调用为 0。下文均为逻辑请求数，每个逻辑请求各有合同纠正 2 次、传输重发 4 次的恢复额度。
 
 ### 大纲执行（现行默认目录编译路径）
 
@@ -145,5 +145,5 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
   - Excel 正文取唯一 row 范围、raw 留全网格、drawing anchor 补图片偏移、全空行压缩视图但留 `body` 身份、`display_incomplete_reason` 升级为可见问题；Word SECTION 保留原生定位；PDF 补齐 image occurrence，重复页边与不可读图记 `partial`，原件损坏属技术失败。
   - `supporting` 只累计前文同节/祖先节条件与表头（混合小章包用 `scope_binding.applies_to_range_ids` 绑定）；无法切出完整条件句时写 `pack.pending_scope_context`（仅定位与 `scope_binding` 元数据，不含正文/表格/图像），模型空 findings 不解除阻断。
 - **模型层**：`ModelConfig.from_env(mapping=None)` 单一配置源；`OpenAIModel(config, store, lease, prompts, concurrency=2, timeout_seconds=60).call(task, payload, images=())` 关闭 SDK 重试，仅接受本地图像字节/data URL。
-  - 默认连续 60 秒无非空原始响应字节超时（收到流字节重计时，不限总墙钟）；`timeout`、`retry_policy=bounded_work_unit_deadline_v1`、`outline_source_binding_contract=batch_excerpt_coverage_v1` 计入冻结执行身份。
-  - 请求状态 `prepared → sent → succeeded / failed / uncertain`（真实 usage 缺失留 `null`，收部分流后超时记 `uncertain`）；错误分 `ModelInfrastructureError` / `ModelSemanticError` / `ModelConfigurationError`；429 按 30/60/120 秒退避并持久化 `not_before`；首原始字节/首解码块/首非空正文/最大 raw 静默/排队耗时独立计量且不进请求身份。
+  - 默认连续 60 秒无非空原始响应字节超时（收到流字节重计时，不限总墙钟）；`timeout`、`retry_policy=split_transport_contract_v1`、`outline_source_binding_contract=batch_excerpt_coverage_v1` 计入冻结执行身份。
+  - 请求状态 `prepared → sent → succeeded / failed / uncertain`（真实 usage 缺失留 `null`，收部分流后超时记 `uncertain`）；错误分 `ModelInfrastructureError` / `ModelSemanticError` / `ModelConfigurationError`；429 按 30/60/120 秒退避并持久化 `not_before`；同一进程内某端点收到 429 后，该端点的全部并发槽位在冷却结束前都不发新请求（冷却取 `Retry-After`，至少 30 秒、至多 120 秒；不跨进程共享）；首原始字节/首解码块/首非空正文/最大 raw 静默/排队耗时独立计量且不进请求身份。

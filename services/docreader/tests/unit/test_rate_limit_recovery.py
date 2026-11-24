@@ -82,18 +82,18 @@ async def test_rate_limit_recovery_waits_then_accepts_fourth_attempt(monkeypatch
     assert error.retry_after_seconds == hint
 
 
-async def test_capacity_rejections_still_stop_after_initial_and_three_retries(monkeypatch, tmp_path):
+async def test_capacity_rejections_stop_after_initial_and_four_transport_retries(monkeypatch, tmp_path):
     delays = []
 
     async def sleep(seconds):
         delays.append(seconds)
 
     monkeypatch.setattr("docreader.llm.recovery.asyncio.sleep", sleep)
-    instance = Model([request_module.ModelRateLimitError()] * 4 + [{"findings": []}])
+    instance = Model([request_module.ModelRateLimitError()] * 5 + [{"findings": []}])
     with pytest.raises(ModelWorkUnitExhausted):
         await call_validated(instance, Store(), ArtifactStore(tmp_path), Lease("run", 1, 1, "cmd"),
                              "verify", {}, validate)
-    assert len(instance.calls) == 4 and delays == [30, 60, 120]
+    assert len(instance.calls) == 5 and delays == [30, 60, 120, 120]
 
 
 async def test_other_infrastructure_errors_keep_short_backoff(monkeypatch, tmp_path):
@@ -134,3 +134,33 @@ async def test_execution_stop_does_not_enter_capacity_backoff(monkeypatch, tmp_p
         await call_validated(instance, Store(), ArtifactStore(tmp_path), Lease("run", 1, 1, "cmd"),
                              "verify", {}, validate)
     assert len(instance.calls) == 1 and delays == []
+
+
+async def test_rate_limit_cools_down_every_slot_for_the_endpoint(monkeypatch, tmp_path):
+    clock = [NOW.timestamp()]
+    waits, sent = [], []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(client_module.time, "time", lambda: clock[0])
+    monkeypatch.setattr(client_module.asyncio, "sleep", sleep)
+    from test_tender_llm import response
+
+    def handler(status):
+        def send(request):
+            sent.append(clock[0])
+            if status == 429:
+                return httpx.Response(429, headers={"retry-after": "45"}, json={"error": "busy"})
+            return response()
+        return send
+
+    limited, _ = model(handler(429), artifacts=ArtifactStore(tmp_path))
+    sibling, _ = model(handler(200), artifacts=ArtifactStore(tmp_path))
+    async with limited, sibling:
+        with pytest.raises(ModelInfrastructureError):
+            await limited.call("extract", {})
+        assert await sibling.call("extract", {}) == {"result": "ok"}
+    assert waits == [45]
+    assert sent == [NOW.timestamp(), NOW.timestamp() + 45]

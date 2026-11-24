@@ -115,11 +115,11 @@ async def test_successor_reuses_accepted_source_and_rebuilds_failed_source_and_a
     original_execution = deepcopy(await store.get_execution(first))
     original_plan = next(r for r in original_execution["receipts"] if r["stage"] == "document-plan")
     assert original_execution["status"] == "succeeded"
-    assert calls == {"declaration": 1, "requirement": 4, "assemble": 4, "structure": 1}
+    assert calls == {"declaration": 1, "requirement": 5, "assemble": 5, "structure": 1}
     assert {"outline_batch_unavailable", "outline_assembly_unavailable"} <= {
         gap["code"] for gap in first_document["gaps"]}
     assert await execute(first) == first_ref
-    assert sum(calls.values()) == 10, "Reopening a completed execution must not create new paid calls."
+    assert sum(calls.values()) == 12, "Reopening a completed execution must not create new paid calls."
 
     recovered = True
     second_ref = await execute(second, previous_execution_id=first)
@@ -128,7 +128,7 @@ async def test_successor_reuses_accepted_source_and_rebuilds_failed_source_and_a
     assert successor["authoring_input"] == original_execution["authoring_input"] == snapshot
     assert successor["execution_spec"]["authoring_input_ref"] == input_ref
     assert successor["execution_spec"].get("outline_ref") is None
-    assert calls == {"declaration": 1, "requirement": 5, "assemble": 5, "structure": 2}
+    assert calls == {"declaration": 1, "requirement": 6, "assemble": 6, "structure": 2}
     assert document["usage"]["sent_requests"] == 3
     inherited = [r for r in successor["receipts"] if r["stage"] == "document-model-response"
                  and r["metadata"].get("reused_from_execution_id") == first]

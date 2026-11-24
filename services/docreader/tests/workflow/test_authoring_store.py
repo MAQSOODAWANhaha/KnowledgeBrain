@@ -308,12 +308,12 @@ async def test_independent_logical_tasks_can_send_concurrently_with_separate_ret
         await store.begin_request(lease, "wrong-task", "fixture", "extract", metadata())
 
 
-async def test_unknown_and_failed_calls_share_four_sends_across_lease_takeover(
+async def test_unknown_and_failed_corrections_stay_bounded_across_lease_takeover(
     authoring_store,
 ):
     store = authoring_store
     identity, lease = await submitted(store)
-    for number in range(4):
+    for number in range(3):
         request_id = f"attempt-{number}"
         await store.begin_request(
             lease, request_id, "fixture", "outline", metadata(f"feedback-{number}")
@@ -332,29 +332,29 @@ async def test_unknown_and_failed_calls_share_four_sends_across_lease_takeover(
         await store.finish_request("fifth", "sent")
     requests = (await store.get_execution(identity))["requests"]
     assert requests == before
-    assert sum(request["sent_at"] is not None for request in requests) == 4
+    assert sum(request["sent_at"] is not None for request in requests) == 3
 
 
-async def test_four_sends_do_not_prevent_reusing_an_existing_success_cache(
+async def test_exhausted_sends_do_not_prevent_reusing_an_existing_success_cache(
     authoring_store,
 ):
     store = authoring_store
     identity, lease = await submitted(store)
-    for number in range(4):
+    for number in range(3):
         await store.begin_request(
             lease, f"call-{number}", "fixture", "outline", metadata(f"call-{number}")
         )
         await store.finish_request(f"call-{number}", "sent")
         await store.finish_request(
             f"call-{number}",
-            "succeeded" if number == 3 else "failed",
+            "succeeded" if number == 2 else "failed",
             response_ref=store.test_artifacts.put_json({"response": number}),
         )
     before = (await store.get_execution(identity))["requests"]
     cached = await store.begin_request(
-        lease, "cached-no-new-call", "fixture", "outline", metadata("call-3")
+        lease, "cached-no-new-call", "fixture", "outline", metadata("call-2")
     )
-    assert cached["request_id"] == "call-3"
+    assert cached["request_id"] == "call-2"
     assert (await store.get_execution(identity))["requests"] == before
 
 
@@ -523,7 +523,7 @@ async def test_exhausted_chapter_does_not_spend_another_chapters_retry_budget(
 ):
     store = authoring_store
     _, lease = await submitted(store)
-    for number in range(4):
+    for number in range(3):
         await store.begin_request(
             lease,
             f"failed-{number}",

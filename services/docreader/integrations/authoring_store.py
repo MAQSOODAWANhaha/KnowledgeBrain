@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 import math
 import re
 import time
@@ -23,7 +24,7 @@ from docreader.integrations.store import (
     _request_retry_delay,
     _safe_metadata,
 )
-from docreader.llm.request import ModelWorkUnitExhausted
+from docreader.llm.request import ModelWorkUnitExhausted, send_allowance_exhausted
 from docreader.tender.schema import ArtifactRef, AuthoringInput
 from docreader.tender.status import (
     AUTHORING_MODEL_TASKS,
@@ -38,6 +39,11 @@ from docreader.tender.status import (
 class AuthoringLease:
     execution_id: str
     epoch: int
+
+
+def _request_digest(row: Any) -> str:
+    # Rows come from the dict_row factory; psycopg types them as tuples.
+    return row["metadata"]["request_digest"]
 
 
 def _duration(value):
@@ -357,7 +363,10 @@ class AuthoringStore:
             )
             if active is not None:
                 raise RequestReplayBlocked(active["request_id"], active["status"])
-            if sum(r["sent_at"] is not None for r in matching) >= 4:
+            if send_allowance_exhausted(
+                [_request_digest(r) for r in matching if r["sent_at"] is not None],
+                metadata["request_digest"],
+            ):
                 raise ModelWorkUnitExhausted(task)
             return status_row(
                 await (
@@ -477,7 +486,10 @@ class AuthoringStore:
                 )
                 if cached is not None:
                     raise RequestReplayBlocked(cached["request_id"], cached["status"])
-                if len(matching) >= 4:
+                if send_allowance_exhausted(
+                    [_request_digest(r) for r in matching],
+                    _request_digest(row),
+                ):
                     raise ModelWorkUnitExhausted(row["task"])
             if (
                 row["response_ref"] is not None
