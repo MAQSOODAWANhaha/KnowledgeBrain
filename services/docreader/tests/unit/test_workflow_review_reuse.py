@@ -116,7 +116,7 @@ async def test_verify_loads_exact_history_lazily_and_only_before_its_current_rec
     assert nodes.store.history_reads == 1
     # The regular verify receipt still settles same-revision recovery before
     # history discovery, even if the predecessor is now unavailable.
-    nodes.store.history = None
+    monkeypatch.setattr(nodes.store, "history", None)
     assert await nodes.verify(deepcopy(state)) == first
     assert nodes.store.history_reads == 1
 

@@ -506,6 +506,7 @@ def _not_applicable_formats():
         '9-3 业绩表\n须保留的另一表正文',
     ]
     prepared = _Prepared([{'document_id': 'tender', 'role': 'main', 'pages': pages}], _snapshot())
+    assert prepared.payload is not None
     refs = {text: ref for ref, text in prepared.payload['lines']}
     return prepared, refs
 

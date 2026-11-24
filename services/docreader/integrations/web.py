@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from typing import Any
 from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
@@ -876,13 +877,14 @@ async def execute_authoring_job(execution_id, settings):
                     return
                 await asyncio.sleep(0.5)
 
-        request = {key: job["payload"]["request"].get(key) for key in ("previous_execution_id", "review_request")}
-        if job['payload']['request'].get('reviewed_source_facts_ref') is not None:
-            request['reviewed_source_facts_ref'] = job['payload']['request']['reviewed_source_facts_ref']
+        job_request: dict[str, Any] = job["payload"]["request"]
+        request: dict[str, Any] = {key: job_request.get(key) for key in ("previous_execution_id", "review_request")}
+        if job_request.get('reviewed_source_facts_ref') is not None:
+            request['reviewed_source_facts_ref'] = job_request['reviewed_source_facts_ref']
         if _operation(job) == "outline":
             request["outline_only"] = True
-            if 'requirement_chain_contract' in job['payload']['request']:
-                request['requirement_chain_contract'] = job['payload']['request']['requirement_chain_contract']
+            if 'requirement_chain_contract' in job_request:
+                request['requirement_chain_contract'] = job_request['requirement_chain_contract']
         elif _operation(job) == 'document':
             from docreader.integrations.web_layout import build_web_layout
             request['layout_renderer'] = build_web_layout(execution_id=execution_id)

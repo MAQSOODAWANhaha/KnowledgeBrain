@@ -1,4 +1,5 @@
 from copy import deepcopy
+from typing import Any
 
 import pytest
 
@@ -157,7 +158,7 @@ def test_response_reassignment_rejects_unknown_and_duplicate_ids(target_ids):
 def evaluation_outline():
     base = outline()
     artifact = base['chapters'][0]['targets'][0]['rule_refs'][0]['item_ref']['artifact_ref']
-    refs = [{'item_ref': {'artifact_ref': artifact, 'item_id': f'evaluation-{i}'}} for i in range(6)]
+    refs: list[dict[str, Any]] = [{'item_ref': {'artifact_ref': artifact, 'item_id': f'evaluation-{i}'}} for i in range(6)]
     refs[2].update(decision_id='effective-decision', rule_index=0)
     base['issues'].append({'code': 'outline_rule_unassigned', 'detail': '未收到模型回包', 'rule_refs': [refs[5]]})
     items = {f'r{i}': {'rule_ref': ref, 'semantic': {'kind': 'scoring_rule'}} for i, ref in enumerate(refs[:5])}
@@ -201,7 +202,7 @@ def test_save_preserves_exact_evaluation_refs_and_can_settle_each_outcome():
                                   'unselected_target', 'missing_effective_identity', 'occupied_reference'])
 def test_save_rejects_invalid_or_cross_snapshot_evaluation_decisions(case):
     base, refs = evaluation_outline()
-    chapters = [{'chapter_id': 'a', 'title': '原式'}]
+    chapters: list[dict[str, Any]] = [{'chapter_id': 'a', 'title': '原式'}]
     decisions = [{'rule_ref': refs[0], 'resolution': 'evaluation'}]
     if case == 'duplicate':
         decisions *= 2
