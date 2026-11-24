@@ -41,6 +41,12 @@ jobs:
         with:
           python-version: '3.11'
           enable-cache: true
+      - name: Install poppler-utils
+        run: |
+          if ! command -v pdfinfo >/dev/null || ! command -v pdftotext >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends poppler-utils
+          fi
       - run: uv sync --frozen
       - run: uvx ruff check .
       # Existing pyright errors are recorded in pyright-baseline.json; only new ones fail.

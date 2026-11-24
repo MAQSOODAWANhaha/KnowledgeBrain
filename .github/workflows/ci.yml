@@ -241,6 +241,12 @@ jobs:
         with:
           python-version: ${{ env.CI_DOCREADER_PYTHON_VERSION }}
           enable-cache: true
+      - name: Install poppler-utils
+        run: |
+          if ! command -v pdfinfo >/dev/null || ! command -v pdftotext >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends poppler-utils
+          fi
       - name: sync
         run: uv sync --frozen
       - name: Start isolated Python workflow database
@@ -253,6 +259,7 @@ jobs:
           echo "TENDER_TEST_DSN=postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}" >> "$GITHUB_ENV"
           echo "TENDER_TEST_DATABASE_URL=postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}" >> "$GITHUB_ENV"
           echo "TENDER_TEST_REDIS_URL=redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/15" >> "$GITHUB_ENV"
+          echo "TENDER_REDIS_URL=redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/15" >> "$GITHUB_ENV"
       - name: pytest
         run: |
           set -euo pipefail

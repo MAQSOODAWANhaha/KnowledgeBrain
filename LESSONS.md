@@ -1,4 +1,4 @@
-<!-- reviewed-through: ec41811 (2026-11-23) -->
+<!-- reviewed-through: eac4de5 (2026-11-24) -->
 # 活错题本（Lessons）
 
 开工改代码前必读。本页只保留**近期反复出现、跨模块高价值**的防错规则（上限 10 条 / 150 行）。
@@ -38,3 +38,13 @@
    - 原因：多会话共用同一 checkout 会互相覆盖未提交修改、混入无关文件或把他人提交挤掉。
    - 证据：多分支并行开发期间通过独立 worktree 隔离避免工作区冲突。
    - Seen 1×（2026-11-23）。
+
+7. **修改 `services/docreader/parser/*.py`（哪怕只改注释）会改变 `parser_version()` 原始字节哈希，必须同步刷新跨语言 fixture 并跑回归。**
+   - 原因：`source_contract.py` 对 9 个解析文件的原始字节做 SHA-256；只改注释不跑 `generate_excel_wire_fixture.py` 与 `pytest tests/test_excel_wire_fixture.py` 会直接打红 CI。
+   - 证据：`84d1fe4` 更新 `pdf_parser.py` 注释导致 `crates/docparser/tests/fixtures/python-excel-wire.pb` 指纹失配。
+   - Seen 1×（2026-11-24）。
+
+8. **测试严禁硬编码本机路径或依赖模块 import 期的本机默认端口，且合入 `main` 前必须跑齐对应栈的 L0/L1 检查。**
+   - 原因：本机存在 `testdata/bid/` 和 `127.0.0.1:16379` Redis 会掩盖硬编码路径与 import 期绑定默认端口的 bug，推到干净 CI runner 立即失败；未跑 `cargo fmt/clippy`、`npm ci` 也会直接阻断下游全部 acceptance 与镜像发布 job。
+   - 证据：2026-11-24 CI 连续红灯排查（`tender_routes.rs` fmt/clippy、`web/package-lock.json` 缺 `esbuild@0.28.2`、`test_directory_compile.py` 硬编码 `111.pdf`、`test_skeleton.py` Redis import 顺序、CI 缺 `poppler-utils`）。
+   - Seen 1×（2026-11-24）。

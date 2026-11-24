@@ -834,19 +834,38 @@ def test_direct_text_is_not_replaced_by_ocr_and_a_short_heading_is_not_a_scan(tm
 
 
 def test_pdf_layout_keeps_toc_indent_and_a_short_title_is_not_recognized(tmp_path, monkeypatch):
-    from pathlib import Path
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
     import docreader.tender.directory_compile as directory_compile
     from test_structural_packing import source
+
+    writer = PdfWriter()
+    font = writer._add_object(DictionaryObject({
+        NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'),
+        NameObject('/BaseFont'): NameObject('/Helvetica')}))
+    resources = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+    for stream_bytes in (
+        b'BT /F1 14 Tf 70 700 Td (Volume One) Tj ET',
+        b'BT /F1 12 Tf 60 720 Td (Contents) Tj 24 -20 Td (1. Technical Proposal) Tj ET',
+    ):
+        page = writer.add_blank_page(width=400, height=800)
+        page[NameObject('/Resources')] = resources
+        stream = DecodedStreamObject()
+        stream.set_data(stream_bytes)
+        page[NameObject('/Contents')] = writer._add_object(stream)
+    pdf_path = tmp_path / 'toc-layout.pdf'
+    with pdf_path.open('wb') as handle:
+        writer.write(handle)
 
     calls = []
     monkeypatch.setattr(directory_compile, '_tesseract', lambda data: calls.append(True) or '不应识别')
     artifacts = ArtifactStore(tmp_path)
     index = source([{'text': '解析单元不应代替版式'}], document_id='tender')
-    index.raw['original_ref'] = artifacts.put_bytes(Path('/opt/workspace/KnowledgeBrain/testdata/bid/111.pdf').read_bytes())
+    index.raw['original_ref'] = artifacts.put_bytes(pdf_path.read_bytes())
     documents = documents_from_frozen(artifacts, {'documents': [_freeze(artifacts, index, 'main')]})
     assert any(line.startswith('   1.') for line in documents[0]['pages'][1].splitlines())
     assert '解析单元不应代替版式' not in '\n'.join(documents[0]['pages'])
-    assert any('第一卷' in page for page in documents[0]['pages'])
+    assert any('Volume One' in page for page in documents[0]['pages'])
     assert calls == []
 
 

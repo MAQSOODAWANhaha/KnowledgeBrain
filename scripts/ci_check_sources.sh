@@ -107,6 +107,16 @@ grep -Fq 'python-version: ${{ env.CI_DOCREADER_PYTHON_VERSION }}' .github/workfl
   echo ".github/workflows/ci.yml must pin docreader setup-uv to CI_DOCREADER_PYTHON_VERSION" >&2
   exit 1
 }
+for wf in .github/workflows/ci.yml .github/workflows/python-tender.yml; do
+  grep -Fq 'poppler-utils' "$wf" || {
+    echo "$wf must install poppler-utils to match deploy/Dockerfile.docreader" >&2
+    exit 1
+  }
+done
+if rg -n '/opt/workspace/KnowledgeBrain' crates services/docreader/tests web/src; then
+  echo "tests and source code must not hardcode developer workspace paths (/opt/workspace/KnowledgeBrain)" >&2
+  exit 1
+fi
 if rg -n 'crates/bidding|bidding_v2_baseline|CI_TENDER_PREPARE_BIN|bid-authoring-v2' Cargo.toml deploy/queue-registry.toml .github/workflows/ci.yml; then
   echo "retired Rust tender workflow remains in active build configuration" >&2
   exit 1

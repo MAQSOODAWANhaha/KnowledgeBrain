@@ -25,6 +25,8 @@ from docreader.workflow.persistence import FencedPostgresSaver, initialize_check
 from docreader.workflow.graph import build_graph
 from docreader.workflow.runner import execute_command
 
+if os.environ.get("TENDER_TEST_REDIS_URL"):
+    os.environ.setdefault("TENDER_REDIS_URL", os.environ["TENDER_TEST_REDIS_URL"])
 sys.path.insert(0, str(Path(__file__).parent))
 from skeleton_worker import SkeletonNodes, skeleton_command
 
