@@ -10,6 +10,20 @@ from docreader.llm.recovery import call_validated
 from docreader.llm.request import request_digest
 
 
+def sent_request(payload):
+    """The Chat request actually sent for a recovery payload.
+
+    Feedback belongs to the semantic JSON, never Chat API parameters.
+    """
+    request = deepcopy(payload["request"])
+    if "contract_feedback" in payload:
+        content = request["messages"][1]["content"][0]
+        value = json.loads(content["text"])
+        value["contract_feedback"] = payload["contract_feedback"]
+        content["text"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return request
+
+
 class _OutlineModel:
     def __init__(self, client, store, artifacts, lease, budget, spec, task="outline"):
         self.client, self.store, self.artifacts, self.lease = client, store, artifacts, lease
@@ -18,13 +32,7 @@ class _OutlineModel:
 
     async def call(self, task, payload):
         baseline = payload["request"]
-        request = deepcopy(baseline)
-        if "contract_feedback" in payload:
-            # Feedback belongs to the semantic JSON, never Chat API parameters.
-            content = request["messages"][1]["content"][0]
-            value = json.loads(content["text"])
-            value["contract_feedback"] = payload["contract_feedback"]
-            content["text"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        request = sent_request(payload)
         self.budget.admit_request(request, task)
         digest = request_digest(self.client.config.chat.base_url, request)
         logical = request_digest(self.client.config.chat.base_url, baseline)

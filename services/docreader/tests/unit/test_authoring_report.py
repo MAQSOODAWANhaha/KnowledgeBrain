@@ -41,6 +41,34 @@ def test_document_report_counts_gaps():
     assert report["document_gaps"] == {"knowledge_unavailable": 2}
 
 
+def test_failures_tie_rejections_to_the_sent_request_and_rank_by_tokens():
+    from docreader.llm.request import request_digest
+    from docreader.tender.authoring_execution import sent_request
+    from docreader.tender.authoring_report import failure_table
+
+    endpoint = "https://fixture.invalid/v1/chat/completions"
+    base = {"messages": [{"role": "system", "content": "s"},
+                         {"role": "user", "content": [{"type": "text", "text": '{"units":[]}'}]}]}
+    corrected = {"request": base, "contract_feedback": {"errors": [{"code": "list_type"}], "rejection_count": 1}}
+    rejected = request("authoring_review", "r1", completion=40)
+    rejected["metadata"]["request_digest"] = request_digest(endpoint, sent_request(corrected))
+    # A failed resend of the same complete request shares its digest; only the
+    # send that succeeded at transport can have produced the rejected response.
+    failed = {**request("authoring_review", "r1", "failed"), "usage": None, "error": {"type": "http_429"}}
+    failed["metadata"] = {**failed["metadata"], "request_digest": rejected["metadata"]["request_digest"]}
+    uncertain = {**request("outline", "o1", "uncertain", completion=5), "error": {"type": "between_data_idle_timeout"}}
+    rejections = [{"task": "authoring_review", "errors": [{"code": "list_type"}, {"code": "other"}], "payload": corrected},
+                  {"task": "authoring_review", "errors": [{"code": "list_type"}], "payload": {"request": base}}]
+    table = failure_table([rejected, failed, uncertain, request("outline", "o1")], rejections, endpoint)
+    assert [(row["task"], row["kind"], row["code"], row["count"], row["reported_tokens"], row["unknown_usage"])
+            for row in table] == [
+        ("authoring_review", "contract", "list_type", 2, 140, 1),
+        ("outline", "send", "between_data_idle_timeout", 1, 105, 0),
+        ("authoring_review", "send", "http_429", 1, 0, 1)]
+    assert table[0]["stage"] == "正文复核 / 再核"
+    assert sum(row["count"] for row in table if row["kind"] == "contract") == len(rejections)
+
+
 def test_analysis_planning_does_not_wait_for_retired_phases():
     plans = [{"phase": phase, "requests": [{"budget": {"input_tokens": 1, "output_reserve": 1, "fits": True}}]}
              for phase in ("extract", "review")]
@@ -59,7 +87,7 @@ async def test_cli_reads_document_and_its_outline(tmp_path, monkeypatch):
     outline_ref = artifacts.put_json(outline())
     result_ref = artifacts.put_json({"outline_ref": outline_ref, "gaps": [{"code": "knowledge_unavailable"}]})
     execution = {"execution_id": "web-document-x", "status": "succeeded", "result_ref": result_ref,
-                 "requests": [request("authoring_write", "w1")]}
+                 "requests": [request("authoring_write", "w1")], "receipts": []}
 
     class Store:
         def __init__(self, dsn):

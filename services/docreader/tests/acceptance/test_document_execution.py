@@ -522,6 +522,54 @@ async def test_rejected_response_is_corrected_then_reused_as_accepted_json(
     assert len(sent) == 3
 
 
+async def test_failure_report_ties_rejections_and_failed_sends_to_their_tokens(
+    analysis_runtime, pipeline, monkeypatch
+):
+    from argparse import Namespace
+
+    from docreader.integrations import cli
+
+    async def no_delay(seconds):
+        return None
+
+    monkeypatch.setattr("docreader.llm.recovery.asyncio",
+                        SimpleNamespace(sleep=no_delay, to_thread=asyncio.to_thread))
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        if len(sent) == 1:
+            return httpx.Response(500, json={"error": "synthetic upstream failure"})
+        # Two rejections: the second request carries contract_feedback, so its
+        # tokens are found only through the actually sent request digest.
+        # Distinct usage per send makes any wrong match change the sum.
+        value = {"value": "invalid" if len(sent) in {2, 3} else "accepted"}
+        events = [{"choices": [{"index": 0, "delta": {"content": json.dumps(value)}, "finish_reason": None}]},
+                  {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                  {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": len(sent),
+                                            "total_tokens": 100 + len(sent)}}]
+        body = "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    execution_id = uuid4().hex
+    await execute(analysis_runtime, execution_id, handler)
+    row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
+    assert row is not None
+    rejected = [r for r in row["requests"] if r["task"] == "outline" and r["status"] == "succeeded"][:2]
+    receipts = [r for r in row["receipts"] if r["stage"] == "model-rejection"]
+    monkeypatch.setattr(cli.Settings, "from_env", classmethod(lambda cls: analysis_runtime[2]))
+    report = await cli.run(Namespace(command="authoring-report", execution_id=execution_id))
+    assert isinstance(report, dict) and isinstance(report["failures"], list)
+    failures = {(f["task"], f["kind"], f["code"]): f for f in report["failures"]}
+    assert set(failures) == {("outline", "send", "http_500"), ("outline", "contract", "bad_value")}
+    assert failures[("outline", "send", "http_500")]["count"] == 1
+    assert failures[("outline", "send", "http_500")]["unknown_usage"] == 1
+    contract = failures[("outline", "contract", "bad_value")]
+    assert contract["count"] == len(receipts) == 2 and contract["unknown_usage"] == 0
+    assert [r["usage"]["total_tokens"] for r in rejected] == [102, 103]
+    assert contract["reported_tokens"] == 205
+
+
 async def test_publication_failure_resumes_fixed_snapshot_and_knowledge_without_resending(
     analysis_runtime,
     pipeline,

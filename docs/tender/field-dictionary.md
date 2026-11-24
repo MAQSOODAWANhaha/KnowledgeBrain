@@ -235,6 +235,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `targets` | 大纲响应位置总数 `total`、知识应答位置 `knowledge_answers`、带分析规则引用的位置 `with_rule_refs` |
 | `outline_issues` | 大纲 issues 按 code 计数，含预算拒收、待核和未安排的分析规则（`outline_rule_unassigned`） |
 | `document_gaps` | 仅正文执行：缺口按 code 计数 |
+| `failures` | 失败聚合表，每行一个「阶段 × 类别 × code」：`stage`、`task`、`kind`、`code`、`count`、`reported_tokens`（供应商回报的 total_tokens 之和）、`unknown_usage`（无回报用量的条数）。`kind=send` 来自状态为 failed 或 uncertain 的请求行，code 取 `error.type`；`kind=contract` 来自 `model-rejection` 回执，每条回执计一次，code 取首条错误的 code，Token 取产生该回包的请求行（按回执里的请求重建实际发送的请求摘要匹配），匹配不到记入 `unknown_usage`。contract 行的 count 之和等于回执条数。按 reported_tokens、count 降序排列，回答「哪类失败最多」 |
 
 ### 运行状态
 

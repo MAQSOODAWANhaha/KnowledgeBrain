@@ -121,7 +121,13 @@ async def run(args):
                         if execution.get("result_ref") else {"chapters": [], "issues": []})
         document = result if "outline_ref" in result else None
         outline = await asyncio.to_thread(artifacts.read_json, result["outline_ref"]) if document else result
-        return authoring_report(execution, execution["requests"], outline, document)
+        rejections = []
+        for receipt in execution["receipts"]:
+            if receipt["stage"] == "model-rejection":
+                rejection = await asyncio.to_thread(artifacts.read_json, receipt["artifact_ref"])
+                rejection["payload"] = await asyncio.to_thread(artifacts.read_json, rejection["request_ref"])
+                rejections.append(rejection)
+        return authoring_report(execution, execution["requests"], outline, document, rejections)
     if args.command == "cancel":
         row = await store.cancel(args.run_id)
         return {"run_id": row["run_id"], "status": row["status"]}
