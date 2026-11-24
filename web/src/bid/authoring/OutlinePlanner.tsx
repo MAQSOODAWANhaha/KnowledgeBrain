@@ -20,19 +20,20 @@ import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../../api";
 import { randomUuid } from "../../uuid";
-import { executionError, tenderApi, type DocumentStart, type OutlineRevision, type OutlineSave, type OutlineView, type TenderChapter, type TenderIssue } from "../api/workbench";
+import { executionError, tenderApi, type DocumentStart, type OutlineRevision, type OutlineSave, type OutlineView, type TenderChapter, type TenderIssue, type TenderItem } from "../api/workbench";
+import { EvaluationReview, pendingEvaluation, submittedDecisions, type Decisions } from "./EvaluationReview";
 import { canEditManualGoal, editChapter, findChapter, manualGoal, moveChapter, moveRelative, outlineNodes, removeChapter } from "./outlineTree";
 import { OutlineRecovery } from "./OutlineRecovery";
 import { inProgress as running } from "../executionStatus";
 import { TaskProgress } from "../TaskProgress";
 
-type Working = { chapters: TenderChapter[]; issues?: TenderIssue[]; expected: string | null; sourceRevision?: string; sourceExecution?: string; saved: string | null };
+type Working = { chapters: TenderChapter[]; issues?: TenderIssue[]; decisions?: Decisions; expected: string | null; sourceRevision?: string; sourceExecution?: string; saved: string | null };
 type SaveFlight = { body: OutlineSave; attempt: MutationAttempt; working: Working };
 const signature = (chapters: TenderChapter[]) => JSON.stringify(outlineNodes(chapters));
 const fromDraft = (draft: OutlineRevision): Working => ({ chapters: draft.outline.chapters, issues: draft.outline.issues ?? [], expected: draft.revision_id, sourceRevision: draft.revision_id, saved: signature(draft.outline.chapters) });
 
-export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onGenerateBody, onUnsafeChange, onExecutionAction }: {
-  projectId: string; disabled: boolean; bodyBusy: boolean; bodyPending: boolean;
+export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPending, onGenerateBody, onUnsafeChange, onExecutionAction }: {
+  projectId: string; items: TenderItem[]; disabled: boolean; bodyBusy: boolean; bodyPending: boolean;
   onGenerateBody(body?: DocumentStart): void; onUnsafeChange(unsafe: boolean): void;
   onExecutionAction(execution: string, action: "resume" | "cancel"): Promise<void>;
 }) {
@@ -52,6 +53,7 @@ export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onG
   const [notice, setNotice] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const generationKey = `kb.outline-generation:${projectId}`;
   const [generationAttempt, setGenerationAttempt] = useState<MutationAttempt | null>(() => {
     try { const value = JSON.parse(sessionStorage.getItem(generationKey) ?? "null") as MutationAttempt | null; return typeof value?.idempotencyKey === "string" ? value : null; } catch { return null; }
@@ -76,7 +78,8 @@ export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onG
     const poll = async () => { await read(abort.signal); if (!abort.signal.aborted) timer = setTimeout(() => void poll(), 5000); };
     void poll(); return () => { abort.abort(); clearTimeout(timer); };
   }, [read]);
-  const dirty = !!working && (working.saved === null ? !!working.chapters.length || !!working.sourceExecution || !!working.sourceRevision : signature(working.chapters) !== working.saved);
+  const decided = submittedDecisions(working?.decisions ?? {});
+  const dirty = !!working && (working.saved === null ? !!working.chapters.length || !!working.sourceExecution || !!working.sourceRevision : signature(working.chapters) !== working.saved || !!decided.length);
   useEffect(() => { onUnsafeChange(dirty || !!pending || saving); }, [dirty, pending, saving, onUnsafeChange]);
   useEffect(() => {
     if (!pending || !working) return;
@@ -99,7 +102,8 @@ export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onG
     if (!working || saving || disabled && !pending || !hasSource) return;
     const flight = pending ?? { body: { expected_revision_id: working.expected,
       ...(working.sourceRevision ? { source_revision_id: working.sourceRevision } : {}),
-      ...(working.sourceExecution ? { source_execution_id: working.sourceExecution } : {}), chapters: outlineNodes(tree) }, attempt: createMutationAttempt(), working };
+      ...(working.sourceExecution ? { source_execution_id: working.sourceExecution } : {}), chapters: outlineNodes(tree),
+      ...(decided.length ? { evaluation_decisions: decided } : {}) }, attempt: createMutationAttempt(), working };
     try { sessionStorage.setItem(storageKey, JSON.stringify({ ...flight, working })); }
     catch { setNotice("无法保存浏览器恢复信息，大纲尚未发送。请检查浏览器存储后重试。"); return; }
     readRequest.current++; setPending(flight); setSaving(true); setNotice(null); setConflict(false);
@@ -108,6 +112,7 @@ export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onG
       setConfirmed(draft);
       setWorking(current => current && { ...current, expected: draft.revision_id, sourceRevision: draft.revision_id, sourceExecution: undefined,
         issues: draft.outline.issues ?? [],
+        decisions: JSON.stringify(submittedDecisions(current.decisions ?? {})) === JSON.stringify(flight.body.evaluation_decisions ?? []) ? {} : current.decisions,
         saved: signature(draft.outline.chapters),
         chapters: signature(current.chapters) === JSON.stringify(flight.body.chapters) ? draft.outline.chapters : current.chapters });
       sessionStorage.removeItem(storageKey); setPending(null); await read();
@@ -168,6 +173,7 @@ export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onG
       setNotice("当前编排已保留并更新保存基准。再次保存会按当前全部章节另存修订。");
     } catch (error) { if (request === readRequest.current) setNotice(error instanceof Error ? error.message : "最新修订读取失败，请重试。"); }
   };
+  const evaluationRefs = pendingEvaluation(working?.issues ?? []);
   const moves = [["up", "上移"], ["down", "下移"], ["indent", "降为子级"], ["outdent", "提升一级"]] as const;
   return <VStack gap={0} height="100%" minHeight={0} role="region" aria-label="大纲编排工作区">
     <Toolbar label="大纲操作" dividers={["bottom"]}
@@ -196,6 +202,12 @@ export function OutlinePlanner({ projectId, disabled, bodyBusy, bodyPending, onG
         endContent={running(remote.generation.status) ? <Button size="sm" isDisabled={bodyBusy} onClick={() => void executionAction("cancel")} label="取消大纲生成" /> : <Button size="sm" isDisabled={disabled || bodyBusy} onClick={() => void executionAction("resume")} label="继续大纲生成" />} />}
       {(confirmed && !confirmed.sources_current || remote?.draft?.sources_current === false) && <Banner role="alert" status="error" title="项目来源已变化，请重新生成大纲并保存新修订后生成正文。" />}
       {!hasSource && <Banner status="info" title="请先生成并载入候选大纲，再编排章节和保存修订。" />}
+      {!!evaluationRefs.length && <Banner status="warning" title={`${evaluationRefs.length} 条事项待按原件核定是否按评标程序处理`}
+        description={decided.length ? `已核定 ${decided.length} 条，保存大纲草稿后生效。` : undefined}
+        endContent={<Button size="sm" onClick={() => setReviewOpen(true)} label="核定评标待核事项" />} />}
+      <EvaluationReview isOpen={reviewOpen} onOpenChange={setReviewOpen} refs={evaluationRefs} chapters={tree} items={items}
+        decisions={working?.decisions ?? {}} disabled={editingDisabled || !!pending}
+        onChange={decisions => setWorking(current => current && { ...current, decisions })} />
       <OutlineRecovery projectId={projectId} tree={tree} sourceRevision={working?.sourceRevision} sourceExecution={working?.sourceExecution}
         sourceTargets={remote?.candidate && remote.candidate.execution_id === working?.sourceExecution ? remote.candidate.outline.chapters.flatMap(function targets(chapter): typeof chapter.targets { return [...chapter.targets, ...chapter.children.flatMap(targets)]; }) : undefined}
         issues={working?.issues ?? []} selectedId={selected?.chapter_id}

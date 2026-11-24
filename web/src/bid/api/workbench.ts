@@ -5,7 +5,7 @@ import type { DocxSessionApi } from "../authoring/docxSession";
 import type { ReviewIdentity } from "./analysisReview";
 import { downloadResponse, v2Blob, v2Request } from "./http";
 
-export type TenderIssue = { code: string; detail: string; issue_id?: string; chapter_id?: string | null; target_id?: string | null };
+export type TenderIssue = { code: string; detail: string; issue_id?: string; chapter_id?: string | null; target_id?: string | null; rule_refs?: RuleRef[] };
 export type TenderEvidence = { range_id: string; quote: string };
 export type TenderItem = {
   item_id?: string; kind?: string; text: string; evidence?: TenderEvidence[];
@@ -35,7 +35,9 @@ export type OutlineRevision = {
   outline: OutlineDocument; sources_current: boolean; newer_analysis_identity?: ReviewIdentity | null;
 };
 export type OutlineView = { draft: OutlineRevision | null; candidate: { execution_id: string; sha256: string; outline: OutlineDocument } | null; generation: TenderExecution | null };
-export type OutlineSave = { expected_revision_id: string | null; source_revision_id?: string; source_execution_id?: string; chapters: OutlineNode[] };
+export type EvaluationResolution = "pending" | "evaluation" | "reference" | "document_wide" | "target";
+export type EvaluationDecision = { rule_ref: RuleRef; resolution: EvaluationResolution; target_id?: string };
+export type OutlineSave = { expected_revision_id: string | null; source_revision_id?: string; source_execution_id?: string; chapters: OutlineNode[]; evaluation_decisions?: EvaluationDecision[] };
 export type DocumentStart = { outline_revision_id?: string; outline_sha256?: string; knowledge_selections?: Array<{ product_id: string; version_id: string }>; previous_execution_id?: string; review_request?: { target_ids: string[]; reason: string } };
 export type TenderDocument = {
   id: string; file_name: string; media_type: string; byte_length: number;

@@ -305,3 +305,45 @@ test("confirming a pending body request works even when the outline head is temp
   await expect.poll(() => f.state.starts.length).toBe(2);
   expect(f.state.starts[0]).toEqual(f.state.starts[1]);
 });
+
+test("evaluation-pending items are adjudicated with the outline save and leave the pending list", async ({ page }) => {
+  const f = await fixture(page);
+  f.view.analysis!.items!.push({ item_id: "rule-2", kind: "scoring_rule", text: "评委按方案完整性打分。" }, { item_id: "rule-3", kind: "requirement", text: "评标委员会复核资格。" });
+  f.outline.draft!.outline.issues = [{ code: "outline_rule_unassigned", detail: "模型建议按评标程序处理，请按原件核定是否另设响应。",
+    rule_refs: [{ item_ref: { item_id: "rule-2" } }, { item_ref: { item_id: "rule-3" } }] }];
+  await f.ready();
+  await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
+  await expect(page.getByText("2 条事项待按原件核定是否按评标程序处理", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "核定评标待核事项", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "核定评标待核事项" });
+  await drawer.getByRole("combobox", { name: "去向：评委按方案完整性打分。", exact: true }).click();
+  await page.getByRole("option", { name: "归入：实施方案 · 说明实施方法", exact: true }).click();
+  await drawer.getByRole("combobox", { name: "去向：评标委员会复核资格。", exact: true }).click();
+  await page.getByRole("option", { name: "纯评审流程，不需响应", exact: true }).click();
+  await expect(drawer.getByRole("status").filter({ hasText: "已核定" })).toHaveText("已核定 2 条，共 2 条");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
+  await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
+  await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 2");
+  expect(f.state.outlineSaves[0].body.evaluation_decisions).toEqual([
+    { rule_ref: { item_ref: { item_id: "rule-2" } }, resolution: "target", target_id: "target-1" },
+    { rule_ref: { item_ref: { item_id: "rule-3" } }, resolution: "evaluation" },
+  ]);
+  await expect(page.getByRole("button", { name: "核定评标待核事项", exact: true })).toHaveCount(0);
+});
+
+test("a pending-only adjudication sends no decisions and keeps the outline clean", async ({ page }) => {
+  const f = await fixture(page);
+  f.outline.draft!.outline.issues = [{ code: "outline_rule_unassigned", detail: "模型建议按评标程序处理，请按原件核定是否另设响应。", rule_refs: [{ item_ref: { item_id: "rule-1" } }] }];
+  await f.ready();
+  await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
+  await page.getByRole("button", { name: "核定评标待核事项", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "核定评标待核事项" });
+  await drawer.getByRole("combobox", { name: "去向：应提交实施安排。", exact: true }).click();
+  await page.getByRole("option", { name: "整份投标文件约束", exact: true }).click();
+  await drawer.getByRole("combobox", { name: "去向：应提交实施安排。", exact: true }).click();
+  await page.getByRole("option", { name: "继续待核", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 1");
+  await expect(page.getByRole("button", { name: "保存大纲草稿", exact: true })).toBeDisabled();
+});

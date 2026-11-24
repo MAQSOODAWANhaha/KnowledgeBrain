@@ -452,7 +452,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             </VStack></LayoutPanel>} />}
         </Panel>
         <Panel id="guide-panel" role="tabpanel" aria-label="材料引导" isShown={step === "authoring" && authoringMode === "guide"} fill isScrollable><GuideScreen /></Panel>
-        <Panel id="outline-planner-panel" role="tabpanel" aria-label="大纲编排" isShown={step === "authoring" && authoringMode === "outline"} fill><OutlinePlanner projectId={projectId} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></Panel>
+        <Panel id="outline-planner-panel" role="tabpanel" aria-label="大纲编排" isShown={step === "authoring" && authoringMode === "outline"} fill><OutlinePlanner projectId={projectId} items={analysisItems} disabled={!!ended} bodyBusy={busy || !!pending && (pending.kind !== "authoring" || !pending.body || !("outline_revision_id" in pending.body)) || inProgress(view.authoring?.status) && pending?.kind !== "authoring"} bodyPending={pending?.kind === "authoring" && !!pending.body && "outline_revision_id" in pending.body} onGenerateBody={body => void start("authoring", body)} onUnsafeChange={setOutlineUnsafe} onExecutionAction={executionAction} /></Panel>
         <Panel id="word-editor-panel" role="tabpanel" aria-label="正文编辑" isShown={bodyMode} fill>
           <Layout height="fill"
             start={leftClosed
