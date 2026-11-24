@@ -24,7 +24,13 @@ from docreader.integrations.store import (
     _request_retry_delay,
     _safe_metadata,
 )
-from docreader.llm.request import ModelWorkUnitExhausted, send_allowance_exhausted
+from docreader.llm.request import (
+    RUN_LIMIT_POLICY,
+    ExecutionBudgetExhausted,
+    ModelWorkUnitExhausted,
+    send_allowance_exhausted,
+)
+from docreader.llm.usage import reported_usage
 from docreader.tender.schema import ArtifactRef, AuthoringInput
 from docreader.tender.status import (
     AUTHORING_MODEL_TASKS,
@@ -44,6 +50,40 @@ class AuthoringLease:
 def _request_digest(row: Any) -> str:
     # Rows come from the dict_row factory; psycopg types them as tuples.
     return row["metadata"]["request_digest"]
+
+
+def _count(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _planned_tokens(metadata: Any) -> int:
+    return _count(metadata.get("input_tokens")) + _count(metadata.get("output_reserve"))
+
+
+def _used_tokens(row: Any) -> int:
+    total = (reported_usage(row["usage"]) or {}).get("total_tokens")
+    if type(total) is int:
+        return total
+    # A failed send produced no output; an uncertain stream may have.
+    if row["status"] == "failed":
+        return _count(row["metadata"].get("input_tokens"))
+    return _planned_tokens(row["metadata"])
+
+
+def _run_limit_reached(execution: Any, rows: Any, task: str, metadata: Any, multiplier: int) -> bool:
+    """Calls per task and tokens per execution stay within a multiple of their plans."""
+    planned = sum(_count(r["metadata"].get("planned_requests")) for r in execution["receipts"]
+                  if r["stage"] == "execution-plan" and r["metadata"].get("task") == task)
+    admitted: dict[tuple[str, str], Any] = {}
+    for r in rows:
+        if r["sent_at"] is not None or r["status"] in {"prepared", "sent"}:
+            admitted.setdefault((r["task"], r["metadata"]["logical_request_digest"]), r)
+    new = (task, metadata["logical_request_digest"]) not in admitted
+    if sum(key[0] == task for key in admitted) + new > multiplier * planned:
+        return True
+    plan = sum(_planned_tokens(r["metadata"]) for r in admitted.values()) + (_planned_tokens(metadata) if new else 0)
+    used = sum(_used_tokens(r) for r in rows if r["sent_at"] is not None) + _planned_tokens(metadata)
+    return used > multiplier * plan
 
 
 def _duration(value):
@@ -316,6 +356,14 @@ class AuthoringStore:
             )
             return receipt
 
+    async def register_plan(self, lease, task, scope, requests, reference):
+        """Record one stage's planned logical requests for a task (run limits)."""
+        return await self.commit_artifact(
+            lease, "execution-plan", reference, scope=f"{task}:{scope}",
+            input_digest=f"{task}:{requests}",
+            metadata={"task": task, "planned_requests": requests},
+        )
+
     async def begin_request(self, lease, request_id, model, task, metadata):
         if task not in AUTHORING_MODEL_TASKS:
             raise ValueError("unsupported authoring task")
@@ -330,7 +378,7 @@ class AuthoringStore:
                     f"authoring model audit requires a lowercase SHA-256 {key}"
                 )
         async with self.transaction() as conn:
-            await self.assert_fence(lease, conn)
+            execution: Any = await self.assert_fence(lease, conn)
             rows = [
                 status_row(entry, ModelRequestStatus)
                 for entry in await (
@@ -368,6 +416,11 @@ class AuthoringStore:
                 metadata["request_digest"],
             ):
                 raise ModelWorkUnitExhausted(task)
+            spec = execution["execution_spec"] or {}
+            if spec.get("run_limit_policy") == RUN_LIMIT_POLICY and _run_limit_reached(
+                execution, rows, task, metadata, spec["run_limit_multiplier"]
+            ):
+                raise ExecutionBudgetExhausted(task)
             return status_row(
                 await (
                     await conn.execute(

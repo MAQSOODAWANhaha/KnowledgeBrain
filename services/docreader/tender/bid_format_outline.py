@@ -308,11 +308,12 @@ def decode_bid_format_outline(raw, prepared):
 
 
 async def select_bid_format_plan(documents, budget, execute, identity):
-    from docreader.tender.authoring_pipeline import _ask
+    from docreader.tender.authoring_pipeline import _ask, _plan
 
     prepared = _Prepared(documents, identity)
     if prepared.payload is None:
         return None
+    await _plan(execute, AuthoringTask.DIRECTORY_PLAN, 1, 'bid-format-plan')
 
     def accept(raw):
         return decode_bid_format_outline(raw, prepared)

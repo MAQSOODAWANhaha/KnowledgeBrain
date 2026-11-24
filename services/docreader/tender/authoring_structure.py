@@ -646,8 +646,9 @@ async def review_structure(artifacts, outline, units, budget, execute, *, outlin
     request = build_request(budget.model, prompt, payload, task="authoring_structure",
                             reasoning_effort=budget.reasoning_effort)
     try:
-        from docreader.tender.authoring_pipeline import _replay
+        from docreader.tender.authoring_pipeline import _plan, _replay
 
+        await _plan(execute, "authoring_structure", 1, "structure")
         hit, value = await _replay(execute, "authoring_structure", request, validate)
         if hit:
             return accepted(value)

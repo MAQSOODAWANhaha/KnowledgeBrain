@@ -28,6 +28,7 @@ from docreader.llm.client import OpenAIModel
 from docreader.llm.config import ModelConfig, ModelEndpoint
 from docreader.llm.contracts import schema_prompt
 from docreader.llm.request import (
+    ExecutionBudgetExhausted,
     ModelBudgetError,
     ModelConfigurationError,
     ModelContractError,
@@ -63,6 +64,7 @@ def pipeline(monkeypatch):
         published_units=[],
         saved_plans=[],
         published_plans=[],
+        unplanned_write=False,
     )
 
     async def generate(
@@ -127,7 +129,15 @@ def pipeline(monkeypatch):
                 state.observed.append(result)
                 return result
 
-            outputs.append(await execute(task, request, validate))
+            if not (task == "authoring_write" and state.unplanned_write):
+                await execute.plan(task, 1, "synthetic")
+            try:
+                outputs.append(await execute(task, request, validate))
+            except ExecutionBudgetExhausted:
+                # The real pipeline keeps a placeholder; this fake only records it.
+                if not state.unplanned_write:
+                    raise
+                continue
             if task == "authoring_write" and on_unit is not None:
                 unit = {"schema_version": 2, "task_id": "synthetic-write", "chapter_id": "chapter",
                         "target_ids": ["target"], "status": "generated", "blocks": [],
@@ -239,6 +249,25 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
     assert len(units) == len(pipeline.published_units) == 1
     assert pipeline.saved_units == [[]]
     assert pipeline.saved_plans == [None] and len(pipeline.published_plans) == 1
+
+
+async def test_run_limit_refuses_an_unplanned_task_without_http_and_names_it(analysis_runtime, pipeline):
+    _, artifacts, settings, _, _ = analysis_runtime
+    pipeline.unplanned_write = True
+    execution_id, sent = uuid4().hex, []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return response({"value": "accepted"})
+
+    value = artifacts.read_json(await execute(analysis_runtime, execution_id, handler))
+    row = await AuthoringStore(settings.dsn).get_execution(execution_id)
+    assert row is not None and row["status"] == "succeeded"
+    assert [request["task"] for request in row["requests"]] == ["outline"] and len(sent) == 1
+    assert row["execution_spec"]["run_limit_policy"] == "planned_task_budget_v1"
+    assert row["execution_spec"]["run_limit_multiplier"] == 2
+    limited = [gap for gap in value["gaps"] if gap["code"] == "execution_budget_exhausted"]
+    assert len(limited) == 1 and "authoring_write" in limited[0]["detail"]
 
 
 @pytest.mark.parametrize("contract", ["retry_policy", "outline_assembly_planning_contract"])
@@ -554,6 +583,9 @@ async def test_model_transport_failures_still_retry_and_count_unknown_usage(
         "docreader.llm.recovery.asyncio",
         SimpleNamespace(sleep=no_delay, to_thread=asyncio.to_thread),
     )
+    # Isolate per-request transport retries: with one planned request, three
+    # failed sends would otherwise reach the run-level token limit first.
+    monkeypatch.setattr(document_execution, "RUN_LIMIT_MULTIPLIER", 10)
 
     def handler(request):
         sent.append(request)

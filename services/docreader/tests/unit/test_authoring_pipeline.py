@@ -86,6 +86,40 @@ async def test_missing_analysis_and_failed_unit_still_produce_a_real_document(tm
     assert result['gaps'] and calls.count('authoring_write') == 1
 
 
+async def test_run_limit_refusal_leaves_named_placeholders_after_stage_plans(tmp_path):
+    from docreader.llm.request import ExecutionBudgetExhausted
+
+    artifacts = ArtifactStore(tmp_path)
+    budget = RequestBudget(model='fixture', context_tokens=131072, prompts={}, output_reserve=16384)
+
+    class Executor:
+        def __init__(self):
+            self.plans, self.calls = {}, []
+
+        async def plan(self, task, requests, scope):
+            self.plans[(task, scope)] = requests
+
+        async def __call__(self, task, request, validate):
+            self.calls.append(task)
+            assert any(key[0] == task for key in self.plans), f'{task} sent before its stage plan'
+            if task == 'authoring_write':
+                raise ExecutionBudgetExhausted(task)
+            if task == 'authoring_basis':
+                return validate({'approach': '拟采用分阶段实施方式'})
+            return validate({'findings': []})
+
+    execute, given = Executor(), outline()
+    result_ref = await generate_document(artifacts, deepcopy(given['authoring_input']), budget, execute,
+        outline=given, materials=[{'material_id': 'implementation', 'title': '给定实施方法', 'text': '按部署、测试、验收阶段实施。'}])
+    result = artifacts.read_json(result_ref)
+    assert result['docx_ref'] and result['package_ref']
+    assert execute.plans[('authoring_write', 'write')] == len(plan_writing_tasks(given))
+    units = [artifacts.read_json(ref) for ref in result['unit_refs']]
+    refused = [unit for unit in units if unit.get('error_type') == 'ExecutionBudgetExhausted']
+    assert refused and len(refused) == execute.calls.count('authoring_write')
+    assert all(unit['status'] == 'placeholder' and '运行上限' in unit['gaps'][0] for unit in refused)
+
+
 async def test_cross_batch_assembly_merges_targets_and_preserves_manual_instance(monkeypatch, tmp_path):
     from types import SimpleNamespace
     import docreader.tender.authoring_pipeline as pipeline

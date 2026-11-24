@@ -17,6 +17,10 @@ from test_directory_compile import docs, item, node, plan, window
 class Receipts:
     def __init__(self):
         self.rows = {}
+        self.plans = {}
+
+    async def register_plan(self, _lease, task, scope, requests, _reference):
+        self.plans[(task, scope)] = requests
 
     async def receipt(self, _lease, stage, scope, *, input_digest):
         return self.rows.get((stage, scope, input_digest))

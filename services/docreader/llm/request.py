@@ -14,6 +14,10 @@ MODEL_RETRY_POLICY = "split_transport_contract_v1"
 # complete requests; transport retries resend one of them unchanged.
 MODEL_CONTRACT_ATTEMPTS = 3
 MODEL_TRANSPORT_RETRIES = 4
+# Authoring run limits: calls and tokens stay within this multiple of the
+# per-task stage plans and per-request plans (first-send input + output).
+RUN_LIMIT_POLICY = "planned_task_budget_v1"
+RUN_LIMIT_MULTIPLIER = 2
 ReasoningEffort = Literal["low", "medium", "high"]
 
 
@@ -86,6 +90,14 @@ class ModelWorkUnitExhausted(RuntimeError):
     def __init__(self, task=None):
         self.task = task
         super().__init__("Model work unit exhausted its automatic attempts")
+
+
+class ExecutionBudgetExhausted(ModelWorkUnitExhausted):
+    """The execution reached its run-level call or token limit; nothing was sent."""
+
+    def __init__(self, task=None):
+        super().__init__(task)
+        self.args = ("Execution reached its run-level limit",)
 
 
 class ModelContractError(ModelSemanticError):

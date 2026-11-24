@@ -702,3 +702,64 @@ async def test_real_web_unknown_attempts_keep_budget_across_lease_takeover(autho
         await web_knowledge(store, artifacts, lease, handler).search(
             [{"query": "完整要求", "target_id": "old-owner"}], artifacts)
     assert len(sent) == 4
+
+
+async def limited(store):
+    from docreader.llm.request import RUN_LIMIT_MULTIPLIER, RUN_LIMIT_POLICY
+
+    identity = "authoring-" + uuid4().hex
+    await store.submit(identity, input_value(store), {
+        "protocol": "outline-v1", "model": "fixture",
+        "run_limit_policy": RUN_LIMIT_POLICY, "run_limit_multiplier": RUN_LIMIT_MULTIPLIER})
+    lease = await store.acquire(identity)
+    return identity, lease
+
+
+def sized(actual, logical, input_tokens=100, output_reserve=100):
+    return {**metadata(actual, logical), "input_tokens": input_tokens, "output_reserve": output_reserve}
+
+
+async def test_run_limit_caps_new_logical_requests_at_twice_the_task_plan(authoring_store):
+    from docreader.llm.request import ExecutionBudgetExhausted
+
+    store = authoring_store
+    identity, lease = await limited(store)
+    with pytest.raises(ExecutionBudgetExhausted):
+        await store.begin_request(lease, "unplanned", "fixture", "authoring_write", sized("w", "w"))
+    plan = store.test_artifacts.put_json({"planned_requests": 1})
+    await store.register_plan(lease, "outline", "batches", 1, plan)
+    await store.register_plan(lease, "outline", "batches", 1, plan)  # replay is idempotent
+    for logical in ("first", "second"):
+        await store.begin_request(lease, logical, "fixture", "outline", sized(logical, logical))
+        await store.finish_request(logical, "sent")
+        await store.finish_request(logical, "succeeded", usage={"total_tokens": 150},
+                                   response_ref=store.test_artifacts.put_json({"ok": logical}))
+    with pytest.raises(ExecutionBudgetExhausted):
+        await store.begin_request(lease, "third", "fixture", "outline", sized("third", "third"))
+    cached = await store.begin_request(lease, "cache", "fixture", "outline", sized("first", "first"))
+    assert cached["request_id"] == "first"
+    assert len((await store.get_execution(identity))["requests"]) == 2
+
+
+async def test_run_limit_stops_retries_once_tokens_reach_twice_the_plan(authoring_store):
+    from docreader.llm.request import ExecutionBudgetExhausted
+
+    store = authoring_store
+    _, lease = await limited(store)
+    await store.register_plan(lease, "outline", "batches", 1, store.test_artifacts.put_json({"planned_requests": 1}))
+    # Plan: 100 input + 100 output reserve = 200; the limit is 400 tokens.
+    await store.begin_request(lease, "first", "fixture", "outline", sized("first", "unit"))
+    await store.finish_request("first", "sent")
+    await store.finish_request("first", "failed", usage={"total_tokens": 150}, error={"type": "http_500"})
+    await store.begin_request(lease, "resend", "fixture", "outline", sized("first", "unit"))
+    await store.finish_request("resend", "sent")
+    await store.finish_request("resend", "failed", error={"type": "http_500"})
+    # Used 150 + 200 (unknown usage counts as its plan); another 200 would exceed 400.
+    with pytest.raises(ExecutionBudgetExhausted):
+        await store.begin_request(lease, "third", "fixture", "outline", sized("first", "unit"))
+
+
+async def test_executions_without_run_limit_policy_are_not_capped(authoring_store):
+    store = authoring_store
+    _, lease = await submitted(store)
+    await store.begin_request(lease, "unplanned", "fixture", "authoring_write", sized("w", "w"))

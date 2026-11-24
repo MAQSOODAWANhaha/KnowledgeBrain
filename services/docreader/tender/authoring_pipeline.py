@@ -12,7 +12,9 @@ import json
 
 from pydantic import ValidationError
 
-from docreader.llm.request import ModelBudgetError, ModelConfigurationError, ModelContractError, ModelWorkUnitExhausted, build_request
+from docreader.llm.request import (
+    ExecutionBudgetExhausted, ModelBudgetError, ModelConfigurationError, ModelContractError, ModelWorkUnitExhausted, build_request,
+)
 from docreader.llm.wire import WirePayload
 from docreader.tender.authoring import (
     _OutlineContext, _check_reference_ids, load_outline_source, project_source_sections, validate_outline_references,
@@ -390,6 +392,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
     if material_facts:
         material_options['reviewed_source_facts'] = material_facts
     materials = None
+    await _plan(execute, AuthoringTask.DIRECTORY_MATERIAL, 1, 'material')
     try:
         materials = await _ask(execute, budget, AuthoringTask.DIRECTORY_MATERIAL,
                                {**_full_source_reading(reading), 'chapters': chapters, 'applicability': applicability,
@@ -453,6 +456,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
                 except _LOCAL_FAILURES:
                     return None
 
+        await _plan(execute, AuthoringTask.DIRECTORY_REQUIREMENT, len(blocks), 'requirement-blocks')
         results = await asyncio.gather(*(one(block) for _, block in blocks))
         for (index, _), plan in zip(blocks, results):
             if plan is None:
@@ -476,6 +480,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
             classification_payload.update(operation=REVIEWED_CLASSIFICATION_OPERATION,
                 chapters=chapters, applicability=applicability,
                 reviewed_source_facts=reviewed_body_summary(reviewed_body_facts))
+        await _plan(execute, AuthoringTask.DIRECTORY_CLASSIFICATION, 1, 'classification')
         try:
             classification_plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_CLASSIFICATION,
                 classification_payload, lambda raw: _accept_classification_plan(raw, compiled, documents, reviewed_source_facts=reviewed_body_facts))
@@ -501,6 +506,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
                    if not chapter.get('unplaced')
                    and chapter.get('response_kind', 'form') == 'narrative'
                    and len([line for line in chapter.get('text', '').splitlines() if line.strip()]) >= 25]
+    await _plan(execute, AuthoringTask.DIRECTORY_PARAMETER, len(long_chapters), 'long-chapters')
     for chapter in long_chapters:
         try:
             plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_PARAMETER,
@@ -512,6 +518,8 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
                                        'detail': f'“{chapter["title"]}”的参数展开未完成，原章保留'})
             continue
         apply_parameters(compiled, documents, plan['chapters'])
+    await _plan(execute, AuthoringTask.DIRECTORY_RESPONSE_FORM,
+                len((materials or {}).get('response_forms', [])), 'response-forms')
     for selection in (materials or {}).get('response_forms', []):
         try:
             if artifacts is None or identity is None:
@@ -586,6 +594,7 @@ async def _request_native_requirements(compiled, documents, budget, execute, ide
             return None
 
     views = packs['views']
+    await _plan(execute, task, len(views), 'native-packs')
     for offset in range(0, len(views), concurrency):
         batch = views[offset:offset + concurrency]
         tasks = [asyncio.create_task(request_native_pack(view)) for view in batch]
@@ -631,6 +640,7 @@ async def _request_joint_classification(compiled, classification, budget, execut
         pass
     else:
         compiled['_native_classification_budget'] = measured
+        await _plan(execute, task, 1, 'joint-classification')
         try:
             prepared = await _ask(execute, budget, task, payload, classification.accept)
         except _LOCAL_FAILURES:
@@ -660,6 +670,7 @@ async def _request_joint_classification(compiled, classification, budget, execut
     except ModelBudgetError:
         pass
     else:
+        await _plan(execute, task, 1, 'classification-document-scope')
         document_completed = await request_scope(*document)
 
     def admit_cases(groups):
@@ -670,6 +681,7 @@ async def _request_joint_classification(compiled, classification, budget, execut
             return None
 
     groups = await asyncio.to_thread(classification.scoped_groups)
+    await _plan(execute, task, len(groups), 'classification-scopes')
     start = 0
     while start < len(groups):
         def next_scope(offset):
@@ -736,6 +748,7 @@ async def _request_directory_plans(documents, budget, execute, identity=None, *,
                 else _accept_directory_plan(raw, documents))
 
     plans, failures = [], []
+    await _plan(execute, AuthoringTask.DIRECTORY_PLAN, 2, 'directory-plans')
     for slot in (1, 2):
         try:
             if contract == DIRECTORY_REF_CONTRACT:
@@ -794,6 +807,13 @@ async def _ask(execute, budget, task, payload, validate):
         require_response_form_budget(budget, request, payload)
     budget.admit_request(request, task)
     return await execute(task, request, validate)
+
+
+async def _plan(execute, task, requests, scope):
+    """Run limits: a stage registers its planned logical requests before sending."""
+    plan = getattr(execute, 'plan', None)
+    if plan is not None and requests:
+        await plan(task, requests, scope)
 
 
 async def _replay(execute, task, request, validate):
@@ -1320,6 +1340,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             headroom_tokens=_OUTLINE_CORRECTION_TOKENS)) or [[]]
         return [prepare_batch(batch, template_parts) for batch in batches]
     source_batches = await asyncio.to_thread(plan_sources)
+    await _plan(execute, 'outline', len(source_batches), 'source-batches')
     source_jobs = iter(enumerate(source_batches))
     stopped = False
 
@@ -1968,6 +1989,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             return lambda raw: assemble(raw, view)
 
         batches = _assembly_batches(payload, budget)
+        await _plan(execute, 'outline', len(batches) + (len(batches) > 1), 'assembly')
         if len(batches) == 1:
             assembled = await _ask(execute, budget, 'outline', batches[0], assembly_validator(batches[0]))
         else:
@@ -2093,6 +2115,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                         **({'candidate_excluded_template_part_ids': {identity: [part_id
                             for part_id, part in part_map.items() if template_part_key(part) in removed]
                             for identity, removed in decoration_exclusions.items()}} if decoration_exclusions else {})})
+            await _plan(execute, 'outline', 1, 'structure-revision')
             try:
                 repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = await _ask(
                     execute, budget, 'outline', feedback, assembly_validator(feedback))
@@ -2743,6 +2766,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     # Each batch reads its own evidence once. The host retains previously bound
     # arrangements instead of repeatedly asking the model to copy and recheck them.
     basis_batches = list(_batches(basis_records, budget, 'authoring_basis', basis_payload))
+    await _plan(execute, 'authoring_basis', len(basis_batches), 'basis')
     for batch in basis_batches:
         try:
             def validate_basis(raw):
@@ -2902,7 +2926,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         except _LOCAL_FAILURES as error:
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                                target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
-                               error_type=type(error).__name__, gaps=['本单元生成未完成，已保留待补位置。']).model_dump()
+                               error_type=type(error).__name__, gaps=['已达到本次执行的运行上限，本单元未生成，已保留待补位置。'
+                               if isinstance(error, ExecutionBudgetExhausted) else '本单元生成未完成，已保留待补位置。']).model_dump()
         unit['gaps'].extend(source_issues)
         record = None if unit.get('error_type') else _review_record(
             task, unit, payload, sources, _task_materials(materials, task), rule_refs=context.rules)
@@ -2914,6 +2939,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             if on_unit is not None and saved_by_id.get(task['task_id']) != unit:
                 await on_unit(unit)
             return unit, record
+    await _plan(execute, 'authoring_write', len(planned), 'write')
     pending = [asyncio.create_task(bounded(task)) for task in planned]
     try:
         written = await asyncio.gather(*pending)
@@ -2949,7 +2975,9 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                                            'partial_context': bool(set(f['task_ids']) - identities),
                                            'original_content_ids': f.get('content_ids', [])}
                         for f in previous if set(f['task_ids']) & identities]}
-        for batch in _batches(records, budget, 'authoring_review', review_payload):
+        batches = list(_batches(records, budget, 'authoring_review', review_payload))
+        await _plan(execute, 'authoring_review', len(batches), f'review-{review_round}')
+        for batch in batches:
             ids = {entry['task_id'] for entry in batch}
             def validate_review(raw):
                 body = {key: value for key, value in raw.items() if key != 'assessments'} if isinstance(raw, dict) else raw

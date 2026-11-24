@@ -223,6 +223,7 @@ async def test_native_form_task_is_durable_and_exact_predecessor_replay_does_not
         request = build_request(request_budget.model, request_budget.prompts['directory_response_form'],
                                 payload, task='directory_response_form',
                                 reasoning_effort=request_budget.reasoning_effort)
+        await execute.plan('directory_response_form', 1, 'response-forms')
         response = await execute('directory_response_form', request,
                                  lambda value: response_model('directory_response_form', payload).model_validate(value).model_dump())
         assert response['dispositions'] == raw['dispositions']

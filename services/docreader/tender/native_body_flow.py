@@ -45,6 +45,9 @@ async def resolve_native_bodies(artifacts, snapshot, outline, scope, budget, exe
         lambda view: selection_request(budget, scope, view), task=AuthoringTask.DIRECTORY_PARAMETER)
     records, pending = [], deepcopy(scope.pending)
     pending.extend(deepcopy(planned['pending_units']))
+    from docreader.tender.authoring_pipeline import _plan
+
+    await _plan(execute, AuthoringTask.DIRECTORY_PARAMETER, len(planned['packs']), 'native-bodies')
     for pack in planned['packs']:
         view, request = pack['view'], pack['request']
         # DIRECTORY_PARAMETER is an existing task; the dedicated operation,

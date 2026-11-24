@@ -254,6 +254,9 @@ async def place_items(outline, items, budget, execute, ask, fits, outside_format
         except (ModelWorkUnitExhausted, ModelBudgetError):
             return None
 
+    from docreader.tender.authoring_pipeline import _plan
+
+    await _plan(execute, AuthoringTask.ITEM_PLACEMENT, len(batches), 'item-placement')
     results = await asyncio.gather(*(one(ids) for ids in batches))
     decided = {key: value for result in results if result for key, value in result.items()}
     bound = bind_placements(outline, positions, keyed, decided)

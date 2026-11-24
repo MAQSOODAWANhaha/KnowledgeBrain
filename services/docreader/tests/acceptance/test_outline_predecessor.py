@@ -42,6 +42,7 @@ def outline_pipeline(monkeypatch):
     async def generate(
         artifacts, snapshot, budget, invoke, *, outline_only=False, **_kwargs
     ):
+        await invoke.plan("outline", 6, "synthetic")
         for ordinal in range(1, 7):
             operation = "source" if ordinal <= 5 else "assemble"
             prompt = "outline" if operation == "source" else "outline_assemble"

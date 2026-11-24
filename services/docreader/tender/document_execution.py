@@ -28,6 +28,9 @@ from docreader.llm.config import completions_url
 from docreader.llm.recovery import call_validated
 from docreader.llm.request import (
     MODEL_RETRY_POLICY,
+    RUN_LIMIT_MULTIPLIER,
+    RUN_LIMIT_POLICY,
+    ExecutionBudgetExhausted,
     ModelConfigurationError,
     ModelSemanticError,
     ModelWorkUnitExhausted,
@@ -200,6 +203,16 @@ class _DocumentExecutor:
         )
         self.budget, self.spec, self.previous = budget, spec, previous
         self._request_locks = {}
+        # Tasks refused by the run-level limit; named once in the final result.
+        self.limited_tasks = set()
+
+    async def plan(self, task, requests, scope=""):
+        """Register a stage's planned logical requests before it sends them."""
+        if task not in _TASKS:
+            raise ModelConfigurationError("unsupported document model task")
+        reference = await asyncio.to_thread(
+            self.artifacts.put_json, {"task": task, "scope": scope, "planned_requests": requests})
+        await self.store.register_plan(self.lease, task, scope, requests, reference)
 
     def _check_reasoning(self, request):
         from docreader.llm.request import validate_request_reasoning
@@ -216,7 +229,11 @@ class _DocumentExecutor:
         digest = request_digest(self.client.config.chat.base_url, request)
         lock = self._request_locks.setdefault((task, digest), asyncio.Lock())
         async with lock:
-            return await self._execute(task, request, validate, digest)
+            try:
+                return await self._execute(task, request, validate, digest)
+            except ExecutionBudgetExhausted:
+                self.limited_tasks.add(task)
+                raise
 
     async def replay(self, task, request, validate):
         """Revalidate an exact accepted response without admitting or sending HTTP."""
@@ -741,6 +758,8 @@ async def execute_document(
         "timeout_seconds": float(timeout_seconds),
         "timeout_policy": "raw_response_idle_v1",
         "retry_policy": MODEL_RETRY_POLICY,
+        "run_limit_policy": RUN_LIMIT_POLICY,
+        "run_limit_multiplier": RUN_LIMIT_MULTIPLIER,
         "outline_source_binding_contract": OUTLINE_SOURCE_BINDING_CONTRACT,
     }
     if requirement_chain_contract is None:
@@ -981,7 +1000,13 @@ async def execute_document(
                 **review_options,
             )
             value = await asyncio.to_thread(artifacts.read_json, reference)
+            limited = sorted(executor.limited_tasks)
+            limit_detail = (f"本次执行已达到运行上限，{'、'.join(limited)} 的剩余请求未发送，"
+                            "已完成内容照常保留；请人工补写或新建执行重跑。")
             if outline_only:
+                if limited:
+                    value["issues"].append({"code": "execution_budget_exhausted",
+                                            "detail": limit_detail, "rule_refs": []})
                 value = AuthoringOutline.model_validate(value).model_dump(
                     exclude_unset=True
                 )
@@ -997,6 +1022,8 @@ async def execute_document(
                     )
                     raise SourceOutlineUnavailable("directory_plan")
                 return await asyncio.to_thread(artifacts.put_json, value)
+            if limited:
+                value["gaps"].append({"code": "execution_budget_exhausted", "detail": limit_detail})
             execution = await store.get_execution(execution_id)
             value["usage"] = _usage(execution["requests"])
             value = AuthoringDocument.model_validate(value).model_dump()

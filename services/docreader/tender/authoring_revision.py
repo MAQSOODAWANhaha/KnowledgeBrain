@@ -131,6 +131,12 @@ async def revise_units(artifacts, budget, execute, tasks, units, findings, make_
             value["target_id"] = unit["target_ids"][0]
         diagnostics.append(value)
 
+    from docreader.tender.authoring_pipeline import _plan
+
+    await _plan(execute, "authoring_write", sum(
+        1 for unit in units if not unit.get("error_type") and any(
+            finding.get("can_revise") is True for finding in findings if unit["task_id"] in finding.get("task_ids", []))),
+        "revision")
     for ordinal, unit in enumerate(units):
         relevant = [finding for finding in findings if unit["task_id"] in finding.get("task_ids", [])]
         if unit.get("error_type") or not any(finding.get("can_revise") is True for finding in relevant):
