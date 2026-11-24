@@ -384,16 +384,23 @@ async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruc
         None,
     )
     prompts = document_execution.load_prompts()
-    request_budget = RequestBudget(
-        context_tokens=131072,
-        model=model.chat.model,
-        prompts=prompts,
-        output_reserve=32768,
-        tokenizer="o200k_base",
-        tokenized_outline_assembly=assembly,
-        tokenized_authoring=True,
-        reasoning_effort=reasoning_effort,
-    )
+
+    def budget_with(prompts):
+        return RequestBudget(
+            context_tokens=131072,
+            model=model.chat.model,
+            prompts=prompts,
+            output_reserve=32768,
+            tokenizer="o200k_base",
+            tokenized_outline_assembly=assembly,
+            tokenized_authoring=True,
+            reasoning_effort=reasoning_effort,
+        )
+
+    request_budget = budget_with(prompts)
+    # BUG-259: the stored budget names only the prompts this execution can call.
+    called = document_execution.execution_prompt_names(outline_only=False, fixed_outline=False)
+    stored_budget = budget_with({name: prompts[name] for name in called})
     pipeline.outline_payload = {"operation": "source", "text": "服务能力" * 18000}
     pipeline.write_text = "技术响应" * 18000
     sent = []
@@ -414,7 +421,7 @@ async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruc
     )
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
     assert row["status"] == "succeeded" and len(sent) == len(row["requests"]) == 2
-    assert row["execution_spec"]["budget"] == request_budget.spec()
+    assert row["execution_spec"]["budget"] == stored_budget.spec()
     assert all(request.get("reasoning_effort") == reasoning_effort for request in sent)
     if reasoning_effort is None:
         assert all("reasoning_effort" not in request for request in sent)

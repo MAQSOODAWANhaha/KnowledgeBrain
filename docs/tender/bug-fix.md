@@ -2738,6 +2738,7 @@ P2、P3 按当时多轮核验写的五问已过时，不继续当作当前调用
 - 根因：原条目写的「默认载入所有任务的 Prompt」不准确：分析只带 `extract`、`verify`、`ocr`，编制只带编制 Prompt。实际耦合有三处：`output_contract_spec()` 不分任务，把分析和编制的全部输出契约（含已退役的 `LocateResult`、`AssociationResult`、`Plan`）都算进身份；大纲执行和固定大纲的正文执行共用全部 23 个编制 Prompt；`budget.prompts.get(...) or 读文件` 的回退可以调用未计入身份的 Prompt。预算只设计了单请求和单逻辑请求两层。
 - 改法：执行身份只含本执行会调用的任务，规则见[字段字典](field-dictionary.md#调用预算恢复与修订)第 6 条，五问见[业务工作流](workflow.md#执行身份范围)。输出契约按 Prompt 登记，未登记的 Prompt 不能进入身份；编制按大纲、正文、整稿取任务集合；回退改为统一入口，带编制 Prompt 的执行缺某个 Prompt 时报配置错误。运行级上限见[改进路线](../../plans/improvement-roadmap.md) W3.2。
 - 验证：`test_execution_identity_scope.py` 覆盖：分析身份只含分析契约；编制身份不含分析契约；正文执行身份不含大纲 Prompt 和契约；改 verify Prompt 时编制身份不变；身份外 Prompt 报错。上线会让现有在途执行身份一次性改变。续核：`bid_format_outline.md` 原未登记，一直经回退读文件、不在身份内；加检查后该路径会报配置错误。已登记为大纲 Prompt，并加用例要求每个打包 Prompt 都属于某个身份。运行级上限的用例待 W3.2。
+- 遗漏：W3.1 修复时没有同步隔离 PostgreSQL 验收 `test_explicit_authoring_tokenizer_survives_execution_budget_reconstruction`，它仍按全部 Prompt 比对已存预算，4 个参数组合失败。期望改为按 `execution_prompt_names` 取本执行的 Prompt 子集。回退期望会重现 `output_contracts`、`prompts` 两项不一致。
 
 ## BUG-260：传输故障与合同纠正共用重试额度，429 时并发槽位互相抢占
 
