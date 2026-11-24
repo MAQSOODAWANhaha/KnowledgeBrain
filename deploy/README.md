@@ -71,7 +71,7 @@ Python init只读核验业务表并初始化LangGraph checkpoint；DocReader与�
 
 ONLYOFFICE 不是招标分析和大纲生成的前置条件。需要编辑时显式启用
 `editing` profile，提供其 JWT/能力密钥及浏览器/API origin；没有固定秘密回退。
-编辑、保存和验收要求见 [ONLYOFFICE](../docs/tender/onlyoffice.md)。
+编辑、保存和验收要求见 [ONLYOFFICE](../docs/tender/workbench.md)。
 
 ## 数据库初始化与升级
 
@@ -218,7 +218,7 @@ OnlyOffice 的浏览器 origin。
 
 失败任务通过现有重试/恢复接口继续，保留租约围栏、模型调用回执和已完成产物。Word 保存保留版本并发检查，缺少资料的响应位置继续留空。上传暂存与对象引用由业务事务登记，retention 负责无引用对象回收。
 
-当前流程与真实验收状态见 [Python 交接文档](../docs/tender/handoff.md)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
+当前流程与真实验收状态见 [Python 交接文档](../docs/tender/README.md#当前状态交接)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
 
 ## 健康与验收
 

@@ -56,7 +56,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 生成合同在 `docs/tender/`。本页是工作台的产品设想。
 
-- [业务入口](docs/tender/word-export.md)、[招标工作流](docs/tender/README.md)、[ONLYOFFICE](docs/tender/onlyoffice.md)
+- [招投标总入口](docs/tender/README.md)、[ONLYOFFICE 与 Word 导出](docs/tender/workbench.md)
 - `docs/knowledge-base/domain.md`（知识库领域与证据检索端口）
 - 无客户照片、无真实标书样张可当品牌图
 

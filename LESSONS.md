@@ -5,7 +5,7 @@
 每条包含：**规则 / 原因 / 证据（commit 或 BUG）/ Seen 计数（按不同日期或里程碑计）**。
 
 - **晋升**：同一规则在 **3 个不同日期或里程碑**出现（`Seen 3×`），晋升进 [工程与验收标准](docs/code-standards.md) 或下沉为自动化 Guard Test，并从本页移出。
-- **不替代**：单次事故详情记 [问题记录](docs/tender/bug-fix.md)；动态运行状态记 [交接](docs/tender/handoff.md)。
+- **不替代**：单次事故详情记 [问题记录](docs/tender/bug-fix.md)；动态运行状态记 [交接](docs/tender/README.md#当前状态交接)。
 
 ## 活跃规则
 

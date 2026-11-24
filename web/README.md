@@ -2,9 +2,9 @@
 
 企业级外壳（见 [DESIGN.md](../DESIGN.md)），栈为 Vite + React 19 + Astryx。项目内入口为 **项目资料 → 招标解读 → 标书编制 → 交付文件**，在左侧导航当前项目下，不在顶栏。编制目标是 ONLYOFFICE Docs 直接编辑真实 DOCX；标题和结构以 DOCX 为准，不由外部树强制回写。
 
-[产品](../PRODUCT.md)、[外壳视觉](../DESIGN.md)、[业务入口](../docs/tender/word-export.md)、[招标工作流](../docs/tender/README.md)、[编辑/保存](../docs/tender/onlyoffice.md)。用户在解析完成后点击生成大纲，不因解析就绪自动启动任务。
+[产品](../PRODUCT.md)、[外壳视觉](../DESIGN.md)、[招标工作流](../docs/tender/README.md)、[ONLYOFFICE 与 Word 导出](../docs/tender/workbench.md)。用户在解析完成后点击生成大纲，不因解析就绪自动启动任务。
 
-当前编制入口使用 ONLYOFFICE DOCX 编辑会话和显式新轮发布，旧大纲/Tiptap 编辑链已删除。保存状态以服务端确认为准；完整冻结招标输入驱动的自动模板生成与同稿 PDF 出件仍按接入计划验收。`npm run dev`/`build` 只构建 SPA。全栈由 `deploy/deploy.sh create` 启动。本地浏览器入口是 **HTTPS**（Caddy 自签，见 [deploy/README.md](../deploy/README.md)）：`https://127.0.0.1:${API_HOST_PORT}/` 或 `https://<本机IPv4>:${API_HOST_PORT}/`。Document Server 浏览器 origin 为 `https://<同一主机>:${ONLYOFFICE_HOST_PORT}/`（`KB_ONLYOFFICE_*`）。首次需信任自签证书。编辑、保存和出件要求见 [ONLYOFFICE](../docs/tender/onlyoffice.md)。
+当前编制入口使用 ONLYOFFICE DOCX 编辑会话和显式新轮发布，旧大纲/Tiptap 编辑链已删除。保存状态以服务端确认为准；完整冻结招标输入驱动的自动模板生成与同稿 PDF 出件仍按接入计划验收。`npm run dev`/`build` 只构建 SPA。全栈由 `deploy/deploy.sh create` 启动。本地浏览器入口是 **HTTPS**（Caddy 自签，见 [deploy/README.md](../deploy/README.md)）：`https://127.0.0.1:${API_HOST_PORT}/` 或 `https://<本机IPv4>:${API_HOST_PORT}/`。Document Server 浏览器 origin 为 `https://<同一主机>:${ONLYOFFICE_HOST_PORT}/`（`KB_ONLYOFFICE_*`）。首次需信任自签证书。编辑、保存和出件要求见 [ONLYOFFICE](../docs/tender/workbench.md)。
 
 ```bash
 cd web && npm install && npm run dev

@@ -4,17 +4,19 @@
 
 | 内容 | 文档 |
 | --- | --- |
-| 分析节点、放行条件、各阶段发送次数 | [业务工作流](workflow.md) |
-| 编制职责与缺资料处理 | [编制架构](authoring.md) |
-| 字段、类型、枚举与编制合同 | [字段字典](field-dictionary.md) |
-| 分析模块接口与执行边界 | [领域模块合同](domain-contract.md) |
-| 工作台交互与稿件行为 | [投标工作台](workbench.md) |
-| ONLYOFFICE 编辑、保存、版本与 PDF 出件 | [ONLYOFFICE](onlyoffice.md) |
-| 来源格式进 Word 规则 | [Word 导出格式](word-export.md) |
-| 验收口径与最低验收线 | [验收](acceptance.md) |
-| 语义评测语料与方法 | [语义样本](semantic-cases.md)、[语义评测](semantic-evaluation.md) |
-| 问题根因和修复 | [问题记录](bug-fix.md) |
-| 部署状态与各样本当前基线 | [交接](handoff.md) |
-| 本机启动与运维命令 | [运行手册](runbook.md) |
+| 流程节点、模型调用、编制架构与证据/模型层接口 | [业务工作流与架构](workflow.md) |
+| 字段、类型、枚举与协议合同 | [字段字典](field-dictionary.md) |
+| 工作台交互、来源格式进 Word 与 ONLYOFFICE 保存/PDF | [工作台与 Word 编辑](workbench.md) |
+| 业务验收线与合成语义评测 | [验收与语义评测](acceptance.md)（语料：[semantic-cases.json](semantic-cases.json)） |
+| 本机启动、CLI 运维与自动验收命令 | [运行手册](runbook.md) |
+| 当前活跃未关闭缺陷清单 | [问题记录](bug-fix.md) |
 
-文档维护与命名规范见 [docs/README.md](../README.md) 与 [工程与验收标准](../code-standards.md)。
+## 当前状态（交接）
+
+动态进展只维护在本节（不抄 run id、Token 或套件次数）；证据统一保存在仓库外 `/opt/workspace/kb-tender-evidence/`。
+
+- **真实文件验收**：四份真实成品（Bidding、安服、111、222）的最低验收线仍是 **0 / 4**，离线单测不能代替。
+- **分析主线**：`verify` 只发 `review`（`locate`、`associate`、`joint` 已退役），已在候选环境验证；缺页和漏报原子由宿主记待核。
+- **安服 S1/D7**：当前分析候选，在隔离冷库通过 CLI 修订、幂等与冲突检查，定点核验首发全部通过宿主校验；待做整份核验根、人工确认与项目采用，P24/P36/P75–80 偏差待修（见 [BUG-318](bug-fix.md#bug-318履约交付的应急预案归入投标提交文件)）。
+- **W2 一条要求链（`single_requirement_chain_v1`）**：仍为非默认入口；已验证大纲、原式出件（含封面、P91 项目名称填格、P113 网格）、评分待核、工作台评标裁决抽屉、方案定点写作与显式项目背景绑定（写作使用合成材料与夹具回包）；项目背景选择目前仍只走保存接口。真实企业资料、整稿业务验收与切默认待完成。
+- **已知待复测项**：安服紧凑结构复核估算高于本地输入额度记软告警、尚未实发；`111` 待按 [BUG-250](bug-fix.md) 重放；`Bidding` 待按 [BUG-249](bug-fix.md) 重新导出。

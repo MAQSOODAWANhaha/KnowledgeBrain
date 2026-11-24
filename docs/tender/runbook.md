@@ -172,7 +172,7 @@ correct 拒绝过期基线和 cancelled run，已冻结来源保持不变。旧�
 ## 同镜像不同角色
 
 以下为已有 PostgreSQL/Redis 且主迁移已完成时的 Python 角色更新入口；须保留当前安装实际
-使用的私有网络 overlay，并先核对[交接中的网络与发送围栏](handoff.md)，不因更新镜像而
+使用的私有网络 overlay，并先核对[交接中的网络与发送围栏](README.md#当前状态交接)，不因更新镜像而
 重发旧冻结协议的uncertain请求；新版恢复规则只用于新运行。构建只选择 Python target，
 启动使用 `--no-deps`，不重建或重启
 Rust、数据库和原 DocReader 服务。当前 overlay 路径如下，换安装环境时须对应核实。

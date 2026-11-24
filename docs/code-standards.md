@@ -10,7 +10,7 @@
    - `docs/` 下只允许 `README.md`、`code-standards.md` 和按业务领域划分的扁平目录：`platform/`、`knowledge-base/`、`tender/`；**禁止**新建杂货抽屉目录（如 `design/`、`research/`、`validation/`）或同义分裂目录（如 `bidding/`）。
    - `plans/` 只放未完成的阶段计划（做完或放弃即删），部署与发布文档统一放在 `deploy/`。
 2. **文件命名规范**：
-   - 除各目录入口固定为 `README.md` 外，`docs/` 与 `plans/` 下所有目录名和文件名统一使用小写 **`kebab-case`**（如 `domain-contract.md`、`word-export.md`）。
+   - 除各目录入口固定为 `README.md` 外，`docs/` 与 `plans/` 下所有目录名和文件名统一使用小写 **`kebab-case`**（如 `field-dictionary.md`、`database-naming.md`）。
    - **禁止**大写、下划线、中文文件名、语言前缀（如 `python-*`）、历史阶段后缀（如 `-phase1`）、冗余后缀（如 `-design`）和日期戳（如 `20261014`）。
 3. **先改权威页再改代码，同 Commit 提交**：修改协议、字段、接口、CLI、环境变量、端口、UI 交互或部署方式时，在 [docs/README.md](README.md) 对应的权威页同步更新。
 4. **只写现在时，禁打补丁**：直接改写或删除旧句，禁止写「若旧句要求 X，以本句为准」「本轮尚未部署」「架构草案」。
@@ -22,7 +22,7 @@
 - **单 Commit 单目标**：不同主题或顺手修的无关缺陷拆成独立 Commit，便于审计和回滚。
 - **兄弟点清查**：修缺陷前全仓 `rg` 同类模式、调用方、路由、表或视口，同一次改动修齐。
 - **失败即未知**：解析失败、读文件失败、映射缺失或模型回包不完整必须显式报错或留 `unresolved`，绝不静默降级为空列表或 0 项。
-- **先记问题再修**：发现缺陷先写明现象、影响、根因和改法（根因未查实明确标待查），修复后补齐实际测试、部署与真实流程验收状态；招标缺陷记录在 [bug-fix.md](tender/bug-fix.md)，动态运行状态只维护在对应交接页（如 [handoff.md](tender/handoff.md)）。
+- **先记问题再修**：发现缺陷先写明现象、影响、根因和改法（根因未查实明确标待查），修复后补齐实际测试、部署与真实流程验收状态；招标缺陷记录在 [bug-fix.md](tender/bug-fix.md)，动态运行状态只维护在对应交接节（如 [招投标入口 · 当前状态](tender/README.md#当前状态交接)）。
 - **证据与密钥边界**：运行证据、抓包与回放素材统一放在仓库外目录（如 `/opt/workspace/kb-tender-evidence/`），禁止放 `/tmp`；严禁提交业务原文、完整请求或密钥。
 - **独立 Worktree + 树完整性自检**：多会话并行时每个任务使用独立 git worktree；每次 `git commit` 后立刻核对 `git show --stat HEAD` 与 `git diff HEAD^ HEAD --stat`，确认改动列表与提交主题一一对应，没有混入无关文件或因旧树覆盖掉他人提交与测试。
 - **管道防吞错**：所有串联测试或日志截断命令必须开启 `set -o pipefail`（如 `set -euo pipefail`），禁止 `test | tail && git push` 掩盖非零退出码。

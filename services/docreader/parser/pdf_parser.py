@@ -1493,7 +1493,7 @@ def _repeating_edge_lines(texts: list, classes: list) -> set:
     The line must be at most 80 characters and appear on at least 60% of the
     text pages, and there must be at least four text pages. This is the same
     structural signal as running-header removal. It is not a word list.
-    Documented in docs/tender/word-export.md.
+    Documented in docs/tender/workbench.md.
     """
     from collections import Counter
 

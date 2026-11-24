@@ -41,7 +41,6 @@ PATCH_PHRASE_EXEMPT_FILES = frozenset({
     "docs/code-standards.md",
     "docs/README.md",
     "docs/tender/bug-fix.md",
-    "docs/tender/handoff.md",
 })
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -196,7 +195,7 @@ def check_repo(root: pathlib.Path) -> list[str]:
                     )
 
         # 5. Active doc hygiene: referenced repo paths, obsolete env vars, and patch phrases
-        if path.name not in {"bug-fix.md", "handoff.md"}:
+        if path.name != "bug-fix.md":
             for lineno, line in enumerate(prose_text.splitlines(), 1):
                 if "DOCREADER_PORT" in line:
                     errors.append(

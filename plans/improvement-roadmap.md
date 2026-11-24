@@ -72,7 +72,7 @@ W2 首次完整实测用已核实的完整来源、固定分析修订和原文�
 | 1.6 | **分析抽取完整性（W2 的前提）**：以安服 S1/D5 当前台账为收口基线，不再发整份核验轮次。已证实的剩余范围、引证和关系问题，以及原文歧义和缺件，全部转为确认页待核，由人工修订出口处理；只允许对单个已证实缺陷做定点复核。进展和运行结果只写交接 | 用同一原文清单核对资格、否决、评分、报价和提交条款，记录漏写率、主动待核和误判，作为 W1 基线数字，不作为放行门槛。剩余问题都能在确认页看到，并有人工出口。满足这两条即收口，进入 W2 |
 | 1.5 | Web 展示：报表接入执行详情；进度里的 locate、associate、joint 改为「仅历史运行」显示；`total_units` 由宿主按计划数给出，给不出时明确显示「未知」 | 新旧运行的进度页都能正确显示；不增加模型调用 |
 
-编制对照样本为安服 S1/D5，分析候选核验及正式采用状态见[交接](../docs/tender/handoff.md)。`222` 只做定点回归。人工标注负责人仍待确定，阻塞 M2。
+编制对照样本为安服 S1/D5，分析候选核验及正式采用状态见[交接](../docs/tender/README.md#当前状态交接)。`222` 只做定点回归。人工标注负责人仍待确定，阻塞 M2。
 
 ## W2 一条要求链
 
@@ -140,7 +140,7 @@ W2 首次完整实测用已核实的完整来源、固定分析修订和原文�
 | 5.1 | pyright 存量错误：基线已存（`services/docreader/pyright-baseline.json`，1921 个），CI 用 `services/docreader/scripts/pyright_baseline.py` 只拦新增，ruff 也已进 CI；剩下按模块清理，从 `llm/` 和 `tender/` 开始，每清一批用 `--update` 下调基线 | 基线和拦截已完成，反例验证通过；清理未开始 |
 | 5.2 | CI 必跑 ruff 和 pytest；PostgreSQL 集成测试用临时容器执行，不连共享库 | CI 记录里 skipped 数只剩确实缺夹具的用例 |
 | 5.3 | 重写编辑器字段级协议文档（BUG-252） | 按 `tender_editor.rs` 和迁移逐项核对 |
-| 5.4 | 逐句核对尚未审过的文档：`workbench.md`、`domain-contract.md`、`deploy/README.md`、runbook 后半部分 | 与代码不符的地方改文档或记缺陷 |
+| 5.4 | 逐句核对尚未审过的文档：`workbench.md`、`workflow.md`、`deploy/README.md`、runbook 后半部分 | 与代码不符的地方改文档或记缺陷 |
 | 5.5 | 删除只剩测试在用的 v1 核验代码：`checks/verify.py` 的 `verify_pack`、`verify_all` 和 `evidence/downstream.py`；保留人工修订路径用的 `check_requirement` | 先记缺陷；删除后全量回归通过 |
 
 ## 不做的事
