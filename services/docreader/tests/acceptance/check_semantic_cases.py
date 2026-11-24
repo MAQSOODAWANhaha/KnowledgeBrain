@@ -10,7 +10,7 @@ from docreader.llm.budget import RequestBudget
 from docreader.tender.schema import AnalysisExtraction, Decision, SourceView
 
 
-CORPUS = Path(__file__).resolve().parents[4] / "docs/design/python-tender-phase1/semantic-cases.json"
+CORPUS = Path(__file__).resolve().parents[4] / "docs/tender/semantic-cases.json"
 PROMPT = Path(__file__).resolve().parents[2] / "tender/prompts/verify.md"
 
 

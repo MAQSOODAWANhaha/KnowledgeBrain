@@ -9,7 +9,7 @@
 | 分析 | 下文「业务协议 v2」 | 历史 v1，以及把 `locate`、`associate`、`review` 各算一轮的旧发送说明 |
 | 编制 | 「Python 编制执行合同（T3 至 T5）」加上「编制最小修订（knowledge_required_v2）」 | `knowledge_required_v1`，以及与 v2 重复的 BUG 附录 |
 
-发送次数以[业务工作流的当前发送边界](business-workflow.md#当前发送边界)和[编制实际模型调用](business-workflow.md#编制实际模型调用)为准，本页不另写公式：
+发送次数以[业务工作流的当前发送边界](workflow.md#当前发送边界)和[编制实际模型调用](workflow.md#编制实际模型调用)为准，本页不另写公式：
 
 - 分析语义发送是每个冻结包 1 次核验判断。`locate`、`associate`、`review`、合批、压缩、续报、跨源补读都不再各算一轮。
 - 编制的目录阶段（A、M、B、C、P、F、原文选择）仍各自发送。正文每个任务最多 2 次写作（初稿加改稿）和 2 轮批量复核。`knowledge_required_v1` 不再单独计。
@@ -21,8 +21,8 @@
 ## 业务协议v2（工作区已实现）
 
 **本文件是第一阶段字段名称、类型、可选性和身份语义的唯一规范。**
-数据库内部表名、存储列及外键规则另由 [数据库命名与关联约定](../database-naming.md) 定义；存储改名通过读写适配保持本文 HTTP/gRPC、LLM 和 CAS 字段合同，不把数据库列名直接暴露为新的业务字段。
-[业务工作流](business-workflow.md)规定处理顺序，其他设计文档引用本字典，不另建同义结构。
+数据库内部表名、存储列及外键规则另由 [数据库命名与关联约定](../platform/database-naming.md) 定义；存储改名通过读写适配保持本文 HTTP/gRPC、LLM 和 CAS 字段合同，不把数据库列名直接暴露为新的业务字段。
+[业务工作流](workflow.md)规定处理顺序，其他设计文档引用本字典，不另建同义结构。
 工作区 `tender/schema.py`、抽取和核验提示、五节点主线使用 v2。旧回包不自动转换。
 压缩、回包容错和默认重试已在源码。语义验收未完成，部署事实以[交接](handoff.md)为准。
 核验只发 review，不再用 joint、discovery 或 associate 的分版号描述当前发送。
@@ -252,7 +252,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | 字段 | 定义 |
 | --- | --- |
 | `execution_id`、`status`、`kind` | 执行身份、状态；`kind` 为 `outline`（大纲执行）或 `document`（正文执行） |
-| `stages` | 按请求 task 分组，`stage` 为[编制实际模型调用](business-workflow.md#编制实际模型调用)里的阶段名。各组含 `logical_requests`（按逻辑请求摘要去重）、`requests`（实际持久请求条数，含重试）、`statuses`、`reported_tokens`、`completion`、`context`，后四项与 `budget_observation` 同义。`directory_parameter` 同时承载 P 长章展开和原文选择，不再细分 |
+| `stages` | 按请求 task 分组，`stage` 为[编制实际模型调用](workflow.md#编制实际模型调用)里的阶段名。各组含 `logical_requests`（按逻辑请求摘要去重）、`requests`（实际持久请求条数，含重试）、`statuses`、`reported_tokens`、`completion`、`context`，后四项与 `budget_observation` 同义。`directory_parameter` 同时承载 P 长章展开和原文选择，不再细分 |
 | `requests` | 本执行全部持久请求条数 |
 | `targets` | 大纲响应位置总数 `total`、知识应答位置 `knowledge_answers`、带分析规则引用的位置 `with_rule_refs` |
 | `outline_issues` | 大纲 issues 按 code 计数，含预算拒收、待核和未安排的分析规则（`outline_rule_unassigned`） |
@@ -422,7 +422,7 @@ findings=[] 不能解决 q1。原文/版本变化或任一必要核验未接受�
 ## 编制依据与交付约束（T3至T5业务语义）
 
 本节说明业务语义，正式结构统一见下节Python编制执行合同；职责与预算见
-[编制架构草案](authoring-architecture.md)。字段先在本字典定义，再同步schema、提示和执行链；
+[编制架构](authoring.md)。字段先在本字典定义，再同步schema、提示和执行链；
 skill只引用合同，不另建同义结构。真实服务与文档验收状态只在交接记录。
 
 统一原则：所有业务缺口均是可交付内容的一部分，不是生成/导出的拒绝条件。原文必填
@@ -648,7 +648,7 @@ compact摘录可省略共同`section_id`，统一引用这唯一章节；多章�
 
 ### 新链事项归属
 
-流程和五问见[业务工作流](business-workflow.md#新链格式补位与事项归属)。
+流程和五问见[业务工作流](workflow.md#新链格式补位与事项归属)。
 
 | 结构 | 字段与含义 |
 | --- | --- |

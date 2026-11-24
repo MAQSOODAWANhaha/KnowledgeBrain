@@ -71,7 +71,7 @@ Python init只读核验业务表并初始化LangGraph checkpoint；DocReader与�
 
 ONLYOFFICE 不是招标分析和大纲生成的前置条件。需要编辑时显式启用
 `editing` profile，提供其 JWT/能力密钥及浏览器/API origin；没有固定秘密回退。
-编辑、保存和验收要求见 [ONLYOFFICE](../docs/bidding/onlyoffice.md)。
+编辑、保存和验收要求见 [ONLYOFFICE](../docs/tender/onlyoffice.md)。
 
 ## 数据库初始化与升级
 
@@ -104,7 +104,7 @@ checkpoint，最后启动worker/dispatcher。
 角色进程、数据库必要表/列及Redis；探针总时限8秒，Compose健康检查时限10秒。
 探针核对统一业务表及checkpoint；缺表/缺列即失败，不由首次页面请求补建业务表。
 三者没有新增宿主端口。该 profile 不自动切换 Rust 链路，也不会自行提交文件或调用模型。
-原件提交、状态核对和人工确认见[工作流运行手册](../docs/design/python-tender-phase1/runbook.md)。
+原件提交、状态核对和人工确认见[工作流运行手册](../docs/tender/runbook.md)。
 
 生产发布使用 `deploy/release-descriptor-v1.json`：
 
@@ -204,7 +204,7 @@ Redis 队列入口要求显式 `REDIS_URL`，不回退固定本机地址；Oxana
 `DOCREADER_GRPC_PORT` 同步客户端默认地址与探针。数据服务默认没有主机映射。
 
 OnlyOffice 可选 profile 的浏览器入口为 28081（`ONLYOFFICE_HOST_PORT`）；Neo4j 仅在明确启用
-knowledge profile 时启动，HTTP/Bolt 宿主端口默认为 27474/27687。启动前核对宿主监听及
+knowledge profile 时启动，HTTP/Bolt 宿主端口默认为 27474/27687。本机开发栈（宿主进程直连、禁用 Compose 内部服务名）常用 loopback 地址：Postgres `127.0.0.1:15432`、Redis `127.0.0.1:16379`、对象存储 `127.0.0.1:19000`（使用 Chainguard MinIO，bucket 为 `knowledgebrain`）、前端 dev server `http://127.0.0.1:5174`（代理到本机 API）。启动前核对宿主监听及
 其他 Compose 项目的端口映射；如需覆盖端口，在现有 `.env` 中设置对应变量，并同步
 OnlyOffice 的浏览器 origin。
 本仓库的开发 release descriptor 不能当作生产身份。
@@ -218,7 +218,7 @@ OnlyOffice 的浏览器 origin。
 
 失败任务通过现有重试/恢复接口继续，保留租约围栏、模型调用回执和已完成产物。Word 保存保留版本并发检查，缺少资料的响应位置继续留空。上传暂存与对象引用由业务事务登记，retention 负责无引用对象回收。
 
-当前流程与真实验收状态见 [Python 交接文档](../docs/design/python-tender-phase1/handoff.md)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
+当前流程与真实验收状态见 [Python 交接文档](../docs/tender/handoff.md)。数据库变更仅支持全新初始化，不操作或清空已有业务库。
 
 ## 健康与验收
 
@@ -232,4 +232,4 @@ OnlyOffice 的浏览器 origin。
 - `crates/platform/tests/fresh_database_postgres.rs`：显式隔离空库验证当前业务表、无数据库业务授权函数与重复初始化。
 - Python workflow/acceptance：隔离 PostgreSQL 验证租约、回执、归属和编制流程，合成模型测试不等于真实模型质量验收。
 
-Release 必须由 named required jobs `schema-contract`, `queue-faults`, `outline-scripted-e2e`, `web-export-e2e`, `release-descriptor` 执行。依赖缺失、测试为零、ignored/skipped suite 或 cleanup 失败均使 job 失败；目前仅已接入上述 `schema-contract`，其余 required jobs 尚未齐备；只能称 development checks，不得称 release accepted。
+Release 必须由 named required jobs `schema-contract`, `queue-faults`, `outline-scripted-e2e`, `web-export-e2e`, `release-descriptor` 执行。依赖缺失、测试为零、ignored/skipped suite 或 cleanup 失败均使 job 失败；目前 CI 已接入 `schema-contract` 与 `queue-faults`，其余 required jobs 尚未齐备；只能称 development checks，不得称 release accepted。

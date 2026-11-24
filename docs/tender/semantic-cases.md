@@ -36,8 +36,7 @@ semantic_acceptance均为false，不能据此宣称模型准确率或完整流�
 - 部分补遗不再用applicable=false表达整条失效。两例使用相同原事项/替换事项，差别在
   amendment.affected_scope和retained_rules，预期观察决议接受与保留义务。
 - 跨文档样本已可按当前联合review输入导出；各文档身份、角色与来源独立，不假造单文档。
-- source_corpus_sha256记录迁移前语料摘要；此次旧快照及迁移脚本在私有验证目录
-  `/tmp/kb-semantic-v2/`。预期文字做了合同适配，但没有改成人工ground truth。
+- `source_corpus_sha256` 记录迁移前语料摘要；预期文字已完成合同适配，但尚未改为人工 ground truth。
 
 condition-scope的明确绑定只是合成输入前提，不表示真实文件已完成范围裁决。
 本批只覆盖 review，不能代替 Extract 逐项完整性、

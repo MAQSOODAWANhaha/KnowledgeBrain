@@ -3,7 +3,7 @@ from collections import Counter
 
 from docreader.llm.usage import budget_observation
 
-# Stage names follow business-workflow.md「编制实际模型调用」.
+# Stage names follow workflow.md「编制实际模型调用」.
 STAGES = {
     "directory_plan": "A 目录规划",
     "directory_material": "M 章内材料",

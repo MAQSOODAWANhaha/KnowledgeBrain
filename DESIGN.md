@@ -2,7 +2,7 @@
 
 企业级投标工作台。设计语言参照 Microsoft Fluent 2：中性灰阶、一个品牌蓝、语义色只表示状态，和投标人员每天使用的 Word / ONLYOFFICE 保持一致。本文只约束 Web 外壳，不改 ONLYOFFICE 编辑器内部和 DOCX 版式。
 
-稿件保存、锚点、版本和编制行为以 [前端工作台](docs/design/frontend-workbench-design.md) 为准。
+稿件保存、锚点、版本和编制行为以 [前端工作台](docs/tender/workbench.md) 为准。
 
 ## 1. 组件来源
 

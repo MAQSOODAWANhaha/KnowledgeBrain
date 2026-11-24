@@ -64,7 +64,7 @@ reset_logs() {
   mkdir -p "$tmp/state"
 }
 
-grep -Fq 'bash scripts/ci_services.sh createdb -T template0 "$database"' "$workflow"
+grep -Fq 'bash scripts/ci_services.sh createdb -T template0 "$CI_FRESH_DATABASE"' "$workflow"
 
 reset_logs
 CREATEDB_FAILS=1

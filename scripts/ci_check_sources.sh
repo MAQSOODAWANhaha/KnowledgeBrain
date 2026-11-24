@@ -7,6 +7,7 @@ cd "$root"
 : "${DEFAULT_BRANCH:?}"
 : "${CI_POSTGRES_PORT:?}"
 : "${CI_REDIS_PORT:?}"
+: "${CI_DOCREADER_PYTHON_VERSION:?}"
 : "${CI_DOCREADER_PYTEST_PATHS:?}"
 : "${CI_RUNNER:?}"
 : "${CI_ACTION_CHECKOUT:?}"
@@ -26,6 +27,14 @@ if [[ "$CI_PUSH_BRANCH" != "$DEFAULT_BRANCH" ]]; then
   exit 1
 fi
 grep -Fq "branches: [${CI_PUSH_BRANCH}]" .github/workflows/ci.yml
+grep -Fq 'group: ci-${{ github.workflow }}-${{ github.ref }}' .github/workflows/ci.yml || {
+  echo "workflow concurrency group must be scoped by github.ref" >&2
+  exit 1
+}
+grep -Fq "cancel-in-progress: \${{ github.ref != 'refs/heads/${CI_PUSH_BRANCH}' }}" .github/workflows/ci.yml || {
+  echo "workflow must not cancel in-progress runs on ${CI_PUSH_BRANCH}" >&2
+  exit 1
+}
 
 workflow=.github/workflows/ci.yml
 anchor=0
@@ -86,7 +95,20 @@ done < <(grep -E '^[[:space:]]*(- )?uses:' "$workflow")
 
 docreader_tests=$(realpath -m "services/docreader/${CI_DOCREADER_PYTEST_PATHS}")
 [[ -d "$docreader_tests" ]] || { echo "missing docreader pytest path $docreader_tests" >&2; exit 1; }
+grep -Fq "FROM python:${CI_DOCREADER_PYTHON_VERSION}-" deploy/Dockerfile.docreader || {
+  echo "deploy/Dockerfile.docreader Python version drifted from CI_DOCREADER_PYTHON_VERSION=${CI_DOCREADER_PYTHON_VERSION}" >&2
+  exit 1
+}
+grep -Fq "python-version: '${CI_DOCREADER_PYTHON_VERSION}'" .github/workflows/python-tender.yml || {
+  echo ".github/workflows/python-tender.yml Python version drifted from CI_DOCREADER_PYTHON_VERSION=${CI_DOCREADER_PYTHON_VERSION}" >&2
+  exit 1
+}
+grep -Fq 'python-version: ${{ env.CI_DOCREADER_PYTHON_VERSION }}' .github/workflows/ci.yml || {
+  echo ".github/workflows/ci.yml must pin docreader setup-uv to CI_DOCREADER_PYTHON_VERSION" >&2
+  exit 1
+}
 if rg -n 'crates/bidding|bidding_v2_baseline|CI_TENDER_PREPARE_BIN|bid-authoring-v2' Cargo.toml deploy/queue-registry.toml .github/workflows/ci.yml; then
   echo "retired Rust tender workflow remains in active build configuration" >&2
   exit 1
 fi
+python3 scripts/ci_check_docs.py

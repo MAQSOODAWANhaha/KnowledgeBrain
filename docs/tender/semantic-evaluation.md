@@ -11,7 +11,7 @@
 ```bash
 PYTHONPATH=services uv run --project services/docreader python \
   services/docreader/tests/acceptance/check_semantic_cases.py \
-  --prepare /tmp/tender-verify-offline-v2
+  --prepare /opt/workspace/kb-tender-evidence/tender-verify-offline-v2
 ```
 
 工具用当前SourceView、AnalysisExtraction、Decision校验输入，检查来源身份、可见引文、
