@@ -13,9 +13,8 @@
 | 全项目工程规范、目录命名、变更五问、评审与验收矩阵 | [工程与验收标准](code-standards.md) |
 | 产品目标、用户、原则 | [PRODUCT.md](../PRODUCT.md) |
 | 外壳视觉（颜色、字体、几何） | [DESIGN.md](../DESIGN.md) |
-| 共享平台能力与归属 | [platform/README.md](platform/README.md) |
-| 数据库迁移与命名 | [数据库初始化](platform/database-initialization.md)、[数据库命名](platform/database-naming.md) |
-| 知识库领域、检索端口、crate | [knowledge-base/README.md](knowledge-base/README.md)（[domain](knowledge-base/domain.md)、[crate](knowledge-base/crate.md)） |
+| 共享平台能力、数据库迁移与命名约定 | [platform/README.md](platform/README.md) |
+| 知识库领域、检索端口与 `crates/knowledge` 边界 | [knowledge-base/README.md](knowledge-base/README.md) |
 | 招投标总入口与当前交接状态 | [tender/README.md](tender/README.md) |
 | 招投标分析流程、编制架构、实际模型调用与运行时接口 | [业务工作流与架构](tender/workflow.md) |
 | 字段、类型、枚举与协议合同 | [字段字典](tender/field-dictionary.md) |
@@ -23,24 +22,24 @@
 | 业务验收线与合成语义评测 | [验收与语义评测](tender/acceptance.md) |
 | 招投标本机启动与 CLI 运维手册 | [运行手册](tender/runbook.md) |
 | 当前活跃未关闭缺陷清单 | [问题记录](tender/bug-fix.md) |
-| 部署、本机栈端口与发布 | [deploy/README.md](../deploy/README.md)、[发布入口](../deploy/release-entry.md) |
+| 部署、本机栈端口与发布工具 | [deploy/README.md](../deploy/README.md) |
 
 ## 目录结构
 
-`docs/` 按业务领域扁平组织，不再使用 `design/`、`bidding/`、`research/`、`validation/` 或带语言/期数后缀的目录：
+`docs/` 按业务领域扁平组织，不使用 `design/`、`bidding/`、`research/`、`validation/` 或带语言/期数后缀的目录：
 
 ```text
 README.md  CLAUDE.md  AGENTS.md  LESSONS.md  PRODUCT.md  DESIGN.md
 deploy/
-  README.md                     部署与本机开发栈端口
-  release-entry.md              宿主发布工具边界与验收
+  README.md                     部署、本机开发栈端口与宿主发布工具
 plans/
-  README.md                     进行中的计划（做完即删）
+  README.md                     进行中的计划入口（做完即删）
+  improvement-roadmap.md        W1–W5 修复与改进路线（含 W2 一条要求链）
 docs/
   README.md                     本页（总导航与权威表）
   code-standards.md             工程规范、目录命名、变更五问与 L0–L3 验收矩阵
-  platform/                     共享平台与数据库（README、database-initialization、database-naming）
-  knowledge-base/               知识库（README、domain、crate）
+  platform/README.md            共享平台、数据库迁移、归属与命名约定
+  knowledge-base/README.md      知识库领域、检索端口与 crate 边界
   tender/                       招投标（README[含交接]、workflow、field-dictionary、
                                       workbench[含 Word/ONLYOFFICE]、acceptance[含语义评测]、
                                       runbook、bug-fix）

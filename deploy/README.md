@@ -131,7 +131,7 @@ API、Rust worker及retention；Python角色command严格校验，不注入Rust�
 
 字段 exact、`additionalProperties=false`，images key set 固定，JSON 键顺序由 JCS 规范化。`release_revision` 使用 exact ASCII grammar `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`（1～128 bytes，不 trim/normalize）。`release_descriptor_sha256=SHA256("KB:ReleaseDescriptor:v1\0" || RFC8785_JCS(document))` 是整组组件 identity，不把多个 image 误称为“一个 image digest”。入口复用平台 typed validator/JCS，并核对 Compose 同目录的 checked schema 与编译内嵌合同一致；缺文件、重复字段或合同漂移均拒绝。
 
-宿主发布入口为 `knowledgebrain-release`，边界和当前候选门槛见[发布入口](release-entry.md)。旧本机结果不等于候选或生产放行。从审核后的候选构建并将 binary 安装到 PATH：
+宿主发布入口为 `knowledgebrain-release`（旧本机结果不代表候选或生产放行）。从审核后的候选构建并将 binary 安装到 PATH：
 
 ```bash
 cargo build --locked --release -p platform --bin knowledgebrain-release
@@ -148,15 +148,12 @@ knowledgebrain-release --descriptor deploy/release-descriptor-v1.json \
 
 添加 `--check-only` 只验证本地输入并计算 hash，不调用 Docker、不验证镜像或数据库。`--compose-file` 默认 `deploy/docker-compose.yml`，`--timeout-seconds` 默认 300，为每条 Docker 命令设置上限。
 
-实际执行先解析Compose、把所有容器名限定到显式project，检查已有组件/依赖的身份和健康状态，再pull并inspect全部digest引用。
-mode-0700临时目录内的mode-0600 override将八个服务映射到五份exact image，仅四个Rust组件额外写入BIN。
-先等待数据依赖，再确认migrator和Python init的image/config、固定command及exit 0；随后启动
-DocReader与两个Python角色并确认健康，最后启动API/Worker/Retention。逐服务inspect时实际执行
-配置中已核对一致的健康探针。镜像manifest RepoDigest与本地image config ID分别校验，不能混用。
+工具边界与候选验收门槛：
 
-发布工具在宿主侧验证实际镜像及健康探针，不向数据库写入 release receipt；应用不要求 descriptor 环境变量或挂载。已有部署不一致时拒绝自动替换；全部服务符合时只检查，不重新初始化或启动。失败只停止本次标签且 project 一致的容器，保留既有容器与数据卷。
-
-checked-in `release-descriptor-v1.development.json` 仅用于离线工具测试；其 synthetic digest 不证明本地 image 的实际 RepoDigest，标准 Compose 不读取它。旧 `docker-compose.pro.yml` 和 `.env.example` 中的 tag 发布配置已删除。验证范围、可复现命令及剩余验收见[发布入口验证](release-entry.md)。
+- **输入与隔离**：descriptor 拒绝未知/重复字段，env 拒绝重复 key，schema 须与 binary 内嵌合同一致，在执行前后及每次启动前复核；Docker 子进程仅继承访问本机 Engine 必需的宿主变量并加载显式 env file，参数不拼接 shell，错误不泄漏含密码的 Engine 输出。
+- **镜像与探针校验**：解析 Compose 后为全部服务赋予显式 project 容器名与本次 attempt 标签；mode-0700 临时目录内 mode-0600 override（fsync 并在成功前核对删除）将八个服务映射到五份 exact digest 镜像（四个 Rust 组件额外写入角色 `BIN` 及原 descriptor 只读挂载），依赖镜像同样要求 digest pinned。先检查既有服务是否漂移，再 pull 并分别校验 manifest RepoDigest、本地 image config ID 与 `.Config.Image` full ref；启动顺序固定为数据依赖 → `migrator`（exit 0）→ `python-tender-init`（exit 0）→ `docreader` 及两 Python 角色健康 → `api` / `worker` / `retention`，逐服务按解析后 Compose 配置执行健康探针。
+- **幂等与失败边界**：不向数据库写入 release receipt；全部服务符合时只读检查，不重跑 migrator；已有部署不一致时拒绝自动替换。失败只停止本次 attempt 且 project 一致的容器，保留既有容器与数据卷，清理失败同样返回失败。
+- **候选验收**：绑定干净候选 SHA、`Cargo.lock`、真实 Docker build context 与五组件 RepoDigest（Rust builder 须包含 `include_str!` 引用的 descriptor schema 文件）；仅在专属授权环境分别验证 check-only、Compose 身份/环境/挂载、migrator 先行、依赖 readiness、同身份只读重放、失败清理、对象引用保护与最终回收。checked-in `release-descriptor-v1.development.json` 仅用于离线工具测试，不代表真实 RepoDigest。
 
 `api`、`worker`、`retention` 都等待 `migrate` 成功。应用进程启动时只连接依赖，不执行
 DDL。重启使用：
@@ -192,7 +189,7 @@ Redis 队列入口要求显式 `REDIS_URL`，不回退固定本机地址；Oxana
 
 `delete` 不会删除 Git 工作区、Docker 全局镜像或其他 Compose 项目的数据卷，但它会删除当前本地 Compose 项目的全部数据面；只允许用于明确的本地 clean-slate 验收，不是生产清理命令。
 
-> Oxana 的 `Job finished success=true` 表示消息已被 Worker 确认处理，不能证明业务生成成功。招标分析应核对请求终态、独立复核结果和已发布的分析版本。执行诊断位于 `bid_tender_agent_run_artifacts`；诊断沿用 SQL 的 UTF-8 安全字节前缀，不承诺保留完整原始消息。旧大纲生成任务已从注册表和 API/SQL 创建链删除。
+> Oxana 的 `Job finished success=true` 仅表示消息已被 Worker 确认处理，不证明业务生成成功。招标分析与编制应核对 Python 工作流请求终态、独立复核结果与已发布版本（`tender_analysis_*` / `tender_authoring_*`）。
 
 
 ## 本地入口与可选网络覆盖

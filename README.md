@@ -1,6 +1,6 @@
 # KnowledgeBrain
 
-Product-document knowledge service and tender authoring. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Engineering and verification standards: [`docs/code-standards.md`](docs/code-standards.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). The current tender workflow is implemented in Python: [business workflow](docs/tender/workflow.md), [field dictionary](docs/tender/field-dictionary.md), and [handoff](docs/tender/README.md#当前状态交接). Rust provides the HTTP adapter, knowledge service and shared infrastructure; the former Rust tender workflow has been removed. Historical private evidence is not published.
+Product-document knowledge service and tender authoring. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Engineering and verification standards: [`docs/code-standards.md`](docs/code-standards.md). Knowledge-base domain: [`docs/knowledge-base/README.md`](docs/knowledge-base/README.md). The current tender workflow is implemented in Python: [business workflow](docs/tender/workflow.md), [field dictionary](docs/tender/field-dictionary.md), and [handoff](docs/tender/README.md#当前状态交接). Rust provides the HTTP adapter, knowledge service and shared infrastructure; the former Rust tender workflow has been removed. Historical private evidence is not published.
 
 HTTP (`/api/v1` knowledge, `/api/v3/tender-projects` tender) validates, persists, and enqueues. Knowledge parse / chunk / vector / wiki / graph run in `worker`; tender analysis and authoring run in Python workers. Resources are visible and writable only by their creator. API keys act as their owning user without separate scope permissions.
 
@@ -14,7 +14,7 @@ cp deploy/.env.example deploy/.env
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile runtime up -d --build
 ```
 
-The migrator applies timestamped SQL files from `migrations/` using SQLx. Initial versions create the shared platform, knowledge base, and tender tables; later versions upgrade them incrementally. Each file and its version/checksum record commit together. These contain tables, indexes and data constraints, with no custom functions, triggers or business database roles. API, worker, and retention check connectivity; they never execute business DDL. See [database design](docs/platform/database-initialization.md).
+The migrator applies timestamped SQL files from `migrations/` using SQLx. Initial versions create the shared platform, knowledge base, and tender tables; later versions upgrade them incrementally. Each file and its version/checksum record commit together. These contain tables, indexes and data constraints, with no custom functions, triggers or business database roles. API, worker, and retention check connectivity; they never execute business DDL. See [shared platform and database](docs/platform/README.md#数据库迁移与业务归属).
 Use `./deploy/deploy.sh up` for an ordinary restart.
 
 ## Local rust (infra only)

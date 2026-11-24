@@ -10,7 +10,7 @@
    - `docs/` 下只允许 `README.md`、`code-standards.md` 和按业务领域划分的扁平目录：`platform/`、`knowledge-base/`、`tender/`；**禁止**新建杂货抽屉目录（如 `design/`、`research/`、`validation/`）或同义分裂目录（如 `bidding/`）。
    - `plans/` 只放未完成的阶段计划（做完或放弃即删），部署与发布文档统一放在 `deploy/`。
 2. **文件命名规范**：
-   - 除各目录入口固定为 `README.md` 外，`docs/` 与 `plans/` 下所有目录名和文件名统一使用小写 **`kebab-case`**（如 `field-dictionary.md`、`database-naming.md`）。
+   - 除各目录入口固定为 `README.md` 外，`docs/` 与 `plans/` 下所有目录名和文件名统一使用小写 **`kebab-case`**（如 `field-dictionary.md`、`improvement-roadmap.md`）。
    - **禁止**大写、下划线、中文文件名、语言前缀（如 `python-*`）、历史阶段后缀（如 `-phase1`）、冗余后缀（如 `-design`）和日期戳（如 `20261014`）。
 3. **先改权威页再改代码，同 Commit 提交**：修改协议、字段、接口、CLI、环境变量、端口、UI 交互或部署方式时，在 [docs/README.md](README.md) 对应的权威页同步更新。
 4. **只写现在时，禁打补丁**：直接改写或删除旧句，禁止写「若旧句要求 X，以本句为准」「本轮尚未部署」「架构草案」。

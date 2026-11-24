@@ -8,5 +8,4 @@
 
 ## 进行中
 
-- [修复与改进路线](improvement-roadmap.md)：W0 至 W5 总路线，里程碑从 0/4 到 4/4。
-- [一条要求链](single-requirement-chain.md)：路线中的 W2，编制改为消费分析台账。
+- [修复与改进路线](improvement-roadmap.md)：W1 至 W5 总路线（含 W2 一条要求链），里程碑从 0/4 到 4/4。

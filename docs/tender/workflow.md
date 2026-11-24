@@ -79,7 +79,7 @@
 
 ## 编制目标设计：一条要求链（试点）
 
-实施路线见 [一条要求链计划](../../plans/single-requirement-chain.md)；默认入口仍为旧大纲链，试点经 Web 接口显式选 `requirement_chain_contract=single_requirement_chain_v1` 启用。分析事项台账是唯一覆盖分母，原式表、固定文字、签章与有据首张原封面由宿主从冻结网格原样复制，标注“不适用”的编号式样为复制边界。
+实施路线见 [修复与改进路线 · W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)；默认入口仍为旧大纲链，试点经 Web 接口显式选 `requirement_chain_contract=single_requirement_chain_v1` 启用。分析事项台账是唯一覆盖分母，原式表、固定文字、签章与有据首张原封面由宿主从冻结网格原样复制，标注“不适用”的编号式样为复制边界。
 
 ### 新链格式补位与事项归属
 

@@ -1,35 +1,13 @@
-# Python 第一阶段唯一字段字典
+# 招投标字段与协议字典
 
-## 当前有效合同
+本页是招标分析与编制（`services/docreader`）字段名称、类型、可选性、枚举与身份语义的唯一规范。处理顺序与调用公式见 [业务工作流](workflow.md#当前发送边界) 与 [编制实际模型调用](workflow.md#编制实际模型调用)，数据库内部表名与外键规则见 [共享平台与数据库](../platform/README.md#数据库命名状态与约束约定)，动态部署与验证事实见 [招投标入口 · 当前状态](README.md#当前状态交接)。
 
-现在只执行下面两份合同。历史 v1、旧的多轮发送说明和 `knowledge_required_v1` 已经从本文删除，不能再当成第二份协议。当前目录引用请求不再复用旧 `select_directory_refs_v1` 回执。在途镜像要重新部署后才走这条路径。
+- 单次输入不超过 94208 token（`o200k_base` 校准边界，详见下文）；输出只含判断、问题或填空，不回写宿主已索引原文范围。
+- 硬阻断只阻止把该版本确认成 `analysis-ready`，不拒绝未确认快照的读取、保存、预览或导出。
 
-| 合同 | 当前正文 | 不再单独立项 |
-| --- | --- | --- |
-| 分析 | 下文「业务协议 v2」 | 历史 v1，以及把 `locate`、`associate`、`review` 各算一轮的旧发送说明 |
-| 编制 | 「Python 编制执行合同（T3 至 T5）」加上「编制最小修订（knowledge_required_v2）」 | `knowledge_required_v1`，以及与 v2 重复的 BUG 附录 |
+## 分析业务协议（v2）
 
-发送次数以[业务工作流的当前发送边界](workflow.md#当前发送边界)和[编制实际模型调用](workflow.md#编制实际模型调用)为准，本页不另写公式：
-
-- 分析语义发送是每个冻结包 1 次核验判断。`locate`、`associate`、`review`、合批、压缩、续报、跨源补读都不再各算一轮。
-- 编制的目录阶段（A、M、B、C、P、F、原文选择）仍各自发送。正文每个任务最多 2 次写作（初稿加改稿）和 2 轮批量复核。`knowledge_required_v1` 不再单独计。
-- 单次输入不超过 94208；A、M 和完整 C 超限时按拒收留待核处理，见业务工作流。输出只含判断、问题或填空。模型不回写宿主已索引的原文范围；请求可以带短编号，原文由宿主装上。
-- 硬阻断只阻止把该版本确认成 `analysis-ready`。未确认时编制仍可读当前冻结快照，待核留在清单里，不因此拒绝保存或导出。
-
-与当前合同冲突的历史附录已删除，包括旧的 locate/associate/joint 轮次、T0 至 T2、`knowledge_required_v1` 和 BUG 附录。
-
-## 业务协议v2（工作区已实现）
-
-**本文件是第一阶段字段名称、类型、可选性和身份语义的唯一规范。**
-数据库内部表名、存储列及外键规则另由 [数据库命名与关联约定](../platform/database-naming.md) 定义；存储改名通过读写适配保持本文 HTTP/gRPC、LLM 和 CAS 字段合同，不把数据库列名直接暴露为新的业务字段。
-[业务工作流](workflow.md)规定处理顺序，其他设计文档引用本字典，不另建同义结构。
-工作区 `tender/schema.py`、抽取和核验提示、五节点主线使用 v2。旧回包不自动转换。
-压缩、回包容错和默认重试已在源码。语义验收未完成，部署事实以[交接](README.md#当前状态交接)为准。
-核验只发 review，不再用 joint、discovery 或 associate 的分版号描述当前发送。
-
-第一阶段完整分析招标文件，目标为 `register → freeze → extract → verify → confirm`，
-确认后到 `analysis-ready`。输入为招标文件、附件、澄清和补遗；不引入企业响应数据、响应计划、
-准备待办、评分采纳或实际得分。原文明示的填表、证明、附件和签章要求属于来源事项。
+工作区 `tender/schema.py`、抽取/核验提示与五节点主线使用 v2（旧回包不自动转换；核验只发 `review`）。分析目标为 `register → freeze → extract → verify → confirm`，确认后到 `analysis-ready`。输入为招标文件、附件、澄清和补遗，不引入企业响应数据、准备待办或实际得分；原文明示的填表、证明、附件与签章要求属于来源事项。
 
 ### 事项 TenderItem
 
@@ -305,10 +283,9 @@ issue_id集合必须恰好等于`human_issue_ids`，没有待处理问题时省�
 不变的问题有效。
 
 
-### 模型发送协议修订：短引用与拒收纠正
+### 短引用与拒收纠正协议
 
-本修订先在源码及隔离测试实现，部署前不改变在途运行的冻结协议。
-主节点、领域schema_version=2及持久事项身份不变；执行快照和预算builder标识发送协议。
+主节点、领域 `schema_version=2` 及持久事项身份保持稳定；执行快照和预算 builder 显式标识发送协议。
 
 - 请求内引用采用按类型编号的短ID。宿主以`model-wire`产物保存原始payload及双向映射；正文、引文、理由等
   自由文本不做字符串替换。所有结构化引用使用同一映射，未知引用不能猜测恢复。
@@ -468,12 +445,7 @@ outline_rule_unassigned以响应位置及constraint_rule_refs共同计算未分�
 
 ## Python编制执行合同（T3至T5）
 
-当前编制策略以[编制最小修订](#编制最小修订knowledge_required_v2)为准。
-下面这些字段仍是执行合同里的结构；v1 那种「没有资料就删稿、空位一律复核」不再有效。
-
-本节先定义本次实施所用的最小字段；实际运行和验收状态仅在交接维护。
-不增加分析节点，不复制招标事实台账。所有模型回包中的ID仅为所需的短引用选择，
-宿主产生执行、章节、任务、资料及文件身份。
+当前编制策略见 [编制交互策略（knowledge_required_v2）](#编制交互策略knowledge_required_v2)；实际运行与验收状态只在 [招投标入口 · 当前状态](README.md#当前状态交接) 维护。所有模型回包中的 ID 仅为所需短引用选择，宿主产生执行、章节、任务、资料及文件身份。
 
 | 结构 | 字段与含义 |
 | --- | --- |
@@ -577,63 +549,16 @@ reference标签忽略有效功能资料；事实/证明/授权声明仍须对应
 
 ### 归并操作的显式Token计量
 
-BUG-081补充：来源组织装包在实际输入准入内预留2048 token纠正空间，实际发送上限
-不变；未知引用错误精确到叶字段，不复制整棵章节树。全量归并仅在原发送视图超限时
-使用`assembly_view="compact_v1"`，仍保持同一输出合同与宿主引用映射：
+来源组织装包在实际输入准入内预留 2048 token 纠正空间，实际发送上限不变；未知引用错误精确到叶字段，不复制整棵章节树。全量归并仅在原发送视图超限时使用 `assembly_view="compact_v1"`，仍保持同一输出合同与宿主引用映射：
 
-- `template_parts`、`source_excerpts`、`submission_sources`、`submission_rules`、`unassigned_rules`由数组
-  改为以原`part_id`/`range_id`/`source_id`/`rule_id`为键的对象，值保留该条除重复ID外的全部字段。
-- 纯原生网格可用`rows`完整二维明文矩阵表达，行列仍从0开始；`null`表示该坐标没有
-  独立原生单元格，`""`表示确实存在的空白格。`merged_cells`每项为
-  `[row,column,row_span,col_span]`，只列非1×1合并；`row_count`/`column_count`保留。
-  原件列宽属于宿主排版数据，仍在冻结原件内，不参与模型语义判断。带额外单元格属性
-  的网格保持完整原结构，不丢公式或其他未知字段。
-- 候选省略`is_volume=false`、`manual_fill=false`、`support_origins=["knowledge"]`、
-  `template_part_ids=[]`时只应用这些明确默认值，不表示缺失语义。其他字段不裁剪。
-- 以上仅是输入投影，不改变持久结构、最终DOCX或输出短引用，不要求模型重抄压缩表。
-  若投影后仍超限，保留既有容量缺口及人工编辑/重新编制出口，不能声称归并成功。
+- `template_parts`、`source_excerpts`、`submission_sources`、`submission_rules`、`unassigned_rules` 由数组改为以原 `part_id`/`range_id`/`source_id`/`rule_id` 为键的对象，值保留该条除重复 ID 外的全部字段。
+- 纯原生网格可用 `rows` 完整二维明文矩阵表达，行列仍从 0 开始；`null` 表示该坐标没有独立原生单元格，`""` 表示确实存在的空白格。`merged_cells` 每项为 `[row,column,row_span,col_span]`，只列非 1×1 合并；`row_count`/`column_count` 保留。原件列宽属于宿主排版数据，仍在冻结原件内，不参与模型语义判断。带额外单元格属性的网格保持完整原结构，不丢公式或其他未知字段。
+- 候选省略 `is_volume=false`、`manual_fill=false`、`support_origins=["knowledge"]`、`template_part_ids=[]` 时只应用这些明确默认值，不表示缺失语义；其他字段不裁剪。
+- 以上仅是输入投影，不改变持久结构、最终 DOCX 或输出短引用，不要求模型重抄压缩表；若投影后仍超限，保留既有容量缺口及人工编辑/重新编制出口。
 
-BUG-103补充：compact视图可在顶层携带`text_pool: string[]`，仅共享完全相同的
-原文行。`template_parts`、`source_excerpts`及`submission_sources`中可用
-`text_lines: (string | integer)[]`代替`text`：字符串就是该行原文，整数是从0开始的
-`text_pool`索引；按顺序以原始`\n`连接即为该条完整原文。空行、首尾换行、Unicode、
-空白和标点均不规整，不让模型计算字符偏移或回抄共享池。仅在完整JSON实际变小
-时采用；没有净收益、不可读正文及网格沿现有表达。相同文字共享不合并来源身份、
-部件、适用条件或实例；原`p/x/s`短引用、部件顺序和宿主绑定均不变。
-这是输入端无损表达，不增加持久字段或输出字段，不改变模板/响应表的实际选择。
-仅当`source_sections`只有一个章节，且所有`source_excerpts`确实引用该章节时，
-compact摘录可省略共同`section_id`，统一引用这唯一章节；多章节或任何不一致时
-逐条保留。`source_sections`本身保持完整，不引入通用默认值/列式协议。
+compact 视图可在顶层携带 `text_pool: string[]`，仅共享完全相同的原文行。`template_parts`、`source_excerpts` 及 `submission_sources` 中可用 `text_lines: (string | integer)[]` 代替 `text`（字符串为原文行，整数为从 0 开始的 `text_pool` 索引，按顺序以原始 `\n` 连接即逐字恢复原文）。空行、首尾换行、Unicode、空白与标点均不规整，仅在完整 JSON 实际变小时采用；相同文字共享不合并来源身份、部件、适用条件或实例。仅当 `source_sections` 只有一个章节且所有 `source_excerpts` 确实引用该章节时，compact 摘录可省略共同 `section_id`。
 
-`RequestBudget`增加宿主构造参数`tokenized_outline_assembly: bool=false`。开启必须同时显式
-配置`tokenizer="o200k_base"`；不能根据模型名称猜测，也不能在正在执行的请求中改配置。
-仅`measure_request/require_request(request, task="outline")`且发送payload顶层
-`operation="assemble"`时启用该计量。原文组织、依据、写作、改稿及复核仍按既有字节估算；
-既有verify tokenizer分支不变。prepared请求的task允许显式字符串，但不扩充分析Task枚举。
-
-开启时按实际消息的o200k token计量，保留512 framing余量、现有安全余量和
-`min(32768, context_tokens/4)`输出预留；131072窗口对应输入上限94208。输出预留不是
-供应商硬上限或已验证输出能力。关闭时默认spec及计量行为不变；开启时只在
-`spec.tokenized.operations`追加`{"outline":["assemble"]}`，`tokenized.tasks`仍为`["verify"]`，
-使执行快照能够区分本次操作准入配置。
-
-校准依据保留在私有证据目录`/opt/workspace/kb-tender-evidence/2026-10-26-authoring-implementation/`：
-`offline-budget-calibration-20261027T045351Z.json`对15个已完成、无图片的真实请求，逐个用
-保存的请求CAS对照供应商prompt usage；样本中的供应商prompt等于o200k正文计数加10，
-加512余量后的估算均高502。`real-assembly-o200k-preflight.json`显示完整归并在相同计量
-规则下可准入。该证据只支持本次端点/模型的窄操作显式启用，不证明所有模型tokenizer
-身份、图片费用或归并输出容量，也不将离线预审写成真实归并完成。
-
-本调整的五项边界：
-
-1. 新增模型调用为0；原文N包不变，N>1仍最多增加一次完整候选归并，不先新增树形多轮调用。
-2. 单请求按完整Prompt、候选、共享规则及全部必要语义实际计量；输出和安全预留照常扣除，
-   不以删除条件、模板或引用换取准入。
-3. 未校准/未显式开启继续字节估算；配置无效在发送前明确报错，实际超限仍保留已组织片段
-   和容量缺口，不改为无限重试或静默部分归并。
-4. 预算配置和Prompt共同固定在执行spec；需调整时使用明确的新执行，保留原调用及回执，
-   实际未变请求依既有摘要复用；不得对在途运行临时放宽准入。
-5. 不新增模型输出字段，不要求模型誊写计量、候选清单或宿主身份；模型仍只选择目标语义引用。
+`RequestBudget` 接受宿主构造参数 `tokenized_outline_assembly: bool=false`，开启时须同时显式配置 `tokenizer="o200k_base"`（不按模型名猜测，不在运行中修改），仅对 `measure_request/require_request(request, task="outline")` 且发送 payload 顶层 `operation="assemble"` 生效；其余操作沿用既有字节估算或 `verify` tokenizer 分支。开启时按实际消息 `o200k_base` token 计量，扣除 512 framing 余量、安全余量与 `min(32768, context_tokens/4)` 输出预留（131072 窗口对应输入上限 94208），并在 `spec.tokenized.operations` 写入 `{"outline":["assemble"]}` 固定执行快照。未校准或未显式开启时保持字节估算，配置无效在发送前报错。
 
 实际知识服务接口是可注入的窄provider：按任务语义查询，返回冻结文字/原件及定位；
 没有配置、无命中或语义不适用返回可读诊断，相关应答留空、固定模板保留，继续导出。
@@ -661,12 +586,9 @@ compact摘录可省略共同`section_id`，统一引用这唯一章节；多章�
 | 评标裁决 | 大纲保存可选 `evaluation_decisions: [{rule_ref, resolution, target_id?}]`。仅接受当前基线大纲的评标建议待核事项及完整正式 `EffectiveItemRef`。`resolution` 取 `evaluation`（纯评审流程）、`reference`（原文索引）、`document_wide`（整份约束）、`target`（本次保存后仍在大纲中的位置，须提供 `target_id`）或 `pending`（继续待核）。按现有修订并发及幂等规则保存。 |
 | 开标项目名称 | `ResponseTarget.opening_project_name_excerpt` 为新链宿主记录的同快照公告原文精确引用。只在已绑定完整原生《开标一览表》的手填位置保存。模型和编辑请求均不指定文字、行列或填值，该值不计为企业应答。 |
 
-## 编制最小修订（knowledge_required_v2）
+## 编制交互策略（knowledge_required_v2）
 
-本节是BUG-047至BUG-052的统一后续合同，取代v1中所有内容必须有material_ids、
-复核不可用清空应答、只允许generated改稿以及所有空位均复核的设计。
-不增加分析节点、Agent、产品确认门禁、环境变量或通用状态机。schema_version仍为2，
-knowledge_required_v2仅标识编制交互策略，须进入执行spec和实际模型请求。
+`schema_version` 仍为 2，`knowledge_required_v2` 标识当前编制交互策略并进入执行 spec 与实际模型请求：不增加分析节点、Agent、产品确认门禁、环境变量或通用状态机。
 
 ### 依据与位置
 
