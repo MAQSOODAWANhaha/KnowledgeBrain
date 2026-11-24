@@ -532,8 +532,15 @@ async fn upload(
             .execute(&mut *tx).await.map_err(pg_error)?;
     }
     tx.commit().await.map_err(pg_error)?;
-    bridge(id,owner,"document.put",json!({"document_id":document,"file_name":name,"sha256":digest,"request_key":key}),bytes).await?;
-    let mut value = document_values(&pool, id)
+    bridge(
+        id,
+        owner,
+        "document.put",
+        json!({"document_id":document,"file_name":name,"sha256":digest,"request_key":key}),
+        bytes,
+    )
+    .await?;
+    let value = document_values(&pool, id)
         .await?
         .as_array()
         .unwrap()
