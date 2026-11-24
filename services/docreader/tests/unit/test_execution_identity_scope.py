@@ -10,6 +10,7 @@ from docreader.tender.prompts import ANALYSIS_PROMPT_TASKS, execution_prompt, ge
 ANALYSIS_CONTRACTS = {"ExtractionOutput", "Extraction", "LocateResult", "AssociationResult",
                       "AnalysisReviewResponse", "Verification", "OCRResponse"}
 BODY = {"authoring_basis", "authoring_write", "authoring_review", "authoring_structure"}
+REQUIREMENT_CHAIN = {"bid_format_outline", "item_placement"}
 
 
 def analysis_spec(prompts=None):
@@ -42,11 +43,11 @@ def test_body_execution_identity_ignores_outline_prompts_and_contracts():
                                              "AuthoringStructureResponse"}
 
 
-def test_outline_and_whole_executions_keep_their_full_task_sets():
-    every = set(document_execution.load_prompts())
+def test_legacy_outline_and_whole_executions_keep_their_task_sets():
+    legacy = set(document_execution.load_prompts()) - REQUIREMENT_CHAIN
     outline = set(document_execution.execution_prompt_names(outline_only=True, fixed_outline=False))
-    assert outline == every - BODY
-    assert set(document_execution.execution_prompt_names(outline_only=False, fixed_outline=False)) == every
+    assert outline == legacy - BODY
+    assert set(document_execution.execution_prompt_names(outline_only=False, fixed_outline=False)) == legacy
 
 
 def test_changing_a_verify_prompt_leaves_authoring_identity_unchanged():
@@ -81,8 +82,10 @@ def test_every_packaged_prompt_belongs_to_an_identity():
     assert packaged == registered
 
 
-def test_outline_execution_can_send_the_bid_format_prompt():
+def test_legacy_outline_execution_cannot_send_w2_prompts():
     outline = document_execution.execution_prompt_names(outline_only=True, fixed_outline=False)
     prompts = {name: document_execution.load_prompts()[name] for name in outline}
-    assert execution_prompt(prompts, "bid_format_outline")
-    assert "BidFormatOutline" in authoring_spec(outline)["output_contracts"]
+    for prompt in REQUIREMENT_CHAIN:
+        with pytest.raises(ModelConfigurationError):
+            execution_prompt(prompts, prompt)
+    assert {"BidFormatOutline", "ItemPlacementResponse"}.isdisjoint(authoring_spec(outline)["output_contracts"])

@@ -35,6 +35,16 @@ def _digest(value):
                                      separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def review_preparation_digest(source_plan, items_index, identity, budget_spec):
+    return _digest({"planner": "source-review-requests-v4", "source_plan": source_plan,
+                    "items_index": items_index, "identity": identity, "budget": budget_spec})
+
+
+def _review_json(value):
+    # Wire construction depends on request-local reference traversal order.
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
 def _stable_unit(prefix, content):
     """Content-stable work-unit identity; host receipts keep run/source/revision."""
     return f"{prefix}-{_digest(content)[:12]}"
@@ -732,14 +742,79 @@ class _Analysis:
             for range_id in ranges:
                 trial = self.review_payload([*current, range_id])
                 measured = self.budget.measure("verify", trial)
-                if current and (measured["fits"] is False or (
-                        measured["method"] == RequestBudget.TOKENIZED_METHOD
-                        and measured["input_tokens"] > self.REVIEW_INPUT_TOKENS)):
+                if current and self._over_review_target(measured):
                     payloads.append(self.review_payload(current))
                     current = []
                 current.append(range_id)
             if current:
                 payloads.append(self.review_payload(current))
+        return self._supplement_review_requests(payloads)
+
+    def _over_review_target(self, measured):
+        return measured["fits"] is False or (
+            measured["method"] == RequestBudget.TOKENIZED_METHOD and measured["input_tokens"] > self.REVIEW_INPUT_TOKENS
+        )
+
+    def _historical_review_groups(self, old_plan, old_items, old_requests):
+        previous_identity = {**self.identity, "domain_revision": self.identity["domain_revision"] - 1}
+        if old_plan.get("run_identity") != previous_identity or {**old_plan, "run_identity": self.identity} != self.plan:
+            return None
+        previous = _Analysis(old_plan, old_items, self.artifacts, previous_identity, self.budget)
+        expanded = self._expand_review_ranges(self.review_targets)
+        if previous._expand_review_ranges(previous.review_targets) != expanded:
+            return None
+        ordinals = {identity: i for i, identity in enumerate(expanded)}
+        main = [request for request in old_requests if request["dispositions"]]
+        groups, start = [], 0
+        for i, request in enumerate(main):
+            last = ordinals[request["dispositions"][-1]["range_id"]]
+            next_first = (ordinals[main[i + 1]["dispositions"][0]["range_id"]]
+                          if i + 1 < len(main) else len(expanded))
+            if start > last or last >= next_first:
+                return None
+            expected = _review_json(request)
+            for end in range(last + 1, next_first + 1):
+                group = expanded[start:end]
+                if self.sources[group[0]]["document_id"] != self.sources[group[-1]]["document_id"]:
+                    return None
+                # Views also contain transitive evidence. Only the original
+                # ordered source slice may be inherited as the group boundary.
+                if _review_json(previous.review_payload(group)) == expected:
+                    groups.append(group)
+                    start = end
+                    break
+            else:
+                return None
+        return groups if groups and start == len(expanded) else None
+
+    def reused_review_requests(self, old_plan, old_items, old_requests):
+        try:
+            groups = self._historical_review_groups(old_plan, old_items, old_requests)
+        except (KeyError, TypeError, ValueError, OSError, AttributeError, IndexError):
+            # A historical artifact is a planning hint. The current plan and
+            # its execution identity do not depend on being able to read it.
+            return None
+        if groups is None:
+            return None
+
+        def fit_group(group):
+            payload = self.review_payload(group)
+            measured = self.budget.measure("verify", payload)
+            if len(group) == 1 or not self._over_review_target(measured):
+                return [payload]
+            middle = len(group) // 2
+            return [*fit_group(group[:middle]), *fit_group(group[middle:])]
+
+        payloads = self._supplement_review_requests([payload for group in groups for payload in fit_group(group)])
+        if (len({p["work_unit_id"] for p in payloads}) != len(payloads)
+                or Counter(d["range_id"] for p in payloads for d in p["dispositions"]) != Counter(self.review_targets)
+                or {i["item_id"] for p in payloads for i in p["items"]} != self.items.keys()
+                or {r["relation_id"] for p in payloads for r in p["relations"]} != self.relations.keys()
+                or any(self.budget.measure("verify", p)["fits"] is False for p in payloads)):
+            return None
+        return payloads
+
+    def _supplement_review_requests(self, payloads):
         reviewed_relations = {r["relation_id"] for p in payloads for r in p["relations"]}
         pending_ranges, pending = set(), None
         for relation_id, relation in self.relations.items():
@@ -753,9 +828,7 @@ class _Analysis:
             combined = pending_ranges | ranges
             trial = self.review_payload(sorted(combined), check_omissions=False)
             measured = self.budget.measure("verify", trial)
-            if pending is not None and (measured["fits"] is False or (
-                    measured["method"] == RequestBudget.TOKENIZED_METHOD
-                    and measured["input_tokens"] > self.REVIEW_INPUT_TOKENS)):
+            if pending is not None and self._over_review_target(measured):
                 payloads.append(pending)
                 combined = ranges
                 trial = self.review_payload(sorted(combined), check_omissions=False)
@@ -816,23 +889,21 @@ class _Analysis:
 
 
 
-async def verify_analysis(source_plan, items_index, artifacts, model, budget, *, identity, save) -> dict:
+async def verify_analysis(source_plan, items_index, artifacts, model, budget, *, identity, save, previous_review=None) -> dict:
     context = await asyncio.to_thread(_Analysis, source_plan, items_index, artifacts, identity, budget)
     # Preparation pins the plan for this revision, including across planner
     # changes. Regrouping only happens when no preparation exists for the inputs.
-    review_inputs = await asyncio.to_thread(_digest, {
-        "planner": "source-review-requests-v4", "source_plan": source_plan, "items_index": items_index,
-        "identity": identity, "budget": budget.spec(),
-    })
+    review_inputs = await asyncio.to_thread(review_preparation_digest, source_plan, items_index, identity, budget.spec())
 
-    def prepare_reviews():
+    def prepare_reviews(previous):
         # CAS sorts object fields; retain their original order inside the string
         # because short-reference traversal and model message text depend on it.
-        return {"requests_json": json.dumps(context.review_requests(), ensure_ascii=False,
-                                            separators=(",", ":"), allow_nan=False)}
+        requests = context.reused_review_requests(*previous) if previous is not None else None
+        return {"requests_json": _review_json(requests if requests is not None else context.review_requests())}
 
     async def prepared_reviews():
-        return await asyncio.to_thread(prepare_reviews)
+        previous = await previous_review() if previous_review is not None else None
+        return await asyncio.to_thread(prepare_reviews, previous)
 
     prepared_ref = await save("analysis-review-requests", prepared_reviews, scope=review_inputs,
                               inputs={"planning_digest": review_inputs})

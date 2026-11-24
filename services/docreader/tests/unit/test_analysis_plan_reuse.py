@@ -180,3 +180,80 @@ async def test_damaged_review_preparation_fails_without_model_calls_or_rebuildin
     with pytest.raises(error):
         await verify(data, model, admission)
     assert model.calls == []
+
+
+async def revised_scenario(tmp_path):
+    facts = [(f"第{i}项义务。", "obligation") for i in range(1, 7)]
+    artifacts, plan, items, _ = await scenario(tmp_path, documents=[("main", "main", facts)])
+    plan = {**plan, "run_identity": dict(IDENTITY)}
+    identity = {**IDENTITY, "domain_revision": IDENTITY["domain_revision"] + 1}
+    previous = _Analysis(plan, items, artifacts, IDENTITY, budget())
+    ranges = previous._expand_review_ranges(previous.review_targets)
+    assert len(ranges) == 6
+    history = [previous.review_payload(ranges[i:i+2]) for i in range(0, 6, 2)]
+    changed = deepcopy(items)
+    entry = changed["packs"][0]
+    pack = artifacts.read_json(entry["artifact_ref"])
+    pack["items"][0]["text"] += "新修订说明。"
+    entry["artifact_ref"] = artifacts.put_json(pack)
+    current = {**plan, "run_identity": identity}
+    return artifacts, plan, items, current, changed, identity, history, ranges
+
+
+async def test_same_source_correction_splits_only_the_changed_historical_group(tmp_path, monkeypatch):
+    artifacts, old, baseline, plan, items, identity, history, ranges = await revised_scenario(tmp_path)
+    admission = budget()
+    original_measure = RequestBudget.measure
+
+    def measure(self, task, payload, *args, **kwargs):
+        result = original_measure(self, task, payload, *args, **kwargs)
+        enlarged = any("新修订说明" in row["text"] for row in payload["items"])
+        if task == "verify" and enlarged and len(payload["dispositions"]) > 1:
+            return {**result, "method": RequestBudget.TOKENIZED_METHOD, "input_tokens": 32769}
+        return result
+
+    def no_full_plan(self):
+        pytest.fail("a verified historical partition should avoid full replanning")
+
+    monkeypatch.setattr(RequestBudget, "measure", measure)
+    monkeypatch.setattr(_Analysis, "review_requests", no_full_plan)
+    calls = []
+
+    async def previous_review():
+        calls.append(True)
+        return old, baseline, history
+
+    receipts, model = Receipts(artifacts), Model()
+    result = await verify_analysis(plan, items, artifacts, model, admission, identity=identity,
+                                   save=receipts, previous_review=previous_review)
+    assert not result["coverage"]["missing"]
+    assert [[d["range_id"] for d in p["dispositions"]] for p in model.calls] == [
+        ranges[:1], ranges[1:2], ranges[2:4], ranges[4:]]
+    assert [json.dumps(p, ensure_ascii=False) for p in model.calls[-2:]] == [
+        json.dumps(p, ensure_ascii=False) for p in history[-2:]]
+    await verify_analysis(plan, items, artifacts, Model(), admission, identity=identity,
+                          save=receipts, previous_review=previous_review)
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("bad_history", ["missing_group", "changed_payload", "changed_source"])
+async def test_unverified_history_falls_back_to_current_full_plan(tmp_path, bad_history):
+    artifacts, old, baseline, plan, items, identity, history, _ = await revised_scenario(tmp_path)
+    admission = budget()
+    expected = _Analysis(plan, items, artifacts, identity, admission).review_requests()
+    if bad_history == "missing_group":
+        history.pop(1)
+    elif bad_history == "changed_payload":
+        history[0]["items"][0]["text"] = "历史材料不能通过重建证明。"
+    else:
+        old = deepcopy(old)
+        old["documents"][0]["file_name"] = "historical-source.txt"
+
+    async def previous_review():
+        return old, baseline, history
+
+    model = Model()
+    result = await verify_analysis(plan, items, artifacts, model, admission, identity=identity,
+                                   save=Receipts(artifacts), previous_review=previous_review)
+    assert model.calls == expected
+    assert not result["coverage"]["missing"]

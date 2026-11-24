@@ -14,6 +14,13 @@ from docreader.tender.status import RunStatus
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
+def _stage_input_digest(inputs, execution_spec=None):
+    identity = {"upstream": inputs or {}}
+    if execution_spec is not None:
+        identity["execution_spec"] = execution_spec
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _raise_failures(results):
     failures = [result for result in results if isinstance(result, BaseException)]
     if failures:
@@ -132,10 +139,8 @@ class TenderNodes:
         return await asyncio.to_thread(self.artifacts.read_json, ref)
 
     async def _save(self, stage, operation, *, scope="", is_ref=False, inputs=None, model=False, metadata=None):
-        identity = {"upstream": inputs or {}}
-        if model:
-            identity["execution_spec"] = await self._execution_spec()
-        input_digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        execution_spec = await self._execution_spec() if model else None
+        input_digest = _stage_input_digest(inputs, execution_spec)
         previous = await self.store.receipt(self.lease, stage, scope, input_digest=input_digest)
         if previous:
             return previous["artifact_ref"]
@@ -332,6 +337,49 @@ class TenderNodes:
                                                       "corrected_items_ref": correction},
                                               model=correction is None)}
 
+    async def _previous_review(self, source_plan, identity):
+        """Find the pinned preparation of the direct same-source correction baseline."""
+        from docreader.tender.checks.analysis import review_preparation_digest
+
+        revision = await self.store.get_revision(self.lease)
+        if not revision.get("corrected_items_ref") or not source_plan.get("frozen_ref"):
+            return None
+        history = (await self.store.get_run(self.lease.run_id))["history"]
+        previous_identity = {**identity, "domain_revision": self.lease.domain_revision - 1}
+
+        def in_baseline(row):
+            return all(row.get(key) == value for key, value in previous_identity.items())
+
+        previous = next((row for row in history["revisions"] if in_baseline(row)), None)
+        if previous is None or previous.get("scope_decisions_ref") != revision.get("scope_decisions_ref"):
+            return None
+        receipts = [row for row in history["artifacts"] if in_baseline(row)]
+        roots = {row["stage"]: row["artifact_ref"] for row in receipts if not row["scope"]}
+        try:
+            if roots["extract"]["sha256"] != revision["upstream_digest"]:
+                return None
+            old_plan = await self._read(roots["pack-plan"])
+            if old_plan["run_identity"] != previous_identity or {**old_plan, "run_identity": identity} != source_plan:
+                return None
+            old_items = await self._read(roots["extract"])
+            old_budget = previous["execution_spec"]["budget"]["chat"]
+            if old_items.get("schema_version") != 2 or not isinstance(old_budget, dict):
+                return None
+            scope = review_preparation_digest(old_plan, old_items, previous_identity, old_budget)
+            row = next((row for row in receipts if row["stage"] == "analysis-review-requests"
+                        and row["scope"] == scope), None)
+            if row is None or row.get("input_digest") != _stage_input_digest({"planning_digest": scope}):
+                return None
+            prepared = await self._read(row["artifact_ref"])
+            requests = await asyncio.to_thread(json.loads, prepared["requests_json"])
+            if isinstance(requests, list) and requests and all(
+                    isinstance(request, dict) and request.get("operation") == "review" for request in requests):
+                return old_plan, old_items, requests
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            # An unavailable historical hint cannot replace the current plan.
+            return None
+        return None
+
     async def verify(self, state):
         from docreader.tender.checks.analysis import verify_analysis
 
@@ -340,11 +388,15 @@ class TenderNodes:
             items_index = await self._read(state["items_ref"])
             if items_index.get("schema_version") != 2:
                 raise ValueError("analysis verification requires v2 items")
+            identity = {"run_id": self.lease.run_id, "source_version": self.lease.source_version,
+                        "domain_revision": self.lease.domain_revision}
+
+            async def previous_review():
+                return await self._previous_review(source_plan, identity)
+
             summary = await verify_analysis(
                 source_plan, items_index, self.artifacts, self, self._request_budget(),
-                identity={"run_id": self.lease.run_id, "source_version": self.lease.source_version,
-                          "domain_revision": self.lease.domain_revision},
-                save=self._save,
+                identity=identity, save=self._save, previous_review=previous_review,
             )
             return {**summary, "items_ref": state["items_ref"]}
 

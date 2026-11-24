@@ -7,6 +7,8 @@ import pytest
 from docreader.llm.budget import RequestBudget
 from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
 from docreader.tender import item_placement as placement
+from docreader.tender.authoring_coverage import build_ledger
+from docreader.tender.authoring_export import _submission_notes
 
 
 ARTIFACT = {"sha256": "0" * 64, "relative_path": "00/" + "0" * 64, "size": 1, "media_type": "application/json"}
@@ -53,16 +55,56 @@ def test_decode_accepts_one_value_per_item_and_rejects_everything_else():
 def test_bind_writes_positions_constraints_and_exclusions_and_leaves_pending_out():
     base = outline()
     positions = placement.placement_positions(base)
-    items = {f"r{n}": item(n) for n in range(1, 5)}
-    bound = placement.bind_placements(base, positions, items,
-                                      {"r1": "t2", "r2": "document_wide", "r3": "evaluation", "r4": None})
+    items = {f"r{n}": item(n) for n in range(1, 6)}
+    bound = placement.bind_placements(base, positions, items, {"r1": "t2", "r2": "document_wide",
+        "r3": "evaluation", "r4": None, "r5": "performance"})
     assert bound["chapters"][1]["targets"][0]["rule_refs"] == [ref(1)]
     assert bound["constraint_rule_refs"] == [ref(2)]
     excluded, = [issue for issue in bound["issues"] if issue["code"] == "outline_rule_excluded"]
-    assert excluded["rule_refs"] == [ref(3)] and "评委" in excluded["detail"]
+    assert excluded["rule_refs"] == [ref(5)] and "签约后" in excluded["detail"]
+    pending, = [issue for issue in bound["issues"] if issue["code"] == "outline_rule_unassigned"]
+    assert pending["rule_refs"] == [ref(3)]
     text = json.dumps(bound, ensure_ascii=False)
     assert '"i4"' not in text
     assert base["chapters"][1]["targets"][0]["rule_refs"] == []
+
+
+async def test_evaluation_proposals_remain_pending_for_every_item_kind():
+    items = [item(1, "scoring_rule", quote="每份得一分。"),
+             item(2, "submission_requirement", ["说明文件"]), item(3), item(4, "consequence_rule"),
+             item(5, "scoring_rule"), item(6, "obligation"), item(7)]
+    items[0]["semantic"]["text"] = "每份得一分。需附加盖公章的证明文件。"
+    items[2]["semantic"].pop("kind")
+    items[2]["rule_ref"].update(decision_id="decision-3", rule_index=0)
+
+    async def ask(_execute, _budget, task, payload, validate):
+        assert task == "item_placement"
+        assert len(payload["requirements"]) == len(items)
+        return validate({"placements": [["r1", "evaluation"], ["r2", "evaluation"],
+                                        ["r3", "evaluation"], ["r4", "evaluation"],
+                                        ["r5", "not_applicable"], ["r6", "evaluation"], ["r7", "t2"]]})
+
+    bound, stats = await placement.place_items(outline(), items, RequestBudget(), None, ask, lambda _payload: True)
+    assert stats == {"batches": 1, "failed": 0}
+    pending, = [issue for issue in bound["issues"] if issue["code"] == "outline_rule_unassigned"]
+    assert pending["rule_refs"] == [items[i]["rule_ref"] for i in (0, 1, 2, 3, 5)]
+    assert "评标" in pending["detail"] and "核定" in pending["detail"]
+    assert [issue["rule_refs"] for issue in bound["issues"] if issue["code"] == "outline_rule_excluded"] == [[ref(5)]]
+
+    requirements = {"rules": [{"rule_ref": row["rule_ref"], "rule": row["semantic"]} for row in items]}
+    ledger = build_ledger(bound, requirements)
+    formal_entries = [entry for entry in ledger if entry["rule_ref"] is not None]
+    assert len(formal_entries) == len(items)
+    assert {entry["rule_ref"]["item_ref"]["item_id"]: (entry["resolution"], entry["target_id"])
+            for entry in formal_entries} == {
+        "i1": ("pending", None), "i2": ("pending", None), "i3": ("pending", None),
+        "i4": ("pending", None), "i5": ("excluded", None), "i6": ("pending", None), "i7": ("content", "b"),
+    }
+    notes = _submission_notes(bound, requirements, [], None, ledger)
+    before, after = notes.split("## 尚未安排的要求", 1)
+    for row in (items[i] for i in (0, 1, 2, 3, 5)):
+        assert row["semantic"]["text"] not in before
+        assert row["semantic"]["text"] in after
 
 
 DOCUMENTS = [{"document_id": "tender", "pages": [
@@ -113,6 +155,19 @@ def test_a_candidate_form_stays_only_when_an_item_is_placed_in_it():
     assert kept["chapters"][0]["title"] == "廉洁履约承诺书"
 
 
+def test_cover_keeps_the_same_item_placement_aliases_and_is_still_carried():
+    base = outline()
+    expected = placement.placement_positions(base)
+    cover = {'chapter_id': 'cover', 'title': '封面', 'presentation_role': 'cover', 'children': [], 'targets': [
+        {'target_id': 'cover-grid', 'kind': 'form', 'purpose': '投标人字段', 'rule_refs': []}]}
+    base['chapters'].insert(0, cover)
+    positions = placement.placement_positions(base)
+    assert positions == expected
+    bound = placement.bind_placements(base, positions, {'r1': item(1)}, {'r1': 't1'})
+    assert bound['chapters'][0] == cover
+    assert bound['chapters'][1]['targets'][0]['rule_refs'] == [ref(1)]
+
+
 def test_batches_follow_the_window_and_keep_source_order():
     positions = placement.placement_positions(outline())
     items = {f"r{n}": item(n) for n in range(1, 6)}
@@ -158,7 +213,6 @@ CHAIN_PAGES = [
 async def test_generate_document_runs_the_requirement_chain(tmp_path, monkeypatch):
     from docreader.integrations.artifacts import ArtifactStore
     from docreader.tender import authoring_pipeline
-    from docreader.tender.authoring_coverage import build_ledger
     from docreader.tender.schema import AuthoringInput
 
     ledger = [item(1, "submission_requirement", ["无关联关系承诺函"], page=0),
@@ -194,5 +248,5 @@ async def test_generate_document_runs_the_requirement_chain(tmp_path, monkeypatc
     resolution = {row["rule_ref"]["item_ref"]["item_id"]: row["resolution"]
                   for row in build_ledger(outline, {"rules": [{"rule_ref": row["rule_ref"]} for row in ledger]})
                   if row["rule_ref"]}
-    assert resolution["i3"] == "excluded" and resolution["i4"] == "pending"
+    assert resolution["i3"] == resolution["i4"] == "pending"
     assert resolution["i1"] != "pending" and resolution["i2"] != "pending"

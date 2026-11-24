@@ -131,13 +131,13 @@ def outline_tree(outline, *, title=None):
             for chapter in outline["chapters"]]
 
 
-async def finish_outline(runtime, monkeypatch, *, key="outline-candidate", target_id="chapter-1:target-1"):
+async def finish_outline(runtime, monkeypatch, *, key="outline-candidate", target_id="chapter-1:target-1", issues=()):
     configured(monkeypatch)
     started = await runtime.bridge.start_outline(payload(runtime, request_key=key))
     execution_id = started["generation"]["execution_id"]
     job = await runtime.bridge.job(runtime.project, execution_id)
     snapshot = await read_authoring_input(runtime.bridge.store, runtime.bridge.artifacts, **job["payload"]["identity"])
-    outline = {"schema_version": 2, "authoring_input": snapshot, "issues": [], "chapters": [{
+    outline = {"schema_version": 2, "authoring_input": snapshot, "issues": list(issues), "chapters": [{
         "chapter_id": "chapter-1", "title": "实施方案", "children": [], "targets": [{
             "target_id": target_id, "kind": "narrative", "purpose": "说明实施方法",
             "rule_refs": [], "source_refs": []}]}]}
@@ -201,6 +201,62 @@ async def test_concurrent_outline_saves_advance_only_one_head(runtime, monkeypat
     assert sum(isinstance(result, dict) for result in results) == 1
     assert sum(isinstance(result, WebError) and result.status == 409 for result in results) == 1
     assert (await runtime.bridge.outline_view(runtime.project))["draft"]["revision"] == 1
+
+
+async def test_outline_save_pins_same_source_proposal_context_for_body(runtime, monkeypatch):
+    from docreader.tender.evidence.references import EvidenceRepository, selector
+
+    await upload(runtime)
+    execution_id, _, outline = await finish_outline(runtime, monkeypatch)
+    bridge = runtime.bridge
+    frozen = bridge.artifacts.read_json(outline['authoring_input']['frozen_ref'])
+    main, = frozen['documents']
+    index_ref = main['source_index_ref']
+    index = EvidenceRepository(bridge.artifacts).source_index(index_ref)
+    source = next(row for row in index.ranges if '本项目建设' in row['text'])
+    excerpt = {'source_ref': {'source_index_ref': index_ref, 'unit_id': source['unit_id']},
+               'selectors': [selector(source)]}
+    tree = outline_tree(outline)
+    existing, = outline['chapters'][0]['targets']
+    tree[0]['source_additions'] = [{'target_id': existing['target_id'], 'project_context_excerpts': [excerpt]}]
+    request = payload(runtime, request_key='save-proposal-background', expected_revision_id=None,
+                      source_execution_id=execution_id, chapters=tree)
+    saved = (await bridge.save_outline(request))['draft']
+    assert saved['outline']['chapters'][0]['targets'] == [{**existing, 'project_context_excerpts': [excerpt]}]
+    assert (await bridge.outline_view(runtime.project))['draft'] == saved
+    assert (await bridge.save_outline(request))['draft'] == saved
+
+    started = (await bridge.start_authoring(payload(runtime, request_key='body-with-proposal-background',
+        outline_revision_id=saved['revision_id'], outline_sha256=saved['sha256'])))['authoring']
+    job = await bridge.job(runtime.project, started['execution_id'])
+    reference = job['payload']['outline_ref']
+    assert reference['sha256'] == saved['sha256']
+    assert bridge.artifacts.read_json(reference) == saved['outline']
+
+
+async def test_outline_save_pins_evaluation_decision_for_body(runtime, monkeypatch):
+    from docreader.tender.item_placement import EVALUATION_PENDING_DETAIL
+
+    await upload(runtime)
+    bridge = runtime.bridge
+    reference = {'item_ref': {'artifact_ref': bridge.artifacts.put_json({'items': []}), 'item_id': 'scope:limit'}}
+    pending = {'code': 'outline_rule_unassigned', 'detail': EVALUATION_PENDING_DETAIL, 'rule_refs': [reference]}
+    execution, _, outline = await finish_outline(runtime, monkeypatch, issues=[pending])
+    request = payload(runtime, request_key='save-evaluation-decision', expected_revision_id=None,
+                      source_execution_id=execution, chapters=outline_tree(outline),
+                      evaluation_decisions=[{'rule_ref': reference, 'resolution': 'document_wide'}])
+    saved = (await bridge.save_outline(request))['draft']
+    assert saved['outline']['constraint_rule_refs'] == [reference]
+    assert not saved['outline']['issues']
+    assert (await bridge.save_outline(request))['draft'] == saved
+    with pytest.raises(Conflict):
+        await bridge.save_outline({**request, 'evaluation_decisions': [{'rule_ref': reference, 'resolution': 'pending'}]})
+    assert (await bridge.outline_view(runtime.project))['candidate']['outline'] == outline
+
+    job = (await bridge.start_authoring(payload(runtime, request_key='body-after-evaluation-decision',
+        outline_revision_id=saved['revision_id'], outline_sha256=saved['sha256'])))['authoring']
+    pinned = (await bridge.job(runtime.project, job['execution_id']))['payload']['outline_ref']
+    assert pinned['sha256'] == saved['sha256'] and bridge.artifacts.read_json(pinned) == saved['outline']
 
 
 async def test_outline_history_restores_responses_and_appends_a_new_head(runtime, monkeypatch):
@@ -402,6 +458,56 @@ async def test_outline_worker_and_document_worker_receive_the_explicit_saved_inp
     assert workbench["authoring"]["execution_id"] == document["execution_id"]
     assert all(view["operation"] == "document" for view in workbench["executions"])
     assert workbench["artifacts"] == {"docx_available": False, "package_available": False}
+
+
+async def test_web_outline_w2_contract_is_pinned_to_the_job_and_retry(runtime, monkeypatch):
+    from docreader.tender import document_execution
+    from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
+
+    await upload(runtime)
+    monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: runtime.settings))
+    config = ModelConfig(ModelEndpoint("http://fixture.invalid", "test-only", "fixture", 131072), None)
+    monkeypatch.setattr(ModelConfig, "from_env", classmethod(lambda cls: config))
+    observed = []
+
+    async def capture(*_args, **kwargs):
+        observed.append(kwargs)
+        raise RuntimeError("offline worker boundary")
+
+    monkeypatch.setattr(document_execution, "execute_document", capture)
+    request = payload(runtime, "outline.start", request_key="worker-w2-outlined")
+    explicit = {**request, "requirement_chain_contract": REQUIREMENT_CHAIN_CONTRACT}
+    started, _ = await handle_command(explicit)
+    assert await handle_command(explicit) == (started, b"")
+    execution_id = started["generation"]["execution_id"]
+    job = await runtime.bridge.job(runtime.project, execution_id)
+    pinned = job["payload"]["authoring_input_ref"]
+    assert runtime.bridge.artifacts.read_json(pinned)["frozen_ref"] is not None
+    assert job["payload"]["request"]["requirement_chain_contract"] == REQUIREMENT_CHAIN_CONTRACT
+
+    with pytest.raises(Conflict, match="different authoring options"):
+        await handle_command(request)
+    default = {**request, "request_key": "worker-default-outlined"}
+    legacy, _ = await handle_command(default)
+    legacy_id = legacy["generation"]["execution_id"]
+    legacy_job = await runtime.bridge.job(runtime.project, legacy_id)
+    assert "requirement_chain_contract" not in legacy_job["payload"]["request"]
+    with pytest.raises(Conflict, match="different authoring options"):
+        await handle_command({**default, "requirement_chain_contract": REQUIREMENT_CHAIN_CONTRACT})
+
+    await execute_authoring_job(execution_id, runtime.settings)
+    assert (await runtime.bridge.job(runtime.project, execution_id))["status"] == "failed"
+    resumed, _ = await handle_command(payload(runtime, "authoring.resume", execution_id=execution_id,
+                                                request_key="retry-w2-outline"))
+    assert resumed["authoring"]["execution_id"] == execution_id
+    await execute_authoring_job(execution_id, runtime.settings)
+    await execute_authoring_job(legacy_id, runtime.settings)
+    assert [call["execution_id"] for call in observed] == [execution_id, execution_id, legacy_id]
+    assert all(call["outline_only"] for call in observed)
+    for call in observed[:2]:
+        assert call["requirement_chain_contract"] == REQUIREMENT_CHAIN_CONTRACT
+        assert call["authoring_input_ref"] == pinned
+    assert "requirement_chain_contract" not in observed[2]
 
 
 async def test_outline_predecessor_is_persisted_and_forwarded_to_the_worker(runtime, monkeypatch):

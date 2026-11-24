@@ -12,6 +12,7 @@ from docreader.tender.schema import (
     ArtifactRef, AuthoringInput, Contract, Digest, Identity, NonnegativeInt,
     ResponseTarget, SOURCE_BODY_CONTRACT, SourceExcerptRef,
 )
+from docreader.tender.status import DocumentRole
 
 
 class LayoutSpan(Contract):
@@ -229,6 +230,29 @@ def load_source_body(artifacts, snapshot, target, *, repository=None, cache=None
 def load_source_context(artifacts, snapshot, target, *, repository=None):
     """Use the accepted joins without turning context into response body."""
     repository = repository or EvidenceRepository(artifacts)
+    if target.get('project_context_excerpts'):
+        try:
+            value = ResponseTarget.model_validate(target).model_dump(exclude_unset=True)
+        except ValueError as error:
+            raise ArtifactIntegrityError('方案背景没有对应的可写响应位置。') from error
+        documents = _documents(artifacts, snapshot)
+        if any(source['role'] in (DocumentRole.AMENDMENT, DocumentRole.CLARIFICATION) for source in documents.values()):
+            raise ArtifactIntegrityError('主件有补遗或澄清，请核对适用范围后再绑定方案背景。')
+        main = {identity: source for identity, source in documents.items() if source['role'] == DocumentRole.MAIN}
+        excerpts = value['project_context_excerpts']
+        index_refs = [source['source_index_ref'] for source in main.values()]
+        if any(excerpt['source_ref']['source_index_ref'] not in index_refs for excerpt in excerpts):
+            raise ArtifactIntegrityError('方案背景必须来自当前冻结主件。')
+        intervals = {}
+        for excerpt in excerpts:
+            digest = excerpt['source_ref']['source_index_ref']['sha256']
+            for selected in excerpt['selectors']:
+                occupied = intervals.setdefault((digest, selected['source_range_id']), [])
+                start, end = selected['start'], selected['end']
+                if start == end or any(start < last and first < end for first, last in occupied):
+                    raise ArtifactIntegrityError('方案背景范围必须非空且不得重叠。')
+                occupied.append((start, end))
+        return _native_sources(artifacts, excerpts, main, repository)
     load_source_body(artifacts, snapshot, target, repository=repository)
     binding = BodyBinding.model_validate(artifacts.read_json(target['source_body_ref'])).model_dump(exclude_none=True)
     groups = binding.get('context_groups')
@@ -246,6 +270,8 @@ def validate_outline_source_bodies(artifacts, outline, *, repository=None):
         if (target.get('source_body_contract') is not None or target.get('source_body_ref') is not None
                 or target.get('source_context_excerpts')):
             load_source_body(artifacts, outline['authoring_input'], target, repository=repository, cache=cache)
+        elif target.get('project_context_excerpts'):
+            load_source_context(artifacts, outline['authoring_input'], target, repository=repository)
 
     def visit(chapters):
         for chapter in chapters:

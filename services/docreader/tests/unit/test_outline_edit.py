@@ -2,6 +2,9 @@ from copy import deepcopy
 
 import pytest
 
+from docreader.integrations.web import _outline_request
+from docreader.tender.authoring_coverage import build_ledger, rule_ref_key
+from docreader.tender.item_placement import bind_placements
 from docreader.tender.outline_edit import apply_outline_edit
 from docreader.tender.schema import AuthoringInput, AuthoringOutline
 
@@ -149,3 +152,82 @@ def test_response_reassignment_rejects_unknown_and_duplicate_ids(target_ids):
     with pytest.raises(ValueError):
         apply_outline_edit(outline(), [{'chapter_id': 'b', 'title': '目标',
                                       'target_ids': target_ids, 'children': []}])
+
+
+def evaluation_outline():
+    base = outline()
+    artifact = base['chapters'][0]['targets'][0]['rule_refs'][0]['item_ref']['artifact_ref']
+    refs = [{'item_ref': {'artifact_ref': artifact, 'item_id': f'evaluation-{i}'}} for i in range(6)]
+    refs[2].update(decision_id='effective-decision', rule_index=0)
+    base['issues'].append({'code': 'outline_rule_unassigned', 'detail': '未收到模型回包', 'rule_refs': [refs[5]]})
+    items = {f'r{i}': {'rule_ref': ref, 'semantic': {'kind': 'scoring_rule'}} for i, ref in enumerate(refs[:5])}
+    return bind_placements(base, {}, items, dict.fromkeys(items, 'evaluation')), refs
+
+
+def test_save_preserves_exact_evaluation_refs_and_can_settle_each_outcome():
+    base, refs = evaluation_outline()
+    original = deepcopy(base)
+    changed = apply_outline_edit(base, [{'chapter_id': 'a', 'title': '原式'}], evaluation_decisions=[
+        {'rule_ref': refs[0], 'resolution': 'evaluation'},
+        {'rule_ref': refs[1], 'resolution': 'reference'},
+        {'rule_ref': refs[2], 'resolution': 'document_wide'},
+        {'rule_ref': refs[3], 'resolution': 'target', 'target_id': 'form-a'},
+        {'rule_ref': refs[4], 'resolution': 'pending'},
+    ])
+    assert base == original
+    assert changed['authoring_input'] == original['authoring_input']
+    assert changed['constraint_rule_refs'] == [refs[2]]
+    assert changed['chapters'][0]['targets'][0]['rule_refs'] == [
+        *original['chapters'][0]['targets'][0]['rule_refs'], refs[3]]
+    pending = [i for i in changed['issues'] if i['code'] == 'outline_rule_unassigned']
+    excluded = [i for i in changed['issues'] if i['code'] == 'outline_rule_excluded']
+    assert [i['rule_refs'] for i in pending] == [[refs[5]], [refs[4]]]
+    assert [i['rule_refs'] for i in excluded] == [[refs[0]], [refs[1]]]
+    assert '评标' in excluded[0]['detail'] and '索引' in excluded[1]['detail']
+    ledger = build_ledger(changed, {'rules': [{'rule_ref': ref} for ref in refs]})
+    by_ref = {rule_ref_key(row['rule_ref']): row['resolution'] for row in ledger}
+    assert [by_ref[rule_ref_key(ref)] for ref in refs] == [
+        'excluded', 'excluded', 'constraint', 'manual', 'pending', 'pending']
+    assert len(ledger) == 7  # Includes the original manual form requirement.
+
+    next_revision = apply_outline_edit(changed, [{'chapter_id': 'a', 'title': '原式'}], evaluation_decisions=[
+        {'rule_ref': refs[4], 'resolution': 'evaluation'},
+    ])
+    assert all(refs[4] not in issue['rule_refs'] for issue in next_revision['issues']
+               if issue['code'] == 'outline_rule_unassigned')
+
+
+@pytest.mark.parametrize('case', ['duplicate', 'foreign', 'unrelated_pending', 'missing_target', 'extra_target',
+                                  'unselected_target', 'missing_effective_identity', 'occupied_reference'])
+def test_save_rejects_invalid_or_cross_snapshot_evaluation_decisions(case):
+    base, refs = evaluation_outline()
+    chapters = [{'chapter_id': 'a', 'title': '原式'}]
+    decisions = [{'rule_ref': refs[0], 'resolution': 'evaluation'}]
+    if case == 'duplicate':
+        decisions *= 2
+    elif case == 'foreign':
+        foreign = deepcopy(refs[0])
+        foreign['item_ref']['artifact_ref'] = {'sha256': 'b' * 64, 'relative_path': 'bb/' + 'b' * 64,
+            'size': 1, 'media_type': 'application/json'}
+        decisions[0]['rule_ref'] = foreign
+    elif case == 'unrelated_pending':
+        decisions[0]['rule_ref'] = refs[5]
+    elif case == 'missing_target':
+        decisions[0]['resolution'] = 'target'
+    elif case == 'extra_target':
+        decisions[0]['target_id'] = 'form-a'
+    elif case == 'unselected_target':
+        decisions[0].update(resolution='target', target_id='form-a')
+        chapters[0]['target_ids'] = []
+    elif case == 'occupied_reference':
+        base['constraint_rule_refs'] = [refs[0]]
+    else:
+        decisions[0]['rule_ref'] = {'item_ref': refs[2]['item_ref']}
+    with pytest.raises(ValueError):
+        apply_outline_edit(base, chapters, evaluation_decisions=decisions)
+
+
+def test_outline_request_preserves_existing_idempotency_input_unless_decisions_are_explicit():
+    raw = {'expected_revision_id': None, 'source_execution_id': 'execution-1', 'chapters': []}
+    assert 'evaluation_decisions' not in _outline_request(raw)
+    assert _outline_request({**raw, 'evaluation_decisions': []})['evaluation_decisions'] == []

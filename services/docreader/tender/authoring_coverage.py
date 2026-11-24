@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from pydantic import ValidationError
 
@@ -18,6 +19,10 @@ _QUERY_GAP = {
     "knowledge_hit_out_of_scope", "knowledge_original_unavailable",
     "knowledge_candidates_not_loaded", "knowledge_partial_results",
 }
+_NAMED_CHAPTER = r'“第[0-9０-９一二三四五六七八九十百千]+章[^“”\n]+”'
+_PROPOSAL_INSTRUCTION = re.compile(
+    rf'投标人(?:应当|应|须)根据{_NAMED_CHAPTER}(?:[、，]{_NAMED_CHAPTER})*(?:等)?要求编制(?:相关)?内容[。.]?'
+)
 
 
 def _json(value):
@@ -359,19 +364,49 @@ def _attach_chapter_answers(chapter):
         target.pop("enterprise_response", None)
         if target.get("manual_fill") is not True or target.get("support_origins") != ["tender"] or not clause.strip():
             continue
-        added.append({
-            "target_id": target["target_id"] + ":answer",
-            "kind": "narrative",
-            "purpose": clause,
-            "rule_refs": [],
-            "source_refs": [],
-            "manual_fill": False,
-            "support_origins": ["knowledge"],
-            "related_target_ids": [target["target_id"]],
-        })
+        added.append(_knowledge_answer(target, []))
     chapter.setdefault("targets", []).extend(added)
     for child in chapter.get("children") or []:
         _attach_chapter_answers(child)
+
+
+def _knowledge_answer(target, rules):
+    return {
+        "target_id": target["target_id"] + ":answer",
+        "kind": "narrative",
+        "purpose": target["purpose"],
+        "rule_refs": rules,
+        "source_refs": [],
+        "manual_fill": False,
+        "support_origins": ["knowledge"],
+        "related_target_ids": [target["target_id"]],
+    }
+
+
+def attach_w2_proposal_answers(outline):
+    """Give an explicit proposal instruction a separate knowledge-backed response after placement."""
+    from docreader.tender.directory_compile import _FORMAT_ITEM
+
+    def attach(chapter):
+        for child in chapter["children"]:
+            attach(child)
+        title = "".join(chapter["title"].split())
+        targets = chapter["targets"]
+        if chapter.get("presentation_role", "body") != "body" or not title.endswith("方案") or len(targets) != 1:
+            return
+        form, = targets
+        if (form["kind"] != "form" or not form.get("manual_fill") or form.get("support_origins") != ["tender"]
+                or not form.get("rule_refs") or any(form.get(field) for field in (
+                    "template_refs", "response_table", "response_form_pending"))):
+            return
+        lines = ["".join(line.split()) for line in form["purpose"].splitlines() if line.strip()]
+        if (len(lines) >= 2 and _FORMAT_ITEM.sub("", lines[0], count=1) == title
+                and _PROPOSAL_INSTRUCTION.fullmatch("".join(lines[1:]))):
+            targets.append(_knowledge_answer(form, form["rule_refs"]))
+            form["rule_refs"] = []
+
+    for chapter in outline["chapters"]:
+        attach(chapter)
 
 
 def tender_content_hashes(artifacts, snapshot):

@@ -70,7 +70,7 @@ from docreader.tender.reviewed_source_facts import (
 from docreader.integrations.store import Conflict
 from docreader.tender.prompts import execution_prompt
 from docreader.tender.authoring_coverage import (
-    accept_assessments, batch_coverage_view, build_ledger, coverage_scope_index, fair_select, plan_queries,
+    accept_assessments, attach_w2_proposal_answers, batch_coverage_view, build_ledger, coverage_scope_index, fair_select, plan_queries,
     rule_ref_key, settle_coverage, task_coverage_refs, unit_fingerprint,
 )
 from docreader.tender.schema import (
@@ -2143,7 +2143,7 @@ def plan_writing_tasks(outline):
                     continue
                 related = target.get('related_target_ids', [])
                 if (target['kind'] == 'narrative' and not target.get('manual_fill', False)
-                        and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'template_refs'))
+                        and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'template_refs', 'project_context_excerpts'))
                         and related and all(identity in identities and identity != target['target_id']
                                             for identity in related)):
                     if target.get('support_origins') == ['knowledge'] and str(target.get('target_id', '')).endswith(':answer'):
@@ -2164,7 +2164,7 @@ def plan_writing_tasks(outline):
 
 
 def _load_task(artifacts, context, task, basis, materials):
-    from docreader.tender.source_body import load_source_body
+    from docreader.tender.source_body import load_source_body, load_source_context
     rules, sources, issues, seed_ranges = [], {}, [], set()
     repository = getattr(context, 'repository', None)
     source_options = {'repository': repository} if repository is not None else {}
@@ -2212,11 +2212,14 @@ def _load_task(artifacts, context, task, basis, materials):
         if (target.get('source_body_contract') is not None or target.get('source_body_ref') is not None
                 or target.get('source_context_excerpts')):
             load_source_body(artifacts, context.input, target, repository=repository, cache=body_cache)
+        elif target.get('project_context_excerpts'):
+            load_source_context(artifacts, context.input, target, repository=repository)
         target_rules = [by_ref[rule_ref_key(ref)] for ref in target['rule_refs'] if rule_ref_key(ref) in by_ref]
         rules.extend(target_rules)
         rows = (target.get('response_table') or {}).get('rows', [])
         table_context = (target.get('response_table') or {}).get('context_source_excerpts', [])
-        excerpts = [*target.get('source_excerpts', []), *target.get('source_context_excerpts', []),
+        source_context = target.get('project_context_excerpts') or target.get('source_context_excerpts', [])
+        excerpts = [*target.get('source_excerpts', []), *source_context,
                     *response_table_excerpts(target.get('response_table') or {})]
         precise_units = {_json(ref['source_ref']) for ref in excerpts}
         coarse_refs = [ref for ref in target['source_refs'] if _json(ref) not in precise_units]
@@ -2253,7 +2256,7 @@ def _load_task(artifacts, context, task, basis, materials):
             register(ref, alias)
         response_context_supports[alias] = list(dict.fromkeys(identity for ref in table_context
             if (identity := register(ref, alias))))
-        source_context_supports[alias] = list(dict.fromkeys(identity for ref in target.get('source_context_excerpts', [])
+        source_context_supports[alias] = list(dict.fromkeys(identity for ref in source_context
             if (identity := register(ref, alias))))
         template_supports[alias] = []
         for part in target.get('template_refs', []):
@@ -2296,6 +2299,7 @@ def _load_task(artifacts, context, task, basis, materials):
     for descriptor, target in zip(payload['targets'], task['targets']):
         if target.get('source_body_contract'):
             descriptor['source_body_contract'] = target['source_body_contract']
+        if target.get('source_body_contract') or target.get('project_context_excerpts'):
             descriptor['source_context_support_ids'] = source_context_supports[descriptor['target_id']]
         table = target.get('response_table') or {}
         if table.get('native_layout'):
@@ -2597,9 +2601,12 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         outline = await asyncio.to_thread(outline_from_compiled, snapshot, compiled, artifacts=artifacts)
         if chain_items is not None:
             from docreader.tender.item_placement import place_items
+            from docreader.tender.opening_project_name import attach_opening_project_name
             outline, _placement = await place_items(
                 outline, chain_items, budget, execute, _ask,
                 lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload), outside_format=chain_added or ())
+            attach_w2_proposal_answers(outline)
+            await asyncio.to_thread(attach_opening_project_name, artifacts, outline)
         if directory_facts:
             await asyncio.to_thread(bind_reviewed_outline_facts, outline, compiled, directory_facts)
         if native_body_contract is not None:

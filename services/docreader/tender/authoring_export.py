@@ -864,8 +864,7 @@ class _Assembler:
 
     def source_context(self, document, target):
         from docreader.tender.source_body import load_source_context
-        excerpts = target.get('source_context_excerpts', [])
-        if not excerpts:
+        if not (target.get('source_context_excerpts') or target.get('project_context_excerpts')):
             return
         text = load_source_context(self.artifacts, self.authoring_input, target, repository=self.repository)
         if text.strip():
@@ -1305,7 +1304,7 @@ class _Assembler:
         reference_only = {target['target_id'] for target in targets
             if target['kind'] == 'narrative' and not target.get('manual_fill', False)
             and not any(target.get(field) for field in ('rule_refs', 'source_refs', 'source_excerpts',
-                                                       'template_refs', 'response_table'))
+                                                       'project_context_excerpts', 'template_refs', 'response_table'))
             and target.get('related_target_ids')
             and all(identity in self.locations and identity != target['target_id']
                     for identity in target['related_target_ids'])}
@@ -1392,6 +1391,16 @@ class _Assembler:
                     if target_id in manual_forms and fills:
                         fills = []
                         self.gap('export_manual_content_omitted', '人工填写表格未采用自动填值。', chapter_id, target_id)
+                    if target.get('opening_project_name_excerpt'):
+                        from docreader.tender.opening_project_name import opening_project_name_fill
+
+                        host_fill = opening_project_name_fill(
+                            self.artifacts, self.authoring_input, target, part, repository=self.repository)
+                        if host_fill is not None:
+                            fills.append(host_fill)
+                        else:
+                            self.gap('export_opening_project_name_unverified', '项目名称或原式空格未能核实，请人工填写。',
+                                     chapter_id, target_id)
                     if native_plan is not None and template_part_key(part) == template_part_key(native_plan['part']):
                         if fills:
                             self.gap('export_cell_fill_unplaced', '原表格填值未绑定展开后的条款行，未采用。',

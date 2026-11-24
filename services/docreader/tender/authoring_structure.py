@@ -269,8 +269,10 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
                         part_ids[key] = f's{len(supports) + 1}'
                         supports.append({'support_id': part_ids[key], 'origin': 'tender', 'text': target['purpose']})
                     selected[-1]['source_support_ids'] = [part_ids[key]]
+                if target.get('source_body_contract') or target.get('project_context_excerpts'):
                     selected[-1]['source_context_support_ids'] = source_supports(
-                        target.get('source_context_excerpts', []), chapter['chapter_id'], target['target_id'])
+                        target.get('project_context_excerpts') or target.get('source_context_excerpts', []),
+                        chapter['chapter_id'], target['target_id'])
                 if target.get("response_table"):
                     if target["response_table"].get("context_source_excerpts"):
                         selected[-1]["response_context_support_ids"] = source_supports(

@@ -6,6 +6,7 @@ import pytest
 
 from docreader.integrations import web
 from docreader.integrations.artifacts import ArtifactStore
+from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
 
 
 def reference(tmp_path):
@@ -53,3 +54,23 @@ def test_changed_reviewed_fact_ref_is_preserved_for_successor_validation(tmp_pat
     actual = web._inherit_reviewed_fact_request({'reviewed_source_facts_ref': second},
                                                {'reviewed_source_facts_ref': first})
     assert actual['reviewed_source_facts_ref'] == second
+
+
+def test_automatic_outline_request_preserves_the_explicit_pilot_contract():
+    request = web._authoring_request({'requirement_chain_contract': REQUIREMENT_CHAIN_CONTRACT}, outline_only=True)
+    assert request['requirement_chain_contract'] == REQUIREMENT_CHAIN_CONTRACT
+    assert 'requirement_chain_contract' not in web._authoring_request({}, outline_only=True)
+
+
+@pytest.mark.parametrize(('contract', 'outline_only'), [('unknown', True), (REQUIREMENT_CHAIN_CONTRACT, False)])
+def test_pilot_option_only_accepts_the_known_automatic_outline_contract(contract, outline_only):
+    with pytest.raises(web.WebError) as rejected:
+        web._authoring_request({'requirement_chain_contract': contract}, outline_only=outline_only)
+    assert rejected.value.code == 'INVALID_OUTLINE_OPTIONS'
+
+
+def test_pilot_option_does_not_accept_legacy_reviewed_source_facts(tmp_path):
+    with pytest.raises(web.WebError) as rejected:
+        web._authoring_request({'requirement_chain_contract': REQUIREMENT_CHAIN_CONTRACT,
+                                'reviewed_source_facts_ref': reference(tmp_path)}, outline_only=True)
+    assert rejected.value.code == 'INVALID_OUTLINE_OPTIONS'

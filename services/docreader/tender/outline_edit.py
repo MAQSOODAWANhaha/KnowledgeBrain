@@ -1,16 +1,28 @@
 """Apply human tree edits while retaining server-owned evidence and target identity."""
 
 from copy import deepcopy
+from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, StrictBool, StrictStr
+from pydantic import Field, StrictBool, StrictStr, model_validator
 
-from docreader.tender.schema import AuthoringOutline, ChapterPresentationRole, Contract, Identity, SourceUnitRef, Text
+from docreader.tender.authoring_coverage import build_ledger, rule_ref_key
+from docreader.tender.item_placement import EVALUATION_PENDING_DETAIL, NOT_REQUIRED
+from docreader.tender.schema import (
+    AuthoringOutline, ChapterPresentationRole, Contract, EffectiveItemRef, Identity, SourceExcerptRef, SourceUnitRef, Text,
+)
 
 
 class OutlineSourceAddition(Contract):
     target_id: Identity
-    source_refs: list[SourceUnitRef] = Field(min_length=1, max_length=1000)
+    source_refs: list[SourceUnitRef] = Field(default_factory=list, max_length=1000)
+    project_context_excerpts: list[SourceExcerptRef] | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode='after')
+    def require_selection(self):
+        if not self.source_refs and self.project_context_excerpts is None:
+            raise ValueError('请选择追加来源或核定的方案背景。')
+        return self
 
 
 class OutlineEditChapter(Contract):
@@ -22,6 +34,21 @@ class OutlineEditChapter(Contract):
     writing_goal: StrictStr = Field(default='', max_length=20000)
     target_ids: list[Identity] | None = Field(default=None, max_length=1000)
     source_additions: list[OutlineSourceAddition] = Field(default_factory=list, max_length=1000)
+
+
+class OutlineEvaluationDecision(Contract):
+    rule_ref: EffectiveItemRef
+    resolution: Literal['evaluation', 'reference', 'document_wide', 'target', 'pending']
+    target_id: Identity | None = None
+
+    @model_validator(mode='after')
+    def target_matches_resolution(self):
+        if self.resolution == 'target':
+            if self.target_id is None:
+                raise ValueError('归入已有位置须提供目标标识。')
+        elif 'target_id' in self.model_fields_set:
+            raise ValueError('仅归入已有位置时可以提供目标标识。')
+        return self
 
 
 def _flatten(chapters):
@@ -59,7 +86,45 @@ def _manual_id(identity):
         return False
 
 
-def apply_outline_edit(base, chapters, *, target_catalog=()):
+def _apply_evaluation_decisions(outline, remaining, decisions):
+    def awaiting_evaluation(issue):
+        return issue['code'] == 'outline_rule_unassigned' and issue['detail'] == EVALUATION_PENDING_DETAIL
+
+    eligible = {rule_ref_key(ref): ref for i in outline['issues'] if awaiting_evaluation(i) for ref in i['rule_refs']}
+    occupied = {rule_ref_key(row['rule_ref']) for row in build_ledger(outline)}
+    selected, resolved, excluded = set(), set(), {}
+    for raw in decisions:
+        choice = OutlineEvaluationDecision.model_validate(raw)
+        key = rule_ref_key(choice.rule_ref.model_dump())
+        if key not in eligible or key in occupied:
+            raise ValueError('评标裁决必须选择本次大纲尚未归属的评标待核事项。')
+        if key in selected:
+            raise ValueError('同一评标待核事项只能提交一次裁决。')
+        selected.add(key)
+        ref = eligible[key]
+        action = choice.resolution
+        if action == 'pending':
+            continue
+        if action == 'target':
+            if choice.target_id not in remaining:
+                raise ValueError('评标裁决的目标必须保留在本次保存的大纲中。')
+            remaining[choice.target_id]['rule_refs'].append(ref)
+        elif action == 'document_wide':
+            outline.setdefault('constraint_rule_refs', []).append(ref)
+        else:
+            excluded.setdefault(action, []).append(ref)
+        resolved.add(key)
+
+    for issue in outline['issues']:
+        if awaiting_evaluation(issue):
+            issue['rule_refs'] = [ref for ref in issue['rule_refs'] if rule_ref_key(ref) not in resolved]
+    outline['issues'] = [i for i in outline['issues'] if not awaiting_evaluation(i) or i['rule_refs']]
+    for action, refs in excluded.items():
+        detail = NOT_REQUIRED['evaluation'] if action == 'evaluation' else '原文仅作索引，不另设响应。'
+        outline['issues'].append({'code': 'outline_rule_excluded', 'detail': '人工核定：' + detail, 'rule_refs': refs})
+
+
+def apply_outline_edit(base, chapters, *, target_catalog=(), artifacts=None, evaluation_decisions=()):
     """Only the editable projection crosses the API; references come from base."""
     _check_size(chapters)
     base = AuthoringOutline.model_validate(deepcopy(base)).model_dump(exclude_unset=True)
@@ -119,6 +184,11 @@ def apply_outline_edit(base, chapters, *, target_catalog=()):
                     raise ValueError('追加来源不属于此大纲快照，请选择已有的完整来源引用。')
                 if reference not in target['source_refs']:
                     target['source_refs'].append(reference)
+            if addition.project_context_excerpts is not None:
+                if target.get('source_body_contract'):
+                    raise ValueError('原文正文位置的上下文随原件绑定，不能在此修改。')
+                target['project_context_excerpts'] = [excerpt.model_dump(exclude_unset=True)
+                                                      for excerpt in addition.project_context_excerpts]
         return chapter
 
     base['chapters'] = [bind(node) for node in edits]
@@ -142,4 +212,15 @@ def apply_outline_edit(base, chapters, *, target_catalog=()):
             base['issues'].append({'code': 'outline_edit_reference_unbound', 'target_id': target['target_id'],
                 'detail': '此响应位置引用的部分位置已移出大纲，需重新安排或核对。',
                 'rule_refs': deepcopy(target['rule_refs'])})
-    return AuthoringOutline.model_validate(base).model_dump(exclude_unset=True)
+    if not isinstance(evaluation_decisions, (list, tuple)):
+        raise ValueError('评标裁决必须为列表。')
+    if evaluation_decisions:
+        _apply_evaluation_decisions(base, remaining, evaluation_decisions)
+    result = AuthoringOutline.model_validate(base).model_dump(exclude_unset=True)
+    if any(target.get('project_context_excerpts') for target in remaining.values()):
+        if artifacts is None:
+            raise ValueError('校验方案背景需要当前冻结原件。')
+        from docreader.tender.source_body import validate_outline_source_bodies
+
+        validate_outline_source_bodies(artifacts, result)
+    return result

@@ -37,6 +37,8 @@ from docreader.llm.usage import reported_usage
 from docreader.tender.authoring_execution import _OutlineModel
 from docreader.tender.authoring import OUTLINE_SOURCE_BINDING_CONTRACT
 from docreader.tender.authoring_pipeline import generate_document
+from docreader.tender.bid_format_outline import BID_FORMAT_OUTLINE_CONTRACT
+from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
 from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
 from docreader.tender.directory_material_ids import MATERIAL_IDENTITY_CONTRACT
 from docreader.tender.directory_compile import PARAMETER_SOURCE_CONTRACT
@@ -103,15 +105,19 @@ def load_prompts():
 
 
 _BODY_PROMPTS = (AuthoringPrompt.BASIS, AuthoringPrompt.WRITE, AuthoringPrompt.REVIEW, AuthoringPrompt.STRUCTURE)
+_REQUIREMENT_CHAIN_PROMPTS = (AuthoringPrompt.BID_FORMAT_OUTLINE, AuthoringPrompt.ITEM_PLACEMENT)
+_LEGACY_PROMPTS = tuple(name for name in _PROMPTS if name not in _REQUIREMENT_CHAIN_PROMPTS)
 
 
-def execution_prompt_names(*, outline_only, fixed_outline):
+def execution_prompt_names(*, outline_only, fixed_outline, requirement_chain_contract=None):
     """BUG-259: the prompts this execution can call, and therefore its identity."""
+    if requirement_chain_contract == REQUIREMENT_CHAIN_CONTRACT:
+        return _REQUIREMENT_CHAIN_PROMPTS
     if outline_only:
-        return tuple(name for name in _PROMPTS if name not in _BODY_PROMPTS)
+        return tuple(name for name in _LEGACY_PROMPTS if name not in _BODY_PROMPTS)
     if fixed_outline:
         return _BODY_PROMPTS
-    return _PROMPTS
+    return _LEGACY_PROMPTS
 
 
 def _digest(value):
@@ -668,11 +674,14 @@ async def execute_document(
         requirement_chain_contract = stored_chain
     elif requirement_chain_contract is None and previous is not None:
         requirement_chain_contract = previous['execution_spec'].get('requirement_chain_contract')
-    if requirement_chain_contract is not None and (
-            not outline_only or outline_ref is not None or not snapshot.get('frozen_ref')
-            or native_requirement_contract is not None):
-        raise ModelConfigurationError('the requirement chain requires automatic frozen outline generation')
-    if existing is not None:
+    if requirement_chain_contract is not None:
+        if requirement_chain_contract != REQUIREMENT_CHAIN_CONTRACT:
+            raise ModelConfigurationError('unsupported requirement chain contract')
+        if not outline_only or outline_ref is not None or not snapshot.get('frozen_ref'):
+            raise ModelConfigurationError('the requirement chain requires automatic frozen outline generation')
+        if native_requirement_contract is not None or reviewed_source_facts_ref is not None:
+            raise ModelConfigurationError('the requirement chain cannot use legacy requirement or reviewed source contracts')
+    elif existing is not None:
         stored_contract = existing['execution_spec'].get('native_requirement_contract')
         if native_requirement_contract is not None and native_requirement_contract != stored_contract:
             raise Conflict('execution_id already identifies a different native requirement contract')
@@ -697,7 +706,8 @@ async def execute_document(
     ]
     every_prompt = load_prompts()
     prompts = {name: every_prompt[name] for name in
-               execution_prompt_names(outline_only=outline_only, fixed_outline=outline_ref is not None)}
+               execution_prompt_names(outline_only=outline_only, fixed_outline=outline_ref is not None,
+                                      requirement_chain_contract=requirement_chain_contract)}
     admitted = RequestBudget(
         context_tokens=budget.context_tokens,
         model=budget.model,
@@ -732,13 +742,16 @@ async def execute_document(
         "timeout_policy": "raw_response_idle_v1",
         "retry_policy": MODEL_RETRY_POLICY,
         "outline_source_binding_contract": OUTLINE_SOURCE_BINDING_CONTRACT,
-        "outline_assembly_planning_contract": "complete_evidence_scoped_batches_v1",
     }
-    # Keep legacy default execution identities unchanged. Non-default planning
-    # and fixed-outline inputs are immutable parts of the new execution spec.
+    if requirement_chain_contract is None:
+        spec["outline_assembly_planning_contract"] = "complete_evidence_scoped_batches_v1"
+    # The planning path and fixed-outline inputs are part of the execution identity.
     if outline_only or outline_ref is not None:
         spec.update(outline_only=outline_only, outline_ref=outline_ref)
-    if outline_only and snapshot.get("frozen_ref"):
+    if requirement_chain_contract is not None:
+        spec["directory_planning_contract"] = BID_FORMAT_OUTLINE_CONTRACT
+        spec["requirement_chain_contract"] = requirement_chain_contract
+    elif outline_only and snapshot.get("frozen_ref"):
         spec["directory_planning_contract"] = DIRECTORY_REF_CONTRACT
         if existing is None:
             spec["directory_material_identity_contract"] = MATERIAL_IDENTITY_CONTRACT
@@ -746,9 +759,6 @@ async def execute_document(
             spec["directory_material_identity_contract"] = existing["execution_spec"]["directory_material_identity_contract"]
         spec["directory_parameter_source_contract"] = PARAMETER_SOURCE_CONTRACT
         spec["directory_response_form_contract"] = RESPONSE_FORM_ROLE_CONTRACT
-        if requirement_chain_contract is not None:
-            spec["directory_planning_contract"] = "bid_format_source_outline_v1"
-            spec["requirement_chain_contract"] = requirement_chain_contract
         if native_requirement_contract is not None:
             spec['native_requirement_contract'] = native_requirement_contract
         elif existing is None and outline_ref is None:

@@ -17,6 +17,7 @@ from docreader.tender.status import AuthoringTask
 
 REQUIREMENT_CHAIN_CONTRACT = 'single_requirement_chain_v1'
 PLACEMENT_OPERATION = 'place_items_v1'
+EVALUATION_PENDING_DETAIL = '模型建议按评标程序处理，请按原件核定是否另设响应。'
 NOT_REQUIRED = {
     'evaluation': '评标程序或评委动作，投标文件不需单独响应。',
     'performance': '签约后才发生的合同手续，投标文件不需说明。',
@@ -37,12 +38,14 @@ def _compact(text):
     return re.sub(r'\s+', '', text or '')
 
 
-def _walk(chapters, titles=()):
+def _walk(chapters, titles=(), *, skip_covers=False):
     for chapter in chapters:
+        if skip_covers and chapter.get('presentation_role') == 'cover':
+            continue
         path = (*titles, chapter['title'])
         for target in chapter.get('targets', []):
             yield path, target
-        yield from _walk(chapter.get('children', []), path)
+        yield from _walk(chapter.get('children', []), path, skip_covers=skip_covers)
 
 
 def _items(context):
@@ -140,7 +143,7 @@ def add_submission_forms(plan, documents, items, format_pages):
 
 def placement_positions(outline, outside_format=()):
     positions = {}
-    for path, target in _walk(outline['chapters']):
+    for path, target in _walk(outline['chapters'], skip_covers=True):
         opening = _compact(target.get('purpose', ''))[:_OPENING]
         positions[f't{len(positions) + 1}'] = {'target': target, 'title_path': list(path),
                                                'kind': target['kind'], 'opening': opening,
@@ -210,17 +213,24 @@ def bind_placements(outline, positions, items, decided):
     for path, target in _walk(outline['chapters']):
         by_target[target['target_id']] = target
     excluded = {}
+    pending_evaluation = []
     for key, value in decided.items():
-        ref = deepcopy(items[key]['rule_ref'])
+        item = items[key]
+        ref = deepcopy(item['rule_ref'])
         if value in positions:
             by_target[positions[value]['target']['target_id']].setdefault('rule_refs', []).append(ref)
         elif value == 'document_wide':
             outline.setdefault('constraint_rule_refs', []).append(ref)
+        elif value == 'evaluation':
+            pending_evaluation.append(ref)
         elif value in NOT_REQUIRED:
             excluded.setdefault(value, []).append(ref)
     for code, refs in excluded.items():
         outline['issues'].append({'code': 'outline_rule_excluded', 'rule_refs': refs,
                                   'detail': f'事项归属：{NOT_REQUIRED[code]}'})
+    if pending_evaluation:
+        outline['issues'].append({'code': 'outline_rule_unassigned', 'rule_refs': pending_evaluation,
+                                  'detail': EVALUATION_PENDING_DETAIL})
     # A candidate form outside the bid-format chapter stays only if an item is placed in it.
     outline['chapters'] = [chapter for chapter in outline['chapters'] if not any(
         value['outside_format'] and value['title_path'][0] == chapter['title'] for value in positions.values())

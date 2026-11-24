@@ -5,6 +5,7 @@ from zipfile import ZipFile
 
 from docx import Document
 from lxml import etree
+import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
@@ -447,3 +448,96 @@ async def test_phase1_model_copy_skips_running_headers_and_page_numbers(tmp_path
     assert '我方承诺按招标文件提交。' in text and '单位负责人签字：' in text
     assert '招标编号' not in text
     assert not any(line.strip() in {'11', '12', '13', '14'} for line in text.splitlines())
+
+
+@pytest.mark.parametrize('select_cover', [False, True])
+async def test_original_cover_is_kept_before_toc_with_its_native_grid(tmp_path, select_cover):
+    import json
+
+    from test_word_continuation_export import _store
+
+    artifacts = ArtifactStore(tmp_path)
+    rows = [('招标编号：', '编号 A'), ('投标人名称：', '（盖章）'), ('日期：', '年 月 日')]
+    grid = {'row_count': 3, 'column_count': 2, 'cells': [
+        {'row': r, 'column': c, 'row_span': 1, 'col_span': 1, 'text': text}
+        for r, row in enumerate(rows) for c, text in enumerate(row)
+    ]}
+    cover_table = {'unit_id': 'cover-grid', 'kind': 'table_region', 'ordinal': 0, 'text': '', 'grid': grid,
+                   'locator': {'locator_kind': 'document', 'section_ordinal': 0}}
+    ref = _store(artifacts, [cover_table])
+    pages = [
+        '第六章 投标文件格式\n21',
+        '招标编号：编号 A\n采购项目固定名称\n投标文件\n招标编号：编号 A\n投标人名称：（盖章）\n日期：年 月 日\n22',
+        '一、投标函\n原式固定正文\n23',
+    ]
+    documents = [{'document_id': 'tender', 'role': 'main', 'pages': pages,
+                  'layout_decoration': [[], [True, False, False, True, False, False, False], []],
+                  'line_units': [[], [None, None, None, 'cover-grid', 'cover-grid', 'cover-grid', None], []],
+                  'template_parts': {'cover-grid': {'source_ref': {'source_index_ref': ref, 'unit_id': 'cover-grid'},
+                                                    'selectors': []}}}]
+
+    async def execute(_task, request, validate):
+        payload = json.loads(request['messages'][1]['content'][0]['text'])
+        lines = {text.strip(): ref for ref, text in payload['lines']}
+        chapters = [{'heading_refs': [lines['一、投标函']], 'name': '投标函'}]
+        if select_cover:
+            chapters.insert(0, {'heading_refs': [lines['投标文件']], 'name': '投标文件'})
+        return validate({'chapters': chapters})
+
+    _, outline = await _outline(tmp_path, documents=documents, artifacts=artifacts, execute=execute,
+                               directory_contract='bid_format_source_outline_v1')
+    cover, letter = outline['chapters']
+    assert (cover['title'], cover['presentation_role'], letter['title']) == ('投标文件', 'cover', '投标函')
+    result = export_authoring_document(artifacts, outline, [])
+    word = Document(BytesIO(artifacts.read_bytes(result['docx_ref'])))
+    cover_grid, = word.tables
+    assert [tuple(cell.text for cell in row.cells) for row in cover_grid.rows] == rows
+    paragraphs = [p.text.strip() for p in word.paragraphs]
+    assert paragraphs.index('采购项目固定名称') < paragraphs.index('目录')
+    assert '招标编号：编号 A' not in paragraphs and '22' not in paragraphs
+
+
+def _not_applicable_formats():
+    from docreader.tender.bid_format_outline import _Prepared
+
+    pages = [
+        '第六章 投标文件格式\n9-1 声明函\n正常表内正文\n说明：个别字段可注明（不适用）',
+        '9-2 额外声明（不适用）\n1. 附随文件\n不适用式样固定正文',
+        '9-3 业绩表\n须保留的另一表正文',
+    ]
+    prepared = _Prepared([{'document_id': 'tender', 'role': 'main', 'pages': pages}], _snapshot())
+    refs = {text: ref for ref, text in prepared.payload['lines']}
+    return prepared, refs
+
+
+def test_skipped_format_still_bounds_an_implicit_copy_window():
+    from docreader.tender.bid_format_outline import decode_bid_format_outline
+
+    prepared, refs = _not_applicable_formats()
+    result = decode_bid_format_outline({'chapters': [
+        {'heading_refs': [refs['9-1 声明函']], 'name': '声明函'},
+        {'heading_refs': [refs['9-3 业绩表']], 'name': '业绩表'},
+    ]}, prepared)
+    first, last = result['nodes']
+    assert first['body_windows'] == [{'document_id': 'tender', 'page': 0, 'start_line': 1, 'end_line': 3}]
+    assert last['body_windows'] == [{'document_id': 'tender', 'page': 2, 'start_line': 0, 'end_line': 1}]
+
+
+@pytest.mark.parametrize('selection', ['crossing', 'excluded_heading', 'excluded_child'])
+def test_selected_format_cannot_enter_a_marked_non_applicable_subtree(selection):
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.bid_format_outline import decode_bid_format_outline
+
+    prepared, refs = _not_applicable_formats()
+    first = {'heading_refs': [refs['9-1 声明函']], 'name': '声明函'}
+    last = {'heading_refs': [refs['9-3 业绩表']], 'name': '业绩表'}
+    chapters = [first, last]
+    if selection == 'crossing':
+        first['body'] = [refs['9-1 声明函'], refs['不适用式样固定正文']]
+        last['body'] = [refs['9-3 业绩表'], refs['须保留的另一表正文']]
+    elif selection == 'excluded_heading':
+        chapters.insert(1, {'heading_refs': [refs['9-2 额外声明（不适用）']], 'name': '额外声明'})
+    else:
+        chapters.insert(1, {'heading_refs': [refs['1. 附随文件']], 'name': '附随文件'})
+    with pytest.raises(ModelContractError):
+        decode_bid_format_outline({'chapters': chapters}, prepared)

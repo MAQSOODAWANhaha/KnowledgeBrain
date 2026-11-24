@@ -568,9 +568,10 @@ reference标签忽略有效功能资料；事实/证明/授权声明仍须对应
 5. 模型不生成CAS、execution/task/chapter ID，不回抄输入/覆盖清单或计算最终页码。
    只选择来源/资料/所需响应位置的短引用；宿主负责映射、表格坐标、真实附件、文件装配。
 6. 执行身份只含本执行会调用的任务（BUG-259）。分析执行的规格和预算只含 `extract`、`verify`、`ocr`
-   的 Prompt 及这三个任务的输出契约。编制执行按类型取任务：大纲执行（`outline_only`）含大纲与目录
-   各任务；固定 `outline_ref` 的正文执行只含 `authoring_basis`、`authoring_write`、`authoring_review`、
-   `authoring_structure`；未固定大纲的整稿执行含全部编制任务。输出契约按同一任务集合计入。
+   的 Prompt 及这三个任务的输出契约。`single_requirement_chain_v1` 大纲执行只登记
+   `bid_format_outline` 和 `item_placement`，分别绑定 `BidFormatOutline` 和 `ItemPlacementResponse`。
+   旧大纲和未固定大纲的整稿执行取各自的旧任务集合；固定 `outline_ref` 的正文执行只含
+   `authoring_basis`、`authoring_write`、`authoring_review`、`authoring_structure`。输出契约按同一任务集合计入。
    执行调用了身份外的 Prompt 时宿主报配置错误，不从文件补读。改某任务的 Prompt 或契约，只改变
    包含该任务的执行身份；身份变了的在途执行仍按原规则拒绝续跑，需新建执行。
 
@@ -651,10 +652,14 @@ compact摘录可省略共同`section_id`，统一引用这唯一章节；多章�
 
 | 结构 | 字段与含义 |
 | --- | --- |
+| 试点选项 | `POST /api/v3/tender-projects/{project}/outline/generate` 的 `requirement_chain_contract` 可显式设为 `single_requirement_chain_v1`，仅用于有冻结来源的自动大纲。同一请求键绑定同一选项，任务保存选项；恢复使用已登记的执行合同。未显式选择时，后继沿用前任的合同，独立大纲按默认路径执行。试点与旧原生要求合同、旧原件复核事实互斥。 |
+| 方案上下文 | 在大纲保存 `chapters[].source_additions[]` 指定本章已有或选入的 `target_id` 及 `project_context_excerpts`，随响应位置保存。精确引用列表替换背景，空列表清除，省略沿用原选择。位置须为非手填、仅允许 `knowledge` 的叙述位置，且无原式表或原文正文绑定。宿主从固定快照读取非空、不重叠的范围，不接受客户端传入文字。现有原文正文的 `source_context_excerpts` 仍须由原文正文绑定校验。两种上下文在模型输入使用 `source_context_support_ids`，企业应答的依据仍由 `support_ids` 和位置权限决定。 |
 | 归属请求 `item_placement` | `{operation:"place_items_v1", positions:[{id,title_path:str[],kind,opening,origin?}], requirements:[{id,kind,subject?,scope?,text,conditions?,exceptions?,submission?,consequence?,scoring?,evidence:[{page,quote}]}]}`。`id` 为本批短 ID（位置 `t*`，事项 `r*`），`opening` 为位置原文开头，最长 120 字；`origin:"outside_format"` 标出格式章节外的候选原式 |
 | `ItemPlacementResponse` | `{placements:[[r,value]]}`，每个本批事项恰好一行。`value` 为本批位置 ID、理由代码或 null（待核） |
 | 不需响应理由代码 | `evaluation`：评标程序或评委动作；`performance`：签订合同、付款、验收、合同变更、违约处理这类签约后才发生、投标文件不需说明的手续，采购需求的技术、服务、人员和交付要求不属此类；`document_wide`：整份投标文件的格式、份数、递交等约束；`not_applicable`：原文明示本项目不适用 |
-| 宿主落账 | 位置 ID → 目标 `rule_refs`；`document_wide` → `constraint_rule_refs`；其余代码 → `outline_rule_excluded` 问题，`detail` 写明理由；null 和未采纳批次 → 覆盖台账 `pending` |
+| 宿主落账 | 位置 ID → 目标 `rule_refs`；`document_wide` → `constraint_rule_refs`；`evaluation`、null 和未采纳批次 → 覆盖台账 `pending`；其余代码 → `outline_rule_excluded` 问题，`detail` 写明理由 |
+| 评标裁决 | 大纲保存可选 `evaluation_decisions: [{rule_ref, resolution, target_id?}]`。仅接受当前基线大纲的评标建议待核事项及完整正式 `EffectiveItemRef`。`resolution` 取 `evaluation`（纯评审流程）、`reference`（原文索引）、`document_wide`（整份约束）、`target`（本次保存后仍在大纲中的位置，须提供 `target_id`）或 `pending`（继续待核）。按现有修订并发及幂等规则保存。 |
+| 开标项目名称 | `ResponseTarget.opening_project_name_excerpt` 为新链宿主记录的同快照公告原文精确引用。只在已绑定完整原生《开标一览表》的手填位置保存。模型和编辑请求均不指定文字、行列或填值，该值不计为企业应答。 |
 
 ## 编制最小修订（knowledge_required_v2）
 

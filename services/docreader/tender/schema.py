@@ -595,6 +595,9 @@ class ResponseTarget(Contract):
     source_body_ref: ArtifactRef | None = Field(default=None, exclude_if=lambda value: value is None)
     source_context_excerpts: list[SourceExcerptRef] = Field(
         default_factory=list, exclude_if=lambda value: not value)
+    project_context_excerpts: list[SourceExcerptRef] = Field(
+        default_factory=list, exclude_if=lambda value: not value)
+    opening_project_name_excerpt: SourceExcerptRef | None = Field(default=None, exclude_if=lambda value: value is None)
     template_refs: list[TemplatePartRef] = Field(default_factory=list)
     subject: Text | None = None
     response_table: ResponseTable | None = None
@@ -615,8 +618,12 @@ class ResponseTarget(Contract):
         if self.source_body_contract is None:
             if self.source_context_excerpts or self.source_body_ref is not None:
                 raise ValueError("source context requires an explicit source body contract")
+            if self.project_context_excerpts and (self.kind != "narrative" or self.manual_fill
+                    or self.support_origins != ["knowledge"] or self.template_refs
+                    or self.response_table is not None or self.response_form_pending is not None):
+                raise ValueError("project context requires a writable knowledge narrative without an original form")
             return self
-        if self.source_body_ref is None or self.template_refs or self.response_table is not None:
+        if self.project_context_excerpts or self.source_body_ref is None or self.template_refs or self.response_table is not None:
             raise ValueError("native source body requires its immutable binding separate from original forms and response tables")
         body = {}
         for excerpt in self.source_excerpts:
