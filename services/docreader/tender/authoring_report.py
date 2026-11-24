@@ -1,4 +1,5 @@
 """Read-only stage report for one authoring execution. It sends nothing and persists nothing."""
+import asyncio
 from collections import Counter
 
 from docreader.llm.request import request_digest
@@ -86,3 +87,18 @@ def authoring_report(execution, requests, outline, document=None, rejections=())
     if document is not None:
         report["document_gaps"] = _counts(document.get("gaps", []))
     return report
+
+
+async def read_authoring_report(artifacts, execution):
+    """Load the result and rejection artifacts one execution's report needs."""
+    result = (await asyncio.to_thread(artifacts.read_json, execution["result_ref"])
+              if execution.get("result_ref") else {"chapters": [], "issues": []})
+    document = result if "outline_ref" in result else None
+    outline = await asyncio.to_thread(artifacts.read_json, result["outline_ref"]) if document else result
+    rejections = []
+    for receipt in execution["receipts"]:
+        if receipt["stage"] == "model-rejection":
+            rejection = await asyncio.to_thread(artifacts.read_json, receipt["artifact_ref"])
+            rejection["payload"] = await asyncio.to_thread(artifacts.read_json, rejection["request_ref"])
+            rejections.append(rejection)
+    return authoring_report(execution, execution["requests"], outline, document, rejections)

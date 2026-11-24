@@ -60,11 +60,19 @@ def test_analysis_counts_only_current_accepted_units_and_keeps_source_revision_z
     assert progress["identity"] == IDENTITY
     assert progress["accepted_units"] == 4
     assert progress["accepted_by_phase"] == [
-        {"phase": "ocr", "count": 1}, {"phase": "extract", "count": 1},
-        {"phase": "analysis-review", "count": 1}, {"phase": "analysis-locate", "count": 1},
+        {"phase": "ocr", "count": 1, "planned": None}, {"phase": "extract", "count": 1, "planned": None},
+        {"phase": "analysis-review", "count": 1, "planned": None},
+        {"phase": "analysis-locate", "count": 1, "planned": None},
     ]
     assert progress["last_completed_phase"] == "analysis-locate"
-    assert progress["total_units"] is None
+    assert "total_units" not in progress
+
+
+def test_extract_plan_is_the_pack_count_and_shows_before_any_pack_is_accepted():
+    plan = {"packs": [{"pack_id": "one"}, {"pack_id": "two"}, {"pack_id": "three"}]}
+    progress = analysis_progress(run(artifacts=[receipt("extract-pack", "one")]), plan)
+    assert progress["accepted_by_phase"] == [{"phase": "extract", "count": 1, "planned": 3}]
+    assert analysis_progress(run(), plan)["accepted_by_phase"] == [{"phase": "extract", "count": 0, "planned": 3}]
 
 
 def test_root_milestones_are_real_recent_progress_but_not_extra_accepted_work_units():
@@ -116,8 +124,7 @@ def test_group_progress_counts_physical_rejections_once_and_uses_host_joint_phas
     ]))
     assert progress["current_phase"] == "analysis-joint"
     assert progress["rejected_responses"] == 1
-    assert progress["accepted_by_phase"] == [{"phase": "analysis-associate", "count": 2}]
-    assert progress["total_units"] is None
+    assert progress["accepted_by_phase"] == [{"phase": "analysis-associate", "count": 2, "planned": None}]
 
 
 @pytest.mark.parametrize("change", [
@@ -172,10 +179,27 @@ def test_authoring_uses_its_fixed_snapshot_and_semantically_accepted_response_re
     progress = authoring_progress(job(), value)
     assert progress["identity"] == {**fixed, "execution_id": "fixed-execution"}
     assert progress["accepted_units"] == 2
-    assert progress["accepted_by_phase"] == [{"phase": "outline", "count": 1}, {"phase": "authoring_write", "count": 1}]
+    assert progress["accepted_by_phase"] == [{"phase": "outline", "count": 1, "planned": None},
+                                             {"phase": "authoring_write", "count": 1, "planned": None}]
     assert progress["last_completed_phase"] == "authoring_write"
     assert progress["current_phase"] == "authoring_review"
     assert progress["rejected_responses"] == 1
+
+
+def test_authoring_plans_are_summed_per_task_from_execution_plan_receipts():
+    def plan(task, scope, requests):
+        return {"stage": "execution-plan", "scope": f"{task}:{scope}",
+                "metadata": {"task": task, "planned_requests": requests}}
+
+    value = execution(receipts=[
+        plan("authoring_write", "", 3), plan("authoring_review", "review-0", 1),
+        plan("authoring_review", "review-1", 2), plan("authoring_review", "review-1", 2),
+        {"stage": "document-model-response", "scope": "authoring_write:one"},
+    ])
+    assert authoring_progress(job(), value)["accepted_by_phase"] == [
+        {"phase": "authoring_write", "count": 1, "planned": 3},
+        {"phase": "authoring_review", "count": 0, "planned": 3},
+    ]
 
 
 def test_authoring_append_order_and_final_result_are_observed_milestones():
@@ -225,7 +249,7 @@ async def test_saved_review_view_keeps_authoring_progress_with_fixed_word_identi
         "snapshot": {**IDENTITY, "frozen_ref": None},
         "request": {"version_id": "fixed-word-version", "docx_sha256": "a" * 64}})
     view = (await review_view(bridge, value))["review"]
-    assert view["progress"]["accepted_by_phase"] == [{"phase": "authoring_review", "count": 1}]
+    assert view["progress"]["accepted_by_phase"] == [{"phase": "authoring_review", "count": 1, "planned": None}]
     assert view["progress"]["identity"] == {**IDENTITY, "execution_id": "fixed-execution"}
     assert view["version_id"] == "fixed-word-version" and view["docx_sha256"] == "a" * 64
     assert view["sources_current"] is None and view["source_status_issue"]["code"] == "saved_word_source_status_unavailable"

@@ -845,6 +845,19 @@ async def completed_job(runtime, *, materials=()):
     return execution_id
 
 
+async def test_execution_report_is_read_only_and_bound_to_the_project(runtime, monkeypatch):
+    await upload(runtime)
+    execution_id = await completed_job(runtime)
+    monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: runtime.settings))
+    before = await runtime.bridge.authoring.get_execution(execution_id)
+    value, data = await handle_command(payload(runtime, "authoring.report", execution_id=execution_id))
+    assert data == b"" and value["report"]["execution_id"] == execution_id
+    assert value["report"]["kind"] == "document" and value["report"]["failures"] == []
+    assert await runtime.bridge.authoring.get_execution(execution_id) == before
+    with pytest.raises(WebError, match="不属于此项目"):
+        await handle_command(payload(runtime, "authoring.report", project_id=runtime.other, execution_id=execution_id))
+
+
 async def test_artifacts_are_bound_to_successful_project_execution(runtime, monkeypatch):
     await upload(runtime)
     execution_id = await completed_job(runtime)

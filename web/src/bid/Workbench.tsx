@@ -44,6 +44,7 @@ import { ChapterRevision } from "./authoring/ChapterRevision";
 import { SavedWordReview } from "./authoring/SavedWordReview";
 import { KnowledgeSelection, type KnowledgeSelection as KnowledgeChoice } from "./KnowledgeSelection";
 import { inProgress, executionStatus } from "./executionStatus";
+import { ExecutionReport } from "./ExecutionReport";
 import { TaskProgress } from "./TaskProgress";
 
 const fileKind = (document: TenderDocument) => {
@@ -526,6 +527,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             {view.authoring && (inProgress(view.authoring.status)
               ? <HStack><Button label="取消本次编制" isDisabled={busy} onClick={() => void executionAction(view.authoring!.execution_id, "cancel")} /></HStack>
               : ["failed", "blocked"].includes(view.authoring.status) && <HStack><Button label="继续本次编制" isDisabled={busy || ended} onClick={() => void executionAction(view.authoring!.execution_id, "resume")} /></HStack>)}
+            {view.authoring && tool === "execution" && <ExecutionReport projectId={projectId} executionId={view.authoring.execution_id} status={view.authoring.status} />}
           </VStack>
         </Drawer>
         <Drawer isOpen={tool === "regenerate"} onOpenChange={closeTool} label="直接生成整稿" width={440}>

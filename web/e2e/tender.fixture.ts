@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import type { DocxCurrent } from "../src/bid/api/docx";
-import type { OutlineNode, OutlineSave, OutlineView, TenderChapter, TenderDocxCurrent, TenderDraft, WorkbenchView } from "../src/bid/api/workbench";
+import type { ExecutionReportView, OutlineNode, OutlineSave, OutlineView, TenderChapter, TenderDocxCurrent, TenderDraft, WorkbenchView } from "../src/bid/api/workbench";
 
 const project = "11111111-1111-4111-8111-111111111111";
 const path = `/api/v3/tender-projects/${project}`;
@@ -73,7 +73,8 @@ async function fixture(page: Page) {
     executions: [] as { action: string; key: string | undefined }[], uploads: [] as string[],
     opens: [] as { version_id: string; mode: string }[],
     saves: [] as { body: unknown; key: string | undefined }[],
-    downloads: [] as string[], saved: null as object | null };
+    downloads: [] as string[], saved: null as object | null,
+    report: null as ExecutionReportView | null, reportReads: [] as string[] };
   let opened = 0;
   const outline: OutlineView = { draft: { revision_id: "outline-r1", revision: 1, parent_id: null,
     execution_id: "outline-execution", sha256: sha, outline: { chapters }, sources_current: true }, candidate: null, generation: null };
@@ -143,6 +144,10 @@ async function fixture(page: Page) {
       const document = { id: "company-proof", file_name: "合成企业证明.pdf", media_type: "application/pdf", byte_length: 30 };
       view.documents.push(document);
       return json(document, 201);
+    }
+    if (url.pathname.includes("/executions/") && url.pathname.endsWith("/report") && method === "GET") {
+      state.reportReads.push(decodeURIComponent(url.pathname.split("/").at(-2)!));
+      return json({ report: state.report });
     }
     if (url.pathname.includes("/executions/") && /\/(resume|cancel)$/.test(url.pathname)) {
       state.executions.push({ action: url.pathname.split("/").at(-1)!, key: request.headers()["idempotency-key"] });

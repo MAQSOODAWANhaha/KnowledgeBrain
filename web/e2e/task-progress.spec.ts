@@ -35,8 +35,8 @@ const progress = (): TaskProgressView => ({
   identity: { run_id: "analysis", source_version: 1, domain_revision: 0 }, state: "running",
   current_phase: "analysis-associate", active_tasks: [{ phase: "analysis-associate", prepared: 0, sent: 2 }],
   latest_request_phase: "analysis-associate", last_completed_phase: "analysis-review",
-  accepted_units: 8, accepted_by_phase: [{ phase: "analysis-review", count: 8 }],
-  request_states: { prepared: 0, sent: 2, uncertain: 1, failed: 3, received: 12 }, rejected_responses: 4, total_units: null,
+  accepted_units: 11, accepted_by_phase: [{ phase: "extract", count: 3, planned: 5 }, { phase: "analysis-review", count: 8, planned: null }],
+  request_states: { prepared: 0, sent: 2, uncertain: 1, failed: 3, received: 12 }, rejected_responses: 4,
 });
 
 test("analysis progress distinguishes accepted work, in flight requests and unknown receipts without invented totals", async ({ page }) => {
@@ -44,11 +44,13 @@ test("analysis progress distinguishes accepted work, in flight requests and unkn
   Object.assign(f.view.analysis!, { status: "running", progress: progress() });
   await page.goto(`/#/bids/${project}/analysis`);
   const panel = page.getByRole("region", { name: "分析任务进度", exact: true });
-  await expect(panel).toContainText("当前阶段：关联要求");
+  await expect(panel).toContainText("当前阶段：关联要求（仅历史运行）");
   await expect(panel).toContainText("最近进展：核验事项");
-  await expect(panel).toContainText("已接受 8 个工作单元，剩余总量尚未确定");
+  await expect(panel).toContainText("已接受 11 个工作单元，总量未知");
   await expect(panel).toContainText("1 次请求回执待确认");
   await panel.getByText("阶段与请求回执").click();
+  await expect(panel).toContainText("提取招标事项：已接受 3 个工作单元，计划 5 个");
+  await expect(panel).toContainText("核验事项：已接受 8 个工作单元，计划数未知");
   await expect(panel).toContainText("等待返回 2 次");
   await expect(panel).toContainText("已收到返回 12 次；失败 3 次；未通过业务验收 4 次");
   await expect(panel).not.toContainText("%");
@@ -84,4 +86,41 @@ test("published analysis blocks new requests but permits confirmation of its fro
   await page.getByRole("button", { name: "确认同一次分析请求" }).click();
   await expect.poll(() => f.state.starts.length).toBe(1);
   expect(f.state.starts[0].key).toBe(attempt.idempotencyKey);
+});
+
+test("execution details read the stage report once opened and rank failures without sending work", async ({ page }) => {
+  const f = await fixture(page);
+  f.state.report = {
+    execution_id: "execution-word-v1", status: "succeeded", kind: "document", requests: 5,
+    stages: {
+      authoring_write: { stage: "W 写作 / 改稿", logical_requests: 2, requests: 4, reported_tokens: { total_tokens: 920 } },
+      authoring_review: { stage: "正文复核 / 再核", logical_requests: 1, requests: 1, reported_tokens: {} },
+    },
+    failures: [
+      { stage: "W 写作 / 改稿", task: "authoring_write", kind: "contract", code: "unknown_target", count: 2, reported_tokens: 410, unknown_usage: 0 },
+      { stage: "W 写作 / 改稿", task: "authoring_write", kind: "send", code: "timeout", count: 1, reported_tokens: 0, unknown_usage: 1 },
+    ],
+  };
+  await f.ready();
+  expect(f.state.reportReads).toEqual([]);
+  await openTool(page, "执行详情");
+  const report = page.getByRole("region", { name: "执行报表", exact: true });
+  await expect(report).toContainText("W 写作 / 改稿");
+  await expect(report.getByRole("row").filter({ hasText: "正文复核 / 再核" })).toContainText("未知");
+  const failures = report.getByRole("row").filter({ hasText: "：" });
+  await expect(failures.nth(0)).toContainText("未通过业务验收：unknown_target");
+  await expect(failures.nth(0)).toContainText("410");
+  await expect(failures.nth(1)).toContainText("发送失败：timeout");
+  await expect(failures.nth(1)).toContainText("另 1 次未知");
+  expect(f.state.reportReads).toEqual(["execution-word-v1"]);
+  expect(f.state.starts).toEqual([]);
+  expect(f.state.executions).toEqual([]);
+});
+
+test("execution details say when the execution has not started instead of showing empty counts", async ({ page }) => {
+  const f = await fixture(page);
+  f.view.authoring = { execution_id: "queued-document", status: "published" };
+  await f.ready();
+  await openTool(page, "执行详情");
+  await expect(page.getByText("此任务尚未开始执行，暂无执行报表。")).toBeVisible();
 });

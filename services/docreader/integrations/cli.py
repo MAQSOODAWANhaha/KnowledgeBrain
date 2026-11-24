@@ -113,21 +113,11 @@ async def run(args):
         return row
     if args.command == "authoring-report":
         from docreader.integrations.authoring_store import AuthoringStore
-        from docreader.tender.authoring_report import authoring_report
+        from docreader.tender.authoring_report import read_authoring_report
 
         execution = await AuthoringStore(settings.dsn).get_execution(args.execution_id)
         assert execution is not None  # missing_ok=False raises for an unknown execution
-        result: dict = (await asyncio.to_thread(artifacts.read_json, execution["result_ref"])
-                        if execution.get("result_ref") else {"chapters": [], "issues": []})
-        document = result if "outline_ref" in result else None
-        outline = await asyncio.to_thread(artifacts.read_json, result["outline_ref"]) if document else result
-        rejections = []
-        for receipt in execution["receipts"]:
-            if receipt["stage"] == "model-rejection":
-                rejection = await asyncio.to_thread(artifacts.read_json, receipt["artifact_ref"])
-                rejection["payload"] = await asyncio.to_thread(artifacts.read_json, rejection["request_ref"])
-                rejections.append(rejection)
-        return authoring_report(execution, execution["requests"], outline, document, rejections)
+        return await read_authoring_report(artifacts, execution)
     if args.command == "cancel":
         row = await store.cancel(args.run_id)
         return {"run_id": row["run_id"], "status": row["status"]}

@@ -86,7 +86,7 @@ def _unique(receipts):
             yield row
 
 
-def _project(identity, state, owner, requests, accepted, last_phase, rejected):
+def _project(identity, state, owner, requests, accepted, last_phase, rejected, planned):
     # A retry is another attempt of one logical request, not another completed unit.
     latest = {}
     for index, row in sorted(
@@ -133,18 +133,19 @@ def _project(identity, state, owner, requests, accepted, last_phase, rejected):
         "latest_request_phase": _request_phase(rows[-1][1]) if rows else None,
         "last_completed_phase": last_phase,
         "accepted_units": sum(counts.values()),
+        # planned is the host's registered plan for that phase; None means unknown.
         "accepted_by_phase": [
-            {"phase": phase, "count": counts[phase]}
+            {"phase": phase, "count": counts[phase], "planned": planned.get(phase)}
             for phase in _PHASE_ORDER
-            if counts[phase]
+            if counts[phase] or phase in planned
         ],
         "request_states": states,
         "rejected_responses": rejected,
-        "total_units": None,
     }
 
 
-def analysis_progress(run):
+def analysis_progress(run, pack_plan=None):
+    """`pack_plan` is the current revision's pack plan; it fixes the extract unit count."""
     identity = {key: run[key] for key in _IDENTITY}
 
     def current(row, *, source_receipt=False):
@@ -187,6 +188,7 @@ def analysis_progress(run):
             )
             for row in receipts
         ),
+        {"extract": len(pack_plan["packs"])} if pack_plan else {},
     )
 
 
@@ -202,7 +204,7 @@ def authoring_progress(job, execution, *, status=None):
     identity["execution_id"] = job["execution_id"]
     state = status if status is not None else owner.get("status", job["status"])
     receipts = list(_unique(owner.get("receipts", [])))
-    accepted, last = [], None
+    accepted, last, planned = [], None, Counter()
     # Authoring receipts have no timestamp; their durable append order is the observation order.
     for row in receipts:
         if row["stage"] == "document-model-response":
@@ -210,6 +212,8 @@ def authoring_progress(job, execution, *, status=None):
             if phase in _AUTHORING_TASKS:
                 accepted.append(phase)
                 last = phase
+        elif row["stage"] == "execution-plan":
+            planned[row["metadata"]["task"]] += row["metadata"]["planned_requests"]
         elif row["stage"] in _AUTHORING_PHASES:
             last = _AUTHORING_PHASES[row["stage"]]
     if state == "succeeded" and owner.get("result_ref"):
@@ -222,4 +226,5 @@ def authoring_progress(job, execution, *, status=None):
         accepted,
         last,
         sum(row["stage"] == "model-rejection" for row in receipts),
+        dict(planned),
     )

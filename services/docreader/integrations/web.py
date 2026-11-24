@@ -626,6 +626,10 @@ class WebBridge:
             submitted = await asyncio.to_thread(self.artifacts.read_json, run["manifest_ref"])
             current = await self.manifest(project_id)
             sources_current = _source_identities(submitted["documents"]) == _source_identities(current["documents"])
+        plan_receipt = next((row for row in run["artifacts"] if row["stage"] == "pack-plan" and not row["scope"]
+                             and row["domain_revision"] == run["domain_revision"]), None)
+        pack_plan = (await asyncio.to_thread(self.artifacts.read_json, plan_receipt["artifact_ref"])
+                     if plan_receipt else None)
         items = []
         for entry in context.payload["rules"]:
             item = entry.get("item", entry.get("effective_rule", {}))
@@ -636,7 +640,7 @@ class WebBridge:
                 "sources_current": sources_current,
                 "items": items, "rules": context.payload["rules"], "issues": context.payload["issues"],
                 "summary": verified.get("summary", {}), "usage": _usage(run["usage"]),
-                "rule_origin": context.rule_origin, "progress": analysis_progress(run)}
+                "rule_origin": context.rule_origin, "progress": analysis_progress(run, pack_plan)}
 
     async def authoring_view(self, job):
         from docreader.integrations.web_progress import authoring_progress
@@ -787,6 +791,12 @@ async def handle_command(payload, blob=b""):
                                                "AND COALESCE(payload->>'operation','document')='document' "
                                                "ORDER BY created_at DESC,execution_id DESC LIMIT 1", (project_id,))).fetchone(), AuthoringJobStatus)
         return {"authoring": await bridge.authoring_view(job) if job else None}, b""
+    if action == "authoring.report":
+        from docreader.tender.authoring_report import read_authoring_report
+
+        await bridge.job(project_id, payload.get("execution_id"))  # project ownership
+        execution = await bridge.authoring.get_execution(payload["execution_id"], missing_ok=True)
+        return {"report": await read_authoring_report(bridge.artifacts, execution) if execution else None}, b""
     if action == "artifact.get":
         kind = payload.get("kind")
         if kind not in {"docx", "package"}:

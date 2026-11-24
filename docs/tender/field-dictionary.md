@@ -225,7 +225,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `deviations` | 逐请求标记，不含原文。`estimate_below_prompt`：实际 prompt_tokens 大于记录的输入估算；`completion_above_reserve`：completion 大于该请求 output_reserve；`slow_first_data`：首个原始字节等待达到 60 秒。字节估算偏高、首包更快、缺字段都不标记。标记不改变 131072 默认窗口、262144 纠错上限、预留或重试 |
 | `limits` | 估算、未知用量及小样本分位数的解释限制 |
 
-`authoring-report` 是编制执行的只读阶段报表（CLI `authoring-report <execution_id>`），由执行的请求行和结果产物现场计算，不写入任何产物、不改变执行身份，旧执行也可以查看：
+`authoring-report` 是编制执行的只读阶段报表（CLI `authoring-report <execution_id>`；网页 `GET /api/v3/tender-projects/{project}/executions/{execution}/report` 返回 `{"report": …}`，执行尚未创建时为 `null`），由执行的请求行和结果产物现场计算，不写入任何产物、不改变执行身份、不发模型请求，旧执行也可以查看：
 
 | 字段 | 定义 |
 | --- | --- |
@@ -236,6 +236,8 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `outline_issues` | 大纲 issues 按 code 计数，含预算拒收、待核和未安排的分析规则（`outline_rule_unassigned`） |
 | `document_gaps` | 仅正文执行：缺口按 code 计数 |
 | `failures` | 失败聚合表，每行一个「阶段 × 类别 × code」：`stage`、`task`、`kind`、`code`、`count`、`reported_tokens`（供应商回报的 total_tokens 之和）、`unknown_usage`（无回报用量的条数）。`kind=send` 来自状态为 failed 或 uncertain 的请求行，code 取 `error.type`；`kind=contract` 来自 `model-rejection` 回执，每条回执计一次，code 取首条错误的 code，Token 取产生该回包的请求行（按回执里的请求重建实际发送的请求摘要匹配），匹配不到记入 `unknown_usage`。contract 行的 count 之和等于回执条数。按 reported_tokens、count 降序排列，回答「哪类失败最多」 |
+
+工作台任务进度（`progress`）的 `accepted_by_phase` 每行为 `phase`、`count`（已接受工作单元）和 `planned`（宿主登记的计划单元数，`null` 表示未知）。`planned` 只来自已登记的计划：编制取各 task 的 `execution-plan` 回执 `planned_requests` 之和，分析的 `extract` 取当前修订提取范围规划的包数，其余阶段为 `null`。有计划但尚未接受单元的阶段也列出（`count` 为 0）。整体总量不给出：后续阶段的计划在前序阶段完成后才登记。
 
 ### 运行状态
 

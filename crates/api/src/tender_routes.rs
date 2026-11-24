@@ -241,6 +241,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(package),
         )
         .route(
+            "/api/v3/tender-projects/{project}/executions/{execution}/report",
+            get(execution_report),
+        )
+        .route(
             "/api/v3/tender-projects/{project}/executions/{execution}/materials/{material}/original",
             get(material_original),
         )
@@ -953,6 +957,24 @@ async fn cancel(
     )
     .await
 }
+async fn execution_report(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path((id, execution)): Path<(Uuid, String)>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, owner) = require_project(&h, &s, id).await?;
+    Ok(Json(
+        bridge(
+            id,
+            owner,
+            "authoring.report",
+            json!({"execution_id": execution}),
+            vec![],
+        )
+        .await?
+        .0,
+    ))
+}
 async fn package(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -1016,6 +1038,30 @@ async fn material_original(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn execution_report_requires_project_authentication() {
+        use tower::ServiceExt;
+        let state = AppState {
+            jwt_secret: "synthetic-report-secret".into(),
+            bootstrap_key: String::new(),
+        };
+        let uri = format!(
+            "/api/v3/tender-projects/{}/executions/web-document-a/report",
+            Uuid::new_v4()
+        );
+        let response = router()
+            .with_state(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     #[test]
     fn coverage_is_bound_to_the_generated_word_identity_not_its_manual_descendant() {
