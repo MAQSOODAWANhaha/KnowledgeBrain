@@ -85,9 +85,9 @@
 
 流水线：`格式章节选择` → `格式补位` → `编译` → `事项归属` → `宿主结算`（字段见 [字段字典 · 新链事项归属](field-dictionary.md#新链事项归属)）：
 
-1. **格式章节选择（`bid_format_source_outline_v1`）**：固定 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。
+1. **格式章节选择（`bid_format_source_outline_v1`）**：固定 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。格式章节只在 `role` 为主件的文档中找一个锚点，补遗与澄清不参与（[BUG-332](bug-fix.md#bug-332新链格式章节只读主件补遗与澄清的格式表不进结构)）；该请求不分片，超限时整次执行失败（[BUG-331](bug-fix.md#bug-331新链格式章节选择超限时不分片整次执行失败)）。
 2. **格式补位（宿主 0 次调用）**：`submission_requirement` 点名且不在格式章节内的必交文件，宿主在引证页及前页找同名独立标题行补成 `outside_format` 候选章，无事项落入则删除。
-3. **事项归属（`item_placement`）**：按预算分批（每批 ≤ `240` 条），每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。
+3. **事项归属（`item_placement`）**：按预算分批（每批 ≤ `240` 条），每批都带完整位置目录（[BUG-333](bug-fix.md#bug-333新链事项归属每批都带完整位置目录目录过大时整次执行失败)），每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。
 
 ### 新链方案正文与评标待核
 
@@ -104,17 +104,20 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 
 ### 大纲执行（现行默认目录编译路径）
 
-| 阶段 | 任务 / Prompt | 次数 | 随什么增长 | 单次输入边界 | 代码入口 |
+默认入口不设 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT`，B、C 走旧路径，原文选择走 `directory_native_body`。A、M 与旧路径 C 把文档集内全部文档的全部行拼进一个请求，不分片；超出准入预算即拒发，不降级为分片。
+
+| 阶段 | 任务 / Prompt | 次数 | 随什么增长 | 单次输入与超限去向 | 代码入口 |
 | --- | --- | --- | --- | --- | --- |
-| A 目录规划 | `directory_plan` / `directory_ref_plan` + `_v2` | 固定 2（`bid_format_source_outline_v1` 为 1） | 不增长 | 装入整份来源 | `_request_directory_plans` |
-| M 章内材料 | `directory_material` + 附加段 | 1 | 不增长 | 装入整份来源 | `_request_directory_details` |
-| B 要求归属 | `directory_requirement`（原生附加 `_native`） | 原生按预算分包；旧路径约每 600 行 1 次 | 随来源规模线性 | 受预算约束 | `_request_native_requirements` / `requirements()` |
-| C 归属分类 | `directory_classification`（可选 `_native`/`_reviewed_facts`） | 装得下 1 次；装不下 `G≤1 + S` | 随全文或待核案例数 | 完整 C 可能超限留待核 | `_request_joint_classification` |
-| P 长章展开 | `directory_parameter` | 每个 ≥25 行叙述章 1 次 | 随长叙述章数 | 单章 | `_request_directory_details` |
+| A 目录规划 | `directory_plan` / `directory_ref_plan` + `_v2`（新执行默认 `_v2`） | 固定 2 | 不增长 | 全部文档全文；两次均超限时大纲无章节，M、B、C、P、F 均不执行，只记 `outline_directory_plan_failed` | `_request_directory_plans` |
+| M 章内材料 | `directory_material` + 附加段 | 1 | 不增长 | 全部文档全文；超限记 `outline_directory_material_rejected`，其余继续 | `_request_directory_details` |
+| B 要求归属 | 旧路径 `directory_requirement`；原生 `_native` | 旧路径按行数打包（每块约 600 行，整页不拆）；原生按预算分包 | 随来源规模线性 | 旧路径单块超限记 `outline_directory_requirement_rejected`；原生受预算约束 | `requirements()` / `_request_native_requirements` |
+| C 归属分类 | 旧路径 `directory_classification`（可选 `_reviewed_facts`）；原生 `_native` | 旧路径固定 1；原生装得下 1 次，装不下 `G≤1 + S` | 旧路径不增长；原生随待核案例数 | 旧路径全部文档全文，超限整体记 `outline_directory_classification_rejected`；原生仍超限的案例留待核 | `_request_directory_details` / `_request_joint_classification` |
+| P 长章展开 | `directory_parameter` | 每个 ≥25 行叙述章 1 次 | 随长叙述章数 | 单章，超限记 `outline_directory_parameter_rejected` | `_request_directory_details` |
 | F 响应原式 | `directory_response_form` + `_v2`/`_v3` | M 选中的每个逐条响应原式 1 次 | 随选中原式数 | 单原式来源范围 | `_request_directory_details` |
 | 原文选择 | `directory_parameter` / `directory_native_body` | 按规划分包，每包 1 次 | 随目标原文量 | 受预算约束 | `resolve_native_bodies` |
 
-- B/C 原生合同与原文选择由 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT` 互斥切换；新链（`single_requirement_chain_v1`）仅需 `1（格式选择）+ ⌈事项数 / 240⌉（归属）` 次逻辑请求。
+- B/C 原生合同与原文选择由 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT` 互斥切换。
+- 新链（`single_requirement_chain_v1`）的目录规划只发 `bid_format_source_outline_v1` 1 次，不发 M、B、C、P、F，共 `1（格式选择）+ 归属批数` 次逻辑请求；单次输入边界与缺口见[新链格式补位与事项归属](#新链格式补位与事项归属)。
 
 #### F 原式的条款号
 
