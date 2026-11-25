@@ -152,7 +152,7 @@ W1.6 收口后即可出稿并进入 W2 实测。W1.2 和 W1.3 不挡住出稿，
 | 5.2 | CI 必跑 ruff 和 pytest；PostgreSQL 集成测试用临时容器执行，不连共享库 | CI skipped 只剩确实缺夹具的用例 |
 | 5.3 | 重写编辑器字段级协议文档（BUG-252） | 按 `tender_editor.rs` 和迁移逐项核对 |
 | 5.4 | 逐句核对尚未审过的文档：`workbench.md`、`workflow.md`、`deploy/README.md`、runbook 后半部分 | 与代码不符处改文档或记缺陷 |
-| 5.5 | 删除只剩测试在用的 v1 核验代码：`checks/verify.py` 的 `verify_pack`、`verify_all` 和 `evidence/downstream.py`；保留人工修订用的 `check_requirement` | 先记缺陷；删除后全量回归通过 |
+| 5.5 | 已删除仅剩测试在用的 v1 核验代码：`checks/verify.py` 的 `verify_pack`/`verify_payload`、`checks/aggregate.py`（`verify_all`）与 `evidence/downstream.py`；保留人工修订用的 `check_requirement`（BUG-334） | 完成；全量单测回归通过 |
 
 ## 不做的事
 

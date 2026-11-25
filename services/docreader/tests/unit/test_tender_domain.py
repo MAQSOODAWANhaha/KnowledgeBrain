@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from docreader.llm import ModelInfrastructureError, ModelSemanticError
-from docreader.tender.checks import apply_applicability_decisions, verify_all, verify_pack
+from docreader.tender.checks import check_requirement
 from docreader.tender.planning import build_plan, constraint_binding
 from docreader.tender.prompts import get_prompt
 from docreader.tender.requirements import CorrectionValidationError, extract_pack, extract_payload, validate_correction
@@ -52,30 +52,24 @@ def codes(result, key="issues"):
     return {issue["code"] for issue in result[key]}
 
 
-def index(*packs, documents=None):
-    return {"packs": [{"pack_id": value["pack_id"]} for value in packs], "issues": [],
-            "range_count": sum(len(value["body"]) for value in packs),
-            "documents": documents or [{"document_id": "main", "document_version": "1", "role": "main"}]}
+def check_pack_requirements(frozen, reqs):
+    sources = {item["range_id"]: item for item in [*frozen["supporting"], *frozen["body"]]}
+    body_ids = {item["range_id"] for item in frozen["body"]}
+    return [finding for req in reqs for finding in check_requirement(req, sources, body_ids)]
 
 
 @pytest.mark.asyncio
-async def test_complete_extraction_and_separate_full_source_review():
+async def test_complete_extraction_preserves_body_and_supporting_without_duplicating_text():
     support = source("intro", "仅适用于第一标段；报价表金额单位为万元。")
     frozen = pack(supporting=[support])
     req = requirement(conditions=["仅适用于第一标段"], evidence=[
         {"range_id": "r1", "quote": "投标人必须在30天内交付。"},
         {"range_id": "intro", "quote": support["text"]}])
-    model = FixedModel(extract=extraction_response([req]), verify={"reviewed_range_ids": ["r1", "intro"], "findings": []})
+    model = FixedModel(extract=extraction_response([req]))
     extracted = await extract_pack(frozen, model)
-    checked = await verify_pack(frozen, extracted, model)
-    aggregate = verify_all(index(frozen), [extracted], [checked])
     assert not extracted["issues"]
-    assert not checked["findings"]
-    assert not aggregate["blocking"]
-    assert [call[0] for call in model.calls] == ["extract", "verify"]
-    assert model.calls[1][1]["body"] == extract_payload(frozen)["body"]
-    assert model.calls[1][1]["supporting"] == extract_payload(frozen)["supporting"]
-    assert model.calls[1][1]["body"][0]["text"] == frozen["body"][0]["text"]
+    assert not check_pack_requirements(frozen, extracted["requirements"])
+    assert [call[0] for call in model.calls] == ["extract"]
     assert "text" not in extracted["source_ranges"]["r1"]
 
 
@@ -87,15 +81,13 @@ async def test_reviewed_scope_targets_survive_when_all_condition_text_is_in_body
         "scope_binding": {"kind": "manual_review", "status": "bound", "complete_sentence": True,
                           "applies_to_range_ids": ["r1"], "reviewed_target_range_ids": ["r1"]},
     }]
-    model = FixedModel(extract=extraction_response(), verify={"reviewed_range_ids": ["r1"], "findings": []})
+    model = FixedModel(extract=extraction_response())
     extracted = await extract_pack(frozen, model)
-    checked = await verify_pack(frozen, extracted, model)
-    assert not extracted["issues"] and not checked["findings"]
+    assert not extracted["issues"]
     for _, payload in model.calls:
         assert payload["scope_bindings"] == frozen["scope_bindings"]
         assert payload["supporting"] == []
         assert "text" not in payload["scope_bindings"][0]
-    assert checked["reviewed_range_ids"] == ["r1"]
 
 
 @pytest.mark.asyncio
@@ -119,30 +111,25 @@ async def test_blank_row_compression_retains_disposition_and_partial_empty_cells
     response["dispositions"].append({"range_id": "blank", "status": "non_requirement",
         "reason": "Reviewed template fields inherit the stated delivery obligation; no additional row text.",
         "requirement_ids": []})
-    model = FixedModel(extract=response, verify={"reviewed_range_ids": ["blank", "r1"], "findings": []})
+    model = FixedModel(extract=response)
     result = await extract_pack(frozen, model)
-    checked = await verify_pack(frozen, result, model)
     assert result["dispositions"][0] == response["dispositions"][1]
     assert len(model.calls[0][1]["body"]) == 1
     assert model.calls[0][1]["body"][0]["cells"][0] == {"column": 0, "text": ""}
     assert model.calls[0][1]["blank_table_templates"] == [{"table_id": "table-1", "column_count": 2,
         "rows": [{"row_start": 1, "row_end": 2, "range_ids": ["blank"]}]}]
-    assert model.calls[1][1]["blank_table_templates"] == model.calls[0][1]["blank_table_templates"]
-    assert not result["issues"] and not checked["findings"]
+    assert not result["issues"]
 
 
 @pytest.mark.asyncio
-async def test_empty_template_rows_require_model_disposition_and_independent_review():
+async def test_empty_template_rows_require_model_disposition():
     frozen = pack([source("blank", "", empty=True, non_requirement_reason="empty_table_row",
                           table_id="table-1", row_start=1, row_end=2, column_count=2)])
-    model = FixedModel(extract=extraction_response([], []), verify={"reviewed_range_ids": [], "findings": []})
+    model = FixedModel(extract=extraction_response([], []))
     result = await extract_pack(frozen, model)
-    checked = await verify_pack(frozen, result, model)
-    assert len(model.calls) == 2
+    assert len(model.calls) == 1
     assert result["dispositions"][0]["status"] == "unresolved"
     assert "range_disposition_incomplete" in codes(result)
-    assert "source_not_independently_reviewed" in codes(checked, "findings")
-    assert checked["reviewed_range_ids"] == []
 
 
 @pytest.mark.asyncio
@@ -183,7 +170,7 @@ async def test_semantic_failure_is_unresolved_but_infrastructure_failure_propaga
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('task', ['extract', 'verify', 'plan'])
+@pytest.mark.parametrize('task', ['extract', 'plan'])
 async def test_work_unit_exhaustion_is_not_converted_to_a_domain_result(task):
     from docreader.llm.request import ModelWorkUnitExhausted
 
@@ -192,8 +179,6 @@ async def test_work_unit_exhaustion_is_not_converted_to_a_domain_result(task):
     with pytest.raises(ModelWorkUnitExhausted) as raised:
         if task == 'extract':
             await extract_pack(pack(), model)
-        elif task == 'verify':
-            await verify_pack(pack(), extraction_response(), model)
         else:
             await build_plan([requirement()], model)
     assert raised.value is exhausted
@@ -206,25 +191,12 @@ async def test_schema_failure_never_silently_drops_body():
     assert result["dispositions"][0]["status"] == "unresolved"
 
 
-@pytest.mark.asyncio
-async def test_independent_review_detects_omission_from_nonrequirement_range():
-    extracted = await extract_pack(pack(), FixedModel(extract=extraction_response([], [
-        {"range_id": "r1", "status": "non_requirement", "reason": "A purported overview sentence only.", "requirement_ids": []}])))
-    checked = await verify_pack(pack(), extracted, FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": [
-        {"code": "requirement_omitted", "range_id": "r1", "detail": "30天交付 is an obligation.", "blocking": True}]}))
-    assert "requirement_omitted" in codes(checked, "findings")
-    assert verify_all(index(pack()), [extracted], [checked])["blocking"]
-
-
-@pytest.mark.asyncio
-async def test_supporting_range_is_independently_reviewed_and_not_body_only_evidence():
+def test_supporting_range_only_evidence_fails_body_evidence_check():
     frozen = pack(supporting=[source("intro", "投标人必须在30天内交付。")])
-    extracted = extraction_response([requirement(range_id="intro")])
-    checked = await verify_pack(frozen, extracted, FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": []}))
-    assert {"missing_body_evidence", "source_not_independently_reviewed"} <= codes(checked, "findings")
+    findings = check_pack_requirements(frozen, [requirement(range_id="intro")])
+    assert "missing_body_evidence" in {item["code"] for item in findings}
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("change, expected", [
     ({"evidence": [{"range_id": "r1", "quote": "60天"}]}, "evidence_quote_mismatch"),
     ({"numbers": [{"value": "30", "unit": "万元", "quote": "30天"}]}, "number_or_unit_unsupported"),
@@ -232,93 +204,20 @@ async def test_supporting_range_is_independently_reviewed_and_not_body_only_evid
     ({"text": "投标人必须在60天内交付。"}, "requirement_number_unsupported"),
     ({"numbers": []}, "number_not_recorded"),
 ])
-async def test_exact_evidence_and_reverse_numeric_rules(change, expected):
-    checked = await verify_pack(pack(), extraction_response([requirement(**change)]), FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": []}))
-    assert expected in codes(checked, "findings")
+def test_exact_evidence_and_reverse_numeric_rules(change, expected):
+    findings = check_pack_requirements(pack(), [requirement(**change)])
+    assert expected in {item["code"] for item in findings}
 
 
-@pytest.mark.asyncio
-async def test_explicit_score_total_can_be_80_and_mismatch_is_blocking():
+def test_explicit_score_total_can_be_80_and_mismatch_is_blocking():
     text = "技术60分，商务20分，总分80分。"
     req = requirement(text=text, numbers=[{"value": value, "unit": "分", "quote": value + "分"} for value in ("60", "20", "80")], scoring={"total": 80, "components": [60, 20]})
     frozen = pack([source(text=text)])
-    checked = await verify_pack(frozen, extraction_response([req]), FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": []}))
-    assert not checked["findings"]
+    assert not check_pack_requirements(frozen, [req])
     req["scoring"]["components"] = [60, 60]
-    checked = await verify_pack(frozen, extraction_response([req]), FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": []}))
-    assert "explicit_score_total_mismatch" in codes(checked, "findings")
+    assert "explicit_score_total_mismatch" in {item["code"] for item in check_pack_requirements(frozen, [req])}
     req["scoring"] = {"points": 60}
-    checked = await verify_pack(frozen, extraction_response([req]), FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": []}))
-    assert not checked["findings"]  # no synthetic 100-point total
-
-
-@pytest.mark.asyncio
-async def test_partial_pack_failure_preserves_success_and_blocks_aggregate():
-    first, second = pack(), pack([source("r2", "技术要求")], pack_id="p2")
-    extracted = [await extract_pack(first, FixedModel(extract=extraction_response())),
-                 await extract_pack(second, FixedModel(extract=ModelSemanticError("bad JSON")))]
-    checks = [{"pack_id": "p1", "findings": [], "reviewed_range_ids": ["r1"]},
-              {"pack_id": "p2", "findings": [], "reviewed_range_ids": ["r2"]}]
-    result = verify_all(index(first, second), extracted, checks)
-    assert result["counts"]["requirements"] == 1
-    assert "requirements" not in result
-    assert result["blocking"] and result["counts"]["ranges"] == 2
-
-
-@pytest.mark.asyncio
-async def test_pack_identity_and_missing_independent_result_do_not_pass_by_count():
-    extracted = await extract_pack(pack(), FixedModel(extract=extraction_response()))
-    result = verify_all(index(pack(pack_id="other")), [extracted], [])
-    assert {"extraction_pack_count_mismatch", "verification_pack_mismatch"} <= codes(result)
-
-
-async def amendment_case(replaces):
-    first = pack()
-    text = "投标人必须在60天内交付。"
-    second = pack([source("amended", text, "amendment")], pack_id="p2")
-    new_req = requirement("p2:q1", "amended", text, numbers=[{"value": "60", "unit": "天", "quote": "60天"}])
-    extracted = [await extract_pack(first, FixedModel(extract=extraction_response())),
-                 await extract_pack(second, FixedModel(extract=extraction_response([new_req], [
-                     {"range_id": "amended", "status": "requirements", "reason": "明确修改交付期限。", "requirement_ids": ["p2:q1"]}])))]
-    frozen_index = index(first, second, documents=[{"document_id": "main", "document_version": "1", "role": "main"},
-                                                 {"document_id": "amendment", "document_version": "2", "role": "amendment", "replaces": replaces}])
-    checks = [{"pack_id": "p1", "findings": []}, {"pack_id": "p2", "findings": []}]
-    return verify_all(frozen_index, extracted, checks), extracted
-
-
-@pytest.mark.asyncio
-async def test_explicit_amendment_replaces_only_named_range_and_preserves_original_artifact():
-    result, original = await amendment_case({"document_id": "main", "range_id": "r1"})
-    assert not result["blocking"]
-    effective = apply_applicability_decisions([req for item in original for req in item["requirements"]], result["applicability_decisions"])
-    assert effective[0]["applicable"] is False
-    assert "amendment" in effective[0]["applicability_basis"]
-    assert effective[1]["applicable"] is True
-    assert result["applicability_decisions"]["p1:q1"]["amendment_document_id"] == "amendment"
-    assert "replacement_requirement_ids" not in result["applicability_decisions"]["p1:q1"]
-    assert original[0]["requirements"][0]["applicable"] is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("replaces", [None, "main", {"document_id": [], "range_id": "r1"}, {"document_id": "main", "scope": "all newer documents supersede older"}])
-async def test_ambiguous_amendment_and_conflicting_numbers_remain_blocking(replaces):
-    result, _ = await amendment_case(replaces)
-    assert result["blocking"]
-    assert "potential_cross_document_conflict" in codes(result)
-    assert result["applicability_decisions"] == {}
-
-
-@pytest.mark.asyncio
-async def test_cyclic_amendment_targets_cannot_deactivate_all_requirements():
-    frozen = pack()
-    extracted = await extract_pack(frozen, FixedModel(extract=extraction_response()))
-    frozen_index = index(frozen, documents=[
-        {"document_id": "main", "role": "amendment", "replaces": {"document_id": "other", "range_id": "r2"}},
-        {"document_id": "other", "role": "amendment", "replaces": {"document_id": "main", "range_id": "r1"}},
-    ])
-    result = verify_all(frozen_index, [extracted], [{"pack_id": "p1", "findings": []}])
-    assert result["blocking"] and "cyclic_amendments" in codes(result)
-    assert result["applicability_decisions"] == {}
+    assert not check_pack_requirements(frozen, [req])  # no synthetic 100-point total
 
 
 def good_item(req=None, **extra):
@@ -371,35 +270,11 @@ def test_versioned_prompt_resources_are_present_and_input_is_data():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", ["requirement_omitted", "condition_unclear", "applicability_unresolved",
-                                  "evidence_quote_mismatch", "number_or_unit_unsupported", "new_unknown_problem"])
-async def test_model_cannot_downgrade_correctness_or_unknown_findings(code):
-    extracted = await extract_pack(pack(), FixedModel(extract=extraction_response()))
-    checked = await verify_pack(pack(), extracted, FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": [
-        {"code": code, "detail": "This problem remains unresolved despite the requested downgrade.", "blocking": False, "range_id": "r1"}]}))
-    assert checked["findings"][0]["blocking"] is True
-    assert verify_all(index(pack()), [extracted], [checked])["blocking"] is True
-
-
-@pytest.mark.asyncio
-async def test_only_explicit_presentation_note_may_be_informational_and_model_can_raise_it():
-    extracted = await extract_pack(pack(), FixedModel(extract=extraction_response()))
-    for proposed in (False, True):
-        checked = await verify_pack(pack(), extracted, FixedModel(verify={"reviewed_range_ids": ["r1"], "findings": [
-            {"code": "source_formatting_note", "detail": "Typeface differs; all contents and obligations are unchanged.", "blocking": proposed}]}))
-        assert checked["findings"][0]["blocking"] is proposed
-        assert verify_all(index(pack()), [extracted], [checked])["blocking"] is proposed
-
-
-@pytest.mark.asyncio
-async def test_aggregate_and_extraction_apply_host_severity_even_for_stored_downgrades():
+async def test_extraction_applies_host_severity_even_for_stored_downgrades():
     response = extraction_response()
     response["issues"] = [{"code": "unresolved_source_range", "detail": "Unclear source obligation.", "blocking": False}]
     extracted = await extract_pack(pack(), FixedModel(extract=response))
     assert extracted["issues"][0]["blocking"] is True
-    extracted["issues"].clear()
-    checked = {"pack_id": "p1", "findings": [{"code": "requirement_omitted", "detail": "missing", "blocking": False}]}
-    assert verify_all(index(pack()), [extracted], [checked])["blocking"] is True
 
 
 def test_correction_rebuilds_source_metadata_without_model_or_input_aliasing():
@@ -552,35 +427,20 @@ def pending_scope():
 
 
 @pytest.mark.asyncio
-async def test_pending_scope_metadata_reaches_both_calls_without_becoming_read_evidence():
+async def test_pending_scope_metadata_reaches_extract_without_becoming_read_evidence():
     frozen = {**pack(), "pending_scope_context": pending_scope()}
-    model = FixedModel(extract=extraction_response(), verify={"reviewed_range_ids": ["r1"], "findings": []})
+    model = FixedModel(extract=extraction_response())
     extracted = await extract_pack(frozen, model)
-    checked = await verify_pack(frozen, extracted, model)
-    assert len(model.calls) == 2  # metadata forwarding never adds a model call
+    assert len(model.calls) == 1  # metadata forwarding never adds a model call
     for _, payload in model.calls:
         assert payload["pending_scope_context"][0]["scope_binding"] == frozen["pending_scope_context"][0]["scope_binding"]
         assert not {"text", "cells", "images", "locator", "physical_path", "unit_id", "document_version"} & payload["pending_scope_context"][0].keys()
         assert payload["supporting"] == []
-    assert extracted["pending_scope_context"] == checked["pending_scope_context"] == frozen["pending_scope_context"]
+    assert extracted["pending_scope_context"] == frozen["pending_scope_context"]
     assert extracted["pending_scope_context"] is not frozen["pending_scope_context"]
     assert set(extracted["source_ranges"]) == {"r1"}
     assert [item["range_id"] for item in extracted["dispositions"]] == ["r1"]
     assert "scope_context_pending" in codes(extracted)
-    assert "scope_context_pending" in codes(checked, "findings")
-    result = verify_all(index(frozen), [extracted], [checked])
-    assert result["blocking"] and result["counts"]["ranges"] == 1
-
-
-@pytest.mark.asyncio
-async def test_pending_scope_cannot_be_downgraded_or_counted_as_independently_reviewed():
-    frozen = {**pack(), "pending_scope_context": pending_scope()}
-    extracted = await extract_pack(frozen, FixedModel(extract=extraction_response()))
-    checked = await verify_pack(frozen, extracted, FixedModel(verify={
-        "reviewed_range_ids": ["r1", "scope-fragment-1"], "findings": [{
-            "code": "scope_context_pending", "detail": "Model attempts to claim resolved.", "blocking": False}]}))
-    assert {"scope_context_pending", "unknown_review_range"} <= codes(checked, "findings")
-    assert all(finding["blocking"] for finding in checked["findings"])
 
 
 def test_correction_preserves_host_pending_metadata_and_cannot_clear_its_issue():
@@ -592,20 +452,6 @@ def test_correction_preserves_host_pending_metadata_and_cannot_clear_its_issue()
     payload = {**extraction_response(), "pending_scope_context": []}
     with pytest.raises(CorrectionValidationError, match="correction_schema_invalid"):
         validate_correction(frozen, payload)
-
-
-@pytest.mark.asyncio
-async def test_verification_keeps_original_requirement_reference_and_digest_without_echo():
-    extracted = await extract_pack(pack(), FixedModel(extract=extraction_response()))
-    ref = {"sha256": "a" * 64, "relative_path": "aa/requirements-index"}
-    result = verify_all(index(pack()), [extracted], [{"pack_id": "p1", "findings": []}], requirements_ref=ref)
-    assert result["requirements_ref"] == ref
-    assert "requirements" not in result and "upstream_requirements" not in result
-    assert len(result["requirements_digest"]) == 64
-    changed = copy.deepcopy(extracted)
-    changed["requirements"][0]["evidence"][0]["quote"] += "原件证据修订"
-    updated = verify_all(index(pack()), [changed], [{"pack_id": "p1", "findings": []}])
-    assert result["requirements_digest"] != updated["requirements_digest"]
 
 
 @pytest.mark.asyncio
@@ -631,17 +477,11 @@ async def test_reviewed_image_disposition_is_deterministic_and_request_probe_mat
                    non_requirement_reason="reviewed_decorative_image",
                    image_disposition={"status": "reviewed", "classification": "decorative", "sha256": "a" * 64})
     frozen = pack([image, source()])
-    model = FixedModel(extract=extraction_response(), verify={"reviewed_range_ids": ["r1"], "findings": []})
+    model = FixedModel(extract=extraction_response())
     result = await extract_pack(frozen, model)
-    checked = await verify_pack(frozen, result, model)
     assert model.calls[0][1] == extract_payload(frozen)
     assert result["dispositions"][0]["status"] == "non_requirement"
     assert result["dispositions"][0]["reason"] == "reviewed_decorative_image"
-    assert checked["host_reviewed_range_ids"] == ["image"]
-    assert checked["reviewed_range_ids"] == ["r1"]
-    assert not checked["findings"]
-    assert model.calls[1][1]["body"] == model.calls[0][1]["body"]
-    assert [item["range_id"] for item in model.calls[1][1]["dispositions"]] == ["r1"]
     image["image_disposition"]["status"] = "unreviewed"
     assert extract_payload(frozen)["body"][0]["range_id"] == "image"
 
@@ -893,12 +733,6 @@ def test_pending_scope_locator_keeps_identity_but_drops_large_cell_reference_lis
     assert pending["parent_section_id"] is None
     assert pending["physical_locator"] == {"page_ordinal": 0}
     assert not {"cell_refs", "cells", "rendered_spans"} & pending["locator"].keys()
-
-
-def test_applicability_decision_identity_must_match_effective_requirement():
-    with pytest.raises(ValueError, match="applicability_decision_identity_mismatch"):
-        apply_applicability_decisions([requirement()], {"p1:q1": {
-            "requirement_id": "different", "applicable": False, "applicability_basis": "明确来源修订。"}})
 
 
 @pytest.mark.parametrize("text", [
