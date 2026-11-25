@@ -118,12 +118,13 @@ def test_missing_enterprise_deposit_and_signatory_stay_blank(tmp_path):
         ])])
     word = document(artifacts, result)
     cells = [cell.text for table in word.tables for row in table.rows for cell in row.cells]
+    pending = next(gap for gap in result["gaps"] if gap["code"] == "export_enterprise_fact_pending")
+    print(f"deposit_cell={cells[1]!r} signatory_cell={cells[3]!r} pending={pending['detail']!r}")
     assert cells[1] in {"", "待补"}
     assert cells[3] in {"", "待补"}
     rendered = "\n".join(cells + [paragraph.text for paragraph in word.paragraphs])
     assert "128000" not in rendered and "李四" not in rendered
-    assert any(gap["code"] == "export_enterprise_fact_pending" and "待补" in gap["detail"]
-               for gap in result["gaps"])
+    assert "待补" in pending["detail"]
 
 
 def test_docx_keeps_nested_order_and_unfilled_required_positions(tmp_path):
