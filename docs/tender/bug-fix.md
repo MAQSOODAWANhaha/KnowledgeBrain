@@ -44,14 +44,6 @@
 - 解决方案：宿主把漏掉的原子补成 `unresolved`，已核定正文补成 `already_carried`，部分核定补成 `reference`。已标为要求但没有归属的原子按来源组件记成待核案例。需要另一次 C 判断才能定章节的赋值改为 `unassigned` 并留下案例。联合 C 和响应表单同样把漏掉的案例或原子补成待核。R 选择里漏掉的单元或岛补成 `unresolved`；声称已选中但没盖住冻结原字的，清空该正文并记 `native_body_anchor_uncovered`，不再整包拒收。重复引用、未知编号、未使用的依据组、上下文环和正文与上下文重叠仍拒收。
 - 验证：原生来源、联合分类、响应表单和 R 选择相关单测通过。真实 111 包尚未重放。
 
-## BUG-252：编辑器文档描述的是已删除的 v2 后端
-
-- 状态 / 发现阶段：错误文档已删除，按代码重写待做；文档整理。
-- 现象与影响：`docs/bidding/docx-editor.md` 和 `docx-rounds.md` 写的是 `bid_docx_current`、`bid_docx_version_artifacts` 表，`/api/v2/submission-workspaces/{id}/docx` 路由，`InitialDocx` 校验和「API role 所属 SQL 函数」。这些在当前迁移和 Rust 代码里都不存在；现在是 `/api/v3/tender-projects`、`tender_editor_sessions`、`tender_draft_versions/state/saves/recoveries` 和 `crates/api/src/tender_editor.rs`。按旧文档改代码会改错。
-- 根因：v2 后端删除、v3 重建时没有同步改写编辑器协议文档。
-- 解决方案：删除两份错误文档，`docs/bidding/onlyoffice.md` 保留保存、版本和验收原则并指向现有代码。之后按 `tender_editor.rs`、`tender_render.rs` 和迁移重写字段级协议，写进 `onlyoffice.md`。
-- 验证：grep 确认 `bid_docx_*`、`/api/v2/submission-workspaces`、`InitialDocx` 在 `crates/` 和 `migrations/` 中零命中。协议文档尚未重写。
-
 ## BUG-254：编制大纲重新抽取全部要求，与分析台账重复
 
 - 状态：新的自动大纲已默认走 [W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)。点名旧目录合同或已保存的旧执行仍逐原子重抽。同一真实文件的调用、输入、待核和 Word 覆盖尚未对照。设计评审。

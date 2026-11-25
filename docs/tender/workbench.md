@@ -31,7 +31,7 @@
 1. 修改后显示“有未保存修改”；点击保存显示“保存中”，服务端确认会话、父版本、结果版本与文件身份一致后才显示“已保存”；网络中断/回执未知显示“保存结果待确认”并重试同一次请求；明确失败保留现场与修改标记。
 2. 下载使用明确已保存版本（有未保存修改时明确提示不包含），不依赖资料齐备或问题关闭。
 3. 当前交付「整稿加人工编辑」：整稿重新生成另存新稿，不合并旧稿，不覆盖用户已保存版本；编辑后 AI 候选入稿已推迟（见 [PRODUCT.md](../../PRODUCT.md)）；不把编译中间结构当成第二正文主源。
-4. 接入实现：前端 [DocxEditor.tsx](../../web/src/bid/authoring/DocxEditor.tsx) 与 [docxSession.ts](../../web/src/bid/authoring/docxSession.ts) 对接 Rust `/api/v3/tender-projects` 权限、回调与版本保护（`crates/api/src/tender_editor.rs`、`tender_render.rs`，表 `tender_editor_sessions`、`tender_draft_*`，字段级协议待补齐见 [BUG-252](bug-fix.md)）；Python [document_execution.py](../../services/docreader/tender/document_execution.py) 与 [authoring_export.py](../../services/docreader/tender/authoring_export.py) 经 `TenderBridge` 提供编制产物。页面查看、切换、保存和下载新增模型调用为 0，轮询刷新不得重复创建付费任务。
+4. 接入实现：前端 [DocxEditor.tsx](../../web/src/bid/authoring/DocxEditor.tsx) 与 [docxSession.ts](../../web/src/bid/authoring/docxSession.ts) 对接 Rust `/api/v3/tender-projects` 权限、回调与版本保护（`crates/api/src/tender_editor.rs`、`tender_render.rs`，表 `tender_editor_sessions`、`tender_draft_*`，字段级协议见 [字段字典 · Word 编辑器与 PDF 出件协议（v3）](field-dictionary.md#word-编辑器与-pdf-出件协议v3)）；Python [document_execution.py](../../services/docreader/tender/document_execution.py) 与 [authoring_export.py](../../services/docreader/tender/authoring_export.py) 经 `TenderBridge` 提供编制产物。页面查看、切换、保存和下载新增模型调用为 0，轮询刷新不得重复创建付费任务。
 
 ## 来源格式进 Word
 

@@ -731,3 +731,56 @@ generated/placeholder继续只表示实际内容是否存在，核验完成与�
 
 调用次数、预算分批、恢复额度与执行身份边界统一见 [业务工作流 · 编制实际模型调用](workflow.md#编制实际模型调用) 与 [失败执行的显式恢复](#失败执行的显式恢复)；业务验收口径见 [验收](acceptance.md)，实际运行结果与预算测量只维护在 [交接](README.md#当前状态交接)。
 
+### Word 编辑器与 PDF 出件协议（v3）
+
+Rust API（`crates/api/src/tender_editor.rs`、`crates/api/src/tender_render.rs`、`crates/api/src/tender_state.rs`）与 SQL 迁移（`migrations/20261028000003_tender.sql`）共同定义 v3 Word 编辑、保存回调与同版 PDF 出件的字段级合同。前端交互与部署约束见 [工作台与 Word 编辑](workbench.md)。
+
+#### 持久表结构
+
+| 表 | 主键 / 唯一约束 | 关键字段与不变式 |
+| --- | --- | --- |
+| `tender_draft_versions` | `id`；`UNIQUE(project_id, revision)`；同 `(project_id, execution_id)` 仅一个 `generated` | `project_id`、`execution_id`、`round_id`、`revision`（>0）、`parent_version_id`、`source`（`generated`/`manual`/`recovered`）、`object_ref`（`objects/<content_sha256>`）、`content_sha256`、`byte_length`（>0）、`media_type`（DOCX MIME）、`object_state`（`available`）、`outline`（jsonb 对象）、`created_by_user_id`、`created_at` |
+| `tender_editor_sessions` | `id`（对外即 `editor_key`/`key`）；`UNIQUE(project_id, request_key)` | `project_id`、`base_version_id`、`owner_user_id`、`mode`（`view`/`edit`）、`request_key`、`request_sha256`、`created_at`、`closed_at` |
+| `tender_draft_state` | `project_id` | `version_id`（当前选中版本）、`session_id`（活动编辑会话）、`pending_save_id`（待确认保存，延迟外键）、`editor_error`（`{"kind":"command"|"callback","code":<i64>}`） |
+| `tender_draft_saves` | `id`（对外即 `save_id`）；`UNIQUE(project_id, request_key)` | `project_id`、`session_id`、`parent_version_id`、`parent_sha256`、`request_key`、`request_sha256`、`state`（`pending`/`saved`/`failed`）、`result_version_id`（与 `state='saved'` 互为充要）、`callback_sha256`、`error_code`、`created_at` |
+| `tender_draft_recoveries` | `session_id` | `callback_sha256`、`version_id`（记录 `status=2` 最终关闭回调产出的 `recovered` 版本，防重放内容漂移） |
+
+#### 公开版本对象
+
+`GET .../docx/current`、`POST .../docx/current`、`GET .../docx/versions/{version}` 及工作台版本列表返回同一版本 JSON 结构：
+
+`id`、`version_id`（同 `id`）、`sha256`、`docx_sha256`（同 `content_sha256`）、`project_id`、`workspace_id`（同 `project_id`）、`round_id`、`execution_id`、`revision`、`source`、`created_at`、`outline`、`byte_length`、`object_ref`、`editor`（`{key, base_version_id, pending_save_id, save_error}`；仅在当前选中版本等于该版本时返回活动 `key`、`pending_save_id` 与 `save_error`）。
+
+#### HTTP 路由、请求/响应字段与错误码
+
+所有 `/api/v3/tender-projects/{project}/...` 用户路由均要求登录且校验项目创建人归属；所有写操作请求体启用 `deny_unknown_fields`。
+
+| 路由 | 必需头 / 请求体 | 响应与行为 | 关键错误码 |
+| --- | --- | --- | --- |
+| `GET /api/v3/tender-projects/{project}/docx/current` | — | 当前选中版本对象或 `null` | — |
+| `POST /api/v3/tender-projects/{project}/docx/current` | `{version_id, docx_sha256}` | 项目须为 `open` 且无活动 `session_id`/`pending_save_id`；切换 `tender_draft_state.version_id` 并清空 `editor_error`，返回版本对象 | `409 DOCX_VERSION_CONFLICT` |
+| `GET /api/v3/tender-projects/{project}/docx/versions/{version}` | — | 指定版本对象 | `404` |
+| `GET /api/v3/tender-projects/{project}/docx/versions/{version}/download` | — | DOCX 字节流（`cache-control: private, no-store`、`x-content-type-options: nosniff`），读出后校验 `docx_sha256` 与 `byte_length` | `404`、`503 ONLYOFFICE_UNAVAILABLE` |
+| `GET /api/v3/tender-projects/{project}/docx/versions/{version}/review` | — | 经 `TenderBridge` 返回 `docx.review.status` | `404` |
+| `POST /api/v3/tender-projects/{project}/docx/versions/{version}/review` | `Idempotency-Key`（1–200 字节）；`{docx_sha256, reason}`（`reason` 非空且 ≤4000 字符） | 校验摘要后经 `docx.review.start` 启动保存稿复核，返回 `202 Accepted` | `409 DOCX_VERSION_CONFLICT`、`422` |
+| `POST /api/v3/tender-projects/{project}/docx/editor` | `Idempotency-Key`；`{version_id, docx_sha256, mode: "view"|"edit", language?}`（`language` ≤40 字节 ASCII 字母数字/`-`） | `edit` 要求项目 `open`、目标为当前选中版本且无活动 `session_id`/`pending_save_id`；同 `request_key` 且 `request_sha256` 一致且未关闭可幂等复用。返回 `{config, api_script_url, session: {editor_key, round_id, version_id}}` | `409 PROJECT_ENDED`、`409 DOCX_VERSION_CONFLICT`、`503 ONLYOFFICE_UNAVAILABLE` |
+| `POST /api/v3/tender-projects/{project}/docx/editor/save` | `Idempotency-Key`；`{editor_key, expected: {version_id, docx_sha256}}` | 校验基线一致且无其他待保存，写 `tender_draft_saves(pending)` 并向 `KB_ONLYOFFICE_COMMAND_ORIGIN/coauthoring/CommandService.ashx` 发 HS256 签名 `{c:"forcesave", key, userdata: save_id}`。返回 `{save_id, pending, dispatch}` | `409 DOCX_VERSION_CONFLICT`、`503 ONLYOFFICE_COMMAND_UNCERTAIN`、`503 ONLYOFFICE_COMMAND_REJECTED` |
+| `GET /api/v3/tender-projects/{project}/docx/editor/{key}/saves/{save}` | — | `state='saved'` 时返回 `{save_id, editor_key, parent_version_id, round_id, version_id, docx_sha256, revision}`，否则 `null` | — |
+| `POST /api/v3/tender-projects/{project}/docx/editor/{key}/close` | — | 无 `pending_save_id` 时清空 `tender_draft_state.session_id`/`editor_error` 并写 `closed_at`，返回 `{closed: true}` | `409 DOCX_VERSION_CONFLICT` |
+| `GET /api/v3/tender-projects/{project}/docx/editor/{key}/source?token=<jwt>` | 能力 JWT（`aud="tender-word-source"`） | 实时核验 `tender_editor_sessions.closed_at IS NULL` 与项目归属后返回 `base_version_id` DOCX 字节 | `401`、`403` |
+| `POST /api/v3/tender-projects/{project}/docx/editor/{key}/callback?token=<jwt>` | 能力 JWT（`aud="tender-word-callback"` 且 `mode="edit"`）+ ONLYOFFICE JWT（`body.token` 或 `Authorization: Bearer`） | 成功返 `{"error":0}`，失败返 `{"error":1,"code":...}`；语义见下节 | `401`、`403`、`409`、`422`、`503` |
+| `POST /api/v3/tender-projects/{project}/docx/versions/{version}/pdf` | `{docx_sha256}` | 校验版本、摘要与体积上限 `min(max_file_bytes, 50 MiB)`，4 并发槽位与 `min(KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS, 180s)` 限时，经一次性内部取源通道 `/api/internal/tender-saved-pdf/{project}/{version}/{nonce}/source?token=<jwt>` 调 ONLYOFFICE `converter` 返回 `application/pdf` 及 `Content-Disposition: attachment; filename="tender-v<revision>.pdf"`、`X-KB-Render-Source-Version`、`X-KB-Render-Source-Sha256`、`X-KB-Render-Pdf-Sha256` | `409 DOCX_VERSION_CONFLICT`、`413 SAVED_PDF_FILE_TOO_LARGE`、`503 SAVED_PDF_UNAVAILABLE` |
+| `POST /api/internal/tender-render/{execution}` | Worker Bearer JWT（`GRPC_AUTH_TOKEN`，`purpose="tender_docx_render_v1"`，含 `execution_id`/`docx_sha256`/`epoch`/`exp`），请求体为 DOCX 字节 | 供编制版式核对使用的内部转换入口，配 `/api/internal/tender-render/{execution}/{nonce}/source?token=<jwt>`（`aud="tender-docx-render-source"`），返回 `application/pdf` 及 `X-KB-Render-Engine: onlyoffice-converter-v1`、`X-KB-Render-Service-Sha256`、`X-KB-Render-Source-Sha256`、`X-KB-Render-Pdf-Sha256` | `401`、`403`、`422`、`503` |
+
+#### 签名、能力令牌与回调状态机
+
+- **环境变量**：`KB_ONLYOFFICE_SERVER_ORIGIN`、`KB_ONLYOFFICE_COMMAND_ORIGIN`、`KB_ONLYOFFICE_API_ORIGIN`、`KB_ONLYOFFICE_JWT_SECRET`、`KB_ONLYOFFICE_CAPABILITY_SECRET`、`KB_ONLYOFFICE_TOKEN_TTL_SECONDS`（默认 `1200`）、`KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS`（默认 `120`）。
+- **配置签名**：`config` 使用 `KB_ONLYOFFICE_JWT_SECRET`（HS256）签发，带 `exp = now + TTL`；`view` 模式下 `document.permissions` 的 `edit`/`review`/`fillForms`/`comment` 均为 `false` 且省略 `callbackUrl`，`download` 为 `true`；合法浏览器 `Origin`/`Referer` 会附加导航插件 `onlyoffice-navigation/config.json`。
+- **会话能力 JWT**：使用 `KB_ONLYOFFICE_CAPABILITY_SECRET`（HS256）签发 `{aud, project, key, version, owner, mode}`，不依赖 `exp` 过期，每次取源与回调均由数据库 `closed_at IS NULL` 与项目创建人实时校验撤销。
+- **回调验证与状态处理**：校验能力 JWT 与 ONLYOFFICE 服务 JWT（去除 `iat`/`exp` 后须与回调业务体逐字段一致，且 `body.key == key`）；回调下载地址须同源于 `KB_ONLYOFFICE_COMMAND_ORIGIN` 或 `KB_ONLYOFFICE_SERVER_ORIGIN`，拉取时统一改写走 `KB_ONLYOFFICE_COMMAND_ORIGIN` 且禁重定向、限 `max_file_bytes`：
+  - `status=1`（编辑中）：仅校验会话有效；
+  - `status=4`（无修改关闭）：无 `pending_save_id` 时释放 `session_id` 并写 `closed_at`；
+  - `status=2`（关闭定稿）：按 `callback_sha256` 幂等，经 `docx.outline` 重算目录写入 `source='recovered'` 版本与 `tender_draft_recoveries`，将未关联的 `pending` 保存标 `failed(error_code=2)`，释放会话但**不替换**用户当前选中版本；
+  - `status=6` 且 `forcesavetype=0`（显式关联保存）：按 `userdata=save_id` 与 `callback_sha256` 校验幂等，核对 `tender_draft_state` 的父版本、摘要、会话与 `pending_save_id` 一致后下载文件并重算目录，原子写入 `source='manual'` 新版本、推进 `tender_draft_state.version_id`、清空 `pending_save_id`/`editor_error` 并置 `tender_draft_saves.state='saved'`；
+  - `status=7` 且 `forcesavetype=0`（保存失败）：置 `state='failed'`、`error_code=7` 与 `editor_error={"kind":"callback","code":7}`，清空 `pending_save_id`；其余状态或非 `forcesavetype=0` 拒绝。
+
