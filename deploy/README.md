@@ -2,7 +2,7 @@
 
 默认招标栈：API、Worker、Retention、DocReader、Python招标worker/dispatcher、PostgreSQL、Redis、MinIO。
 Neo4j（`knowledge` profile）与 OnlyOffice（`editing` profile）不随招标栈自动启动。
-原图复核使用 Chat；OCR 可继承已确认支持图像的 Chat，或显式指定独立 VLM。
+原图复核使用 Chat；Rust 侧 OCR 可继承已确认支持图像的 Chat（`KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES`）或显式指定独立 VLM，Python 招标图片处理要求独立配置 `KNOWLEDGEBRAIN_VLM_*`。
 
 默认 Compose 项目名为 `kb`，容器统一命名为 `kb_<服务名>`，例如 `kb_api`、`kb_postgres`。
 项目的网络和数据卷也使用 `kb` 命名空间。Python 招标工作流随 `runtime` 启用，也可通过
@@ -112,7 +112,7 @@ checkpoint，最后启动worker/dispatcher。
 复用descriptor中的DocReader镜像，不扩大镜像协议。启动保持 `--no-deps`，依次确认
 数据依赖、migrator退出0、Python初始化退出0、DocReader及两Python角色健康，最后启动
 API、Rust worker及retention；Python角色command严格校验，不注入Rust的BIN参数。
-合同及隔离探针验证不代表正式发布验收，本轮没有执行生产发布。
+合同及隔离探针验证不代表正式发布验收。
 
 ```json
 {
@@ -137,7 +137,7 @@ API、Rust worker及retention；Python角色command严格校验，不注入Rust�
 cargo build --locked --release -p platform --bin knowledgebrain-release
 ```
 
-入口只接受显式 descriptor、env file、Compose project；也可用 `KB_RELEASE_TOOL` 指向已构建的宿主 binary。以下是验收完成后的唯一发布命令：
+入口只接受显式 descriptor、env file、Compose project。以下是验收完成后的唯一发布命令：
 
 ```bash
 cp deploy/.env.example deploy/.env
@@ -219,7 +219,7 @@ OnlyOffice 的浏览器 origin。
 
 ## 健康与验收
 
-以下列出已有的健康接口和验证入口，不代表本轮重跑或整体运行验收。
+以下列出已有的健康接口和验证入口，不代表实际运行验收。
 
 `schema-contract` 验证全新 DDL 与重复初始化行为，旧 catalog/receipt 漂移测试已删除。对象清理验收区分交接、实际消费和最终回收；不得削弱引用保护、幂等和失败恢复断言。
 

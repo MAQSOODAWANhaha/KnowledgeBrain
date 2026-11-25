@@ -35,7 +35,7 @@
 
 ## 来源格式进 Word
 
-PDF、DOCX、Excel 冻结为同一批来源对象，格式定义只在来源存一份；Word 还原来源已记录格式，不按原 PDF 逐页排版。模型只接收表格明文 `grid.rows`、非 1×1 `merged_cells`、阅读文本与身份并只回引用和应答；列宽、字体、页边距、页坐标及 `paragraph_breaks` 只留来源，由 `authoring_export.py` 回查：
+PDF、DOCX、Excel 冻结为同一批来源对象，格式定义只在来源存一份；Word 还原来源已记录格式，不按原 PDF 逐页排版。模型只接收表格明文 `grid.rows`、非 1×1 `merged_cells`、阅读文本与身份并只回引用和应答；列宽、字体、页边距、页坐标及 `paragraph_breaks` 只留来源，由 `services/docreader/tender/authoring_export.py` 回查：
 
 | 来源里的格式 | Word |
 | --- | --- |
@@ -56,7 +56,7 @@ V3 出件页每个已保存版本可独立下载 DOCX 或 PDF。PDF 使用 `POST
 
 ## ONLYOFFICE 部署与验证
 
-浏览器经 `SERVER_ORIGIN` 加载 DocsAPI；API 经 `COMMAND_ORIGIN` 调 CommandService；文件和回调经 `API_ORIGIN` 回传 API；密钥不放前端，不默认依赖 Developer 版专属 Automation API。健康接口和示例页不等于验收，必须实测：
+浏览器经 `KB_ONLYOFFICE_SERVER_ORIGIN` 加载 DocsAPI；API 经 `KB_ONLYOFFICE_COMMAND_ORIGIN` 调 CommandService；文件和回调经 `KB_ONLYOFFICE_API_ORIGIN` 回传 API；密钥不放前端，不默认依赖 Developer 版专属 Automation API。健康接口和示例页不等于验收，必须实测：
 
 1. 真实 DOCX 打开、编辑、forcesave、回调落库、关闭重开和下载。
 2. 图片、表格、标题、页眉页脚和样式在普通编辑保存后保留。

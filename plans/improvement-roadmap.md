@@ -151,7 +151,7 @@ W1.6 收口后即可出稿并进入 W2 实测。W1.2 和 W1.3 不挡住出稿，
 | 5.1 | pyright 存量错误清理：基线已存（`services/docreader/pyright-baseline.json`，1921 个），CI 已用 `services/docreader/scripts/pyright_baseline.py` 拦新增、ruff 已进 CI；按模块从 `llm/` 和 `tender/` 开始清理并 `--update` 下调基线 | 基线与拦截已完成；存量清理待推进 |
 | 5.2 | CI 必跑 ruff 和 pytest；PostgreSQL 集成测试用临时容器执行，不连共享库 | CI skipped 只剩确实缺夹具的用例 |
 | 5.3 | 已按 `tender_editor.rs`、`tender_render.rs`、`tender_state.rs` 与 `20261028000003_tender.sql` 重写 v3 编辑器与 PDF 出件字段级协议文档，写入 [字段字典](../docs/tender/field-dictionary.md#word-编辑器与-pdf-出件协议v3) 并关闭 BUG-252 | 完成；`ci_check_docs` 与源码逐项核对通过 |
-| 5.4 | 逐句核对尚未审过的文档：`workbench.md`、`workflow.md`、`deploy/README.md`、runbook 后半部分 | 与代码不符处改文档或记缺陷 |
+| 5.4 | 已逐句核对 `workbench.md`、`workflow.md`、`deploy/README.md` 与 `runbook.md` 后半部分，修正环境变量名（`KB_ONLYOFFICE_*`、移除无消费者的 `KB_RELEASE_TOOL`）、VLM 口径区分、失效路径/锚点与过期历史措辞 | 完成；`ci_check_docs` 与代码逐项核对通过 |
 | 5.5 | 已删除仅剩测试在用的 v1 核验代码：`checks/verify.py` 的 `verify_pack`/`verify_payload`、`checks/aggregate.py`（`verify_all`）与 `evidence/downstream.py`；保留人工修订用的 `check_requirement`（BUG-334） | 完成；全量单测回归通过 |
 
 ## 不做的事

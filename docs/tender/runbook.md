@@ -166,14 +166,14 @@ uv run --frozen python -m docreader.integrations.cli review-scope <run_id> scope
 correct 拒绝过期基线和 cancelled run，已冻结来源保持不变。旧确认立即失效；新修订通过
 独立验证后再次等待确认。相同 request key/相同内容幂等；不能以 unchanged manifest
 调用 revise 伪造来源变更。非秘密模型/提示配置恢复时必须与固定快照一致，密钥轮换允许。
-模型并发也属于固定执行快照；默认值从4改为2后，已有修订不会被静默改写。
-新版`uncertain`按工作单元统一重试，可能重复计费；修改并发不能重置额度。
+模型并发默认为 2，属于固定执行快照，已有修订不会被静默改写。
+`uncertain` 按工作单元传输额度统一重试，可能重复计费；修改并发不能重置额度。
 
 ## 同镜像不同角色
 
 以下为已有 PostgreSQL/Redis 且主迁移已完成时的 Python 角色更新入口；须保留当前安装实际
-使用的私有网络 overlay，并先核对[交接中的网络与发送围栏](README.md#当前状态交接)，不因更新镜像而
-重发旧冻结协议的uncertain请求；新版恢复规则只用于新运行。构建只选择 Python target，
+使用的私有网络 overlay，并先核对[部署说明](../../deploy/README.md)与[当前发送边界](workflow.md#当前发送边界)，不因更新镜像而
+重发旧冻结协议的 `uncertain` 请求；现有恢复规则只用于新运行。构建只选择 Python target，
 启动使用 `--no-deps`，不重建或重启
 Rust、数据库和原 DocReader 服务。当前 overlay 路径如下，换安装环境时须对应核实。
 
@@ -228,7 +228,7 @@ uv build --wheel
 
 接受测试会启动并 SIGKILL 自己的 Dramatiq 子进程，不碰现有 Rust worker。数据库账号需有
 测试 schema 创建权限。未配置真实服务时 integration 测试会显式 skip；skip 不能当通过。
-新 `.github/workflows/python-tender.yml` 显式启动 PostgreSQL/Redis 服务运行这些测试。
+`.github/workflows/python-tender.yml` 与 `.github/workflows/ci.yml`（`python` job）均会显式启动 PostgreSQL/Redis 服务运行这些测试。
 
 当前五节点确定性模型在 `tests/acceptance/fixture_analysis_model.py`，只用于测试，没有生产 mock 开关。
 它不发外部请求、不编造 paid usage。真实 LLM 验收需原文件、明确上下文容量，以及付费前确认。

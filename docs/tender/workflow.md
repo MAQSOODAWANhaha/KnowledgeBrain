@@ -135,7 +135,7 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 | W 写作 | `authoring_write` | 每个有允许依据的任务 1 次（大任务按子片拆）；全人工/无依据不写 |
 | 正文复核 | `authoring_review` | 按预算分批，每批 1 次（含“有候选却判空”语义空稿） |
 | 改稿 / 再核 | `authoring_write` / `authoring_review` | 仅 `can_revise=true` 任务至多 1 次改稿 + 1 轮受影响再核 |
-| 保存后复核 | `review_saved_word` → `authoring_review` | 按预算分批，每批 1 次（`saved_word_review.py`） |
+| 保存后复核 | `review_saved_word` → `authoring_review` | 按预算分批，每批 1 次（`services/docreader/tender/saved_word_review.py`） |
 
 ### 执行身份范围
 
