@@ -109,7 +109,18 @@ async def run(args):
                 descriptor = await asyncio.to_thread(artifacts.read_json, pack["artifact_ref"])
                 budgets.append({"budget": descriptor["planning_details"]["budget"]})
             plans.insert(0, {"phase": "extract", "requests": budgets})
-        row["budget_observation"] = budget_observation(row["usage"], plans)
+        wires, rejections = {}, []
+        for item in row["artifacts"]:
+            if item["stage"] == "model-wire":
+                wire = await asyncio.to_thread(artifacts.read_json, item["artifact_ref"])
+                if isinstance(wire, dict) and "payload" in wire:
+                    wires[item["scope"]] = wire["payload"]
+            elif item["stage"] == "model-rejection":
+                rejection = await asyncio.to_thread(artifacts.read_json, item["artifact_ref"])
+                rejection["payload"] = (await asyncio.to_thread(artifacts.read_json, rejection["request_ref"])
+                                        if rejection.get("request_ref") else None)
+                rejections.append(rejection)
+        row["budget_observation"] = budget_observation(row["usage"], plans, rejections=rejections, wires=wires)
         return row
     if args.command == "authoring-report":
         from docreader.integrations.authoring_store import AuthoringStore

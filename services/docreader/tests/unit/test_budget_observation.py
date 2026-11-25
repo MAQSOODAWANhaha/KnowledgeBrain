@@ -134,3 +134,85 @@ def test_reasoning_and_visible_output_do_not_treat_unknown_usage_as_zero():
     result = usage.budget_observation(rows)["tasks"]["extract"]
     assert result["reasoning_tokens"] == {"observations": 1, "missing": 2, "total": 20}
     assert result["visible_completion_tokens"] == {"observations": 1, "missing": 2, "total": 80}
+
+
+def test_analysis_failures_tie_rejections_via_wire_and_rank_by_tokens():
+    base = {"schema_version": 2, "operation": "review", "work_unit_id": "review-1"}
+    corrected = {**base, "contract_feedback": {"errors": [{"code": "list_type"}], "rejection_count": 1}}
+    rows = [
+        # Failed resend shares the digest with the succeeded send whose response was rejected.
+        {"task": "verify", "status": "failed", "error": {"type": "http_429"}, "usage": None,
+         "metadata": {"operation": "review", "work_unit_id": "review-1", "request_digest": "d-base"}},
+        {"task": "verify", "status": "succeeded", "usage": {"total_tokens": 110},
+         "metadata": {"operation": "review", "work_unit_id": "review-1", "request_digest": "d-base"}},
+        {"task": "verify", "status": "succeeded", "usage": {"total_tokens": 125},
+         "metadata": {"operation": "review", "work_unit_id": "review-1", "request_digest": "d-corr"}},
+        {"task": "extract", "status": "uncertain", "error": {"type": "between_data_idle_timeout"},
+         "usage": {"total_tokens": 150}, "metadata": {"operation": "extract", "request_digest": "d-ext"}},
+        {"task": "verify", "status": "succeeded", "usage": {"total_tokens": 90},
+         "metadata": {"operation": "review", "work_unit_id": "review-1", "request_digest": "d-ok"}},
+    ]
+    wires = {"d-base": base, "d-corr": corrected}
+    rejections = [
+        {"task": "verify", "errors": [{"code": "list_type"}, {"code": "other"}], "payload": base},
+        {"task": "verify", "errors": [{"code": "list_type"}], "payload": corrected},
+        {"task": "ocr", "errors": [{"code": "ocr_response_invalid"}], "payload": {"image_sha256": "abc"}},
+    ]
+    failures = usage.budget_observation(rows, rejections=rejections, wires=wires)["failures"]
+    assert [(f["stage"], f["task"], f["kind"], f["code"], f["count"], f["reported_tokens"], f["unknown_usage"])
+            for f in failures] == [
+        ("review", "verify", "contract", "list_type", 2, 235, 0),
+        ("extract", "extract", "send", "between_data_idle_timeout", 1, 150, 0),
+        ("ocr", "ocr", "contract", "ocr_response_invalid", 1, 0, 1),
+        ("review", "verify", "send", "http_429", 1, 0, 1),
+    ]
+    assert sum(f["count"] for f in failures if f["kind"] == "contract") == len(rejections)
+
+
+async def test_cli_status_reads_wire_and_rejection_artifacts_for_failures(tmp_path, monkeypatch):
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from docreader.integrations import cli
+    from docreader.integrations.artifacts import ArtifactStore
+
+    artifacts = ArtifactStore(tmp_path)
+    payload = {"schema_version": 2, "operation": "review", "work_unit_id": "review-1"}
+    wire_ref = artifacts.put_json({"protocol": "tender_short_refs_v2", "payload": payload, "mapping": {}})
+    req_ref = artifacts.put_json(payload)
+    rej_ref = artifacts.put_json({"task": "verify", "request_ref": req_ref, "errors": [{"code": "list_type"}]})
+    run_row = {
+        "run_id": "run-1", "status": "failed",
+        "artifacts": [
+            {"stage": "model-wire", "scope": "digest-1", "artifact_ref": wire_ref},
+            {"stage": "model-rejection", "scope": "id:0", "artifact_ref": rej_ref},
+        ],
+        "usage": [
+            {"task": "verify", "status": "failed", "error": {"type": "http_500"}, "usage": None,
+             "metadata": {"operation": "review", "work_unit_id": "review-1", "request_digest": "digest-1"}},
+            {"task": "verify", "status": "succeeded", "usage": {"total_tokens": 140},
+             "metadata": {"operation": "review", "work_unit_id": "review-1", "request_digest": "digest-1"}},
+        ],
+    }
+
+    class FakeStore:
+        def __init__(self, dsn):
+            pass
+
+        async def get_run(self, run_id):
+            assert run_id == "run-1"
+            return run_row
+
+    monkeypatch.setattr(cli.Settings, "from_env", classmethod(
+        lambda cls: SimpleNamespace(dsn="unused", artifact_root=tmp_path)))
+    monkeypatch.setattr(cli, "Store", FakeStore)
+    status = await cli.run(Namespace(command="status", run_id="run-1"))
+    assert isinstance(status, dict)
+    observation = status["budget_observation"]
+    assert isinstance(observation, dict)
+    assert observation["failures"] == [
+        {"stage": "review", "task": "verify", "kind": "contract", "code": "list_type",
+         "count": 1, "reported_tokens": 140, "unknown_usage": 0},
+        {"stage": "review", "task": "verify", "kind": "send", "code": "http_500",
+         "count": 1, "reported_tokens": 0, "unknown_usage": 1},
+    ]

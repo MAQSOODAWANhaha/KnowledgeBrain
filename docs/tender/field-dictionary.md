@@ -223,6 +223,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `plans` | 已生成的 extract 与 review 计划及各阶段的 planned_requests、input_estimate、max_input_estimate、output_reserve_total、over_budget_requests。这是计划统计，不能与实际 Token 相加。locate、associate、joint 不再生成发送计划。 |
 | `planning` | unplanned_phases列出尚未生成的阶段；known_planned_requests只计已知计划；有未知阶段时total_planned_requests为null。此计数不含OCR、重试和纠正，不能充当全程付费调用上限 |
 | `deviations` | 逐请求标记，不含原文。`estimate_below_prompt`：实际 prompt_tokens 大于记录的输入估算；`completion_above_reserve`：completion 大于该请求 output_reserve；`slow_first_data`：首个原始字节等待达到 60 秒。字节估算偏高、首包更快、缺字段都不标记。标记不改变 131072 默认窗口、262144 纠错上限、预留或重试 |
+| `failures` | 失败聚合表，每行一个「阶段 × 类别 × code」：`stage`（口径同 `operations`）、`task`、`kind`、`code`、`count`、`reported_tokens`（供应商回报的 total_tokens 之和）、`unknown_usage`（无回报用量的条数）。`kind=send` 来自状态为 failed 或 uncertain 的请求行，code 取 `error.type`；`kind=contract` 来自 `model-rejection` 回执，每条回执计一次，code 取首条错误的 code，Token 按 `model-wire` 记录的原始 payload 对应到 `scope`（`request_digest`）再匹配同 task 且状态为 succeeded 的请求行，匹配不到或无 wire 记录（如 OCR）记入 `unknown_usage`。contract 行的 count 之和等于回执条数。按 `reported_tokens`、`count` 降序排列 |
 | `limits` | 估算、未知用量及小样本分位数的解释限制 |
 
 `authoring-report` 是编制执行的只读阶段报表（CLI `authoring-report <execution_id>`；网页 `GET /api/v3/tender-projects/{project}/executions/{execution}/report` 返回 `{"report": …}`，执行尚未创建时为 `null`），由执行的请求行和结果产物现场计算，不写入任何产物、不改变执行身份、不发模型请求，旧执行也可以查看：

@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from collections import Counter
 from datetime import datetime
+import hashlib
+import json
 import math
 from typing import Any
 
@@ -71,7 +73,72 @@ def _timing_observation(rows):
     return result
 
 
-def budget_observation(requests: list[dict], plans=()) -> dict:
+def _operation(task: str, metadata: dict | None) -> str:
+    if task != "verify":
+        return task
+    meta = metadata or {}
+    work_unit = meta.get("work_unit_id", "")
+    return next(
+        (name for name in ("discovery", "reference", "joint") if work_unit.startswith(name + "-")),
+        meta.get("operation", "verify_unattributed"),
+    )
+
+
+def _payload_digest(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def analysis_failures(requests: list[dict], rejections=(), wires=None) -> list[dict]:
+    """Stage x kind x code: failed sends and model-rejection receipts with their tokens.
+
+    `rejections` are model-rejection artifacts with `request_ref` loaded as `payload`;
+    `wires` maps `model-wire` scope (`request_digest`) to its recorded raw payload.
+    """
+    rows = {
+        (row["task"], digest): row
+        for row in requests
+        if row["status"] == "succeeded" and (digest := (row.get("metadata") or {}).get("request_digest"))
+    }
+    by_payload: dict[str, list[str]] = {}
+    for digest, payload in (wires or {}).items():
+        bucket = by_payload.setdefault(_payload_digest(payload), [])
+        if digest not in bucket:
+            bucket.append(digest)
+    groups: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+    def add(stage: str, task: str, kind: str, code: str, row: dict | None) -> None:
+        group = groups.setdefault((stage, task, kind, code), {
+            "stage": stage, "task": task, "kind": kind, "code": code,
+            "count": 0, "reported_tokens": 0, "unknown_usage": 0})
+        group["count"] += 1
+        total = (reported_usage(row.get("usage")) or {}).get("total_tokens") if row else None
+        if type(total) is int:
+            group["reported_tokens"] += total
+        else:
+            group["unknown_usage"] += 1
+
+    for row in requests:
+        if row["status"] in {"failed", "uncertain"}:
+            add(_operation(row["task"], row.get("metadata")), row["task"], "send",
+                (row.get("error") or {}).get("type") or "unknown", row)
+    for rejection in rejections:
+        task = rejection["task"]
+        payload = rejection.get("payload")
+        row = None
+        if payload is not None:
+            matches = [rows[(task, digest)] for digest in by_payload.get(_payload_digest(payload), ())
+                       if (task, digest) in rows]
+            row = matches[0] if len(matches) == 1 else None
+        stage = _operation(task, row.get("metadata") if row else (payload if isinstance(payload, dict) else None))
+        errors = rejection.get("errors") or [{}]
+        add(stage, task, "contract", errors[0].get("code") or "unknown", row)
+    return sorted(groups.values(), key=lambda group: (
+        -group["reported_tokens"], -group["count"], group["stage"], group["task"], group["kind"], group["code"]))
+
+
+def budget_observation(requests: list[dict], plans=(), *, rejections=(), wires=None) -> dict:
     """Read-only calibration evidence; unknown usage is never zero billed cost."""
     summaries = {"tasks": {}, "operations": {}}
     buckets = {}
@@ -92,12 +159,7 @@ def budget_observation(requests: list[dict], plans=()) -> dict:
                     noted[key] = usage[key]
             deviations.append(noted)
     for row in requests:
-        metadata = row.get("metadata", {})
-        operation = row["task"]
-        if operation == "verify":
-            work_unit = metadata.get("work_unit_id", "")
-            operation = next((name for name in ("discovery", "reference", "joint")
-                              if work_unit.startswith(name + "-")), metadata.get("operation", "verify_unattributed"))
+        operation = _operation(row["task"], row.get("metadata"))
         for kind, name in (("tasks", row["task"]), ("operations", operation)):
             buckets.setdefault((kind, name), []).append(row)
     fields = ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -155,6 +217,7 @@ def budget_observation(requests: list[dict], plans=()) -> dict:
     known_requests = sum(plan["planned_requests"] for plan in planned)
     return {"calibration_status": "observations_only", "requests": len(requests),
             "deviations": deviations, "timing": _timing_observation(requests), **summaries,
+            "failures": analysis_failures(requests, rejections, wires),
             "planning": {"unplanned_phases": unplanned, "known_planned_requests": known_requests,
                          "total_planned_requests": None if unplanned else known_requests},
             "plans": planned, "limits": ["Estimates and reserves are not billed usage or provider output limits.",

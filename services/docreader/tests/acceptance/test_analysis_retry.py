@@ -316,3 +316,79 @@ async def test_sse_success_rejection_correction_and_restart_cache(runtime):
     assert after['commands'][-1]['infrastructure_failures'] == 0
     assert after['commands'][-1]['execution_count'] == 1
     assert len({row['metadata']['logical_request_digest'] for row in after['usage']}) == 1
+
+
+async def test_status_failure_report_ties_analysis_rejections_and_failed_sends_to_tokens(runtime, monkeypatch):
+    from argparse import Namespace
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    import httpx
+    from pydantic import ValidationError
+    from docreader.integrations import cli
+    from docreader.llm import ModelConfig, OpenAIModel
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.schema import AnalysisReviewResponse
+
+    async def no_delay(seconds):
+        return None
+
+    monkeypatch.setattr('docreader.llm.recovery.asyncio',
+                        SimpleNamespace(sleep=no_delay, to_thread=asyncio.to_thread))
+    store, artifacts, settings, run = runtime
+    command = (await store.get_run(run['run_id']))['commands'][-1]
+    lease = await store.acquire(run['run_id'], command['command_id'], run['source_version'])
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        if len(sent) == 1:
+            return httpx.Response(500, json={'error': 'synthetic upstream failure'})
+        # Two rejections: the second request carries contract_feedback, so its
+        # tokens are matched only through model-wire for the actual sent payload.
+        reply = {'schema_version': 2, 'accepted_decision_ids': [],
+                 'findings': None if len(sent) == 2 else ({} if len(sent) == 3 else [])}
+        chunks = [{'choices': [{'index': 0, 'delta': {'content': json.dumps(reply)}, 'finish_reason': None}]},
+                  {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
+                  {'choices': [], 'usage': {'prompt_tokens': 100, 'completion_tokens': len(sent),
+                                            'total_tokens': 100 + len(sent)}}]
+        stream = ''.join('data: ' + json.dumps(chunk) + '\n\n' for chunk in chunks) + 'data: [DONE]\n\n'
+        return httpx.Response(200, content=stream, headers={'content-type': 'text/event-stream'})
+
+    config = ModelConfig.from_env({'KNOWLEDGEBRAIN_CHAT_BASE_URL': 'https://fixture.invalid/v1',
+        'KNOWLEDGEBRAIN_CHAT_API_KEY': 'synthetic', 'KNOWLEDGEBRAIN_CHAT_MODEL': 'fixture',
+        'KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS': '131072'})
+    worker = TenderNodes(store, artifacts, lease, OpenAIModel(config, store, lease,
+        prompts={'verify': 'Return review JSON'}, artifacts=artifacts, transport=httpx.MockTransport(handler)))
+
+    def validate(value):
+        try:
+            return AnalysisReviewResponse.model_validate(value).model_dump()
+        except ValidationError as error:
+            raise ModelContractError([{'path': list(e['loc']), 'code': e['type'], 'detail': e['msg']}
+                                      for e in error.errors(include_input=False, include_url=False)]) from None
+
+    payload = {'schema_version': 2, 'work_unit_id': 'review-1', 'operation': 'review',
+               'source_views': [], 'items': [], 'relations': [], 'decisions': []}
+    try:
+        result = await worker.call_validated('verify', payload, validate)
+        assert result['findings'] == []
+    finally:
+        await worker.close()
+
+    monkeypatch.setattr(cli.Settings, 'from_env', classmethod(lambda cls: settings))
+    status = await cli.run(Namespace(command='status', run_id=run['run_id']))
+    assert isinstance(status, dict)
+    artifact_rows = status['artifacts']
+    observation = status['budget_observation']
+    assert isinstance(artifact_rows, list) and isinstance(observation, dict)
+    receipts = [row for row in artifact_rows if row['stage'] == 'model-rejection']
+    failures = {(f['stage'], f['task'], f['kind'], f['code']): f for f in observation['failures']}
+    assert set(failures) == {('review', 'verify', 'send', 'http_500'), ('review', 'verify', 'contract', 'list_type')}
+    assert failures[('review', 'verify', 'send', 'http_500')] == {
+        'stage': 'review', 'task': 'verify', 'kind': 'send', 'code': 'http_500',
+        'count': 1, 'reported_tokens': 0, 'unknown_usage': 1}
+    assert failures[('review', 'verify', 'contract', 'list_type')] == {
+        'stage': 'review', 'task': 'verify', 'kind': 'contract', 'code': 'list_type',
+        'count': len(receipts), 'reported_tokens': 205, 'unknown_usage': 0}
+    assert len(receipts) == 2
