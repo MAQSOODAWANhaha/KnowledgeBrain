@@ -31,6 +31,22 @@ from docreader.tender.word_navigation import add_bookmark, bookmark_name
 
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _XML_ILLEGAL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]")
+_ENTERPRISE_SLOT = re.compile(r"保证金|签署人|签字人")
+
+
+def _row_label(grid, row, column):
+    return "\n".join(
+        cell.get("text") or ""
+        for cell in grid.get("cells", [])
+        if cell.get("row") == row and cell.get("column") != column and (cell.get("text") or "").strip()
+    )
+
+
+def _unsupported_enterprise_slot(grid, fill):
+    """Deposit amounts and signatory names stay blank until an enterprise material is cited."""
+    if fill.get("material_ids"):
+        return False
+    return bool(_ENTERPRISE_SLOT.search(_row_label(grid, fill["row"], fill["column"])))
 
 
 def xml_text(value):
@@ -957,6 +973,11 @@ class _Assembler:
             [Mm(width) for width in supplied] if supplied else None, header_count)
         choices = defaultdict(set)
         for fill in fills:
+            if _unsupported_enterprise_slot(grid, fill):
+                self.gap("export_enterprise_fact_pending",
+                         "保证金金额或签署人没有企业资料，单元格留空待补。",
+                         chapter_id, target_id)
+                continue
             choices[(fill["row"], fill["column"])].add(fill["text"])
         anchors = {(cell["row"], cell["column"]) for cell in grid["cells"]}
         for position in choices.keys() - anchors:

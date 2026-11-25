@@ -97,6 +97,35 @@ def grid():
     ]}
 
 
+def test_missing_enterprise_deposit_and_signatory_stay_blank(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    form = {"row_count": 2, "column_count": 2, "widths_mm": [40, 80], "cells": [
+        {"row": 0, "column": 0, "row_span": 1, "col_span": 1, "text": "投标保证金"},
+        {"row": 0, "column": 1, "row_span": 1, "col_span": 1, "text": ""},
+        {"row": 1, "column": 0, "row_span": 1, "col_span": 1, "text": "签署人"},
+        {"row": 1, "column": 1, "row_span": 1, "col_span": 1, "text": ""},
+    ]}
+    ref = source_ref(artifacts, grid=form)
+    frozen = artifacts.put_json({"schema_version": 2, "documents": [{
+        "document_id": "main", "file_name": "current.pdf", "role": "main"}]})
+    position = target("bond", "form", [ref], templates=[ref])
+    outline = {"authoring_input": {"frozen_ref": frozen}, "chapters": [
+        chapter("a", "投标函", [position])]}
+    result = export_authoring_document(artifacts, outline, [writing(
+        "task", "a", ["bond"], cell_fills=[
+            {"source_ref": ref, "row": 0, "column": 1, "text": "128000元"},
+            {"source_ref": ref, "row": 1, "column": 1, "text": "李四"},
+        ])])
+    word = document(artifacts, result)
+    cells = [cell.text for table in word.tables for row in table.rows for cell in row.cells]
+    assert cells[1] in {"", "待补"}
+    assert cells[3] in {"", "待补"}
+    rendered = "\n".join(cells + [paragraph.text for paragraph in word.paragraphs])
+    assert "128000" not in rendered and "李四" not in rendered
+    assert any(gap["code"] == "export_enterprise_fact_pending" and "待补" in gap["detail"]
+               for gap in result["gaps"])
+
+
 def test_docx_keeps_nested_order_and_unfilled_required_positions(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     outline = {"chapters": [chapter("a", "技术文件", children=[
