@@ -196,6 +196,31 @@ async def test_a_failed_batch_leaves_its_items_pending_and_named():
     assert failed["rule_refs"] == [ref(3), ref(4)]
 
 
+def test_batches_stop_at_half_the_input_budget_and_still_send_a_single_item():
+    budget = RequestBudget(context_tokens=8192, output_reserve=512, tokenizer="o200k_base")
+    positions = placement.placement_positions(outline())
+    items = {f"r{n}": item(n, quote="事项" * 500) for n in range(1, 8)}
+
+    def fits(payload):
+        from docreader.tender.authoring_pipeline import _fits
+        return _fits(budget, "item_placement", payload)
+
+    batches, unsent = placement.plan_batches(budget, positions, items, fits)
+    assert unsent == [] and len(batches) > 1
+    limit = budget.effective_input_budget_tokens // 2
+    for batch in batches:
+        payload = placement.placement_payload(positions, items, batch)
+        from docreader.tender.authoring_pipeline import _request
+        measured = budget.require_request(_request(budget, "item_placement", payload), "item_placement")
+        if len(batch) > 1:
+            assert measured["input_tokens"] <= limit
+    alone = placement.placement_payload(positions, items, ["r1"])
+    from docreader.tender.authoring_pipeline import _request
+    one = budget.require_request(_request(budget, "item_placement", alone), "item_placement")
+    assert one["fits"] is True
+    assert any(batch[0] == "r1" for batch in batches)
+
+
 def test_batches_never_exceed_the_soft_item_cap(monkeypatch):
     monkeypatch.setattr(placement, "PLACEMENT_BATCH_ITEMS", 3)
     positions = placement.placement_positions(outline())

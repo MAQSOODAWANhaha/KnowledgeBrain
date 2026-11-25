@@ -29,6 +29,9 @@ _SEMANTIC = ('kind', 'subject', 'scope', 'text', 'conditions', 'exceptions', 'su
 _OPENING = 120
 # A whole 715-item ledger fit the window but the model answered three rows; the pilot's 345 passed.
 PLACEMENT_BATCH_ITEMS = 240
+# Stop a batch at half the input window. Packing to the ceiling still fits, but the relay
+# spends many minutes before the first token.
+PLACEMENT_BATCH_INPUT_FRACTION = 0.5
 
 
 class ItemPlacementResponse(Contract):
@@ -184,23 +187,40 @@ def _output_fits(budget, ids, positions):
     return bound < budget.output_reserve_for(AuthoringTask.ITEM_PLACEMENT, tokenized=budget.tokenizer is not None)
 
 
+def _placement_input_tokens(budget, payload):
+    from docreader.tender.authoring_pipeline import _request
+
+    measured = budget.require_request(
+        _request(budget, AuthoringTask.ITEM_PLACEMENT, payload), AuthoringTask.ITEM_PLACEMENT)
+    return measured["input_tokens"], measured["effective_input_budget_tokens"]
+
+
 def plan_batches(budget, positions, items, fits):
-    """Greedy source-order batches that fit the input window and the output reserve.
+    """Greedy source-order batches that stay within half the input window and the output reserve.
 
     BUG-333: an item that does not fit even alone with the position catalogue is returned unsent.
+    A single item that fits the full window is still sent; only growing a batch stops at half.
     """
-    def admitted(ids):
+    def payload_ok(ids):
         return (len(ids) <= PLACEMENT_BATCH_ITEMS and fits(placement_payload(positions, items, ids))
                 and _output_fits(budget, ids, positions))
 
+    def within_half(ids):
+        if not payload_ok(ids):
+            return False
+        if len(ids) <= 1:
+            return True
+        used, limit = _placement_input_tokens(budget, placement_payload(positions, items, ids))
+        return used <= int(limit * PLACEMENT_BATCH_INPUT_FRACTION)
+
     batches, current, unsent = [], [], []
     for key in items:
-        if admitted([*current, key]):
+        if within_half([*current, key]):
             current.append(key)
             continue
         if current:
             batches.append(current)
-        current = [key] if admitted([key]) else []
+        current = [key] if payload_ok([key]) else []
         if not current:
             unsent.append(key)
     if current:
