@@ -600,7 +600,7 @@ compact 视图可在顶层携带 `text_pool: string[]`，仅共享完全相同�
 
 | 结构 | 字段与含义 |
 | --- | --- |
-| 试点选项 | `POST /api/v3/tender-projects/{project}/outline/generate` 的 `requirement_chain_contract` 可显式设为 `single_requirement_chain_v1`，仅用于有冻结来源的自动大纲。同一请求键绑定同一选项，任务保存选项；恢复使用已登记的执行合同。未显式选择时，后继沿用前任的合同，独立大纲按默认路径执行。试点与旧原生要求合同、旧原件复核事实互斥。 |
+| 大纲合同 | `POST /api/v3/tender-projects/{project}/outline/generate` 可传 `requirement_chain_contract: "single_requirement_chain_v1"` 或 `directory_planning_contract: "source_refs_compact_plan_v12"`，二者互斥，只用于有冻结来源的自动大纲。同一请求键绑定同一选项，任务保存选项和默认标记 `outline_default_contract`；恢复使用已登记的执行合同。未传时的默认、继承与旧原件复核事实的限制见[编制目标设计：一条要求链](workflow.md#编制目标设计一条要求链)。 |
 | 方案上下文 | 在大纲保存 `chapters[].source_additions[]` 指定本章已有或选入的 `target_id` 及 `project_context_excerpts`，随响应位置保存。精确引用列表替换背景，空列表清除，省略沿用原选择。位置须为非手填、仅允许 `knowledge` 的叙述位置，且无原式表或原文正文绑定。宿主从固定快照读取非空、不重叠的范围，不接受客户端传入文字。现有原文正文的 `source_context_excerpts` 仍须由原文正文绑定校验。两种上下文在模型输入使用 `source_context_support_ids`，企业应答的依据仍由 `support_ids` 和位置权限决定。 |
 | 归属请求 `item_placement` | `{operation:"place_items_v1", positions:[{id,title_path:str[],kind,opening,origin?}], requirements:[{id,kind,subject?,scope?,text,conditions?,exceptions?,submission?,consequence?,scoring?,evidence:[{page,quote}]}]}`。`id` 为本批短 ID（位置 `t*`，事项 `r*`），`opening` 为位置原文开头，最长 120 字；`origin:"outside_format"` 标出格式章节外的候选原式 |
 | `ItemPlacementResponse` | `{placements:[[r,value]]}`，每个本批事项恰好一行。`value` 为本批位置 ID、理由代码或 null（待核） |

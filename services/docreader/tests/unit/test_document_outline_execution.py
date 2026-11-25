@@ -11,6 +11,7 @@ from docreader.integrations.store import Conflict
 from docreader.llm.budget import RequestBudget
 from docreader.tender import document_execution
 from docreader.tender.bid_format_outline import BID_FORMAT_OUTLINE_CONTRACT
+from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
 from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
 from docreader.tender.schema import AuthoringInput, AuthoringOutline
 
@@ -166,8 +167,11 @@ async def test_candidate_joint_contract_is_pinned_at_first_outline_execution(run
     runtime.outline['authoring_input'] = deepcopy(runtime.snapshot)
     monkeypatch.setattr(document_execution, '_has_outline_responses', lambda _chapters: True)
     monkeypatch.setenv('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT', CONTRACT)
+    # A deployment that pins the native contract keeps new outlines on the directory path.
     result = await runtime.execute(outline_only=True)
     spec = runtime.rows['execution']['execution_spec']
+    assert spec['directory_planning_contract'] == DIRECTORY_REF_CONTRACT
+    assert 'requirement_chain_contract' not in spec
     assert spec['native_requirement_contract'] == CONTRACT
     assert 'directory_native_body_contract' not in spec
     assert runtime.observed[0][1]['native_requirement_contract'] == CONTRACT
@@ -176,10 +180,30 @@ async def test_candidate_joint_contract_is_pinned_at_first_outline_execution(run
     assert await runtime.execute(outline_only=True) == result
     assert len(runtime.observed) == 1
 
-    await runtime.execute(execution_id='legacy', outline_only=True)
-    assert 'native_requirement_contract' not in runtime.rows['legacy']['execution_spec']
+    named = {'outline_only': True, 'directory_planning_contract': DIRECTORY_REF_CONTRACT}
+    await runtime.execute(execution_id='legacy', **named)
+    legacy = runtime.rows['legacy']['execution_spec']
+    assert legacy['directory_planning_contract'] == DIRECTORY_REF_CONTRACT
+    assert 'native_requirement_contract' not in legacy
     monkeypatch.setenv('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT', CONTRACT)
-    assert await runtime.execute(execution_id='legacy', outline_only=True) == result
+    assert await runtime.execute(execution_id='legacy', **named) == result
+
+
+@pytest.mark.parametrize('options', [
+    {'outline_only': False},
+    {'outline_only': True, 'fixed_outline': True},
+    {'outline_only': True, 'frozen': False},
+])
+async def test_named_directory_contract_outside_frozen_outline_generation_is_rejected(runtime, options):
+    options = dict(options)
+    if options.pop('frozen', True):
+        runtime.snapshot['frozen_ref'] = runtime.artifacts.put_json({'documents': []})
+        runtime.outline['authoring_input'] = deepcopy(runtime.snapshot)
+    if options.pop('fixed_outline', False) or not options['outline_only']:
+        options['outline_ref'] = runtime.outline_ref
+    with pytest.raises(document_execution.ModelConfigurationError, match='directory planning contract'):
+        await runtime.execute(directory_planning_contract=DIRECTORY_REF_CONTRACT, **options)
+    assert 'execution' not in runtime.rows
 
 
 @pytest.fixture
@@ -235,7 +259,8 @@ async def test_outline_replays_ignore_a_prompt_from_the_other_chain(
     monkeypatch.setattr(document_execution, 'load_prompts', lambda: {**load_prompts(), **changed})
 
     results = {
-        'legacy': await frozen_runtime.execute('legacy', outline_only=True),
+        'legacy': await frozen_runtime.execute('legacy', outline_only=True,
+                                               directory_planning_contract=DIRECTORY_REF_CONTRACT),
         'w2': await frozen_runtime.execute('w2', outline_only=True, requirement_chain_contract=REQUIREMENT_CHAIN_CONTRACT),
     }
     legacy_spec = frozen_runtime.rows['legacy']['execution_spec']

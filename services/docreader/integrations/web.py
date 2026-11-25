@@ -107,12 +107,19 @@ def _authoring_request(payload, *, outline_only=False):
                "review_request": payload.get("review_request")}
     facts_ref = payload.get("reviewed_source_facts_ref")
     chain = payload.get('requirement_chain_contract')
+    directory = payload.get('directory_planning_contract')
     if chain is not None:
         from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
 
-        if not outline_only or chain != REQUIREMENT_CHAIN_CONTRACT or facts_ref is not None:
-            raise WebError('INVALID_OUTLINE_OPTIONS', '新链试点仅用于自动大纲，且不能指定旧原件复核事实。')
+        if not outline_only or chain != REQUIREMENT_CHAIN_CONTRACT or facts_ref is not None or directory is not None:
+            raise WebError('INVALID_OUTLINE_OPTIONS', '一条要求链仅用于自动大纲，且不能指定旧目录合同或旧原件复核事实。')
         request['requirement_chain_contract'] = chain
+    if directory is not None:
+        from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
+
+        if not outline_only or directory != DIRECTORY_REF_CONTRACT:
+            raise WebError('INVALID_OUTLINE_OPTIONS', '旧目录合同仅用于自动大纲。')
+        request['directory_planning_contract'] = directory
     if facts_ref is not None:
         if not outline_only:
             raise WebError("INVALID_OUTLINE_OPTIONS", "原件复核事实仅用于生成大纲；正文沿用已保存大纲。")
@@ -547,7 +554,11 @@ class WebBridge:
                 identity = _identity(previous_outline["authoring_input"])
         if outline_only and request.get('reviewed_source_facts_ref') is not None:
             if 'requirement_chain_contract' in request:
-                raise WebError('INVALID_OUTLINE_OPTIONS', '前任沿用旧原件复核事实；请使用当前冻结来源新建试点。')
+                raise WebError('INVALID_OUTLINE_OPTIONS', '前任沿用旧原件复核事实；请使用当前冻结来源新建大纲。')
+            if request['previous_execution_id'] is not None and 'directory_planning_contract' not in request:
+                prior = await self.authoring.get_execution(request['previous_execution_id'], missing_ok=True)
+                if prior is not None and prior['execution_spec'].get('requirement_chain_contract') is not None:
+                    raise WebError('INVALID_OUTLINE_OPTIONS', '前任大纲使用一条要求链，不能追加旧原件复核事实；请点名旧目录合同或新建大纲。', 409)
             from docreader.tender.reviewed_source_facts import validate_fact_successor
             try:
                 manifest = await asyncio.to_thread(self.artifacts.read_json, request['reviewed_source_facts_ref'])
@@ -565,10 +576,17 @@ class WebBridge:
                 "materials": [] if outline_only else await self.materials(payload["project_id"])}
         if selections:
             data["knowledge_selections"] = selections
+        if outline_only:
+            # Jobs queued before the requirement chain became the default carry no
+            # marker and keep the directory path they were submitted for.
+            from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
+
+            data["outline_default_contract"] = REQUIREMENT_CHAIN_CONTRACT
         if outline_ref is None:
             snapshot = await read_authoring_input(self.store, self.artifacts, **identity)
-            if 'requirement_chain_contract' in request and not snapshot.get('frozen_ref'):
-                raise WebError('INVALID_OUTLINE_OPTIONS', '新链试点需要冻结来源，请先完成招标资料冻结。', 409)
+            if ('requirement_chain_contract' in request or 'directory_planning_contract' in request) \
+                    and not snapshot.get('frozen_ref'):
+                raise WebError('INVALID_OUTLINE_OPTIONS', '指定大纲合同需要冻结来源，请先完成招标资料冻结。', 409)
             data["authoring_input_ref"] = await asyncio.to_thread(self.artifacts.put_json, snapshot)
         if outline_ref is not None:
             data["outline_ref"] = outline_ref
@@ -893,8 +911,14 @@ async def execute_authoring_job(execution_id, settings):
             request['reviewed_source_facts_ref'] = job_request['reviewed_source_facts_ref']
         if _operation(job) == "outline":
             request["outline_only"] = True
-            if 'requirement_chain_contract' in job_request:
-                request['requirement_chain_contract'] = job_request['requirement_chain_contract']
+            for key in ('requirement_chain_contract', 'directory_planning_contract'):
+                if key in job_request:
+                    request[key] = job_request[key]
+            if ('outline_default_contract' not in job['payload'] and request['previous_execution_id'] is None
+                    and 'requirement_chain_contract' not in request):
+                from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
+
+                request['directory_planning_contract'] = DIRECTORY_REF_CONTRACT
         elif _operation(job) == 'document':
             from docreader.integrations.web_layout import build_web_layout
             request['layout_renderer'] = build_web_layout(execution_id=execution_id)

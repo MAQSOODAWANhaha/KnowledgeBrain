@@ -5,6 +5,7 @@ import pytest
 
 from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender import document_execution
+from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
 from test_document_outline_execution import runtime as runtime
 
 
@@ -108,7 +109,7 @@ async def test_previously_persisted_empty_success_is_not_returned_as_usable(sour
 @pytest.mark.parametrize('prior_contract', ['material_short_ids_v2', None])
 async def test_new_material_capability_does_not_rewrite_existing_execution_identity(source_runtime, prior_contract):
     source_runtime.outline['chapters'] = [chapter(targets=[target()])]
-    reference = await source_runtime.execute(outline_only=True)
+    reference = await source_runtime.execute(outline_only=True, directory_planning_contract=DIRECTORY_REF_CONTRACT)
     spec = source_runtime.rows['execution']['execution_spec']
     assert spec['directory_material_identity_contract'] == 'material_short_ids_v3'
     if prior_contract is None:

@@ -124,7 +124,9 @@ async def test_source_receipt_precedes_publication_and_survives_real_sql_recover
     async def execute():
         return await document_execution.execute_document(analysis, artifacts, configured, budget,
             execution_id=execution_id, **{k: run[k] for k in ('run_id', 'source_version', 'domain_revision')},
-            outline_only=True, authoring_input_ref=pinned, transport=httpx.MockTransport(handler))
+            outline_only=True, authoring_input_ref=pinned,
+            directory_planning_contract='source_refs_compact_plan_v12',
+            transport=httpx.MockTransport(handler))
 
     expected = ConnectionError if interruption == 'receipt_ack_lost' else SourceBodyResolutionPending
     with pytest.raises(expected):

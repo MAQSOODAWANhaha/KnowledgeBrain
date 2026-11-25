@@ -549,6 +549,7 @@ async def execute_document(
     reviewed_source_facts_ref=None,
     native_requirement_contract=None,
     requirement_chain_contract=None,
+    directory_planning_contract=None,
     layout_renderer=None,
     concurrency: int = 2,
     lease_seconds: float = 60,
@@ -588,6 +589,10 @@ async def execute_document(
         )
     if native_requirement_contract not in (None, NATIVE_REQUIREMENT_CONTRACT):
         raise ModelConfigurationError('unsupported native requirement source contract')
+    if directory_planning_contract not in (None, DIRECTORY_REF_CONTRACT):
+        raise ModelConfigurationError('unsupported directory planning contract')
+    if directory_planning_contract is not None and requirement_chain_contract is not None:
+        raise ModelConfigurationError('a directory planning contract cannot be combined with the requirement chain')
     if previous_execution_id == execution_id:
         raise Conflict("a document execution cannot inherit from itself")
     if reviewed_source_facts_ref is not None:
@@ -688,9 +693,29 @@ async def execute_document(
         stored_chain = existing['execution_spec'].get('requirement_chain_contract')
         if requirement_chain_contract is not None and requirement_chain_contract != stored_chain:
             raise Conflict('execution_id already identifies a different requirement chain contract')
+        stored_directory = existing['execution_spec'].get('directory_planning_contract')
+        if directory_planning_contract is not None and directory_planning_contract != stored_directory:
+            raise Conflict('execution_id already identifies a different directory planning contract')
         requirement_chain_contract = stored_chain
-    elif requirement_chain_contract is None and previous is not None:
+        directory_planning_contract = stored_directory if stored_chain is None else None
+    elif previous is not None and requirement_chain_contract is None and directory_planning_contract is None:
         requirement_chain_contract = previous['execution_spec'].get('requirement_chain_contract')
+        if requirement_chain_contract is None:
+            directory_planning_contract = previous['execution_spec'].get('directory_planning_contract')
+    elif (
+        requirement_chain_contract is None
+        and directory_planning_contract is None
+        and native_requirement_contract is None
+        and reviewed_source_facts_ref is None
+        and not os.environ.get('KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT')
+        and outline_only
+        and outline_ref is None
+        and snapshot.get('frozen_ref')
+    ):
+        requirement_chain_contract = REQUIREMENT_CHAIN_CONTRACT
+    if directory_planning_contract is not None and (
+            not outline_only or outline_ref is not None or not snapshot.get('frozen_ref')):
+        raise ModelConfigurationError('the directory planning contract requires automatic frozen outline generation')
     if requirement_chain_contract is not None:
         if requirement_chain_contract != REQUIREMENT_CHAIN_CONTRACT:
             raise ModelConfigurationError('unsupported requirement chain contract')

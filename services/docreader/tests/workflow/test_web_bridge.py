@@ -131,7 +131,8 @@ def outline_tree(outline, *, title=None):
             for chapter in outline["chapters"]]
 
 
-async def finish_outline(runtime, monkeypatch, *, key="outline-candidate", target_id="chapter-1:target-1", issues=()):
+async def finish_outline(runtime, monkeypatch, *, key="outline-candidate", target_id="chapter-1:target-1", issues=(),
+                         spec=None):
     configured(monkeypatch)
     started = await runtime.bridge.start_outline(payload(runtime, request_key=key))
     execution_id = started["generation"]["execution_id"]
@@ -142,7 +143,7 @@ async def finish_outline(runtime, monkeypatch, *, key="outline-candidate", targe
             "target_id": target_id, "kind": "narrative", "purpose": "说明实施方法",
             "rule_refs": [], "source_refs": []}]}]}
     reference = runtime.bridge.artifacts.put_json(outline)
-    await runtime.bridge.authoring.submit(execution_id, snapshot, {"protocol": "outline-test"})
+    await runtime.bridge.authoring.submit(execution_id, snapshot, {"protocol": "outline-test", **(spec or {})})
     lease = await runtime.bridge.authoring.acquire(execution_id)
     await runtime.bridge.authoring.release(lease, "succeeded", result_ref=reference)
     return execution_id, reference, outline
@@ -508,6 +509,72 @@ async def test_web_outline_w2_contract_is_pinned_to_the_job_and_retry(runtime, m
         assert call["requirement_chain_contract"] == REQUIREMENT_CHAIN_CONTRACT
         assert call["authoring_input_ref"] == pinned
     assert "requirement_chain_contract" not in observed[2]
+
+
+async def test_web_outline_forwards_named_directory_contract_and_keeps_unmarked_jobs_on_it(runtime, monkeypatch):
+    from docreader.tender import document_execution
+    from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
+    from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
+
+    await upload(runtime)
+    monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: runtime.settings))
+    config = ModelConfig(ModelEndpoint("http://fixture.invalid", "test-only", "fixture", 131072), None)
+    monkeypatch.setattr(ModelConfig, "from_env", classmethod(lambda cls: config))
+    observed = []
+
+    async def capture(*_args, **kwargs):
+        observed.append(kwargs)
+        raise RuntimeError("offline worker boundary")
+
+    monkeypatch.setattr(document_execution, "execute_document", capture)
+    request = payload(runtime, "outline.start", request_key="named-directory")
+    for invalid in ({"directory_planning_contract": "unknown"},
+                    {"directory_planning_contract": DIRECTORY_REF_CONTRACT,
+                     "requirement_chain_contract": REQUIREMENT_CHAIN_CONTRACT}):
+        with pytest.raises(WebError) as error:
+            await handle_command({**request, **invalid})
+        assert error.value.code == "INVALID_OUTLINE_OPTIONS"
+    named, _ = await handle_command({**request, "directory_planning_contract": DIRECTORY_REF_CONTRACT})
+    default, _ = await handle_command(payload(runtime, "outline.start", request_key="default-outline"))
+    queued, _ = await handle_command(payload(runtime, "outline.start", request_key="queued-before-default"))
+    ids = [started["generation"]["execution_id"] for started in (named, default, queued)]
+    job = await runtime.bridge.job(runtime.project, ids[0])
+    assert job["payload"]["request"]["directory_planning_contract"] == DIRECTORY_REF_CONTRACT
+    assert job["payload"]["outline_default_contract"] == REQUIREMENT_CHAIN_CONTRACT
+    # A job queued before the default switch has no marker and keeps the directory path.
+    async with runtime.bridge.store.transaction() as conn:
+        await conn.execute("UPDATE tender_authoring_jobs SET payload=payload-'outline_default_contract' "
+                           "WHERE execution_id=%s", (ids[2],))
+    for execution_id in ids:
+        await execute_authoring_job(execution_id, runtime.settings)
+    assert [call["execution_id"] for call in observed] == ids
+    assert observed[0]["directory_planning_contract"] == DIRECTORY_REF_CONTRACT
+    assert "directory_planning_contract" not in observed[1] and "requirement_chain_contract" not in observed[1]
+    assert observed[2]["directory_planning_contract"] == DIRECTORY_REF_CONTRACT
+
+
+async def test_web_outline_rejects_reviewed_facts_on_a_chain_predecessor(runtime, monkeypatch):
+    from docreader.tender.directory_compile import documents_from_frozen
+    from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
+    from docreader.tender.directory_sources import SourceRefs
+    from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
+
+    await upload(runtime)
+    previous, _, outline = await finish_outline(
+        runtime, monkeypatch, spec={"requirement_chain_contract": REQUIREMENT_CHAIN_CONTRACT})
+    snapshot = outline["authoring_input"]
+    documents = documents_from_frozen(runtime.bridge.artifacts, runtime.bridge.artifacts.read_json(snapshot["frozen_ref"]))
+    reference = runtime.bridge.artifacts.put_json({
+        "schema_version": 1, "contract": "reviewed_source_facts_v1", "authoring_input": snapshot,
+        "source_projection_digest": SourceRefs(documents).digest, "facts": []})
+    options = {"previous_execution_id": previous, "reviewed_source_facts_ref": reference}
+    with pytest.raises(WebError) as error:
+        await runtime.bridge.start_outline(payload(runtime, request_key="facts-on-chain", **options))
+    assert (error.value.code, error.value.status) == ("INVALID_OUTLINE_OPTIONS", 409)
+    named = await runtime.bridge.start_outline(payload(runtime, request_key="facts-named-directory",
+        directory_planning_contract=DIRECTORY_REF_CONTRACT, **options))
+    job = await runtime.bridge.job(runtime.project, named["generation"]["execution_id"])
+    assert job["payload"]["request"]["directory_planning_contract"] == DIRECTORY_REF_CONTRACT
 
 
 async def test_outline_predecessor_is_persisted_and_forwarded_to_the_worker(runtime, monkeypatch):
