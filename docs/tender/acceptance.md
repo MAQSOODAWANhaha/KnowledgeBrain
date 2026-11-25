@@ -24,6 +24,20 @@
 
 逐字保真只要求原式表格、固定文字与签章位置；其余正文解析造成的空白/换行差异记为解析器缺陷，不判定验收失败。解析不完整、附件未展开、Excel 显示不完整、OCR 读不出保留为可追溯问题，不能靠确认清除；未知 VLM 容量时不挪用对话模型容量。
 
+### 离线最低验收线评测脚本
+
+使用 `services/docreader/tender/acceptance_eval.py` 对一次编制执行的大纲、Word 稿件、交付包与阶段报表离线打分（不发模型请求、不写库、不联网）：
+
+```bash
+cd services/docreader && uv run --frozen python -m docreader.tender.acceptance_eval \
+  --outline <outline.json> --docx <投标文件.docx> \
+  --requirements <招标要求底稿.json> --coverage <覆盖结算.json> \
+  --gaps <待补事项.json> --report <authoring-report.json> \
+  --artifact-root <artifact-root>
+```
+
+也可直接传 `--package <交付包.zip>`（自动读取包内 DOCX、底稿、覆盖结算、待补事项与版式核对）或 `--result <document-result.json> --artifact-root <artifact-root>`。脚本按最低验收线四项输出每项状态与具体漏项/错表位置（字段见[字段字典](field-dictionary.md)的 `acceptance-eval`）：离线脚本只能给出机器核对结果，不能替代人工抽查原件（第 1 项）、人工真实性核验（第 3 项）或 ONLYOFFICE 实测回执（第 4 项）；未提供对应实测/人工回执时状态保留 `needs_human_check` / `needs_onlyoffice_check` 或 `unknown`，不会静默判通过。
+
 ## 合成语义核验语料与评测
 
 合成评测语料位于 [semantic-cases.json](semantic-cases.json)（v2 合同，32 个独立 `operation=review` 输入：13 组正反配对、2 个跨文档样本、4 个漏项目标/异常例外/补读路由样本）。原文为合成数据，`expected` 为 agent 草案，`human_review_completed` / `model_evaluation_completed` / `semantic_acceptance` 均为 `false`。

@@ -238,6 +238,18 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `document_gaps` | 仅正文执行：缺口按 code 计数 |
 | `failures` | 失败聚合表，每行一个「阶段 × 类别 × code」：`stage`、`task`、`kind`、`code`、`count`、`reported_tokens`（供应商回报的 total_tokens 之和）、`unknown_usage`（无回报用量的条数）。`kind=send` 来自状态为 failed 或 uncertain 的请求行，code 取 `error.type`；`kind=contract` 来自 `model-rejection` 回执，每条回执计一次，code 取首条错误的 code，Token 取产生该回包的请求行（按回执里的请求重建实际发送的请求摘要匹配），匹配不到记入 `unknown_usage`。contract 行的 count 之和等于回执条数。按 reported_tokens、count 降序排列，回答「哪类失败最多」 |
 
+`acceptance-eval` 是最低验收线离线评测脚本（`python -m docreader.tender.acceptance_eval`，见[验收与语义评测](acceptance.md#离线最低验收线评测脚本)）的只读打分输出：
+
+| 字段 | 定义 |
+| --- | --- |
+| `schema_version`、`passed` | 固定 `1`；`passed` 仅在四项最低验收线全部为 `pass` 时为 `true` |
+| `summary` | `score_passed` / `score_total`（`4`）、`machine_passed`（机器检查通过的项数）以及各状态计数（`pass`、`fail`、`needs_human_check`、`needs_onlyoffice_check`、`unknown`） |
+| `criteria.requirements_coverage` | 第 1 项（要求不漏）：以分析事项为分母统计已落位、已结案（约束/排除）、显式待补和静默漏项，`missing_items` 列出每条漏项的 `rule_ref`、`item_id`、位置与原因；缺底稿时为 `unknown`，缺人工抽查回执且机器无漏项时为 `needs_human_check` |
+| `criteria.original_tables` | 第 2 项（原式表正确）：核对大纲原式表在 Word 中的表格结构（列数、行数、表头、合并单元格）与固定文字/签章行保留，输出 `mismatches` 精确到 `chapter_id`、`chapter_title`、`target_id`、`table_index`、`kind`、`expected` 与 `actual`；无原件网格且无模板错误时保留 `unknown` |
+| `criteria.no_fabrication` | 第 3 项（缺口不被编造）：核对覆盖结算与缺口中的 `unsupported`、人工位自动填值、无依据正文写入与未复核正文，`violations` 列出具体 `chapter_id`、`target_id`、`coverage_id` 与 `code`；机器无违规且缺人工真实性核验时为 `needs_human_check` |
+| `criteria.file_usability` | 第 4 项（文件可用）：校验 DOCX 压缩包与 XML 完整性、大纲章节/目标书签覆盖，并结合 `版式核对.json` 或 `--onlyoffice-receipt` 核对同摘要 `docx_sha256` 的 ONLYOFFICE 保存与 PDF 导出；缺实测回执时为 `needs_onlyoffice_check` |
+| `execution_report`、`limits` | 透传的 `authoring-report` 摘要（含 `failures`、`outline_issues`、`document_gaps`）及离线评测局限说明 |
+
 工作台任务进度（`progress`）的 `accepted_by_phase` 每行为 `phase`、`count`（已接受工作单元）和 `planned`（宿主登记的计划单元数，`null` 表示未知）。`planned` 只来自已登记的计划：编制取各 task 的 `execution-plan` 回执 `planned_requests` 之和，分析的 `extract` 取当前修订提取范围规划的包数，其余阶段为 `null`。有计划但尚未接受单元的阶段也列出（`count` 为 0）。整体总量不给出：后续阶段的计划在前序阶段完成后才登记。
 
 ### 运行状态
