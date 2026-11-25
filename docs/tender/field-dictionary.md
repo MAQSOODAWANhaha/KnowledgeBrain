@@ -605,7 +605,7 @@ compact 视图可在顶层携带 `text_pool: string[]`，仅共享完全相同�
 | 归属请求 `item_placement` | `{operation:"place_items_v1", positions:[{id,title_path:str[],kind,opening,origin?}], requirements:[{id,kind,subject?,scope?,text,conditions?,exceptions?,submission?,consequence?,scoring?,evidence:[{page,quote}]}]}`。`id` 为本批短 ID（位置 `t*`，事项 `r*`），`opening` 为位置原文开头，最长 120 字；`origin:"outside_format"` 标出格式章节外的候选原式 |
 | `ItemPlacementResponse` | `{placements:[[r,value]]}`，每个本批事项恰好一行。`value` 为本批位置 ID、理由代码或 null（待核） |
 | 不需响应理由代码 | `evaluation`：评标程序或评委动作；`performance`：签订合同、付款、验收、合同变更、违约处理这类签约后才发生、投标文件不需说明的手续，采购需求的技术、服务、人员和交付要求不属此类；`document_wide`：整份投标文件的格式、份数、递交等约束；`not_applicable`：原文明示本项目不适用 |
-| 宿主落账 | 位置 ID → 目标 `rule_refs`；`document_wide` → `constraint_rule_refs`；`evaluation`、null 和未采纳批次 → 覆盖台账 `pending`；其余代码 → `outline_rule_excluded` 问题，`detail` 写明理由 |
+| 宿主落账 | 位置 ID → 目标 `rule_refs`；`document_wide` → `constraint_rule_refs`；`evaluation`、null、未采纳批次和连同位置目录超出预算未发送的事项 → 覆盖台账 `pending`；其余代码 → `outline_rule_excluded` 问题，`detail` 写明理由 |
 | 评标裁决 | 大纲保存可选 `evaluation_decisions: [{rule_ref, resolution, target_id?}]`。仅接受当前基线大纲的评标建议待核事项及完整正式 `EffectiveItemRef`。`resolution` 取 `evaluation`（纯评审流程）、`reference`（原文索引）、`document_wide`（整份约束）、`target`（本次保存后仍在大纲中的位置，须提供 `target_id`）或 `pending`（继续待核）。按现有修订并发及幂等规则保存。 |
 | 开标项目名称 | `ResponseTarget.opening_project_name_excerpt` 为新链宿主记录的同快照公告原文精确引用。只在已绑定完整原生《开标一览表》的手填位置保存。模型和编辑请求均不指定文字、行列或填值，该值不计为企业应答。 |
 

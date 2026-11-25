@@ -87,7 +87,7 @@
 
 1. **格式章节选择（`bid_format_source_outline_v1`）**：通常 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。标题行整体超出准入预算时按原文顺序分片，每片 1 次逻辑请求，切点优先落在附件编号或编号式样标题前；每片只回本片标题、不回 `body`，宿主合并后按整节规则校验。单行连同 Prompt 仍超限、或分片请求失败时，该片标题不进大纲并记 `outline_directory_plan_failed`；全部分片失败时本次大纲执行失败。格式章节只在 `role` 为主件的文档中找一个锚点，补遗与澄清不参与（[BUG-332](bug-fix.md#bug-332新链格式章节只读主件补遗与澄清的格式表不进结构)）。
 2. **格式补位（宿主 0 次调用）**：`submission_requirement` 点名且不在格式章节内的必交文件，宿主在引证页及前页找同名独立标题行补成 `outside_format` 候选章，无事项落入则删除。
-3. **事项归属（`item_placement`）**：按预算分批（每批 ≤ `240` 条），每批都带完整位置目录（[BUG-333](bug-fix.md#bug-333新链事项归属每批都带完整位置目录目录过大时整次执行失败)），每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。
+3. **事项归属（`item_placement`）**：按预算分批（每批 ≤ `240` 条），每批都带完整位置目录；单条事项连同位置目录仍超出准入预算时不发送，与未采纳批次一样记 `outline_item_placement_failed` 留待核，不中断执行。每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。
 
 ### 新链方案正文与评标待核
 

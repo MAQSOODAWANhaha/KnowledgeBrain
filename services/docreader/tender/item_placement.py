@@ -168,21 +168,27 @@ def _output_fits(budget, ids, positions):
 
 
 def plan_batches(budget, positions, items, fits):
-    """Greedy source-order batches that fit the input window and the output reserve."""
-    batches, current = [], []
+    """Greedy source-order batches that fit the input window and the output reserve.
+
+    BUG-333: an item that does not fit even alone with the position catalogue is returned unsent.
+    """
+    def admitted(ids):
+        return (len(ids) <= PLACEMENT_BATCH_ITEMS and fits(placement_payload(positions, items, ids))
+                and _output_fits(budget, ids, positions))
+
+    batches, current, unsent = [], [], []
     for key in items:
-        trial = [*current, key]
-        if (len(trial) <= PLACEMENT_BATCH_ITEMS and fits(placement_payload(positions, items, trial))
-                and _output_fits(budget, trial, positions)):
-            current = trial
+        if admitted([*current, key]):
+            current.append(key)
             continue
+        if current:
+            batches.append(current)
+        current = [key] if admitted([key]) else []
         if not current:
-            raise ModelBudgetError('one requirement and the position catalogue exceed the request budget')
-        batches.append(current)
-        current = [key]
+            unsent.append(key)
     if current:
         batches.append(current)
-    return batches
+    return batches, unsent
 
 
 def decode_placements(raw, ids, positions):
@@ -244,7 +250,7 @@ async def place_items(outline, items, budget, execute, ask, fits, outside_format
     positions = placement_positions(outline, set(outside_format))
     if not keyed or not positions:
         return outline, {'batches': 0, 'failed': 0}
-    batches = await asyncio.to_thread(plan_batches, budget, positions, keyed, fits)
+    batches, unsent = await asyncio.to_thread(plan_batches, budget, positions, keyed, fits)
 
     async def one(ids):
         payload = placement_payload(positions, keyed, ids)
@@ -261,8 +267,9 @@ async def place_items(outline, items, budget, execute, ask, fits, outside_format
     decided = {key: value for result in results if result for key, value in result.items()}
     bound = bind_placements(outline, positions, keyed, decided)
     failed = [ids for ids, result in zip(batches, results) if result is None]
-    if failed:
+    pending = {key for ids in failed for key in ids} | set(unsent)
+    if pending:
         bound['issues'].append({'code': 'outline_item_placement_failed', 'rule_refs': [
-            deepcopy(keyed[key]['rule_ref']) for ids in failed for key in ids],
-            'detail': '事项归属批次未被采纳，相关事项留待核。'})
+            deepcopy(keyed[key]['rule_ref']) for key in keyed if key in pending],
+            'detail': '事项归属批次未被采纳或连同位置目录超出单次请求预算，相关事项留待核。'})
     return bound, {'batches': len(batches), 'failed': len(failed)}

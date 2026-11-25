@@ -173,7 +173,7 @@ def test_batches_follow_the_window_and_keep_source_order():
     items = {f"r{n}": item(n) for n in range(1, 6)}
     batches = placement.plan_batches(RequestBudget(), positions, items,
                                      lambda payload: len(payload["requirements"]) <= 2)
-    assert batches == [["r1", "r2"], ["r3", "r4"], ["r5"]]
+    assert batches == ([["r1", "r2"], ["r3", "r4"], ["r5"]], [])
 
 
 async def test_a_failed_batch_leaves_its_items_pending_and_named():
@@ -200,8 +200,34 @@ def test_batches_never_exceed_the_soft_item_cap(monkeypatch):
     monkeypatch.setattr(placement, "PLACEMENT_BATCH_ITEMS", 3)
     positions = placement.placement_positions(outline())
     items = {f"r{n}": item(n) for n in range(1, 8)}
-    batches = placement.plan_batches(RequestBudget(), positions, items, lambda payload: True)
-    assert [len(batch) for batch in batches] == [3, 3, 1]
+    batches, unsent = placement.plan_batches(RequestBudget(), positions, items, lambda payload: True)
+    assert [len(batch) for batch in batches] == [3, 3, 1] and unsent == []
+
+
+async def test_bug333_items_that_cannot_fit_with_the_catalogue_stay_pending_without_aborting():
+    calls = []
+
+    async def ask(_execute, _budget, task, payload, validate):
+        ids = [row["id"] for row in payload["requirements"]]
+        calls.append(ids)
+        return validate({"placements": [[identity, "t1"] for identity in ids]})
+
+    def fits(payload):
+        # r1's evidence is too long to ever share a request with the position catalogue.
+        return all(row["id"] != "r1" for row in payload["requirements"])
+
+    bound, stats = await placement.place_items(
+        outline(), [item(n) for n in range(1, 4)], RequestBudget(), None, ask, fits)
+    assert calls == [["r2", "r3"]] and stats == {"batches": 1, "failed": 0}
+    failed, = [issue for issue in bound["issues"] if issue["code"] == "outline_item_placement_failed"]
+    assert failed["rule_refs"] == [ref(1)]
+
+    calls.clear()
+    bound, stats = await placement.place_items(
+        outline(), [item(n) for n in range(1, 4)], RequestBudget(), None, ask, lambda _payload: False)
+    assert calls == [] and stats == {"batches": 0, "failed": 0}
+    failed, = [issue for issue in bound["issues"] if issue["code"] == "outline_item_placement_failed"]
+    assert failed["rule_refs"] == [ref(1), ref(2), ref(3)]
 
 
 CHAIN_PAGES = [
