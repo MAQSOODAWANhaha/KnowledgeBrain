@@ -276,3 +276,56 @@ async def test_generate_document_runs_the_requirement_chain(tmp_path, monkeypatc
                   if row["rule_ref"]}
     assert resolution["i3"] == resolution["i4"] == "pending"
     assert resolution["i1"] != "pending" and resolution["i2"] != "pending"
+
+
+def test_bug332_an_amendment_restating_a_listed_form_is_kept_beside_it_as_a_conflict():
+    documents = [*DOCUMENTS, {"document_id": "addendum", "role": "amendment", "pages": [
+        "补遗一\n原第六章投标书格式修改如下：\n投标书\n致：采购人（修改后）\n"]}]
+    amended = item(1, "submission_requirement", ["投标书"], page=0)
+    amended["evidence"] = [{"document_id": "addendum", "page": 0, "quote": "投标书"}]
+    result, added_names = placement.add_submission_forms(plan(), documents, [amended], {("tender", 1)})
+    assert added_names == []
+    added, = [node for node in result["nodes"] if node["id"].startswith("submission-")]
+    assert added["name"] == "投标书" and added["heading"] == {"document_id": "addendum", "page": 0, "line": 2}
+    conflict, = result["skipped_item_issues"]
+    assert conflict["code"] == "outline_directory_format_conflict"
+    assert "第 2 页" in conflict["detail"] and "补遗（文档 addendum）第 1 页" in conflict["detail"]
+
+    main_only = item(2, "submission_requirement", ["投标书"], page=0)
+    assert placement.add_submission_forms(plan(), documents, [main_only], {("tender", 1)}) == (plan(), [])
+
+
+async def test_bug332_the_requirement_chain_keeps_an_inline_amendment_form_beside_the_original(tmp_path, monkeypatch):
+    from docreader.integrations.artifacts import ArtifactStore
+    from docreader.tender import authoring_pipeline
+    from docreader.tender.schema import AuthoringInput
+
+    amended = item(1, "submission_requirement", ["投标书"], page=0)
+    amended["evidence"] = [{"document_id": "addendum", "page": 0, "quote": "投标书"}]
+    monkeypatch.setattr(placement, "_items", lambda _context: [amended, item(2)])
+
+    async def execute(task, request, validate):
+        body = json.loads(request["messages"][1]["content"][0]["text"])
+        if task == "directory_plan":
+            found = {text.strip(): ref for ref, text in body["lines"]}
+            return validate({"chapters": [{"heading_refs": [found["一、投标书"]], "name": "投标书"},
+                                          {"heading_refs": [found["二、开标一览表"]], "name": "开标一览表"}]})
+        assert not [row for row in body["positions"] if row.get("origin")]
+        return validate({"placements": [["r1", "document_wide"], ["r2", None]]})
+
+    artifacts = ArtifactStore(tmp_path)
+    snapshot = AuthoringInput.model_validate({"schema_version": 2, "run_id": "chain", "source_version": 1,
+                                              "domain_revision": 1}).model_dump()
+    reference = await authoring_pipeline.generate_document(
+        artifacts, snapshot, RequestBudget(model="unused"), execute,
+        directory_documents=[{"document_id": "tender", "role": "main", "pages": CHAIN_PAGES,
+                              "line_units": [[] for _ in CHAIN_PAGES]},
+                             {"document_id": "addendum", "role": "amendment",
+                              "pages": ["补遗一\n原投标书格式修改如下：\n投标书\n致：采购人（修改后）\n"], "line_units": [[]]}],
+        outline_only=True, directory_contract="bid_format_source_outline_v1",
+        requirement_chain_contract=placement.REQUIREMENT_CHAIN_CONTRACT)
+    outline = artifacts.read_json(reference)
+    assert [chapter["title"] for chapter in outline["chapters"]] == ["投标书", "开标一览表", "投标书"]
+    codes = [issue["code"] for issue in outline["issues"]]
+    assert "outline_directory_format_conflict" in codes
+    assert "outline_directory_revision_unreviewed" not in codes and "outline_directory_rejected" not in codes

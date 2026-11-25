@@ -6,7 +6,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
-from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, bid_format_section
+from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, _ROLE_LABEL, bid_format_sections
 from docreader.tender.directory_sources import SourceRefs
 from docreader.tender.schema import Contract, NonnegativeInt, Text
 from docreader.tender.status import AuthoringTask
@@ -17,6 +17,7 @@ BID_FORMAT_OPERATION = 'select_bid_format_outline_v1'
 HeadingRefs = Annotated[list[NonnegativeInt], Field(min_length=1, max_length=4)]
 BodyRange = Annotated[list[NonnegativeInt], Field(min_length=2, max_length=2)]
 _COVER_TITLES = {'投标文件', '投标文件封面', '封面'}
+_ROLE_NAMES = {'main': '主件', 'attachment': '附件', **_ROLE_LABEL}
 _SUBFORM_NUMBER = re.compile(r'^(?P<number>[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+)\s*(?P<name>[^0-9０-９\s－-].*)$')
 _NOT_APPLICABLE = re.compile(r'[（(]\s*(?:本次|本项目)?\s*不适用\s*[）)]\s*[；;]?$')
 
@@ -45,27 +46,36 @@ def _annex_code(name):
 
 
 class _Prepared:
+    """BUG-332: every registered document may hold a bid-format section; each is asked and bounded on its own."""
+
     def __init__(self, documents, identity):
-        found = bid_format_section(documents)
-        self.found = found is not None
+        found = bid_format_sections(documents)
+        self.found = bool(found)
         self.refs = SourceRefs(documents, identity)
         self.visible = set()
         self.page_edges = set()
         self.grid_rows = {}
-        self.payload = None
-        if found is None:
+        self.order, self.sections = [], []
+        if not found:
             return
-        anchor, section = found
-        points = [(anchor[0], anchor[1], anchor[2])]
-        points.extend((row[0], row[1], row[2]) for row in section)
-        self.visible = {self.refs.by_point[point] for point in points}
         self.grid_rows = _grid_owners(documents, self.refs)
         self.page_edges = {self.refs.by_point[point] for point in _page_edges(documents) if point in self.refs.by_point}
         self.page_edges.difference_update(self.grid_rows)
-        self.order = [self.refs.by_point[point] for point in points]
-        shown = _heading_candidates(section, self.refs)
-        self.payload = {'operation': BID_FORMAT_OPERATION, 'source_ref_format': 'host_bound_line_refs_v1',
-                        'lines': shown, 'section_refs': [self.order[0], self.order[-1]]}
+        for role, anchor, section in found:
+            points = [(anchor[0], anchor[1], anchor[2])]
+            points.extend((row[0], row[1], row[2]) for row in section)
+            order = [self.refs.by_point[point] for point in points]
+            self.visible.update(order)
+            self.order.extend(order)
+            self.sections.append({'role': role, 'first': order[0], 'last': order[-1], 'payload': {
+                'operation': BID_FORMAT_OPERATION, 'source_ref_format': 'host_bound_line_refs_v1',
+                'lines': _heading_candidates(section, self.refs), 'section_refs': [order[0], order[-1]]}})
+
+    def section(self, reference):
+        return next(section for section in self.sections if section['first'] <= reference <= section['last'])
+
+    def end(self, reference):
+        return self.section(reference)['last']
 
 
 def _heading_candidates(section, refs):
@@ -132,9 +142,10 @@ def _cover_window(prepared, chapters):
     limit = min((start if start is not None else heads[0]
                  for heads, _name, start, _end in chapters
                  if all(_compact(prepared.refs.text(ref)) not in _COVER_TITLES for ref in heads)),
-                default=prepared.order[-1] + 1)
+                default=prepared.end(prepared.order[0]) + 1)
+    limit = min(limit, prepared.end(prepared.order[0]) + 1)
     main = prepared.refs.point(prepared.order[0])['document_id']
-    other_page = prepared.refs.point(limit)['page'] if limit <= prepared.order[-1] else None
+    other_page = prepared.refs.point(limit)['page'] if limit <= prepared.end(prepared.order[0]) else None
     pages = {}
     for ref in prepared.order[1:]:
         point = prepared.refs.point(ref)
@@ -180,8 +191,8 @@ def _non_applicable_spans(prepared):
         else:
             continue
         headings.append((reference, depth, bool(_NOT_APPLICABLE.search(name))))
-    return [(reference, next((ref for ref, level, _ in headings[index + 1:] if level <= depth),
-                             prepared.order[-1] + 1))
+    return [(reference, next((ref for ref, level, _ in headings[index + 1:]
+                              if level <= depth and ref <= prepared.end(reference)), prepared.end(reference) + 1))
             for index, (reference, depth, excluded) in enumerate(headings) if excluded]
 
 
@@ -242,7 +253,8 @@ def decode_bid_format_outline(raw, prepared):
             chapters.append((heads, name, None, None))
             continue
         start, end = chapter['body']
-        if end < start or any(reference not in prepared.visible for reference in range(start, end + 1)):
+        if end < start or end > prepared.end(start) or any(reference not in prepared.visible
+                                                             for reference in range(start, end + 1)):
             raise ModelContractError([_issue('body must stay inside the bid-format section', [*path, 'body'])])
         if any(start < stop and skip <= end for skip, stop in skipped):
             raise ModelContractError([_issue('原式正文不能跨入不适用的式样', [*path, 'body'])])
@@ -267,8 +279,10 @@ def decode_bid_format_outline(raw, prepared):
         for index, (heads, name, _start, _end) in enumerate(chapters):
             start = heads[0]
             # Chapters sharing one listed line copy the same template up to the next other heading.
-            following = next((item[0][0] for item in chapters[index + 1:] if item[0][0] != start), None)
-            cutoff = next((boundary for boundary, _ in skipped if boundary > start), prepared.order[-1] + 1)
+            following = next((item[0][0] for item in chapters[index + 1:]
+                              if item[0][0] != start and item[0][0] <= prepared.end(start)), None)
+            cutoff = next((boundary for boundary, _ in skipped if start < boundary <= prepared.end(start)),
+                          prepared.end(start) + 1)
             end = min(following, cutoff) - 1 if following is not None else cutoff - 1
             if end < start:
                 raise ModelContractError([_issue('chapter order leaves an empty template', ['chapters', index])])
@@ -301,50 +315,87 @@ def decode_bid_format_outline(raw, prepared):
                                                    'start_line': first['line'], 'end_line': first['line']}],
                               'entries': entries},
               'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
+    issues = _source_issues(prepared, chapters)
     if cover_pending:
-        result['skipped_item_issues'] = [{'code': 'outline_directory_literal_pending',
-                                          'detail': '格式章节中的封面标题缺少可核对的同页字段网格，原式待核。'}]
+        issues.insert(0, {'code': 'outline_directory_literal_pending',
+                          'detail': '格式章节中的封面标题缺少可核对的同页字段网格，原式待核。'})
+    if issues:
+        result['skipped_item_issues'] = issues
     return result
 
 
+def _place(prepared, reference):
+    point = prepared.refs.point(reference)
+    role = prepared.section(reference)['role']
+    return f"{_ROLE_NAMES.get(role, role)}（文档 {point['document_id']}）第 {point['page'] + 1} 页"
+
+
+def _source_issues(prepared, chapters):
+    """BUG-332: name every addendum form's source; keep same-name forms of different documents for the author."""
+    issues, named = [], {}
+    for heads, name, _start, _end in chapters:
+        if prepared.section(heads[0])['role'] in _ROLE_LABEL:
+            issues.append({'code': 'outline_directory_format_source',
+                           'detail': f'「{name}」的原式来自{_place(prepared, heads[0])}的投标文件格式。'})
+        named.setdefault(_compact(name), []).append((name, heads[0]))
+    for found in named.values():
+        documents = {prepared.refs.point(reference)['document_id'] for _name, reference in found}
+        if len(documents) > 1:
+            issues.append({'code': 'outline_directory_format_conflict',
+                           'detail': f'「{found[0][0]}」同时出现在' + '、'.join(_place(prepared, reference) for _name, reference in found)
+                           + '，各章均保留，请核定以哪份为准。'})
+    return issues
+
+
 async def select_bid_format_plan(documents, budget, execute, identity):
-    """BUG-331: an oversized title list is sent in source-order slices; a slice that fails stays pending."""
+    """One request per document's bid-format section; an oversized one is sent in slices (BUG-331, BUG-332).
+
+    A single section that fits is the unchanged whole-section request. Otherwise each unit returns only its own
+    headings without body, the host merges every unit and decodes once; a failed unit stays pending.
+    """
     import asyncio
 
     from docreader.tender.authoring_pipeline import _ask, _fits, _plan
 
     prepared = _Prepared(documents, identity)
-    if prepared.payload is None:
+    if not prepared.found:
         return None
     task = AuthoringTask.DIRECTORY_PLAN
 
     def accept(raw):
         return decode_bid_format_outline(raw, prepared)
 
-    payloads = await asyncio.to_thread(_slices, prepared.payload, lambda payload: _fits(budget, task, payload))
-    if payloads is None:
+    def units():
+        found = []
+        for section in prepared.sections:
+            slices = _slices(section['payload'], lambda payload: _fits(budget, task, payload))
+            found.extend([section['payload']] if slices is None else slices)
+        return found
+
+    payloads = await asyncio.to_thread(units)
+    if len(prepared.sections) == 1 and payloads == [prepared.sections[0]['payload']]:
         await _plan(execute, task, 1, 'bid-format-plan')
-        return await _ask(execute, budget, task, prepared.payload, accept)
-    await _plan(execute, task, len(payloads), 'bid-format-plan-slices')
+        return await _ask(execute, budget, task, payloads[0], accept)
+    await _plan(execute, task, len(payloads), 'bid-format-plan-units')
 
     async def one(payload):
         if payload is None:
             return None
         shown = {line[0] for line in payload['lines']}
 
-        def accept_slice(raw):
+        def accept_unit(raw):
             try:
                 plan = BidFormatOutline.model_validate(raw).model_dump()
             except ValidationError:
                 plan = None
             if plan is None or any(chapter['body'] is not None or not set(chapter['heading_refs']) <= shown
                                    for chapter in plan['chapters']):
-                raise ModelContractError([_issue('return only heading refs from this slice, without body')])
+                raise ModelContractError([_issue('return only heading refs from these lines, without body')])
             if plan['chapters']:
                 accept(raw)
             return plan['chapters']
         try:
-            return await _ask(execute, budget, task, payload, accept_slice)
+            return await _ask(execute, budget, task, payload, accept_unit)
         except (ModelWorkUnitExhausted, ModelBudgetError):
             return None
 
@@ -356,7 +407,7 @@ async def select_bid_format_plan(documents, budget, execute, identity):
     if any(result is None for result in results):
         result.setdefault('skipped_item_issues', []).append({
             'code': 'outline_directory_plan_failed',
-            'detail': '投标文件格式章节超出单次请求预算，已分片选择；部分分片未完成，其中的格式标题待核。'})
+            'detail': '投标文件格式章节有请求未完成（超出单次请求预算或未被采纳），其中的格式标题待核。'})
     return result
 
 
@@ -390,3 +441,44 @@ def _slices(payload, fits):
         slices.append(part(end))
         start = end
     return slices
+
+
+def compile_bid_format_plan(plan, documents):
+    """BUG-332: a compile list stays inside one document, so a plan spanning documents compiles per document.
+
+    Parts keep registered document order; host issues repeated by every part are kept once, and a revision
+    document that one part cites is not reported unreviewed by another.
+    """
+    import json
+
+    from docreader.tender.directory_compile import compile_plans
+
+    order = [document['document_id'] for document in documents]
+    entries = plan['composition']['entries']
+    cited = sorted({entry['name']['document_id'] for entry in entries}, key=order.index)
+    if len(cited) <= 1:
+        return compile_plans([plan], documents)
+    compiled, seen = {'chapters': [], 'issues': []}, set()
+    for index, document_id in enumerate(cited):
+        own = [number for number, entry in enumerate(entries) if entry['name']['document_id'] == document_id]
+        renumber = {number: position for position, number in enumerate(own)}
+        first = entries[own[0]]['name']
+        part = {'nodes': [node for node in plan['nodes'] if node['heading']['document_id'] == document_id],
+                'composition': {'priority_basis': [{'document_id': document_id, 'page': first['page'],
+                                                    'start_line': first['line'], 'end_line': first['line']}],
+                                'entries': [entries[number] for number in own]},
+                'scopes': [{'items': [{**item, 'entry': renumber[item['entry']]}
+                                      for item in plan['scopes'][0]['items'] if item['entry'] in renumber]}],
+                'excluded': [], 'source_only': []}
+        if index == 0 and plan.get('skipped_item_issues'):
+            part['skipped_item_issues'] = plan['skipped_item_issues']
+        value = compile_plans([part], documents)
+        compiled['chapters'].extend(value['chapters'])
+        for issue in value['issues']:
+            key = json.dumps(issue, ensure_ascii=False, sort_keys=True)
+            if key in seen or (issue['code'] == 'outline_directory_revision_unreviewed'
+                               and any(issue['detail'].startswith(f'{cited_id}是') for cited_id in cited)):
+                continue
+            seen.add(key)
+            compiled['issues'].append(issue)
+    return compiled

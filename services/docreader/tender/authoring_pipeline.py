@@ -2563,12 +2563,12 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             from docreader.tender.bid_format_outline import select_bid_format_plan
             selected = await select_bid_format_plan(directory_documents, budget, execute, snapshot)
             if selected and requirement_chain_contract is not None:
-                from docreader.tender.directory_compile import bid_format_section
+                from docreader.tender.directory_compile import bid_format_sections
                 from docreader.tender.item_placement import _items, add_submission_forms
                 context = await asyncio.to_thread(_OutlineContext, artifacts, snapshot)
                 chain_items = await asyncio.to_thread(_items, context)
-                found = bid_format_section(directory_documents)
-                format_pages = {(row[0], row[1]) for row in (found[0], *found[1])} if found else set()
+                format_pages = {(row[0], row[1]) for _role, anchor, section in bid_format_sections(directory_documents)
+                                for row in (anchor, *section)}
                 selected, chain_added = add_submission_forms(selected, directory_documents, chain_items, format_pages)
             directory_plans = [selected] if selected else []
         elif directory_plans is None and execute is None:
@@ -2583,7 +2583,11 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                     directory_documents, budget, execute, snapshot, contract=directory_contract)
         else:
             plan_failures = []
-        compiled = compile_plans(directory_plans, directory_documents)
+        if directory_contract == 'bid_format_source_outline_v1' and len(directory_plans) == 1:
+            from docreader.tender.bid_format_outline import compile_bid_format_plan
+            compiled = compile_bid_format_plan(directory_plans[0], directory_documents)
+        else:
+            compiled = compile_plans(directory_plans, directory_documents)
         compiled['issues'].extend({'code': 'outline_directory_plan_failed', 'detail': detail} for detail in plan_failures)
         if fetch_details and compiled['chapters']:
             source_options = {}

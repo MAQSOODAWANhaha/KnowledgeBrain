@@ -12,6 +12,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
+from docreader.tender.directory_compile import _REVISIONS, _ROLE_LABEL
 from docreader.tender.schema import Contract, Text
 from docreader.tender.status import AuthoringTask
 
@@ -71,19 +72,26 @@ def _items(context):
 
 
 def submission_form_nodes(documents, plan, items, format_pages):
-    """Plan nodes for named submission forms that the bid-format chapter does not contain."""
-    named = {_compact(node.get('name')) for node in plan.get('nodes', [])}
+    """Plan nodes for named submission forms that the bid-format chapter does not contain.
+
+    BUG-332: an amendment or clarification that restates a form already in the outline is added too, as a conflict.
+    """
+    named = {_compact(node.get('name')): node for node in plan.get('nodes', [])}
+    roles = {document['document_id']: document.get('role') or 'main' for document in documents}
     wanted = {}
     for row in items:
         if row['semantic'].get('kind') != 'submission_requirement':
             continue
         for name in (row['semantic'].get('submission') or {}).get('documents') or []:
+            key = _compact(name)
             outside = [e for e in row['evidence'] if e['page'] is not None
                        and (e['document_id'], e['page']) not in format_pages]
-            if _compact(name) and _compact(name) not in named and outside:
-                wanted.setdefault(_compact(name), {'name': name, 'rows': [], 'evidence': []})
-                wanted[_compact(name)]['rows'].append(row)
-                wanted[_compact(name)]['evidence'].extend(outside)
+            if key in named:
+                outside = [e for e in outside if roles.get(e['document_id']) in _REVISIONS]
+            if key and outside:
+                wanted.setdefault(key, {'name': name, 'rows': [], 'evidence': [], 'conflict': named.get(key)})
+                wanted[key]['rows'].append(row)
+                wanted[key]['evidence'].extend(outside)
     by_id = {document['document_id']: document for document in documents}
     nodes = []
     for key, entry in wanted.items():
@@ -116,7 +124,7 @@ def submission_form_nodes(documents, plan, items, format_pages):
                                'name': entry['name'],
                                'heading': {'document_id': document_id, 'page': page, 'line': line},
                                'body_windows': windows},
-                      'point': heading})
+                      'point': heading, 'conflict': entry['conflict'], 'role': roles.get(document_id)})
     return nodes
 
 
@@ -138,7 +146,16 @@ def add_submission_forms(plan, documents, items, format_pages):
         plan['nodes'].append(added['node'])
         items_in_scope.append({'node_id': added['node']['id'], 'entry': position, 'depth': 'self',
                                'presentation': 'section', 'clause': []})
-    return plan, [added['node']['name'] for added in extra]
+        original = added['conflict']
+        if original is not None:
+            point, heading = original['heading'], added['node']['heading']
+            plan.setdefault('skipped_item_issues', []).append({
+                'code': 'outline_directory_format_conflict',
+                'detail': f"「{added['node']['name']}」同时出现在投标文件格式（文档 {point['document_id']}）第 {point['page'] + 1} 页"
+                          f"和{_ROLE_LABEL[added['role']]}（文档 {heading['document_id']}）第 {heading['page'] + 1} 页，"
+                          '各章均保留，请核定以哪份为准。'})
+    # Conflicts are not outside-format candidates: they stay even when no item is placed in them.
+    return plan, [added['node']['name'] for added in extra if added['conflict'] is None]
 
 
 def placement_positions(outline, outside_format=()):

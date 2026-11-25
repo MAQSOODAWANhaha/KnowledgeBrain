@@ -2389,7 +2389,10 @@ def _ensure_volumes(documents, volumes):
 
 def bid_format_section(documents):
     """Lines after the bid-format heading, before the next chapter. No semantic selection."""
-    rows = _format_lines(documents)
+    return _format_section(_format_lines(documents))
+
+
+def _format_section(rows):
     anchor = _format_anchor(rows)
     if anchor is None:
         return None
@@ -2399,6 +2402,19 @@ def bid_format_section(documents):
             break
         section.append(row)
     return rows[anchor], section
+
+
+def bid_format_sections(documents):
+    """BUG-332: one bid-format section per registered document of any role, in registered order."""
+    found = []
+    for document in documents or []:
+        rows = [(document.get('document_id'), page, line, raw, raw.strip())
+                for page, text in enumerate(document.get('pages') or [])
+                for line, raw in enumerate(str(text).splitlines())]
+        section = _format_section(rows)
+        if section is not None:
+            found.append((document.get('role') or 'main', *section))
+    return found
 
 
 def bid_format_plan(documents):

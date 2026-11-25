@@ -506,8 +506,8 @@ def _not_applicable_formats():
         '9-3 业绩表\n须保留的另一表正文',
     ]
     prepared = _Prepared([{'document_id': 'tender', 'role': 'main', 'pages': pages}], _snapshot())
-    assert prepared.payload is not None
-    refs = {text: ref for ref, text in prepared.payload['lines']}
+    assert len(prepared.sections) == 1
+    refs = {text: ref for ref, text in prepared.sections[0]['payload']['lines']}
     return prepared, refs
 
 
@@ -603,3 +603,65 @@ async def test_bug331_a_failed_slice_keeps_the_others_and_is_named_pending(tmp_p
     assert missed and not missed & set(titles)
     assert titles == [name for name in SLICED_NAMES if name not in missed]
     assert [issue for issue in outline['issues'] if issue['code'] == 'outline_directory_plan_failed']
+
+
+def _format_document(document_id, role, page):
+    return {'document_id': document_id, 'role': role, 'pages': [page], 'line_units': [[]],
+            'unread_pages': [], 'ocr_issues': []}
+
+
+MAIN_FORMAT = '第六章 投标文件格式\n附件1 投标函\n致：招标人\n附件2 报价表\n单价\n第七章 合同条款\n合同正文\n'
+AMENDMENT_FORMAT = '补遗一\n投标文件格式\n附件1 投标函\n致：招标人（补遗）\n附件9 廉洁承诺书\n我方承诺\n'
+
+
+async def _select_annexes(tmp_path, documents):
+    import json
+    import re
+
+    sent = []
+
+    async def execute(task, request, validate):
+        lines = json.loads(request['messages'][1]['content'][0]['text'])['lines']
+        sent.append(json.loads(request['messages'][1]['content'][0]['text']))
+        return validate({'chapters': [{'heading_refs': [ref], 'name': match[1]} for ref, text in lines
+                                      if (match := re.fullmatch(r'附件\d+ (.+)', text.strip()))]})
+    artifacts = ArtifactStore(tmp_path)
+    ref = await generate_document(
+        artifacts, _snapshot(), RequestBudget(model='unused'), execute, directory_documents=documents,
+        outline_only=True, directory_contract='bid_format_source_outline_v1')
+    return artifacts.read_json(ref), sent
+
+
+def _windows(outline):
+    found = []
+    def walk(chapters):
+        for chapter in chapters:
+            found.append((chapter['title'], {window['document_id'] for window in chapter.get('body_windows') or []}))
+            walk(chapter.get('children') or [])
+    walk(outline['chapters'])
+    return found
+
+
+async def test_bug332_an_amendment_format_section_is_selected_beside_the_main_one(tmp_path):
+    main = _format_document('tender', 'main', MAIN_FORMAT)
+    _alone, alone_sent = await _select_annexes(tmp_path / 'alone', [main])
+    outline, sent = await _select_annexes(tmp_path / 'both', [main, _format_document('addendum', 'amendment',
+                                                                                     AMENDMENT_FORMAT)])
+    assert sent[0] == alone_sent[0] and len(sent) == 2
+    assert [chapter['title'] for chapter in outline['chapters']] == ['投标函', '报价表', '投标函', '廉洁承诺书']
+    blob = '\n'.join(_purposes(outline))
+    assert '合同正文' not in blob and '致：招标人（补遗）' in blob
+    codes = [(issue['code'], issue['detail']) for issue in outline['issues']]
+    conflict, = [detail for code, detail in codes if code == 'outline_directory_format_conflict']
+    assert '「投标函」' in conflict and '主件' in conflict and '补遗' in conflict
+    sources = [detail for code, detail in codes if code == 'outline_directory_format_source']
+    assert len(sources) == 2 and all('补遗（文档 addendum）' in detail for detail in sources)
+
+
+async def test_bug332_a_format_section_only_in_an_attachment_is_used(tmp_path):
+    outline, sent = await _select_annexes(tmp_path, [
+        _format_document('tender', 'main', '第一章 招标公告\n格式另册提供\n'),
+        _format_document('forms', 'attachment', MAIN_FORMAT)])
+    assert len(sent) == 1
+    assert [chapter['title'] for chapter in outline['chapters']] == ['投标函', '报价表']
+    assert not [issue for issue in outline['issues'] if issue['code'].startswith('outline_directory_format_')]

@@ -85,8 +85,8 @@
 
 流水线：`格式章节选择` → `格式补位` → `编译` → `事项归属` → `宿主结算`（字段见 [字段字典 · 新链事项归属](field-dictionary.md#新链事项归属)）：
 
-1. **格式章节选择（`bid_format_source_outline_v1`）**：通常 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。标题行整体超出准入预算时按原文顺序分片，每片 1 次逻辑请求，切点优先落在附件编号或编号式样标题前；每片只回本片标题、不回 `body`，宿主合并后按整节规则校验。单行连同 Prompt 仍超限、或分片请求失败时，该片标题不进大纲并记 `outline_directory_plan_failed`；全部分片失败时本次大纲执行失败。格式章节只在 `role` 为主件的文档中找一个锚点，补遗与澄清不参与（[BUG-332](bug-fix.md#bug-332新链格式章节只读主件补遗与澄清的格式表不进结构)）。
-2. **格式补位（宿主 0 次调用）**：`submission_requirement` 点名且不在格式章节内的必交文件，宿主在引证页及前页找同名独立标题行补成 `outside_format` 候选章，无事项落入则删除。
+1. **格式章节选择（`bid_format_source_outline_v1`）**：通常 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。标题行整体超出准入预算时按原文顺序分片，每片 1 次逻辑请求，切点优先落在附件编号或编号式样标题前；每片只回本片标题、不回 `body`，宿主合并后按整节规则校验。单行连同 Prompt 仍超限、或分片请求失败时，该片标题不进大纲并记 `outline_directory_plan_failed`；全部分片失败时本次大纲执行失败。每份登记文档（主件、附件、补遗、澄清）各找一个格式章节锚点，按登记顺序各发各的请求（仅主件有格式章节时与单文档请求相同），每节的隐含复制窗口和不适用范围都止于本节末尾，不跨文档。补遗或澄清格式章节里的每一章记 `outline_directory_format_source`，写明来源文档和页码；不同文档出现同名格式时各章都保留，记 `outline_directory_format_conflict` 交编制人员核定，宿主和模型都不择一。
+2. **格式补位（宿主 0 次调用）**：`submission_requirement` 点名且不在格式章节内的必交文件，宿主在引证页及前页找同名独立标题行补成 `outside_format` 候选章，无事项落入则删除。补遗或澄清内联替换某张原式（无格式章节标题、证据页在补遗或澄清里）且格式章节已有同名章时，宿主在该补遗或澄清的引证页及前页找同名独立标题行补成一章，记 `outline_directory_format_conflict`；这一章不是 `outside_format` 候选，不因无事项落入而删除。
 3. **事项归属（`item_placement`）**：按预算分批（每批 ≤ `240` 条），每批都带完整位置目录；单条事项连同位置目录仍超出准入预算时不发送，与未采纳批次一样记 `outline_item_placement_failed` 留待核，不中断执行。每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。
 
 ### 新链方案正文与评标待核
@@ -117,7 +117,7 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 | 原文选择 | `directory_parameter` / `directory_native_body` | 按规划分包，每包 1 次 | 随目标原文量 | 受预算约束 | `resolve_native_bodies` |
 
 - B/C 原生合同与原文选择由 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT` 互斥切换。
-- 新链（`single_requirement_chain_v1`）的目录规划只发 `bid_format_source_outline_v1`，不发 M、B、C、P、F，共 `格式选择片数（通常为 1）+ 归属批数` 次逻辑请求；单次输入边界与缺口见[新链格式补位与事项归属](#新链格式补位与事项归属)。
+- 新链（`single_requirement_chain_v1`）的目录规划只发 `bid_format_source_outline_v1`，不发 M、B、C、P、F，共 `格式章节数与分片数（通常为 1）+ 归属批数` 次逻辑请求；单次输入边界与缺口见[新链格式补位与事项归属](#新链格式补位与事项归属)。
 
 #### F 原式的条款号
 
