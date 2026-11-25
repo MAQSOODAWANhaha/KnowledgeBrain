@@ -542,3 +542,64 @@ def test_selected_format_cannot_enter_a_marked_non_applicable_subtree(selection)
         chapters.insert(1, {'heading_refs': [refs['1. 附随文件']], 'name': '附随文件'})
     with pytest.raises(ModelContractError):
         decode_bid_format_outline({'chapters': chapters}, prepared)
+
+
+SLICED_NAMES = [f'第{number}号承诺书' for number in range(1, 61)]
+
+
+def _sliced_documents():
+    page = '第六章 投标文件格式\n' + ''.join(f'附件{number} {name}\n致：招标人\n'
+                                           for number, name in enumerate(SLICED_NAMES, start=1))
+    return [{'document_id': 'tender', 'role': 'main', 'pages': [page], 'line_units': [[]],
+             'unread_pages': [], 'ocr_issues': []}]
+
+
+def _slice_execute(fail_slice=None):
+    import json
+    import re
+
+    from docreader.llm.request import ModelWorkUnitExhausted
+
+    sent = []
+
+    async def execute(task, request, validate):
+        assert task == 'directory_plan'
+        lines = json.loads(request['messages'][1]['content'][0]['text'])['lines']
+        sent.append(lines)
+        if len(sent) == fail_slice:
+            raise ModelWorkUnitExhausted(task)
+        chapters = [{'heading_refs': [ref], 'name': match[1]} for ref, text in lines
+                    if (match := re.fullmatch(r'附件\d+ (.+)', text.strip()))]
+        return validate({'chapters': chapters})
+    return execute, sent
+
+
+async def test_bug331_an_oversized_bid_format_section_is_selected_in_slices(tmp_path):
+    # Fits one request at the default window; 22,000 leaves about 4,200 input tokens, under half of the list.
+    execute, sent = _slice_execute()
+    artifacts = ArtifactStore(tmp_path)
+    ref = await generate_document(
+        artifacts, _snapshot(), RequestBudget(context_tokens=22000, model='unused'), execute,
+        directory_documents=_sliced_documents(), outline_only=True,
+        directory_contract='bid_format_source_outline_v1')
+    outline = artifacts.read_json(ref)
+    assert len(sent) > 1
+    assert [ref for lines in sent for ref, _text in lines] == sorted(ref for lines in sent for ref, _text in lines)
+    assert all(lines[0][1].startswith('附件') for lines in sent)
+    assert [chapter['title'] for chapter in outline['chapters']] == SLICED_NAMES
+    assert not [issue for issue in outline.get('issues', []) if issue['code'] == 'outline_directory_plan_failed']
+
+
+async def test_bug331_a_failed_slice_keeps_the_others_and_is_named_pending(tmp_path):
+    execute, sent = _slice_execute(fail_slice=2)
+    artifacts = ArtifactStore(tmp_path)
+    ref = await generate_document(
+        artifacts, _snapshot(), RequestBudget(context_tokens=22000, model='unused'), execute,
+        directory_documents=_sliced_documents(), outline_only=True,
+        directory_contract='bid_format_source_outline_v1')
+    outline = artifacts.read_json(ref)
+    missed = {text.split(' ', 1)[1] for _ref, text in sent[1] if text.startswith('附件')}
+    titles = [chapter['title'] for chapter in outline['chapters']]
+    assert missed and not missed & set(titles)
+    assert titles == [name for name in SLICED_NAMES if name not in missed]
+    assert [issue for issue in outline['issues'] if issue['code'] == 'outline_directory_plan_failed']

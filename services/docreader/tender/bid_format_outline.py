@@ -5,7 +5,7 @@ from typing import Annotated
 
 from pydantic import Field, ValidationError
 
-from docreader.llm.request import ModelContractError
+from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, bid_format_section
 from docreader.tender.directory_sources import SourceRefs
 from docreader.tender.schema import Contract, NonnegativeInt, Text
@@ -308,14 +308,85 @@ def decode_bid_format_outline(raw, prepared):
 
 
 async def select_bid_format_plan(documents, budget, execute, identity):
-    from docreader.tender.authoring_pipeline import _ask, _plan
+    """BUG-331: an oversized title list is sent in source-order slices; a slice that fails stays pending."""
+    import asyncio
+
+    from docreader.tender.authoring_pipeline import _ask, _fits, _plan
 
     prepared = _Prepared(documents, identity)
     if prepared.payload is None:
         return None
-    await _plan(execute, AuthoringTask.DIRECTORY_PLAN, 1, 'bid-format-plan')
+    task = AuthoringTask.DIRECTORY_PLAN
 
     def accept(raw):
         return decode_bid_format_outline(raw, prepared)
 
-    return await _ask(execute, budget, AuthoringTask.DIRECTORY_PLAN, prepared.payload, accept)
+    payloads = await asyncio.to_thread(_slices, prepared.payload, lambda payload: _fits(budget, task, payload))
+    if payloads is None:
+        await _plan(execute, task, 1, 'bid-format-plan')
+        return await _ask(execute, budget, task, prepared.payload, accept)
+    await _plan(execute, task, len(payloads), 'bid-format-plan-slices')
+
+    async def one(payload):
+        if payload is None:
+            return None
+        shown = {line[0] for line in payload['lines']}
+
+        def accept_slice(raw):
+            try:
+                plan = BidFormatOutline.model_validate(raw).model_dump()
+            except ValidationError:
+                plan = None
+            if plan is None or any(chapter['body'] is not None or not set(chapter['heading_refs']) <= shown
+                                   for chapter in plan['chapters']):
+                raise ModelContractError([_issue('return only heading refs from this slice, without body')])
+            if plan['chapters']:
+                accept(raw)
+            return plan['chapters']
+        try:
+            return await _ask(execute, budget, task, payload, accept_slice)
+        except (ModelWorkUnitExhausted, ModelBudgetError):
+            return None
+
+    results = await asyncio.gather(*(one(payload) for payload in payloads))
+    if all(result is None for result in results):
+        raise ModelWorkUnitExhausted(task)
+    result = decode_bid_format_outline({'chapters': [chapter for chapters in results if chapters
+                                                     for chapter in chapters]}, prepared)
+    if any(result is None for result in results):
+        result.setdefault('skipped_item_issues', []).append({
+            'code': 'outline_directory_plan_failed',
+            'detail': '投标文件格式章节超出单次请求预算，已分片选择；部分分片未完成，其中的格式标题待核。'})
+    return result
+
+
+def _slices(payload, fits):
+    """None when the whole title list fits; else consecutive slices, a line too long alone becomes None."""
+    if fits(payload):
+        return None
+    lines, slices, start = payload['lines'], [], 0
+
+    def part(end):
+        return {**payload, 'lines': lines[start:end]}
+    while start < len(lines):
+        if not fits(part(start + 1)):
+            slices.append(None)
+            start += 1
+            continue
+        low, high = start + 1, len(lines)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if fits(part(middle)):
+                low = middle
+            else:
+                high = middle - 1
+        end = low
+        if end < len(lines):
+            # Cut before the last numbered format heading so one form's wrapped lines stay together.
+            cut = max((index for index in range(start + 1, end) if _FORMAT_ITEM.match(lines[index][1].strip())
+                       or _SUBFORM_NUMBER.match(lines[index][1].strip()) or _bare_annex(lines[index][1].strip())),
+                      default=end)
+            end = cut
+        slices.append(part(end))
+        start = end
+    return slices
