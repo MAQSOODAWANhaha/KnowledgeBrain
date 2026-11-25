@@ -32,13 +32,28 @@ from docreader.tender.word_navigation import add_bookmark, bookmark_name
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _XML_ILLEGAL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]")
 _ENTERPRISE_SLOT = re.compile(r"保证金|签署人|签字人")
+_SIGNATORY_NAME = re.compile(
+    r"((?:签字或签章|签字|签章|签署人|签字人)\)?\s*[:：]\s*)([^\s（(）)。，,、:：]{1,12})"
+)
+
+
+def _label_text(cells):
+    return "\n".join(text for text in cells if text.strip())
 
 
 def _row_label(grid, row, column):
-    return "\n".join(
+    return _label_text(
         cell.get("text") or ""
         for cell in grid.get("cells", [])
-        if cell.get("row") == row and cell.get("column") != column and (cell.get("text") or "").strip()
+        if cell.get("row") == row and cell.get("column") != column
+    )
+
+
+def _column_header(grid, row, column):
+    return _label_text(
+        cell.get("text") or ""
+        for cell in grid.get("cells", [])
+        if cell.get("column") == column and (cell.get("row") or 0) < row
     )
 
 
@@ -46,7 +61,28 @@ def _unsupported_enterprise_slot(grid, fill):
     """Deposit amounts and signatory names stay blank until an enterprise material is cited."""
     if fill.get("material_ids"):
         return False
-    return bool(_ENTERPRISE_SLOT.search(_row_label(grid, fill["row"], fill["column"])))
+    label = _row_label(grid, fill["row"], fill["column"]) + "\n" + _column_header(
+        grid, fill["row"], fill["column"])
+    return bool(_ENTERPRISE_SLOT.search(label))
+
+
+def _blank_uncited_signatory(block, unit):
+    """Drop a name typed after a signature label when the block cites no enterprise material."""
+    if block.get("kind") != "paragraph":
+        return block, False
+    if block.get("material_ids") or unit.get("material_ids"):
+        return block, False
+    text = block.get("text") or ""
+
+    def replacer(match):
+        if match.group(2) in {"姓名", "职务", "签章"}:
+            return match.group(0)
+        return match.group(1)
+
+    blanked, count = _SIGNATORY_NAME.subn(replacer, text)
+    if not count or blanked == text:
+        return block, False
+    return {**block, "text": blanked}, True
 
 
 def xml_text(value):
@@ -1288,6 +1324,10 @@ class _Assembler:
                          "人工填写位置未采用生成正文。" if manual else
                          "该原格式没有可填写网格，未另行追加生成声明；补充说明须安排独立正文位置。", chapter_id)
             else:
+                block, blanked = _blank_uncited_signatory(block, unit)
+                if blanked:
+                    self.gap("export_enterprise_fact_pending",
+                             "保证金金额或签署人没有企业资料，单元格留空待补。", chapter_id)
                 blocks.append(block)
         for block in blocks:
             _block(document, block)

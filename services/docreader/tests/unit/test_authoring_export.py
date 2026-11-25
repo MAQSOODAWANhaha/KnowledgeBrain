@@ -111,20 +111,50 @@ def test_missing_enterprise_deposit_and_signatory_stay_blank(tmp_path):
     position = target("bond", "form", [ref], templates=[ref])
     outline = {"authoring_input": {"frozen_ref": frozen}, "chapters": [
         chapter("a", "投标函", [position])]}
-    result = export_authoring_document(artifacts, outline, [writing(
-        "task", "a", ["bond"], cell_fills=[
+    opening = {"row_count": 2, "column_count": 3, "widths_mm": [40, 40, 40], "cells": [
+        {"row": 0, "column": 0, "row_span": 1, "col_span": 1, "text": "项目名称"},
+        {"row": 0, "column": 1, "row_span": 1, "col_span": 1, "text": "投标报价"},
+        {"row": 0, "column": 2, "row_span": 1, "col_span": 1, "text": "投标保证金"},
+        {"row": 1, "column": 0, "row_span": 1, "col_span": 1, "text": ""},
+        {"row": 1, "column": 1, "row_span": 1, "col_span": 1, "text": ""},
+        {"row": 1, "column": 2, "row_span": 1, "col_span": 1, "text": ""},
+    ]}
+    opening_ref = source_ref(artifacts, grid=opening, document_id="opening")
+    opening_position = target("opening", "form", [opening_ref], templates=[opening_ref])
+    letter = target("letter", "narrative")
+    outline["chapters"].extend([
+        chapter("b", "开标表", [opening_position]),
+        chapter("c", "授权书", [letter]),
+    ])
+    result = export_authoring_document(artifacts, outline, [
+        writing("task", "a", ["bond"], cell_fills=[
             {"source_ref": ref, "row": 0, "column": 1, "text": "128000元"},
             {"source_ref": ref, "row": 1, "column": 1, "text": "李四"},
-        ])])
+        ]),
+        writing("open-task", "b", ["opening"], cell_fills=[
+            {"source_ref": opening_ref, "row": 1, "column": 2, "text": "128000元"},
+        ]),
+        writing("sign-task", "c", ["letter"], blocks=[
+            {"kind": "paragraph", "text": "法定代表人(签字或签章):李四"},
+        ]),
+    ])
     word = document(artifacts, result)
     cells = [cell.text for table in word.tables for row in table.rows for cell in row.cells]
-    pending = next(gap for gap in result["gaps"] if gap["code"] == "export_enterprise_fact_pending")
-    print(f"deposit_cell={cells[1]!r} signatory_cell={cells[3]!r} pending={pending['detail']!r}")
+    pending = [gap for gap in result["gaps"] if gap["code"] == "export_enterprise_fact_pending"]
+    column_deposit = next(
+        table.rows[1].cells[2].text
+        for table in word.tables
+        if table.rows[0].cells[0].text == "项目名称")
+    print(
+        f"deposit_cell={cells[1]!r} signatory_cell={cells[3]!r} "
+        f"column_deposit={column_deposit!r} pending={pending[0]['detail']!r}")
     assert cells[1] in {"", "待补"}
     assert cells[3] in {"", "待补"}
+    assert column_deposit in {"", "待补"}
     rendered = "\n".join(cells + [paragraph.text for paragraph in word.paragraphs])
     assert "128000" not in rendered and "李四" not in rendered
-    assert "待补" in pending["detail"]
+    assert "法定代表人(签字或签章):" in rendered
+    assert pending and all("待补" in gap["detail"] for gap in pending)
 
 
 def test_docx_keeps_nested_order_and_unfilled_required_positions(tmp_path):
