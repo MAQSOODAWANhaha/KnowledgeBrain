@@ -1,5 +1,6 @@
 """Outline source choices resolve to loadable native templates, including XLSX grids."""
 
+from typing import TypeVar
 from copy import deepcopy
 import io
 
@@ -15,6 +16,14 @@ from docreader.tender.evidence import freeze_sources
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment, selector
 
 from test_structural_packing import source
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def outline_context(artifacts, index, *, body=None, evidence_source=None):
@@ -339,13 +348,13 @@ async def test_native_workbook_freeze_to_outline_preserves_outside_cells_formula
     artifacts = ArtifactStore(tmp_path / "artifacts")
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["必须另附盖章证明。", "项目名称", "合同金额"])
-    sheet.append(["表外说明", "服务项目", "=1+2"])
-    sheet.add_table(Table(displayName="RequiredForm", ref="B1:C2"))
+    _required(sheet).append(["必须另附盖章证明。", "项目名称", "合同金额"])
+    _required(sheet).append(["表外说明", "服务项目", "=1+2"])
+    _required(sheet).add_table(Table(displayName="RequiredForm", ref="B1:C2"))
     pixels, output = io.BytesIO(), io.BytesIO()
     Image.new("RGB", (12, 8), "blue").save(pixels, format="PNG")
     pixels.seek(0)
-    sheet.add_image(ExcelImage(pixels), "E3")
+    _required(sheet).add_image(ExcelImage(pixels), "E3")
     workbook.save(output)
     original_ref = artifacts.put_bytes(output.getvalue())
     frozen_ref = await freeze_sources({"documents": [{"document_id": "native-workbook", "document_version": "1",
@@ -378,8 +387,10 @@ async def test_outside_merge_survives_freeze_and_outline_source_loading(tmp_path
     workbook = Workbook()
     sheet = workbook.active
     for address, value in {"D1": "项目", "E1": "响应", "D2": "技术", "E2": "提供"}.items():
+        assert sheet is not None
         sheet[address] = value
-    sheet.add_table(Table(displayName="DefinedForm", ref="D1:E2"))
+    _required(sheet).add_table(Table(displayName="DefinedForm", ref="D1:E2"))
+    assert sheet is not None
     sheet[merge.split(":")[0]] = "必须保留表外合并证明说明。"
     sheet.merge_cells(merge)
     output = io.BytesIO()

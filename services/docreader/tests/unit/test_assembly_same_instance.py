@@ -1,5 +1,6 @@
 """Explicit instance semantics do not depend on subject-label string equality."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 import json
@@ -17,6 +18,14 @@ from docreader.tender.schema import OutlineAssemblyTarget
 from test_authoring_templates import create_context, create_source
 from test_complete_format_pipeline import assembled, source_form, source_result
 from test_structural_packing import grid
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 CONDITIONS = ["本表仅适用于无委托代理人的情况。", "须附有效原件扫描件并完成规定签章。"]
@@ -84,7 +93,7 @@ async def organize(tmp_path, subjects, selection, *, revision=None):
                 assert previous["candidate_target_ids"] == [f"t{number + 1}" for number in range(len(subjects))]
                 assert previous.get("same_instance") is True
                 assert len(previous["template_part_ids"]) == len(subjects) + 1
-                return validate(assembled(revision(value)))
+                return validate(assembled(_required(_required(revision)(value))))
             return validate(assembled(selection(value)))
         return validate(select_source(value, subjects))
 

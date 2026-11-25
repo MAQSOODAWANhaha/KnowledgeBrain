@@ -1,6 +1,7 @@
 """Restore missing submission groups from cited source, preserving adopted subtrees."""
 
 from copy import deepcopy
+from typing import NoReturn
 
 from pydantic import Field
 
@@ -17,7 +18,7 @@ SOURCE_GROUP_CONTRACT = 'source_bound_submission_groups_v1'
 SOURCE_GROUP_OPERATION = 'select_response_forms_and_groups_v2'
 
 
-def _reject(detail, path):
+def _reject(detail, path) -> NoReturn:
     raise ModelContractError([{'path': ['source_groups', *path],
                               'code': 'directory_source_group_invalid', 'detail': detail}])
 

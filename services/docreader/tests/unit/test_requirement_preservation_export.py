@@ -1,4 +1,5 @@
 """Known tender requirements survive blank or removed bidder responses in physical exports."""
+from typing import Any, cast
 
 from copy import deepcopy
 from io import BytesIO
@@ -18,7 +19,7 @@ from test_submission_export import chapter, grid, part, source, target, writing
 def rule_ref(artifacts, identity="requirement", *, decision=None, index=None):
     reference = {"item_ref": {"artifact_ref": artifacts.put_json({"fixture": identity}), "item_id": identity}}
     if decision is not None:
-        reference.update(decision_id=decision, rule_index=index)
+        reference.update(decision_id=decision, rule_index=cast(Any, index))
     return reference
 
 

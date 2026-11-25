@@ -1,4 +1,5 @@
 """Real PostgreSQL contracts. Each test owns an isolated disposable schema."""
+from typing import Any, cast
 
 import asyncio
 from dataclasses import asdict
@@ -29,7 +30,7 @@ async def store(tmp_path):
     adapter = Store(make_conninfo(dsn, options=f"-c search_path={schema}"))
     await initialize_schema(adapter.dsn)
     await adapter.setup()
-    adapter.test_artifacts = ArtifactStore(tmp_path)
+    cast(Any, adapter).test_artifacts = ArtifactStore(tmp_path)
     try:
         yield adapter
     finally:

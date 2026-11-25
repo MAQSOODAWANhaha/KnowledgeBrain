@@ -1,4 +1,5 @@
 """One semantic revision preserves successful content, identities, and paid limits."""
+from typing import Any, cast
 
 import asyncio
 from copy import deepcopy
@@ -150,8 +151,8 @@ async def test_previous_template_and_attachment_use_current_short_references(tmp
              "grid": template_grid},
             {"support_id": "k2", "origin": "knowledge", "text": proof_material["text"],
              "attachment": True, "target_ids": ["t1"]}])
-        bindings.update(s7={"origin": "tender", "source_ref": ref_b},
-                        s3={"origin": "tender", "source_ref": ref_a},
+        bindings.update(s7={"origin": "tender", "source_ref": cast(Any, ref_b)},
+                        s3={"origin": "tender", "source_ref": cast(Any, ref_a)},
                         k2={"origin": "knowledge", "material_id": "proof"})
         return value, source_map, bindings
 
@@ -286,8 +287,11 @@ def test_previous_support_rebinds_reordered_targets_and_preserves_materials():
     current_payload, sources, bindings = payload(current_task)
     current_payload["targets"] = [{"target_id": "t1"}, {"target_id": "t2"}]
     previous = _previous_content(current_task, unit(), current_payload, sources, bindings)
+    assert previous is not None
     assert previous["blocks"][0]["target_ids"] == ["t2"]
+    assert previous is not None
     assert previous["blocks"][0]["support_ids"] == ["k1"]
+    assert previous is not None
     assert previous["blocks"][0]["content_id"] == "b1"
 
 
@@ -300,6 +304,7 @@ def test_previous_source_background_uses_local_support_without_persistent_metada
         {"support_id": "s1", "origin": "tender", "text": "项目位于甲园区。", "target_ids": ["t1"]}]}
     previous = _previous_content(task(), current, value, {"s1": reference}, {
         "s1": {"origin": "tender", "source_ref": reference}})
+    assert previous is not None
     assert previous["blocks"] == [{"kind": "paragraph", "text": "项目位于甲园区。", "target_ids": ["t1"],
                                     "content_id": "b1", "support_ids": ["s1"]}]
     assert not any(key in json.dumps(previous) for key in ("sha256", "source_refs", "material_ids", "source:background"))

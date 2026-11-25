@@ -1,5 +1,6 @@
 from copy import deepcopy
 import hashlib
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,7 @@ from test_native_body_scope import case, digest
 
 
 def prose_case(tmp_path, purpose='第一职责。', native=None, *, copies=1, grid_duplicate=False, physical_priority=False):
-    values = list(case(tmp_path / 'previous'))
+    values: list[Any] = list(case(tmp_path / 'previous'))
     native = purpose if native is None else native
     units = [{'text': native} for _ in range(copies)]
     if grid_duplicate:

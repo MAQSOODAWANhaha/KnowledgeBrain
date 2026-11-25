@@ -4,11 +4,12 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 import sys
-from lxml import etree as ET
+from lxml import etree as ET  # pyright: ignore[reportAttributeAccessIssue]
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from openpyxl import Workbook
+from openpyxl.cell.cell import Cell
 from docreader.parser.excel_parser import ExcelParser
 from docreader.main import _structured_units_to_proto
 from docreader.proto.docreader_pb2 import ReadResponse
@@ -19,6 +20,8 @@ def response_bytes():
     wb.properties.created = datetime(2000, 1, 1)
     wb.properties.modified = datetime(2000, 1, 1)
     sheet = wb.active
+    if sheet is None:
+        raise RuntimeError("workbook has no active sheet")
     sheet.title = "报价"
     for address, value, fmt in [
         ("A1", .15, "0%"), ("B1", datetime(2026, 1, 2), "yyyy-mm-dd"),
@@ -27,7 +30,10 @@ def response_bytes():
         ("G1", "=1/0", "General"), ("H1", "普通文字", "General"),
     ]:
         sheet[address] = value
-        sheet[address].number_format = fmt
+        cell = sheet[address]
+        if not isinstance(cell, Cell):
+            raise TypeError(address)
+        cell.number_format = fmt
     wb.create_sheet("参数")["A1"] = 21
     raw = BytesIO()
     wb.save(raw)

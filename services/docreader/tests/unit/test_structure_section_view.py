@@ -1,4 +1,5 @@
 """Grouped structure views preserve all semantic records and their reference edges."""
+from typing import Any, cast
 
 from copy import deepcopy
 import json
@@ -25,15 +26,15 @@ def expanded_structure(view):
                                         for line in record.pop('text_lines'))
         grid = record.get('grid')
         if grid and 'rows' in grid:
-            spans = {(row, column): (rs, cs) for row, column, rs, cs in grid['merged_cells']}
-            record['grid'] = {key: value for key, value in grid.items() if key not in {'rows', 'merged_cells'}}
-            record['grid']['cells'] = [
+            spans = {(row, column): (rs, cs) for row, column, rs, cs in cast(Any, grid)['merged_cells']}
+            cast(Any, record)['grid'] = {key: value for key, value in cast(Any, grid).items() if key not in {'rows', 'merged_cells'}}
+            cast(Any, record)['grid']['cells'] = [
                 {'row': row, 'column': column, 'row_span': spans.get((row, column), (1, 1))[0],
                  'col_span': spans.get((row, column), (1, 1))[1], 'text': text}
-                for row, cells in enumerate(grid['rows']) for column, text in enumerate(cells) if text is not None]
+                for row, cells in enumerate(cast(Any, grid)['rows']) for column, text in enumerate(cells) if text is not None]
         if record.get('grid'):
             # Native widths remain in the host and were already absent from the F grid projection.
-            record['grid'].pop('widths_mm', None)
+            cast(Any, record['grid']).pop('widths_mm', None)
         return record
 
     supports = result.get('supports', [])
@@ -46,8 +47,8 @@ def expanded_structure(view):
             supports[identity] = {**entry(value), 'section_id': section}
     for support in supports.values():
         support.setdefault('origin', 'tender')
-        support.setdefault('grid', None)
-        support.setdefault('header_row_count', None)
+        support.setdefault('grid', cast(Any, None))
+        support.setdefault('header_row_count', cast(Any, None))
     result['supports'] = supports
     sources = result.get('submission_sources', [])
     if isinstance(sources, list):

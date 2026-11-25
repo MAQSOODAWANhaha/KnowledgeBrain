@@ -12,11 +12,11 @@ from dataclasses import dataclass
 import math
 import re
 import time
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal, LiteralString, cast
 from uuid import uuid4
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
+from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from docreader.llm.request import ModelWorkUnitExhausted, model_retry_delay, send_allowance_exhausted
@@ -100,7 +100,7 @@ def _recorded_first_data(activity: dict[str, Any] | None) -> dict[str, float] | 
     for key in ("first_data_seconds", "first_raw_seconds", "first_content_seconds",
                 "max_raw_idle_seconds", "semaphore_wait_seconds"):
         value = activity.get(key)
-        if type(value) in {int, float} and math.isfinite(value) and value >= 0:
+        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
             timings[key] = value
     return timings or None
 
@@ -123,11 +123,11 @@ class Store:
         self.dsn = dsn
 
     @asynccontextmanager
-    async def transaction(self, connection: AsyncConnection | None = None) -> AsyncIterator[AsyncConnection]:
+    async def transaction(self, connection: AsyncConnection[DictRow] | None = None) -> AsyncIterator[AsyncConnection[DictRow]]:
         if connection is not None:
             yield connection
             return
-        async with await AsyncConnection.connect(self.dsn, row_factory=dict_row) as conn:
+        async with await AsyncConnection[DictRow].connect(self.dsn, row_factory=dict_row) as conn:
             async with conn.transaction():
                 yield conn
 
@@ -136,7 +136,7 @@ class Store:
             await conn.execute("SELECT run_id FROM tender_analysis_runs LIMIT 0")
             await conn.execute("SELECT issue_resolutions FROM tender_analysis_confirmations LIMIT 0")
 
-    async def _run(self, conn: AsyncConnection, run_id: str, *, lock: bool = False) -> dict[str, Any]:
+    async def _run(self, conn: AsyncConnection[DictRow], run_id: str, *, lock: bool = False) -> dict[str, Any]:
         query = "SELECT *, lease_until > clock_timestamp() AS lease_live FROM tender_analysis_runs WHERE run_id = %s"
         if lock:
             query += " FOR UPDATE"
@@ -146,20 +146,23 @@ class Store:
         return status_row(row, RunStatus)
 
     async def _command(
-        self, conn: AsyncConnection, run_id: str, source_version: int, kind: str,
+        self, conn: AsyncConnection[DictRow], run_id: str, source_version: int, kind: str,
         payload: dict[str, Any] | None = None, *, domain_revision: int = 1,
     ) -> dict[str, Any]:
-        return status_row(await (await conn.execute(
+        row = await (await conn.execute(
             "INSERT INTO tender_analysis_commands(command_id, run_id, source_version, domain_revision, kind, payload) "
             "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
             (str(uuid4()), run_id, source_version, domain_revision, kind, Jsonb(payload or {})),
-        )).fetchone(), CommandStatus)
+        )).fetchone()
+        assert row is not None
+        return status_row(row, CommandStatus)
 
-    async def _assert_analysis_revision(self, conn: AsyncConnection, run: dict[str, Any]) -> None:
+    async def _assert_analysis_revision(self, conn: AsyncConnection[DictRow], run: dict[str, Any]) -> None:
         revision = await (await conn.execute(
             "SELECT execution_spec FROM tender_analysis_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
             (run["run_id"], run["source_version"], run["domain_revision"]),
         )).fetchone()
+        assert revision is not None
         _assert_analysis_protocol(revision)
         if revision["execution_spec"] is None:
             # Legacy workers wrote source-spec before pinning a model config.
@@ -176,7 +179,7 @@ class Store:
                 raise Conflict("legacy six-stage revisions are read-only; submit a new analysis run")
 
     async def submit(self, manifest_ref: dict[str, Any], request_key: str,
-                     *, connection: AsyncConnection | None = None) -> dict[str, Any]:
+                     *, connection: AsyncConnection[DictRow] | None = None) -> dict[str, Any]:
         if not request_key:
             raise ValueError("request_key is required")
         async with self.transaction(connection) as conn:
@@ -190,6 +193,7 @@ class Store:
                     "SELECT r.*, v.manifest_ref FROM tender_analysis_runs r JOIN tender_analysis_source_versions v "
                     "ON r.run_id = v.run_id AND v.source_version = 1 WHERE r.request_key = %s", (request_key,),
                 )).fetchone(), RunStatus)
+                assert existing is not None
                 if existing["manifest_ref"] != manifest_ref:
                     raise Conflict("request_key already identifies a different submission")
                 return {**existing, "submitted_source_version": 1, "submitted_domain_revision": 1}
@@ -209,9 +213,11 @@ class Store:
         async with self.transaction() as conn:
             run = await self._run(conn, run_id, lock=True)
             source_version, revision = run["source_version"], run["domain_revision"]
-            run["manifest_ref"] = (await (await conn.execute(
+            manifest = await (await conn.execute(
                 "SELECT manifest_ref FROM tender_analysis_source_versions WHERE run_id = %s AND source_version = %s", (run_id, source_version),
-            )).fetchone())["manifest_ref"]
+            )).fetchone()
+            assert manifest is not None
+            run["manifest_ref"] = manifest["manifest_ref"]
             run["revision"] = await (await conn.execute(
                 "SELECT * FROM tender_analysis_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (run_id, source_version, revision),
@@ -222,7 +228,8 @@ class Store:
                 ("usage", "SELECT * FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s AND domain_revision = %s ORDER BY created_at"),
                 ("confirmations", "SELECT * FROM tender_analysis_confirmations WHERE run_id = %s AND source_version = %s AND domain_revision = %s"),
             ):
-                run[key] = await (await conn.execute(query, (run_id, source_version, revision))).fetchall()
+                statement = cast(LiteralString, query)
+                run[key] = await (await conn.execute(statement, (run_id, source_version, revision))).fetchall()
             run["history"] = {}
             for key, query in (
                 ("artifacts", "SELECT * FROM tender_analysis_artifacts WHERE run_id = %s AND NOT (source_version = %s AND domain_revision IN (0, %s)) ORDER BY committed_at"),
@@ -231,19 +238,22 @@ class Store:
                 ("confirmations", "SELECT * FROM tender_analysis_confirmations WHERE run_id = %s AND NOT (source_version = %s AND domain_revision = %s) ORDER BY confirmed_at"),
                 ("revisions", "SELECT * FROM tender_analysis_revisions WHERE run_id = %s AND NOT (source_version = %s AND domain_revision = %s) ORDER BY created_at"),
             ):
-                run["history"][key] = await (await conn.execute(query, (run_id, source_version, revision))).fetchall()
+                statement = cast(LiteralString, query)
+                run["history"][key] = await (await conn.execute(statement, (run_id, source_version, revision))).fetchall()
             for values in (run, run["history"]):
                 values["commands"] = [status_row(row, CommandStatus) for row in values["commands"]]
                 values["usage"] = [status_row(row, ModelRequestStatus) for row in values["usage"]]
             return run
 
-    async def get_revision(self, lease: Lease) -> dict[str, Any]:
+    async def get_revision(self, lease: Lease) -> dict[str, Any] | None:
         async with self.transaction() as conn:
             await self.assert_fence(lease, conn)
             row = await (await conn.execute(
                 "SELECT * FROM tender_analysis_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (lease.run_id, lease.source_version, lease.domain_revision),
             )).fetchone()
+            if row is None:
+                return None
             return row
 
     async def pin_execution_spec(self, lease: Lease, spec: dict[str, Any]) -> dict[str, Any]:
@@ -255,9 +265,12 @@ class Store:
                 "SELECT execution_spec FROM tender_analysis_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (lease.run_id, lease.source_version, lease.domain_revision),
             )).fetchone()
+            assert row is not None
             if row["execution_spec"] is not None:
+                assert row is not None
                 if row["execution_spec"] != spec:
                     raise Conflict("execution configuration changed within a domain revision")
+                assert row is not None
                 return row["execution_spec"]
             await conn.execute(
                 "UPDATE tender_analysis_revisions SET execution_spec = %s WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
@@ -350,8 +363,10 @@ class Store:
             command = status_row(await (await conn.execute(
                 "SELECT * FROM tender_analysis_commands WHERE command_id = %s FOR UPDATE", (command_id,),
             )).fetchone(), CommandStatus)
+            assert command is not None
             if command["status"] != CommandStatus.CLAIMED or command["claim_token"] != claim_token:
                 return False
+            assert command is not None
             failures = command["infrastructure_failures"] + int(retryable)
             terminal = not retryable or failures >= max_infrastructure_failures
             receipt = None
@@ -432,7 +447,7 @@ class Store:
             )
             return Lease(run_id, source_version, epoch, command_id, command["domain_revision"])
 
-    async def assert_fence(self, lease: Lease, conn: AsyncConnection | None = None) -> dict[str, Any]:
+    async def assert_fence(self, lease: Lease, conn: AsyncConnection[DictRow] | None = None) -> dict[str, Any]:
         if conn is None:
             async with self.transaction() as connection:
                 return await self.assert_fence(lease, connection)
@@ -482,12 +497,14 @@ class Store:
                 if prior["artifact_ref"] != artifact_ref or prior["input_digest"] != input_digest:
                     raise Conflict("stage already committed different immutable content or inputs")
                 return prior
-            return await (await conn.execute(
+            row = await (await conn.execute(
                 "INSERT INTO tender_analysis_artifacts(run_id, source_version, domain_revision, stage, scope, artifact_ref, input_digest, metadata, epoch) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (lease.run_id, lease.source_version, 0 if stage in SOURCE_STAGES else lease.domain_revision, stage, scope,
                  Jsonb(artifact_ref), input_digest, Jsonb(_safe_metadata(metadata or {})), lease.epoch),
             )).fetchone()
+            assert row is not None
+            return row
 
     async def release(
         self, lease: Lease, status: RunStatus | Literal["retry"], checklist_digest: str | None = None,
@@ -508,6 +525,7 @@ class Store:
                     "UPDATE tender_analysis_commands SET infrastructure_failures = infrastructure_failures + 1 "
                     "WHERE command_id = %s RETURNING infrastructure_failures", (lease.command_id,),
                 )).fetchone()
+                assert command is not None
                 if command["infrastructure_failures"] >= max_infrastructure_failures:
                     status = RunStatus.FAILED
                     metadata = {**(metadata or {}), "reason": "infrastructure_retries_exhausted"}
@@ -533,7 +551,7 @@ class Store:
 
     async def retry(
         self, run_id: str, source_version: int, domain_revision: int, failed_command_id: str,
-        request_key: str, reason: str, *, connection: AsyncConnection | None = None,
+        request_key: str, reason: str, *, connection: AsyncConnection[DictRow] | None = None,
     ) -> dict[str, Any]:
         """Explicitly continue a failed execution, retaining all paid receipts."""
         if not request_key.strip() or not reason.strip() or source_version < 1 or domain_revision < 1:
@@ -596,8 +614,8 @@ class Store:
     async def confirm(
         self, run_id: str, source_version: int, checklist_digest: str, idempotency_key: str,
         *, domain_revision: int | None = None, issue_resolutions: dict[str, Any] | None = None,
-        connection: AsyncConnection | None = None,
-    ) -> dict[str, Any]:
+        connection: AsyncConnection[DictRow] | None = None,
+    ) -> dict[str, Any] | None:
         if not idempotency_key:
             raise ValueError("idempotency_key is required")
         async with self.transaction(connection) as conn:
@@ -629,9 +647,12 @@ class Store:
                         or item["checklist_digest"] != checklist_digest or item["issue_resolutions"] != resolutions):
                     raise InvalidConfirmation("confirmation key or checklist is stale")
             if prior:
-                return status_row(await (await conn.execute(
+                row = await (await conn.execute(
                     "SELECT * FROM tender_analysis_commands WHERE command_id = %s", (prior[0]["command_id"],),
-                )).fetchone(), CommandStatus)
+                )).fetchone()
+                if row is None:
+                    return None
+                return status_row(row, CommandStatus)
             if run["status"] != RunStatus.WAITING_CONFIRMATION or run["checklist_digest"] != checklist_digest:
                 raise InvalidConfirmation("run is not waiting for this checklist")
             command = await self._command(
@@ -683,6 +704,7 @@ class Store:
                 "SELECT manifest_ref FROM tender_analysis_source_versions WHERE run_id = %s AND source_version = %s",
                 (run_id, run["source_version"]),
             )).fetchone()
+            assert current is not None
             if current["manifest_ref"] == manifest_ref:
                 raise Conflict("source revision requires a changed manifest; use correct for requirement corrections")
             source_version = run["source_version"] + 1
@@ -713,7 +735,7 @@ class Store:
     async def correct(
         self, run_id: str, source_version: int, expected_revision: int, base_items_digest: str,
         corrected_items_ref: dict[str, Any], request_key: str, reason: str,
-        *, connection: AsyncConnection | None = None,
+        *, connection: AsyncConnection[DictRow] | None = None,
     ) -> dict[str, Any]:
         if not request_key or not reason.strip() or expected_revision < 1:
             raise ValueError("correction requires a request key, reason, and positive expected revision")
@@ -748,6 +770,7 @@ class Store:
                 "SELECT scope_decisions_ref, execution_spec FROM tender_analysis_revisions WHERE run_id = %s AND source_version = %s AND domain_revision = %s",
                 (run_id, source_version, expected_revision),
             )).fetchone()
+            assert previous_revision is not None
             revision = expected_revision + 1
             await conn.execute(
                 "INSERT INTO tender_analysis_revisions(run_id, source_version, domain_revision, request_key, corrected_items_ref, scope_decisions_ref, upstream_digest, reason) "
@@ -823,14 +846,14 @@ class Store:
             return {**(await self._run(conn, run_id)), "submitted_source_version": source_version,
                     "submitted_domain_revision": revision}
 
-    async def _cancel_commands(self, conn: AsyncConnection, run_id: str, reason: str) -> None:
+    async def _cancel_commands(self, conn: AsyncConnection[DictRow], run_id: str, reason: str) -> None:
         await conn.execute(
             "UPDATE tender_analysis_commands SET status = 'cancelled', completed_at = clock_timestamp(), receipt = %s "
             "WHERE run_id = %s AND status NOT IN ('completed', 'cancelled')",
             (Jsonb({"status": CommandStatus.CANCELLED, "reason": reason}), run_id),
         )
 
-    async def _abandon_requests(self, conn: AsyncConnection, run_id: str) -> None:
+    async def _abandon_requests(self, conn: AsyncConnection[DictRow], run_id: str) -> None:
         await conn.execute(
             "UPDATE tender_analysis_model_requests SET status = CASE WHEN status = 'sent' THEN 'uncertain' ELSE 'failed' END, "
             "finished_at = clock_timestamp(), error = '{\"type\":\"run_invalidated\"}'::jsonb "
@@ -875,11 +898,13 @@ class Store:
                 # Same source, same complete request: reuse the paid success. sent/uncertain
                 # fences for active or legacy requests were checked in this revision above.
                 return reused[0]
-            return status_row(await (await conn.execute(
+            row = await (await conn.execute(
                 "INSERT INTO tender_analysis_model_requests(request_id, run_id, source_version, domain_revision, epoch, model, task, metadata) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (request_id, lease.run_id, lease.source_version, lease.domain_revision, lease.epoch, model, task, Jsonb(_safe_metadata(metadata or {}))),
-            )).fetchone(), ModelRequestStatus)
+            )).fetchone()
+            assert row is not None
+            return status_row(row, ModelRequestStatus)
 
     async def request_not_before(self, lease, task, logical_digest):
         async with self.transaction() as conn:
@@ -906,7 +931,7 @@ class Store:
             return max(deadlines, default=None)
 
     async def _matching_model_requests(
-        self, conn: AsyncConnection, run_id: str, source_version: int, domain_revision: int, task: Task, digest: str,
+        self, conn: AsyncConnection[DictRow], run_id: str, source_version: int, domain_revision: int, task: Task, digest: str,
     ) -> list[dict[str, Any]]:
         # Caller holds the run lock, shared by begin, send, cancel and lease takeover.
         # Prepared requests have not been sent; explicit failures may be retried.
@@ -918,7 +943,7 @@ class Store:
         )).fetchall()]
 
     async def _reusable_source_requests(
-        self, conn: AsyncConnection, run_id: str, source_version: int, task: Task, digest: str,
+        self, conn: AsyncConnection[DictRow], run_id: str, source_version: int, task: Task, digest: str,
     ) -> list[dict[str, Any]]:
         return [status_row(entry, ModelRequestStatus) for entry in await (await conn.execute(
             "SELECT * FROM tender_analysis_model_requests WHERE run_id = %s AND source_version = %s "
@@ -1024,14 +1049,16 @@ class Store:
                     )).fetchall()
                     count = max(sum(key in entry["keys"] for entry in reservations) for key in keys)
                 else:
-                    count = (await (await conn.execute(
+                    counted = await (await conn.execute(
                         "SELECT count(*) AS count FROM tender_analysis_model_requests WHERE run_id = %s "
                         "AND source_version = %s AND domain_revision = %s AND task = %s "
                         "AND metadata->>'logical_request_digest' = %s AND metadata->>'command_id' = %s "
                         "AND sent_at IS NOT NULL",
                         (row["run_id"], row["source_version"], row["domain_revision"], row["task"],
                          row["metadata"]["logical_request_digest"], row["metadata"]["command_id"]),
-                    )).fetchone())["count"]
+                    )).fetchone()
+                    assert counted is not None
+                    count = counted["count"]
                 observed["not_before"] = time.time() + _request_retry_delay(error, count - 1)
             await conn.execute(
                 "UPDATE tender_analysis_model_requests SET status = %s, usage = COALESCE(%s, usage), error = %s, "

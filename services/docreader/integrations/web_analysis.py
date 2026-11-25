@@ -5,6 +5,7 @@ import asyncio
 import copy
 import json
 import re
+from typing import Any, Literal, overload
 
 from docreader.integrations.cli import _correction_ref
 from docreader.integrations.store import Conflict, InvalidConfirmation
@@ -34,6 +35,14 @@ def _digest(payload, field):
     if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
         raise WebError("INVALID_ANALYSIS_DIGEST", "分析基准不正确，请刷新后核对。")
     return value
+
+
+@overload
+async def _owned_run(bridge: Any, payload: Any, *, write: bool = False, latest: Literal[False] = False) -> dict[str, Any]: ...
+
+
+@overload
+async def _owned_run(bridge: Any, payload: Any, *, write: bool = False, latest: Literal[True]) -> dict[str, Any] | None: ...
 
 
 async def _owned_run(bridge, payload, *, write=False, latest=False):

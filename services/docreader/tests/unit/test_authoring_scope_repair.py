@@ -1,4 +1,5 @@
 """Authoring scope stays tied to selected requirements, not loaded carrier pages."""
+from typing import Any, cast
 from types import SimpleNamespace
 
 import pytest
@@ -56,7 +57,7 @@ async def test_automatic_outline_is_reviewed_and_repaired_before_publication(tmp
         response = ordinary_response(task, value)
         if task == 'outline' and value.get('operation') == 'assemble' and 'review_findings' in value:
             assert value['previous_structure']
-            response['chapters'][0]['title'] = '修正后的正式组成'
+            cast(Any, response)['chapters'][0]['title'] = '修正后的正式组成'
         return validate(response)
 
     async def publish(reference):

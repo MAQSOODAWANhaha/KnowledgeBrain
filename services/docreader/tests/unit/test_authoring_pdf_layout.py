@@ -1,4 +1,5 @@
 """Original PDF typography and real chapter links survive editable Word export."""
+from typing import Any, cast
 
 from io import BytesIO
 
@@ -90,7 +91,7 @@ def test_pdf_table_uses_its_source_font_and_line_spacing_without_changing_cells(
     body_text = "First line\nSecond line" if multiline else "First line"
     assert [[cell.text for cell in row.cells] for row in table.rows] == [
         ["Item", "Response"], [body_text, ""], ["Another item", ""]]
-    assert document.styles["Normal"].font.size == Pt(11)
+    assert cast(Any, document.styles["Normal"]).font.size == Pt(11)
     spacing, rule = (11, WD_LINE_SPACING.EXACTLY) if multiline else (9, WD_LINE_SPACING.AT_LEAST)
     for row in table.rows:
         for cell in row.cells:

@@ -1,4 +1,5 @@
 """Local model defects retain usable analysis and reach independent review."""
+from typing import Any, cast
 
 from copy import deepcopy
 import json
@@ -56,7 +57,7 @@ async def test_deleted_lf_is_restored_without_mutating_model_response_or_source(
         async def call(self, task, payload):
             return response
 
-    extracted = await extract_items(frozen, SharedResponseModel(), identity=IDENTITY)
+    extracted = await extract_items(frozen, cast(Any, SharedResponseModel()), identity=IDENTITY)
     assert extracted["items"][0]["evidence"][0]["quote"] == "交付期限\n为30天"
     assert extracted["issues"] == []
     assert extracted["diagnostics"][0] == {

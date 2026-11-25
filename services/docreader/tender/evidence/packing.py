@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
+from typing import Any
 
 from docreader.tender.evidence.context import condition_context, pending_scope_metadata, section_ancestors
 
@@ -160,9 +161,10 @@ def source_ranges(document: dict, raw: dict) -> list[dict]:
                                  if row - item["locator"]["region"]["start_row"] in
                                  {cell["row"] for cell in item.get("header_cells", [])}]
                 leading_tables = [item["unit_id"] for item in tables if row == item["locator"]["region"]["start_row"]]
+                image_extra: dict[str, Any] = {"image_unit_ids": image_unit_ids} if image_unit_ids else {}
                 append(unit, "" if empty else text, text_basis="spreadsheet_row", cells=cells,
                        row_start=row, row_end=row + 1, empty=empty, column_count=width,
-                       **({"image_unit_ids": image_unit_ids} if image_unit_ids else {}),
+                       **image_extra,
                        table_id=table["unit_id"] if table else f"sheet:{sheet}",
                        table_ids=[item["unit_id"] for item in tables],
                        header_table_ids=header_tables, leading_table_ids=leading_tables,

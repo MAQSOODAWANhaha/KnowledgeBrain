@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 from re import compile as _compile
-from typing import Annotated
+from typing import Annotated, cast
 
 from pydantic import BeforeValidator, Field
 
@@ -396,7 +396,7 @@ def reading_payload(documents, identity=None):
     return payload
 
 
-def _unit_lines(unit, recognized=''):
+def _unit_lines(unit, recognized: str | None = ''):
     """Grid text is cleared on native units, so rows are read from the canonical cells."""
     text = unit.get('text') or ''
     if not text.strip():
@@ -1201,7 +1201,7 @@ def _bbox_word_boxes(xhtml):
         text = part[part.find('>') + 1:end if end >= 0 else len(part)]
         for old, new in (('&lt;', '<'), ('&gt;', '>'), ('&quot;', '"'), ('&apos;', "'"), ('&amp;', '&')):
             text = text.replace(old, new)
-        x1, y1, x2, y2 = (float(value) for value in box)
+        x1, y1, x2, y2 = (float(cast(str, value)) for value in box)
         words.append((x1, y1, x2, y2, _compact(text)))
     return [word for word in words if word[4]]
 
@@ -4147,12 +4147,16 @@ def _point(value, source, label):
     return document_id, page, line
 
 
-def _window(value, source, label):
+def _window(value, source, label) -> tuple[str, int, int, int]:
     if not isinstance(value, dict):
         raise DirectoryPlanRejected(f'{label} must be a continuous source window')
     _keys(value, _WINDOW, label)
-    document_id, page, start, end = value.get('document_id'), value.get('page'), value.get('start_line'), value.get('end_line')
-    if not isinstance(document_id, str) or not all(isinstance(item, int) for item in (page, start, end)) or end < start:
+    document_id = value.get('document_id')
+    page = value.get('page')
+    start = value.get('start_line')
+    end = value.get('end_line')
+    if (not isinstance(document_id, str) or not isinstance(page, int) or not isinstance(start, int)
+            or not isinstance(end, int) or end < start):
         raise DirectoryPlanRejected(f'{label} must be a continuous source window')
     source.line(document_id, page, start)
     source.line(document_id, page, end)

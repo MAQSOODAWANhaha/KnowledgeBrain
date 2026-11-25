@@ -169,6 +169,7 @@ async def revise_units(artifacts, budget, execute, tasks, units, findings, make_
         except (ModelWorkUnitExhausted, ModelBudgetError) as error:
             diagnostic("authoring_revision_unavailable", f"本次改稿未完成（{type(error).__name__}），由采用流程保留安全稿。", unit)
             continue
+        assert replacement is not None
         if (replacement.get("task_id") != unit["task_id"] or replacement.get("chapter_id") != unit["chapter_id"]
                 or replacement.get("target_ids") != unit.get("target_ids")):
             diagnostic("authoring_revision_unbound", "改稿未绑定原响应位置，保留已有正文。", unit)

@@ -1,5 +1,6 @@
 """A chapter's own service duties still need responses when it has other children."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 
@@ -10,6 +11,14 @@ from docreader.tender import authoring_pipeline as pipeline
 from docreader.tender.directory_compile import compile_directory, outline_from_compiled
 from test_authoring_pipeline_boundaries import budget, snapshot
 from test_directory_compile import docs, fixture_titles, item, node, plan, window
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 async def service_case(monkeypatch, line_count=30):
@@ -91,9 +100,9 @@ async def test_nonleaf_services_reach_word_with_separate_blank_responses_and_the
     paragraphs = document.paragraphs
     for child in children[1:]:
         start = next(index for index, paragraph in enumerate(paragraphs)
-                     if paragraph.style.name.startswith('Heading') and paragraph.text == child['title'])
+                     if _required(_required(paragraph.style).name).startswith('Heading') and paragraph.text == child['title'])
         end = next((index for index in range(start + 1, len(paragraphs))
-                    if paragraphs[index].style.name.startswith('Heading')), len(paragraphs))
+                    if _required(_required(paragraphs[index].style).name).startswith('Heading')), len(paragraphs))
         text = '\n'.join(paragraph.text for paragraph in paragraphs[start:end])
         assert child['targets'][0]['purpose'] in text
         assert text.count('我方响应：________（人工填写）') == 1

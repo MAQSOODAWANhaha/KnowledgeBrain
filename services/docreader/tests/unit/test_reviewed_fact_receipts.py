@@ -1,4 +1,5 @@
 """Final reviewed-source receipts refer to the saved outline, after target binding."""
+from typing import Any, cast
 
 from copy import deepcopy
 
@@ -73,9 +74,9 @@ async def test_final_fact_receipt_is_bound_to_saved_outline_and_precedes_publica
     budget = RequestBudget(model='synthetic', context_tokens=131072, output_reserve=32768)
     if fail_receipt:
         with pytest.raises(RuntimeError, match='receipt persistence failed'):
-            await pipeline.generate_document(artifacts, snapshot, budget, no_model, **options)
+            await pipeline.generate_document(artifacts, snapshot, budget, no_model, **cast(Any, options))
         assert [event[0] for event in observed] == ['facts']
     else:
-        result = await pipeline.generate_document(artifacts, snapshot, budget, no_model, **options)
+        result = await pipeline.generate_document(artifacts, snapshot, budget, no_model, **cast(Any, options))
         assert [event[0] for event in observed] == ['facts', 'outline']
         assert all(event[1] == result for event in observed)

@@ -38,9 +38,11 @@ async def test_ended_analysis_replays_full_original_payload_without_writes(revie
     async with runtime.bridge.store.transaction() as conn:
         await conn.execute("UPDATE tender_projects SET status='ended' WHERE id=%s", (runtime.project,))
     monkeypatch.setattr(Settings, "from_env", classmethod(lambda cls: runtime.bridge.settings))
+    assert review is not None
     before = await runtime.bridge.store.get_run(review["run_id"])
     forbid_mutations(monkeypatch)
     assert (await handle_command(request))[0] == first
+    assert review is not None
     assert await runtime.bridge.store.get_run(review["run_id"]) == before
     changed = copy.deepcopy(request)
     if action == "analysis.confirm":

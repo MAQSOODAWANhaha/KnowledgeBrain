@@ -387,7 +387,7 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
         if issue['code'] == RESPONSE_FORM_ROLE_RECORD:
             target = actual_targets.get(issue.get('target_id'))
             record = response_form_role_record(issue, target) if target else None
-            if record is None:
+            if record is None or target is None:
                 gaps.append({'code': 'structure_response_form_role_unbound',
                              'detail': '原式行责任未能绑定当前实际条款行，保留原表及职责人工核定。'})
                 continue

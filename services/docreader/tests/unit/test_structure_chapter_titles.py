@@ -1,5 +1,6 @@
 """Explicit structure title edits update navigation without changing native forms."""
 
+from typing import TypeVar, Any, cast
 from copy import deepcopy
 from io import BytesIO
 import json
@@ -18,6 +19,14 @@ from test_authoring_pipeline_boundaries import (
     budget, ordinary_response, outline as source_outline, payload, snapshot,
 )
 from test_authoring_templates import create_context, create_source, make_part
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 NATIVE_TEXTS = ["附件 8A 商务部分摘要表", "1.1 原格式填写条款：____",
@@ -83,7 +92,7 @@ async def test_allowed_renames_update_main_and_volume_word_but_preserve_native_c
         documents.append(archive.read(volumes[0]["package_path"]))
     for data in documents:
         document = Document(BytesIO(data))
-        headings = [p.text for p in document.paragraphs if p.style.name.startswith("Heading")]
+        headings = [p.text for p in document.paragraphs if _required(_required(p.style).name).startswith("Heading")]
         assert "商务部分摘要" in headings
         assert "投标函" in headings
         assert all("8A" not in text and "附件1" not in text for text in headings)
@@ -136,7 +145,7 @@ async def test_automatic_f0_and_f1_allow_title_edits_without_an_extra_model_roun
             return validate(source_outline(value, chapters=2))
         response = ordinary_response(task, value)
         if task == "outline":
-            response["chapters"][0]["title"] = (
+            cast(Any, response)["chapters"][0]["title"] = (
                 "附件8A 商务摘要表" if value.get("review_findings") else "8A 商务摘要表")
         return validate(response)
 

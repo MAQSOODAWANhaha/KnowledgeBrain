@@ -1,4 +1,5 @@
 """Owner-reviewed source assertions retain their immutable evidence and legal exits."""
+from typing import Any, cast
 from copy import deepcopy
 from hashlib import sha256
 
@@ -321,7 +322,7 @@ async def test_generate_preflights_review_before_A_and_runs_M_C_to_single_source
     with pytest.raises(ModelConfigurationError):
         await pipeline.generate_document(artifacts, snapshot, budget, execute, **{**options, 'source_carrier_contract': None})
     assert observed == []
-    ref = await pipeline.generate_document(artifacts, snapshot, budget, execute, **options)
+    ref = await pipeline.generate_document(artifacts, snapshot, budget, execute, **cast(Any, options))
     outline = artifacts.read_json(ref)
     target = next(t for c in pipeline._flatten(outline['chapters']) for t in c['targets']
         if t['purpose'] == '应制定保密方案\n包括管理与应急')
@@ -480,7 +481,7 @@ def test_new_C_schema_is_additive_and_short_facts_are_request_local(tmp_path):
     assert ids.payload['reviewed_source_facts'][0]['fact_id'] == 'f1'
     assert ids.restore_payload() == payload
     raw = {'reviewed_body_dispositions': [{'fact_id': 'f1', 'scope': 'chapter', 'chapter_id': 'c1'}]}
-    assert ids.decode(raw)['reviewed_body_dispositions'][0]['fact_id'] == facts[2]['fact_id']
+    assert cast(Any, ids.decode(raw))['reviewed_body_dispositions'][0]['fact_id'] == facts[2]['fact_id']
     assert response_model('directory_classification', payload) is reviewed().ReviewedClassificationPlan
     assert response_model('directory_classification', {}) is ClassificationPlan
     assert 'reviewed_body_dispositions' not in output_schema('directory_classification', {})['properties']

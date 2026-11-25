@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+from typing import NoReturn
 from uuid import UUID
 
 from docreader.integrations.store import Conflict
@@ -10,7 +11,7 @@ from docreader.integrations.web import (
 )
 
 
-def _ended():
+def _ended() -> NoReturn:
     raise WebError("PROJECT_ENDED", "项目已结束，仅可确认已有请求或读取已有文件。", 409)
 
 

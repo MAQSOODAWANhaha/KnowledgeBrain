@@ -1,5 +1,6 @@
 """Subject labels stay with their own content, including a form preamble before a grid."""
 
+from typing import TypeVar
 from io import BytesIO
 import json
 from zipfile import ZipFile
@@ -12,6 +13,14 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 
 from test_authoring_export import chapter, document, grid, source_ref, target, writing
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def test_subject_does_not_break_preamble_to_original_table_pagination_chain(tmp_path):
@@ -27,7 +36,7 @@ def test_subject_does_not_break_preamble_to_original_table_pagination_chain(tmp_
         volume = Document(BytesIO(package.read(manifest["volumes"][0]["package_path"])))
 
     for doc in [document(artifacts, result), volume]:
-        labels = [paragraph for paragraph in doc.paragraphs if paragraph.style.name == "Caption"]
+        labels = [paragraph for paragraph in doc.paragraphs if _required(_required(paragraph.style).name) == "Caption"]
         assert [label.text for label in labels] == ["投标人", "投标人"]
         assert all(label.paragraph_format.keep_with_next is True for label in labels)
         carried = next(paragraph for paragraph in doc.paragraphs if paragraph.text == preamble["purpose"])

@@ -1,5 +1,6 @@
 """Response roles and source-grounded subjects survive into real blank Word positions."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 
@@ -15,6 +16,14 @@ from docreader.tender.directory_compile import (
 )
 from test_authoring_pipeline_boundaries import budget, snapshot
 from test_directory_compile import docs, entry, item, node, plan, point, window
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 SNAPSHOT = {'schema_version': 2, 'run_id': 'run', 'source_version': 1, 'domain_revision': 1}
@@ -91,7 +100,7 @@ async def test_two_subjects_share_one_chapter_but_have_independent_native_forms_
         artifacts, fixed, budget(), no_enterprise_model, outline=outline))
     document = Document(BytesIO(artifacts.read_bytes(result['docx_ref'])))
     assert len(document.tables) == 2
-    assert [p.text for p in document.paragraphs if p.style.name == 'Caption'] == ['投标人', '原厂']
+    assert [p.text for p in document.paragraphs if _required(_required(p.style).name) == 'Caption'] == ['投标人', '原厂']
     assert document.tables[0].cell(1, 1).text == document.tables[1].cell(1, 1).text == ''
     assert document.tables[0].cell(1, 1)._tc is not document.tables[1].cell(1, 1)._tc
     document.tables[0].cell(1, 1).text = '独立人工填写'

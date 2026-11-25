@@ -6,7 +6,9 @@ import json
 
 from pydantic import ValidationError
 
-from docreader.tender.schema import AuthoringRequirements, EffectiveItemRef, EffectiveRule, TenderItem
+from docreader.tender.schema import (
+    AuthoringInputIssue, AuthoringRequirements, EffectiveItemRef, EffectiveRule, TenderItem,
+)
 
 
 def preserve_requirements(context, outline) -> dict:
@@ -71,6 +73,7 @@ def preserve_requirements(context, outline) -> dict:
             "detail": "当前只有来源，尚无可保留的事项台账；不将背景、评审表或整段原文推断为响应要求。"})
     issues = list({json.dumps(entry, sort_keys=True): entry for entry in issues}.values())
     return AuthoringRequirements(schema_version=2, authoring_input=deepcopy(context.input),
-        rule_origin=origin, rules=list(rows.values()), issues=issues, **(
+        rule_origin=origin, rules=list(rows.values()),
+        issues=[AuthoringInputIssue.model_validate(entry) for entry in issues], **(
             {'unplaced_targets': deepcopy(outline['unplaced_targets'])}
             if outline.get('unplaced_targets') else {})).model_dump(exclude_unset=True)

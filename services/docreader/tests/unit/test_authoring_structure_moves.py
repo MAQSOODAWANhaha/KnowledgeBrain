@@ -1,4 +1,5 @@
 """The final automatic structure review can move exact existing subtrees."""
+from typing import Any, cast
 from copy import deepcopy
 import json
 
@@ -83,7 +84,7 @@ async def test_moves_use_final_parent_and_resolve_moved_sibling_dependencies(tmp
     artifacts, outline = fixture(tmp_path)
     before = deepcopy(outline)
     _, gaps = await review(artifacts, outline, {'findings': [], 'chapter_moves': [
-        move('aux', 'parent', 'other'), move(), move('child', 'parent', None)]})
+        move('aux', 'parent', 'other'), move(), move('child', 'parent', cast(Any, None))]})
     assert [c['chapter_id'] for c in outline['chapters'][0]['children']] == ['parent']
     assert [c['chapter_id'] for c in outline['chapters'][0]['children'][0]['children']] == [
         'child', 'other', 'aux']
@@ -94,7 +95,7 @@ async def test_moves_use_final_parent_and_resolve_moved_sibling_dependencies(tmp
 async def test_move_to_root_preserves_chapter_and_target_ids(tmp_path):
     artifacts, outline = fixture(tmp_path)
     before = deepcopy(outline)
-    await review(artifacts, outline, {'findings': [], 'chapter_moves': [move('child', None, None)]})
+    await review(artifacts, outline, {'findings': [], 'chapter_moves': [move('child', cast(Any, None), cast(Any, None))]})
     assert [c['chapter_id'] for c in outline['chapters']] == ['child', 'root']
     assert nodes(outline['chapters']) == nodes(before['chapters'])
 
@@ -103,7 +104,7 @@ async def test_move_to_root_preserves_chapter_and_target_ids(tmp_path):
     [move('missing')], [move(parent='missing')], [move(after='missing')],
     [move(), move()], [move(parent='other')], [move(after='other')],
     [move(after='root')],
-    [move('parent', 'other', None), move('other', 'child', None)],
+    [move('parent', 'other', cast(Any, None)), move('other', 'child', cast(Any, None))],
     [move(), move('child', 'parent', 'other')],
     [move(), move('aux', 'parent', 'child')],
 ])
@@ -121,7 +122,7 @@ async def test_invalid_later_action_cannot_leave_earlier_move_partly_applied(tmp
     artifacts, outline = fixture(tmp_path)
     before = deepcopy(outline)
     _, gaps = await review(artifacts, outline, {'findings': [], 'chapter_moves': [
-        move(), move('aux', 'missing', None)]})
+        move(), move('aux', 'missing', cast(Any, None))]})
     assert outline == before and gaps[0]['code'] == 'structure_hierarchy_edits_invalid'
 
 

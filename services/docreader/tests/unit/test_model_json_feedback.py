@@ -1,4 +1,5 @@
 """Complete invalid JSON keeps bounded wire diagnostics and paid-call fences."""
+from typing import Any, cast
 
 import json
 
@@ -33,27 +34,27 @@ def test_duplicate_closing_delta_has_exact_json_location_and_short_wire_ids():
     stream = StreamResponse()
     stream.feed(event(original) + event("]}") + event(delta={}, finish="stop") + DONE)
     error = json_error(stream)
-    assert error.code == "json_syntax_error"
-    assert error.line == 1 and error.column == len(original) + 1 and error.offset == len(original)
-    assert error.feedback["message"] == "Extra data"
-    assert '"range_id":"r1"' in error.feedback["fragment"]
-    assert error.feedback["fragment"].endswith("]}")
+    assert cast(Any, error).code == "json_syntax_error"
+    assert cast(Any, error).line == 1 and cast(Any, error).column == len(original) + 1 and cast(Any, error).offset == len(original)
+    assert cast(Any, error).feedback["message"] == "Extra data"
+    assert '"range_id":"r1"' in cast(Any, error).feedback["fragment"]
+    assert cast(Any, error).feedback["fragment"].endswith("]}")
     assert "r1" not in str(error) and "r1" not in repr(error)
 
 
 @pytest.mark.parametrize("content", ['\n  [1,2]', '\n  "text"', '\n  null'])
 def test_complete_non_object_has_a_json_root_diagnostic(content):
     error = json_error(complete(content))
-    assert error.code == "json_object_required"
-    assert (error.line, error.column, error.offset) == (2, 3, 3)
+    assert cast(Any, error).code == "json_object_required"
+    assert (cast(Any, error).line, cast(Any, error).column, cast(Any, error).offset) == (2, 3, 3)
 
 
 @pytest.mark.parametrize("content", ['{"text":"' + "中" * 5000 + '"}]}', '{"text":"' + "\x00" * 5000],
                          ids=["large-unicode", "escaped-controls"])
 def test_feedback_is_bounded_after_json_escaping(content):
     error = json_error(complete(content))
-    assert len(json.dumps(error.feedback, ensure_ascii=False, separators=(",", ":"))) <= 384
-    assert len(error.feedback["fragment"]) < len(content)
+    assert len(json.dumps(cast(Any, error).feedback, ensure_ascii=False, separators=(",", ":"))) <= 384
+    assert len(cast(Any, error).feedback["fragment"]) < len(content)
 
 
 @pytest.mark.parametrize("settings", [
@@ -83,8 +84,8 @@ async def test_client_persists_failed_receipt_before_exposing_wire_json_feedback
         with pytest.raises(errors.ModelSemanticError) as caught:
             await client.call("extract", payload)
     assert type(caught.value).__name__ == "ModelJSONError"
-    assert '"range_id":"r1"' in caught.value.feedback["fragment"]
-    assert "range-permanent" not in json.dumps(caught.value.feedback)
+    assert '"range_id":"r1"' in cast(Any, caught.value).feedback["fragment"]
+    assert "range-permanent" not in json.dumps(cast(Any, caught.value).feedback)
     terminal = audit.events[-1]
     assert terminal["status"] == "failed" and terminal["response_ref"]
     saved = artifacts.read_json(terminal["response_ref"])
@@ -105,7 +106,7 @@ async def test_client_redacts_credentials_before_clipping_error_fragment(tmp_pat
         with pytest.raises(errors.ModelSemanticError) as caught:
             await client.call("extract", {})
     assert type(caught.value).__name__ == "ModelJSONError"
-    feedback = caught.value.feedback
+    feedback = cast(Any, caught.value).feedback
     assert len(json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))) <= 512
     assert "Z" * 16 not in feedback["fragment"]
     for literal in (secret, json.dumps(secret, ensure_ascii=False)[1:-1], json.dumps(secret)[1:-1]):

@@ -1,4 +1,5 @@
 """Role identity, bounded failures and credential-free CLI output."""
+from typing import TypeVar
 from pathlib import Path
 import re
 import subprocess
@@ -8,6 +9,14 @@ import psycopg
 import pytest
 
 from docreader.jobs import healthcheck
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def process(root, pid, *args):
@@ -90,7 +99,7 @@ def test_database_probe_reads_every_unified_baseline_table_in_read_only_mode(mon
     healthcheck._check_database("fixture")
     baseline = Path(__file__).resolve().parents[4] / "migrations" / "20261028000003_tender.sql"
     expected = set(re.findall(r"CREATE TABLE (\w+)", baseline.read_text()))
-    queried = {re.search(r"FROM (\w+)", query)[1] for query in database.queries if query.startswith("SELECT ")}
+    queried = {_required(re.search(r"FROM (\w+)", query))[1] for query in database.queries if query.startswith("SELECT ")}
     assert expected | {"checkpoints", "checkpoint_blobs", "checkpoint_writes"} <= queried
     assert database.read_only and 0 < options["connect_timeout"] <= 2
     assert all(query.startswith(("SELECT ", "SET LOCAL statement_timeout")) for query in database.queries)

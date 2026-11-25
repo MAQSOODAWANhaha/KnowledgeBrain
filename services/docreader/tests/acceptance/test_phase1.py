@@ -1,4 +1,5 @@
 """Real parsers + real PostgreSQL + deterministic model, separate from LLM acceptance."""
+from typing import TypeVar, Any, cast
 import asyncio
 import os
 from pathlib import Path
@@ -32,6 +33,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fixture_model import fixture_request_digest
 from fixture_analysis_model import AnalysisFixtureModel
 
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
+
 pytestmark = pytest.mark.integration
 
 
@@ -45,12 +54,12 @@ def mixed_manifest(root):
     image.save(root / "schedule.png")
     book = Workbook()
     first = book.active
-    first.title = "Delivery"
-    first.append(["Requirement", "Response"])
-    first.append(["The supplier must name a delivery coordinator.", None])
-    first.append([None, None])
-    first.append(["Descriptive note", None])
-    first.add_image(SheetImage(str(root / "schedule.png")), "D2")
+    _required(first).title = "Delivery"
+    _required(first).append(["Requirement", "Response"])
+    _required(first).append(["The supplier must name a delivery coordinator.", None])
+    _required(first).append([None, None])
+    _required(first).append(["Descriptive note", None])
+    _required(first).add_image(SheetImage(str(root / "schedule.png")), "D2")
     second = book.create_sheet("Service")
     second.append(["Requirement", "Response"])
     second.append(["The supplier must provide a service contact.", None])
@@ -168,15 +177,15 @@ async def test_uncertain_and_refused_siblings_each_stop_after_four_resends(runti
         async def call(self, task, payload, images=()):
             if task == "extract" and any(view["document_id"] == "annex" for view in payload.get("source_views", [])):
                 request_id = uuid4().hex
-                await self.store.begin_request(self.lease, request_id, "deterministic-contract-fixture", task, {
+                await _required(self.store).begin_request(self.lease, request_id, "deterministic-contract-fixture", task, {
                     "request_digest": fixture_request_digest(task, payload, images),
                     "logical_request_digest": fixture_request_digest(task,
                         {key: value for key, value in payload.items() if key != "contract_feedback"}, images),
                     "test_double": True, "external_request": False,
                 })
-                await self.store.finish_request(request_id, "sent")
-                await self.store.finish_request(request_id, "uncertain", error={"type": "injected_partial_stream_loss"},
-                    response_ref=self.artifacts.put_json({"partial_content": "{", "done": False}))
+                await _required(self.store).finish_request(request_id, "sent")
+                await _required(self.store).finish_request(request_id, "uncertain", error={"type": "injected_partial_stream_loss"},
+                    response_ref=_required(self.artifacts).put_json({"partial_content": "{", "done": False}))
                 raise UncertainModelResponse("injected partial stream loss")
             return await super().call(task, payload, images)
 
@@ -297,7 +306,7 @@ async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(run
         if status == "analysis-ready" and not failed_once:
             failed_once = True
             raise psycopg.OperationalError("injected receipt failure after complete checkpoint")
-        return await original_release(self, lease, status, **kwargs)
+        return await original_release(self, lease, cast(Any, status), **kwargs)
     monkeypatch.setattr(Store, "release", fail_receipt_after_checkpoint)
     with pytest.raises(psycopg.OperationalError):
         await execute_with_spec("original")
@@ -347,9 +356,9 @@ async def test_repeated_image_pixels_share_ocr_without_losing_occurrence_coordin
     root = settings.artifact_root.parent
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["The supplier must provide image-backed supporting material."])
+    _required(sheet).append(["The supplier must provide image-backed supporting material."])
     for anchor in ("B2", "E5"):
-        sheet.add_image(SheetImage(str(root / "schedule.png")), anchor)
+        _required(sheet).add_image(SheetImage(str(root / "schedule.png")), anchor)
     workbook.save(root / "repeated-images.xlsx")
     registered = register_manifest({"documents": [{"document_id": "repeated", "document_version": "one", "role": "main",
                                                   "path": str(root / "repeated-images.xlsx")}]}, artifacts)

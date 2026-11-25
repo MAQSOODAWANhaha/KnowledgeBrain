@@ -1,4 +1,5 @@
 """A cmap-less font needs the audited PDF encoding as well as its font program."""
+from typing import Any, cast
 
 from copy import deepcopy
 
@@ -86,13 +87,13 @@ def test_registration_rejects_wrong_font_glyph_or_pdf_encoding_provenance(proble
 def test_source_list_and_heading_path_use_the_two_distinct_audited_symbols():
     original = '\uf0d8前附表说明\n\n\uf06c技术服务'
     item = section_source(original)
-    item.locator.heading_path = '\uf0d8前附表说明'
+    cast(Any, item.locator).heading_path = '\uf0d8前附表说明'
     evidence = [proof(0xF0D8), proof(0xF06C, 9)]
     before = deepcopy(evidence)
     accepted = pdf_symbols.normalize_pdf_units([item], evidence)
     layout, issues = _normalize_layout_symbols([original], {'source_contract': {'glyph_normalizations': accepted}})
     assert item.text == layout[0] == '➢前附表说明\n\n●技术服务'
-    assert item.locator.heading_path == '➢前附表说明'
+    assert cast(Any, item.locator).heading_path == '➢前附表说明'
     assert not item.source_issues and not issues
     assert accepted == evidence == before
     assert len(item.text) == len(original) and len(item.text.splitlines()) == len(original.splitlines())

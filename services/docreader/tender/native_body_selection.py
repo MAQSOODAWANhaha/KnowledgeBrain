@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 import re
+from typing import Any, Callable, cast
 
 from docreader.llm.request import ModelBudgetError, ModelContractError
 
@@ -79,7 +80,7 @@ class NativeBodySelectionView:
             for island in islands:
                 cells = island['cell_ids']
                 if (any(not _positive(i) or i not in self.by_cell for i in cells) or
-                        len(cells) != len(set(cells)) or cells != sorted(cells, key=self.order.get)):
+                        len(cells) != len(set(cells)) or cells != sorted(cells, key=cast(Callable[[Any], Any], self.order.get))):
                     raise ValueError('native island cells must follow the supplied frozen source order')
             if self._is_prose(unit):
                 anchors = unit.get('anchor_spans')
@@ -204,7 +205,7 @@ class NativeBodySelectionView:
                     selected.setdefault(cell_id, []).append((start, end))
                     body.append({**self._slice(cell_id, start, end),
                                  'source_join': 'continuation' if join else 'paragraphs'})
-                if seen != sorted(seen, key=self.order.get):
+                if seen != sorted(seen, key=cast(Callable[[Any], Any], self.order.get)):
                     _reject('Choose cells in their supplied frozen source order.')
                 if (island['state'] == 'selected') != bool(body):
                     _reject('Selected requires body; unresolved requires an empty body.')

@@ -10,6 +10,7 @@ from importlib.resources import files
 import json
 import math
 import os
+from typing import Any, cast
 
 import psycopg
 import httpx
@@ -68,7 +69,7 @@ from docreader.tender.status import AUTHORING_MODEL_TASKS, AuthoringExecutionSta
 
 
 _TASKS = AUTHORING_MODEL_TASKS
-_PROMPT_FILES = {
+_PROMPT_FILES: dict[str, str] = {
     AuthoringPrompt.OUTLINE: "outline.md",
     AuthoringPrompt.BASIS: "authoring_basis.md",
     AuthoringPrompt.WRITE: "authoring_write.md",
@@ -250,12 +251,13 @@ class _DocumentExecutor:
         receipt = await self.store.receipt(
             self.lease, "document-model-response", scope, input_digest=digest
         )
+        previous = self.previous
         inherited = False
-        if receipt is None and self.previous is not None:
+        if receipt is None and previous is not None:
             receipt = next(
                 (
                     row
-                    for row in self.previous["receipts"]
+                    for row in previous["receipts"]
                     if row["stage"] == "document-model-response"
                     and row["scope"] == scope
                     and row["input_digest"] == digest
@@ -285,6 +287,7 @@ class _DocumentExecutor:
                 ) from None
             return False, None
         if inherited:
+            assert previous is not None
             await self.store.commit_artifact(
                 self.lease,
                 "document-model-response",
@@ -292,7 +295,7 @@ class _DocumentExecutor:
                 scope=scope,
                 input_digest=digest,
                 metadata={
-                    "reused_from_execution_id": self.previous["execution_id"]
+                    "reused_from_execution_id": previous["execution_id"]
                 },
             )
         return True, value
@@ -835,7 +838,7 @@ async def execute_document(
                 spec['reviewed_body_entry_contract'] = existing['execution_spec']['reviewed_body_entry_contract']
     automatic_outline = outline_only and outline_ref is None
     await store.submit(execution_id, snapshot, spec)
-    lease = await store.acquire(execution_id, lease_seconds=lease_seconds)
+    lease = await store.acquire(execution_id, lease_seconds=cast(int, lease_seconds))
     if lease is None:
         saved = await store.get_execution(execution_id)
         if saved["cancel_requested"]:
@@ -879,7 +882,7 @@ async def execute_document(
             executor = _DocumentExecutor(
                 client, store, artifacts, lease, admitted, spec, previous
             )
-            review_options = (
+            review_options: dict[str, Any] = (
                 {"review_request": review_request} if review_request is not None else {}
             )
             if submission_sources:
@@ -963,7 +966,8 @@ async def execute_document(
                     input_digest=_digest(identity))
 
             if layout_renderer is not None:
-                review_options['render_pdf'] = lambda blob: layout_renderer.render(blob, epoch=lease.epoch)
+                renderer = layout_renderer
+                review_options['render_pdf'] = lambda blob: renderer.render(blob, epoch=lease.epoch)
                 review_options['on_layout'] = publish_layout
 
             stored = await store.get_execution(execution_id)
@@ -1062,7 +1066,7 @@ async def execute_document(
         while True:
             await asyncio.sleep(heartbeat_seconds)
             await assert_authoring_active(analysis_store, snapshot)
-            await store.heartbeat(lease, lease_seconds=lease_seconds)
+            await store.heartbeat(lease, lease_seconds=cast(int, lease_seconds))
 
     work, heart = asyncio.create_task(invoke()), asyncio.create_task(heartbeat())
     try:

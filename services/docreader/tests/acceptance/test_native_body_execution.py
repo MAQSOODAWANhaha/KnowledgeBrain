@@ -1,4 +1,5 @@
 """Real SQL/stream/replay for source receipts; the small source scope is synthetic."""
+from typing import Any, cast
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -80,7 +81,7 @@ async def test_source_receipt_precedes_publication_and_survives_real_sql_recover
 ):
     analysis, artifacts, settings, run, _ = analysis_runtime
     snapshot, outline, scope = source_fixture(artifacts, run)
-    scope.pending = ([{'target_id': 'chapter-1:target-1', 'reason': 'synthetic_source_review',
+    cast(Any, scope).pending = ([{'target_id': 'chapter-1:target-1', 'reason': 'synthetic_source_review',
                        'outlet': 'manual_source_review'}] if interruption == 'source_pending' else [])
     monkeypatch.setattr(authoring_pipeline, 'outline_from_compiled', lambda *_args, artifacts: deepcopy(outline))
     monkeypatch.setattr(native_body_scope, 'NativeBodyScope', lambda *_args: scope)

@@ -1,5 +1,6 @@
 """Failed global assembly preserves already accepted local chapter trees."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 import json
@@ -12,6 +13,14 @@ from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender import authoring_pipeline as pipeline
 from docreader.tender.authoring_export import export_authoring_document
 from test_authoring_templates import create_context, create_source
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def targets(chapters):
@@ -143,7 +152,7 @@ async def test_failed_assembly_preserves_cover_and_excludes_submission_descendan
     assert result['chapters'][0]['presentation_role'] == 'cover'
     exported = export_authoring_document(artifacts, result, [])
     document = Document(BytesIO(artifacts.read_bytes(exported['docx_ref'])))
-    headings = [paragraph.text for paragraph in document.paragraphs if paragraph.style.name.startswith('Heading')]
+    headings = [paragraph.text for paragraph in document.paragraphs if _required(_required(paragraph.style).name).startswith('Heading')]
     assert any('商务文件' in title for title in headings)
     assert all('密封交付' not in title and '电子递交待办' not in title for title in headings)
     assert all('投标文件封面' not in title for title in headings)

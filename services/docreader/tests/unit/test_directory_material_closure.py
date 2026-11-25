@@ -1,4 +1,5 @@
 """M must account for native carriers discarded by a source choice."""
+from typing import Any, cast
 
 from copy import deepcopy
 
@@ -93,10 +94,10 @@ def test_physical_catalog_deduplicates_the_table_but_keeps_both_candidate_origin
     assert all('source_record' not in origin for origin in catalog[0]['origins'])
     assert 'source_ref' not in catalog[0]
     identities = MaterialIds({'source_carrier_catalog': catalog, 'chapters': [{'id': 'service'}]})
-    assert identities.restore_payload()['source_carrier_catalog'] == catalog
+    assert cast(Any, identities.restore_payload())['source_carrier_catalog'] == catalog
     assert identities.payload['source_carrier_catalog'][0]['table_id'] == 't1'
     raw = {'carrier_dispositions': [{'table_id': 't1', 'action': 'reference', 'chapter_id': 'c1', 'case_id': 'q1'}]}
-    assert identities.decode(raw)['carrier_dispositions'][0]['table_id'] == carrier['table_id']
+    assert cast(Any, identities.decode(raw))['carrier_dispositions'][0]['table_id'] == carrier['table_id']
 
 
 def test_new_schema_and_prompt_activate_only_for_the_new_operation():

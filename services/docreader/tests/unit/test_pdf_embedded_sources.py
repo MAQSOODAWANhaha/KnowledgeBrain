@@ -1,3 +1,4 @@
+from typing import TypeVar, Any, cast
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -12,6 +13,14 @@ from docreader.tender.directory_compile import compile_directory, documents_from
 from docreader.tender.evidence import EvidenceRepository, freeze_sources
 from test_directory_compile import item, node, plan
 from test_source_presentation import pdf_bytes
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 async def test_pdf_embedded_docx_is_indexed_once_with_all_carriers_and_names(tmp_path, monkeypatch):
@@ -95,9 +104,9 @@ async def test_images_on_readable_pdf_pages_are_still_in_source_review(tmp_path)
                     NameObject('/ColorSpace'): NameObject('/DeviceRGB'), NameObject('/BitsPerComponent'): NumberObject(8)})
     picture.set_data(bytes((100, 17, 40)) * (99 * 75))
     page = writer.pages[0]
-    page['/Resources'][NameObject('/XObject')] = DictionaryObject({NameObject('/Im0'): writer._add_object(picture)})
+    cast(Any, page)['/Resources'][NameObject('/XObject')] = DictionaryObject({NameObject('/Im0'): writer._add_object(picture)})
     content = page.get_contents()
-    content.set_data(content.get_data() + b'\nq 99 0 0 75 100 250 cm /Im0 Do Q\n')
+    _required(content).set_data(_required(content).get_data() + b'\nq 99 0 0 75 100 250 cm /Im0 Do Q\n')
     page.replace_contents(content)
     output = BytesIO()
     writer.write(output)

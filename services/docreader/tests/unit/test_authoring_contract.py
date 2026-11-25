@@ -242,6 +242,25 @@ async def test_source_fragments_recover_original_location_and_keep_background_an
     assert artifacts.read_bytes(document["original_ref"]) == b"synthetic original"
 
 
+async def test_unreadable_extract_pack_stays_pending_and_keeps_readable_siblings(confirmed):
+    confirmed.row.update(status="failed", checklist_digest=None)
+    confirmed.row["artifacts"] = [entry for entry in confirmed.row["artifacts"] if entry["stage"] == "freeze"]
+    readable = confirmed.artifacts.put_json({"schema_version": 2, "items": [
+        {"item_id": "partial", "text": "须提供服务", "evidence": []}]})
+    broken = confirmed.artifacts.put_json({"schema_version": 2, "items": []})
+    path = confirmed.artifacts.path(broken)
+    path.chmod(0o644)
+    path.write_bytes(b"not-json")
+    confirmed.row["artifacts"].extend([
+        {**IDENTITY, "stage": "extract-pack", "scope": "broken", "artifact_ref": broken},
+        {**IDENTITY, "stage": "extract-pack", "scope": "first", "artifact_ref": readable},
+    ])
+    value = await read(confirmed, checklist_digest=None)
+    assert value["extract_refs"] == [readable]
+    assert any(issue["code"] == "authoring_input_unavailable" and "extract-pack" in issue["detail"]
+               for issue in value["issues"])
+
+
 async def test_unconfirmed_partial_extract_receipts_are_fixed_without_fake_roots(confirmed):
     confirmed.row.update(status="failed", checklist_digest=None)
     confirmed.row["artifacts"] = [entry for entry in confirmed.row["artifacts"] if entry["stage"] == "freeze"]

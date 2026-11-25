@@ -1,4 +1,5 @@
 """The new source-entry binding rule is explicit and immutable per execution."""
+from typing import Any, cast
 
 from copy import deepcopy
 
@@ -59,10 +60,10 @@ async def test_pipeline_forwards_only_the_explicit_supported_entry_rule(tmp_path
         options['reviewed_body_entry_contract'] = contract
     if contract == 'unknown-entry-rule':
         with pytest.raises(ModelConfigurationError):
-            await pipeline.generate_document(artifacts, snapshot, RequestBudget(model='synthetic'), no_model, **options)
+            await pipeline.generate_document(artifacts, snapshot, RequestBudget(model='synthetic'), no_model, **cast(Any, options))
         assert observed == []
     else:
-        await pipeline.generate_document(artifacts, snapshot, RequestBudget(model='synthetic'), no_model, **options)
+        await pipeline.generate_document(artifacts, snapshot, RequestBudget(model='synthetic'), no_model, **cast(Any, options))
         assert observed == [contract]
 
 
@@ -92,7 +93,7 @@ async def test_failed_classification_preserves_failure_and_archives_only_host_bo
     options = dict(artifacts=artifacts, source_carrier_contract='source_carriers_closed_v1', reviewed_source_facts=facts)
     if contract is not None:
         options['reviewed_body_entry_contract'] = contract
-    await pipeline._request_directory_details(compiled, documents, RequestBudget(model='synthetic'), object(), **options)
+    await pipeline._request_directory_details(compiled, documents, RequestBudget(model='synthetic'), object(), **cast(Any, options))
     assert any(i['code'] == 'outline_directory_classification_rejected' for i in compiled['issues'])
     record, = compiled['_reviewed_source_fact_applications']
     pending = [i for i in compiled['issues'] if i['code'] == 'outline_directory_requirement_unassigned']

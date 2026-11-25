@@ -1,5 +1,6 @@
 from copy import deepcopy
 import hashlib
+from typing import Any
 
 import pytest
 
@@ -11,7 +12,7 @@ from test_native_body_scope import case
 
 
 def explicit_case(tmp_path):
-    values = list(case(tmp_path / 'old'))
+    values: list[Any] = list(case(tmp_path / 'old'))
     artifacts, ref, index = create_source(tmp_path / 'joined', [
         {'text': '第一段'}, {'text': '第二段'}, {'text': '来源名称'}])
     snapshot = {**values[1], 'frozen_ref': artifacts.put_json({'documents': [

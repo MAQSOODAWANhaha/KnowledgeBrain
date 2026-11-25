@@ -1,4 +1,5 @@
 """Real infrastructure probe, deliberately contains no tender semantics."""
+from typing import Any, cast
 import asyncio
 import os
 from pathlib import Path
@@ -49,5 +50,5 @@ class SkeletonNodes:
 async def skeleton_command(run_id, command_id, source_version):
     s = Settings.from_env()
     settings = Settings(s.dsn, s.redis_url, s.artifact_root, lease_seconds=2,
-                        heartbeat_seconds=0.2, redeliver_seconds=0.1)
+                        heartbeat_seconds=0.2, redeliver_seconds=cast(Any, 0.1))
     await execute_command(run_id, command_id, source_version, settings, SkeletonNodes)

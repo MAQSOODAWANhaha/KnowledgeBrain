@@ -1,4 +1,5 @@
 """Single-query receipts preserve results while rebinding host target identity."""
+from typing import Any, cast
 
 from copy import deepcopy
 from types import SimpleNamespace
@@ -30,7 +31,7 @@ class Knowledge:
         async def send_once():
             return self._result(queries)
         key = document_execution._digest({"query": queries[0]["query"], "provider": "fixture",
-                                          "scope": self.scope})
+                                          "scope": cast(Any, self).scope})
         return await run_operation("search", key, send_once)
 
     def _result(self, queries):

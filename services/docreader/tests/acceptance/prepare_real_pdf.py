@@ -1,6 +1,8 @@
 """Offline private-PDF preflight: no model client, no network, no document text output."""
 from __future__ import annotations
 
+from typing import Any, cast
+
 import argparse
 import asyncio
 from collections import Counter, defaultdict
@@ -208,8 +210,8 @@ async def prepare(args):
     known_high = sum(value['high'] for value in extract_estimates + verify_estimates)
     scope_issue_ids = {problem.get('range_id') for problem in index['issues'] if problem['code'] == 'condition_scope_unresolved'}
     range_pages = {entry['range_id']: (entry.get('physical_locator') or entry.get('locator') or {}).get('page_ordinal') for entry in body}
-    scope_issue_pages = sorted({range_pages.get(problem.get('parent_range_id')) for problem in index['issues']
-                                if problem['code'] == 'condition_scope_unresolved'} - {None})
+    scope_issue_pages = sorted(cast(Any, {range_pages.get(problem.get('parent_range_id')) for problem in index['issues']
+                                if problem['code'] == 'condition_scope_unresolved'} - {None}))
     report = {
         'schema_version': 2, 'evidence_kind': 'offline_real_pdf_structure_preflight',
         'source': {'sha256': source_digest, 'bytes': source.stat().st_size},

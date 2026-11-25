@@ -1,4 +1,5 @@
 """Human outline edits reach the actual Word hierarchy, forms and stable anchors."""
+from typing import Any, cast
 
 from collections import Counter
 from copy import deepcopy
@@ -8,7 +9,7 @@ from zipfile import ZipFile
 
 from docx import Document
 from docx.oxml.ns import qn
-from lxml import etree
+import lxml.etree as etree
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_pipeline import generate_document, plan_writing_tasks
@@ -33,7 +34,7 @@ async def test_human_outline_projection_exports_its_actual_word_hierarchy_forms_
         **descriptor["document"], "role": "main", "raw_ref": descriptor["raw_ref"],
         "source_index_ref": reference["source_index_ref"]}]})
     snapshot = AuthoringInput(schema_version=2, run_id="outline-export", source_version=1,
-                              domain_revision=1, frozen_ref=frozen).model_dump()
+                              domain_revision=1, frozen_ref=cast(Any, frozen)).model_dump()
     form = {"target_id": "stable-form-target", "kind": "form", "purpose": "保留人员安排原表",
             "rule_refs": [], "source_refs": [reference],
             "template_refs": [{"source_ref": reference, "selectors": []}],
@@ -43,13 +44,13 @@ async def test_human_outline_projection_exports_its_actual_word_hierarchy_forms_
                  "related_target_ids": [form["target_id"]]}
     removed = {"target_id": "removed-target", "kind": "narrative", "purpose": "不再采用的响应位置",
                "rule_refs": [], "source_refs": []}
-    base = AuthoringOutline(schema_version=2, authoring_input=snapshot, issues=[], chapters=[
+    base = AuthoringOutline(schema_version=2, authoring_input=cast(Any, snapshot), issues=[], chapters=cast(Any, [
         {"chapter_id": "old-root", "title": "原技术篇", "targets": [], "children": [
             {"chapter_id": "narrative", "title": "原实施方案", "targets": [narrative], "children": []},
             {"chapter_id": "removed", "title": "删除章节", "targets": [removed], "children": []}]},
         {"chapter_id": "form", "title": "原人员表", "targets": [form], "children": []},
         {"chapter_id": "container", "title": "原容器", "targets": [], "children": []},
-    ]).model_dump(exclude_unset=True)
+    ])).model_dump(exclude_unset=True)
     before = deepcopy(base)
     goal = "依据已有企业资料补充交付安排，保留待确认事项。"
     edited = apply_outline_edit(base, [

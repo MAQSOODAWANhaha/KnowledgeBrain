@@ -1,6 +1,7 @@
 """Persisted directory requests and contracts retain their distinct identities."""
 
 import json
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
@@ -68,7 +69,7 @@ async def test_layout_spec_lease_and_final_refs_are_durable_without_model_calls(
         empty = artifacts.put_json({})
         return artifacts.put_json(AuthoringDocument(authoring_input=fixed, outline_ref=outline_ref,
             basis_ref=empty, review_ref=empty, unit_refs=[], docx_ref=docx_ref, package_ref=package_ref,
-            gaps=[], usage={}).model_dump())
+            gaps=[], usage=cast(Any, {})).model_dump())
 
     monkeypatch.setattr(document_execution, 'generate_document', generate)
     execution_id = uuid4().hex
@@ -77,8 +78,8 @@ async def test_layout_spec_lease_and_final_refs_are_durable_without_model_calls(
                    transport=httpx.MockTransport(lambda request: pytest.fail('Layout does not call a model.')))
     if lose_after_commit:
         with pytest.raises(RuntimeError, match='executor lost'):
-            await execute_document(store, artifacts, config(), budget(), **options)
-    result_ref = await execute_document(store, artifacts, config(), budget(), **options)
+            await execute_document(store, artifacts, config(), budget(), **cast(Any, options))
+    result_ref = await execute_document(store, artifacts, config(), budget(), **cast(Any, options))
     row = await AuthoringStore(settings.dsn).get_execution(execution_id)
     assert seen == [(b'candidate', 1)] and row['epoch'] == (2 if lose_after_commit else 1)
     assert bool(lost) is lose_after_commit
@@ -91,7 +92,7 @@ async def test_layout_spec_lease_and_final_refs_are_durable_without_model_calls(
     assert saved['docx_ref'] == result['docx_ref'] and saved['package_ref'] == result['package_ref']
     assert saved['outline_ref'] == result['outline_ref']
     assert artifacts.read_json(saved['layout_ref'])['documents'][0]['artifact_ref'] == result['docx_ref']
-    assert await execute_document(store, artifacts, config(), budget(), **options) == result_ref
+    assert await execute_document(store, artifacts, config(), budget(), **cast(Any, options)) == result_ref
     assert len(seen) == 1 and row['requests'] == []
 
 
@@ -124,9 +125,9 @@ async def test_reviewed_facts_and_host_closure_are_pinned_and_inherited_without_
     options = dict(run_id=run['run_id'], source_version=1, domain_revision=1, outline_only=True,
                    transport=httpx.MockTransport(no_model))
     await execute_document(store, artifacts, config(), budget(), execution_id=first,
-                           reviewed_source_facts_ref=facts_ref, **options)
+                           reviewed_source_facts_ref=facts_ref, **cast(Any, options))
     await execute_document(store, artifacts, config(), budget(), execution_id=second,
-                           previous_execution_id=first, **options)
+                           previous_execution_id=first, **cast(Any, options))
     assert observed == [facts_ref, facts_ref]
     authoring = AuthoringStore(settings.dsn)
     for identity in (first, second):
@@ -158,7 +159,7 @@ async def test_directory_contract_and_both_reads_are_persisted_before_recovery(a
         return response({'nodes': [], 'composition': {'priority_basis': [], 'entries': []},
                          'scopes': [], 'excluded': [], 'source_only': []})
 
-    options = dict(execution_id=execution_id, run_id=run['run_id'], source_version=1, domain_revision=1,
+    options: dict[str, Any] = dict(execution_id=execution_id, run_id=run['run_id'], source_version=1, domain_revision=1,
                    outline_only=True, directory_planning_contract='source_refs_compact_plan_v12',
                    transport=httpx.MockTransport(handler))
     with pytest.raises(SourceOutlineUnavailable):
@@ -236,7 +237,7 @@ async def test_native_form_task_is_durable_and_exact_predecessor_replay_does_not
 
     monkeypatch.setattr(document_execution, 'generate_document', generate)
     first, second = uuid4().hex, uuid4().hex
-    options = dict(run_id=run['run_id'], source_version=1, domain_revision=1,
+    options: dict[str, Any] = dict(run_id=run['run_id'], source_version=1, domain_revision=1,
                    outline_only=True, directory_planning_contract='source_refs_compact_plan_v12',
                    transport=httpx.MockTransport(handler))
     original = await execute_document(store, artifacts, config(), budget(), execution_id=first, **options)

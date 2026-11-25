@@ -1,7 +1,7 @@
 """Close physical native-carrier differences after the complete M source choice."""
 
 from copy import deepcopy
-from typing import Literal
+from typing import Literal, NoReturn
 
 from pydantic import Field
 
@@ -59,7 +59,7 @@ def source_carrier_catalog(carriers, *, required_native_ids=()):
         for origin in item['origins']]} for item in carriers]
 
 
-def _reject(detail, path=(), code='directory_material_carrier_invalid'):
+def _reject(detail, path=(), code='directory_material_carrier_invalid') -> NoReturn:
     raise ModelContractError([{'path': ['carrier_dispositions', *path], 'code': code, 'detail': detail}])
 
 
@@ -103,8 +103,10 @@ def apply_carrier_closure(compiled, documents, dispositions, carriers, *, requir
             if state == 'reference':
                 owner = chapters.get(value['chapter_id'])
                 origins = [o for o in item['origins'] if value['case_id'] in (None, o['case_id'])]
-                if (owner is None or owner.get('presentation') in {'cover', 'content'}
-                        or identity not in parts[owner['id']]
+                if owner is None or owner.get('presentation') in {'cover', 'content'}:
+                    _reject('reference needs the same actual native part in one role/subject/entry-compatible chapter',
+                            (index, 'chapter_id'))
+                if (identity not in parts[owner['id']]
                         or not any(_compatible(o['signature'], owner) for o in origins)):
                     _reject('reference needs the same actual native part in one role/subject/entry-compatible chapter',
                             (index, 'chapter_id'))

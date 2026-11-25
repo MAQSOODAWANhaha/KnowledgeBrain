@@ -189,7 +189,7 @@ def collect_page_symbols(page, page_ordinal, raw, cache, *, font_bindings=None):
                 if not glyphs and isinstance(binding, dict):
                     glyphs = [binding.get("glyph_name")]
                 mapping = verified_symbol(font[0], ord(char), glyphs, font[1], glyph_binding=binding) if font else None
-                if mapping:
+                if mapping and font:
                     left, bottom, right, top = textpage.get_charbox(index)
                     if not (0 <= left <= right <= width and 0 <= bottom <= top <= height):
                         raise ValueError("symbol is outside the physical page")

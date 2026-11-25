@@ -1,4 +1,5 @@
 """Explicit v3 catalog records preserve the complete legacy material contract."""
+from typing import Any, cast
 
 from copy import deepcopy
 import hashlib
@@ -101,7 +102,7 @@ def test_documents_nested_catalogs_literal_ids_and_native_grids_are_not_rewritte
     ids = MaterialIds(original, contract=CURRENT)
     assert wire(ids.payload['documents']) == wire(legacy.payload['documents'])
     assert ids.payload['table_header_catalog']['blocks'][0]['constant_values']['grid'] == grid
-    assert wire(ids.restore_payload()['documents']) == wire(original['documents'])
+    assert wire(cast(Any, ids.restore_payload())['documents']) == wire(original['documents'])
     assert ids.restore_payload() == original
     ids.payload['table_header_catalog']['blocks'][0]['constant_values']['grid']['cells'][0][0] = 'changed'
     assert original['table_header_catalog'][0]['grid'] == grid

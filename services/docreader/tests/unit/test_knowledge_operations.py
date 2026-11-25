@@ -1,5 +1,6 @@
 """Physical knowledge HTTP operations keep one durable retry budget."""
 
+from typing import TypeVar, Any, cast
 import asyncio
 from collections import Counter
 import hashlib
@@ -13,6 +14,14 @@ from docreader.integrations.artifacts import ArtifactIntegrityError, ArtifactSto
 from docreader.integrations.store import Cancelled, Conflict, StaleExecution
 from docreader.integrations.web_knowledge import build_web_knowledge
 from docreader.tender.document_execution import _FrozenKnowledge
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 PRODUCT = "4c78bf65-9ee2-4788-bc0c-f14769bb153f"
@@ -53,7 +62,7 @@ def source(handler, store, artifacts, versions=(VERSION,)):
         {"product_id": PRODUCT, "version_id": version} for version in versions],
         base_url="https://knowledge.invalid", service_secret="synthetic-secret",
         transport=httpx.MockTransport(handler))
-    return _FrozenKnowledge(provider, provider.spec(), store, artifacts,
+    return _FrozenKnowledge(provider, _required(provider).spec(), store, artifacts,
                             SimpleNamespace(execution_id="execution"))
 
 
@@ -137,7 +146,7 @@ async def test_committed_operation_survives_failure_before_aggregate_snapshot(tm
         calls.append(command["operation"])
         return response(command, empty=empty)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
-    store.fail_stage = "knowledge-snapshot"
+    cast(Any, store).fail_stage = "knowledge-snapshot"
     with pytest.raises(OSError, match="persistence"):
         await source(handler, store, artifacts).search(query(), artifacts)
     store.fail_stage = None
@@ -193,7 +202,7 @@ async def test_control_and_storage_errors_do_not_become_business_retries(tmp_pat
         calls.append(request)
         return response(json.loads(request.content))
     artifacts, store = ArtifactStore(tmp_path), Receipts()
-    store.fail_stage, store.fail_suffix, store.failure = "knowledge-operation", ":outcome", failure
+    cast(Any, store).fail_stage, cast(Any, store).fail_suffix, store.failure = "knowledge-operation", ":outcome", failure
     with pytest.raises(type(failure)):
         await source(handler, store, artifacts).search(query(), artifacts)
     assert len(calls) == 1
@@ -206,7 +215,7 @@ async def test_result_not_committed_is_unknown_and_may_be_sent_again(tmp_path):
         calls.append(command["operation"])
         return response(command)
     artifacts, store = ArtifactStore(tmp_path), Receipts()
-    store.fail_stage, store.fail_suffix = "knowledge-operation", ":outcome"
+    cast(Any, store).fail_stage, cast(Any, store).fail_suffix = "knowledge-operation", ":outcome"
     with pytest.raises(OSError):
         await source(handler, store, artifacts).search(query(), artifacts)
     store.fail_stage = None

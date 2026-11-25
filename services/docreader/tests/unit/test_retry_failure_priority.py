@@ -1,4 +1,5 @@
 """Cancellation and lost fences take priority; model exhaustion stops further retries."""
+from typing import Any, cast
 
 import pytest
 
@@ -29,7 +30,7 @@ def test_cancellation_and_lost_fence_take_priority_over_sibling_failure(stop, ot
 
 @pytest.mark.parametrize("other", [
     UncertainModelResponse("Provider execution is uncertain"),
-    RequestReplayBlocked("previously-sent-request", "uncertain"),
+    RequestReplayBlocked("previously-sent-request", cast(Any, "uncertain")),
     ModelCorrectionStalled("Same correction rejected"),
     ModelSemanticError("Invalid JSON"),
 ])

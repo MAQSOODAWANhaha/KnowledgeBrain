@@ -1,5 +1,6 @@
 """Version 2 keeps source facts optional while enforcing the wire contract."""
 
+from typing import TypeVar, Any, cast
 from copy import deepcopy
 
 import pytest
@@ -10,6 +11,14 @@ from docreader.tender.schema import (
     Candidate, CatalogEntry, Decision, Issue, ItemDisposition, ItemDispositionResponse,
     ItemRef, LocateResult, TenderItem,
 )
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def evidence():
@@ -100,7 +109,7 @@ def test_business_details_belong_only_to_the_corresponding_kind(kind, detail, va
 def test_zero_and_negative_score_deltas_are_source_facts_not_missing_values():
     for scoring in ({"points": 0, "max_points": 0}, {"points": -2, "method": "每缺一项扣2分，最多扣6分"}):
         parsed = TenderItem.model_validate({**item(), "scoring": scoring})
-        assert parsed.scoring.model_dump(exclude_unset=True) == scoring
+        assert _required(parsed.scoring).model_dump(exclude_unset=True) == scoring
 
 
 @pytest.mark.parametrize("value", [True, False, "2", float("nan"), float("inf"), -float("inf")])
@@ -125,7 +134,7 @@ def test_source_number_strings_and_zero_remain_explicit_source_facts():
         parsed = TenderItem.model_validate({**item(), "numbers": [{
             "value": value, "unit": "分", "quote": "2分",
         }]})
-        assert parsed.numbers[0].value == value
+        assert _required(parsed.numbers)[0].value == value
 
 
 def test_v2_rejects_old_fields_and_does_not_convert_old_extraction():
@@ -321,7 +330,7 @@ def test_empty_protocol_collections_and_a_plain_blank_row_are_valid():
 
 def test_partial_deletion_retains_original_facts_without_inheriting_old_score_cap():
     parsed = Decision.model_validate(decision())
-    retained = parsed.amendment.retained_rules[0].model_dump()
+    retained = _required(parsed.amendment).retained_rules[0].model_dump()
     assert set(retained) == {"text", "scope", "evidence"}
     assert "scoring" not in retained
 
@@ -330,7 +339,7 @@ def test_pure_deletion_needs_no_fabricated_replacement_or_issue():
     payload = decision()
     payload["issue_ids"] = []
     payload["amendment"]["retained_rules"] = []
-    assert Decision.model_validate(payload).amendment.replacement_item_ids == []
+    assert _required(Decision.model_validate(payload).amendment).replacement_item_ids == []
 
 
 @pytest.mark.parametrize("effect,replacements", [("replace", []), ("delete", ["p2:i1"])])
@@ -388,7 +397,7 @@ def test_candidate_must_select_actual_identifiable_input_for_later_host_resoluti
 
 def test_locate_and_associate_results_cannot_masquerade_as_independent_acceptance():
     assert LocateResult(schema_version=2, candidates=[], findings=[]).candidates == []
-    associated = AssociationResult(schema_version=2, relations=[], decisions=[decision()], findings=[])
+    associated = AssociationResult(schema_version=2, relations=[], decisions=[cast(Any, decision())], findings=[])
     with pytest.raises(ValidationError):
         AnalysisVerification.model_validate(associated.model_dump(exclude_unset=True))
 
@@ -407,13 +416,13 @@ def test_catalog_keeps_document_identity_and_null_unheaded_section():
 def test_section_candidate_is_identifiable_without_inventing_unloaded_range_ids():
     payload = {"candidate_id": "d1:c1", "issue_ids": [], "range_ids": [], "item_ids": [],
                "section_refs": [{"document_id": "d1", "section_id": None}], "reason": "补读无标题正文。"}
-    assert Candidate.model_validate(payload).section_refs[0].section_id is None
+    assert _required(Candidate.model_validate(payload).section_refs)[0].section_id is None
 
 
 def test_physical_page_candidate_needs_no_invented_range_identity():
     payload = {"candidate_id": "d1:c1", "issue_ids": [], "range_ids": [], "item_ids": [],
                "page_refs": [{"document_id": "d1", "page_ordinal": 0}], "reason": "补读物理首页。"}
-    assert Candidate.model_validate(payload).page_refs[0].page_ordinal == 0
+    assert _required(Candidate.model_validate(payload).page_refs)[0].page_ordinal == 0
 
 
 @pytest.mark.parametrize("refs", [None, [], [{"document_id": "d1", "page_ordinal": -1}],
@@ -457,7 +466,7 @@ def test_catalog_does_not_allow_duplicate_section_identities():
 def test_item_reference_preserves_artifact_and_item_identity():
     artifact = {"sha256": "a" * 64, "relative_path": "aa/" + "a" * 64,
                 "size": 12, "media_type": "application/json"}
-    parsed = ItemRef(artifact_ref=artifact, item_id="p1:i1")
+    parsed = ItemRef(artifact_ref=cast(Any, artifact), item_id="p1:i1")
     assert ItemRef.model_validate_json(parsed.model_dump_json()) == parsed
 
 

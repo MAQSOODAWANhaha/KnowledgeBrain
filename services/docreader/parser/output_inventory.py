@@ -12,6 +12,7 @@ from collections import Counter
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 from docx import Document as DocxDocument
 from docx.oxml import parse_xml
@@ -296,8 +297,11 @@ def _docx(content):
     style_names = _style_names(doc)
     units, entries = [], []
     image_ordinal = 0
-    parts = {str(part.partname): part for part in doc.part.package.parts}
-    stories = [(doc.part, doc.element.body)]
+    package = doc.part.package
+    if package is None:
+        raise ValueError("DOCX package is missing")
+    parts = {str(part.partname): part for part in package.parts}
+    stories: list[tuple[Any, Any]] = [(doc.part, doc.element.body)]
     used_parts = {str(doc.part.partname)}
 
     def unsupported(part, ordinal, reason):
@@ -364,7 +368,7 @@ def _docx(content):
     part_ordinals = {}
     for part, story in stories:
         name = str(part.partname)
-        owner = SimpleNamespace(part=part)
+        owner = cast(Any, SimpleNamespace(part=part))
         # Bookmarks that wrap a whole paragraph sit as siblings of `w:p`. Word
         # normalizes them inline, but a freshly compiled document still has them
         # outside, so they belong to the next carrier rather than to nothing.

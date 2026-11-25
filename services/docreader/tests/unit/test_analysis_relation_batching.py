@@ -1,4 +1,5 @@
 """Batch relationship reviews without losing endpoints, evidence or replay identity."""
+from typing import Any, cast
 
 from copy import deepcopy
 from itertools import combinations
@@ -49,7 +50,7 @@ async def related_sources(tmp_path, count, pairs, *, shared_evidence=False):
     documents = [(f"doc{number}", "main" if number == 0 else "attachment",
                   [(f"要求{number}须提供完整证明。", "obligation")]) for number in range(count)]
     if shared_evidence:
-        documents.append(("shared", "attachment", [("上述要求须结合共同适用说明。", None)]))
+        documents.append(("shared", "attachment", [("上述要求须结合共同适用说明。", cast(Any, None))]))
     data = await scenario(tmp_path, documents=documents)
     original = context(data)
     baseline = original.review_requests()

@@ -15,6 +15,7 @@ import json
 import mimetypes
 import re
 from copy import deepcopy
+from typing import cast
 from uuid import UUID
 
 import httpx
@@ -287,8 +288,10 @@ class KnowledgeProvider:
                         source["source_identity"] = "unconfirmed"
                     retrieval = {"query_id": query_ids.get(query, query), "rank": rank}
                     score = hit.get("score")
-                    if type(score) in {int, float} and not isinstance(score, bool) and score == score and abs(score) != float("inf"):
-                        retrieval["score"] = score
+                    if type(score) in {int, float} and not isinstance(score, bool):
+                        number = cast(int | float, score)
+                        if number == number and abs(number) != float("inf"):
+                            retrieval["score"] = score
                     source.update(chunk_id=hit["id"], kind="search_excerpt", service_url=base)
                     identity = hashlib.sha256(json.dumps({"source": source, "sha256": reference["sha256"]},
                         ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

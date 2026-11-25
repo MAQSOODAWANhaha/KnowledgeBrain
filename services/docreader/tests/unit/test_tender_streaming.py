@@ -1,5 +1,6 @@
 """Local-only SSE, deterministic idle clocks, and durable response reuse."""
 
+from typing import TypeVar
 import asyncio
 import json
 import zlib
@@ -14,6 +15,14 @@ from docreader.llm import ModelConfig, ModelInfrastructureError, ModelSemanticEr
 from docreader.llm.request import ImageInput, ModelRateLimitError, build_request, request_digest
 from docreader.llm import client as client_module, streaming
 from test_tender_llm import Audit, CountedArtifacts, environment, model, response
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def event(content=None, *, finish=None, delta=None, usage=None):
@@ -302,7 +311,7 @@ class ReplayAudit(Audit):
 
     async def begin_request(self, lease, request_id, model, kind, metadata=None):
         for row in self.rows.values():
-            if row["metadata"]["request_digest"] == metadata["request_digest"] and row["kind"] == kind:
+            if row["metadata"]["request_digest"] == _required(metadata)["request_digest"] and row["kind"] == kind:
                 if row["status"] in {"sent", "uncertain"}:
                     raise RequestReplayBlocked(row["request_id"], row["status"])
                 if row["status"] == "succeeded":

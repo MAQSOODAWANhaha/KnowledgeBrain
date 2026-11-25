@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+from typing import TypeVar
 
 from pydantic import ValidationError
 
@@ -20,6 +21,7 @@ from docreader.tender.schema import (
 
 
 OUTLINE_SOURCE_BINDING_CONTRACT = "batch_excerpt_coverage_v1"
+T = TypeVar("T")
 
 
 def load_outline_source(artifacts, reference: dict, *, repository=None) -> dict:
@@ -150,7 +152,7 @@ class _OutlineContext:
         self.excerpts = {}
         self._sources(plan)
 
-    def _read(self, reference, label, default):
+    def _read(self, reference, label, default: T) -> T:
         if reference is None:
             return deepcopy(default)
         try:

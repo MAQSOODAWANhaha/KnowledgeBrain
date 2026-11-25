@@ -4,7 +4,7 @@ from io import BytesIO
 from zipfile import ZipFile
 
 from docx import Document
-from lxml import etree
+import lxml.etree as etree
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document

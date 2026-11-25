@@ -1,5 +1,6 @@
 """Original-table inclusion and the source clause's actor are separate decisions."""
 
+from typing import TypeVar
 from copy import deepcopy
 import hashlib
 import json
@@ -22,6 +23,14 @@ from docreader.tender.directory_compile import outline_from_compiled
 from docreader.tender.evidence.references import SourceIndex
 from test_directory_compile import fixture_titles
 from test_directory_response_forms import render_target, source_case, synthetic_response
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 CONTRACT = 'source_bound_response_forms_v3'
@@ -88,7 +97,7 @@ def test_only_v3_schema_requires_a_separate_role_on_each_selected_row():
     payload = {'atom_count': 10, 'mandate': [{}], 'form': {'grid': {'row_count': 7, 'column_count': 4}}}
     for operation in ['select_native_response_form_v1', 'select_native_response_form_v2', 'select_native_response_form_v3']:
         model = response_model('directory_response_form', {**payload, 'operation': operation})
-        row = model.model_fields['rows'].annotation.__args__[0]
+        row = _required(model.model_fields['rows'].annotation).__args__[0]
         assert ('source_role' in row.model_fields) == operation.endswith('v3')
         if operation.endswith('v3'):
             assert row.model_fields['source_role'].is_required()

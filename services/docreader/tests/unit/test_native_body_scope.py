@@ -1,6 +1,7 @@
 from copy import deepcopy
 import hashlib
 import json
+from typing import Any
 
 import pytest
 
@@ -230,7 +231,7 @@ def test_exact_excerpt_can_be_upgraded_without_model_call(tmp_path):
 
 
 def test_cell_offsets_bind_second_native_row_and_multiline_nonfirst_column(tmp_path):
-    values = list(case(tmp_path / 'old'))
+    values: list[Any] = list(case(tmp_path / 'old'))
     grid = {'row_count': 2, 'column_count': 2, 'cells': [
         {'row': r, 'column': c, 'row_span': 1, 'col_span': 1, 'text': text}
         for r, c, text in [(0, 0, 'A'), (0, 1, 'first'), (1, 0, 'prefix'), (1, 1, '尾句。\n续行。')]]}

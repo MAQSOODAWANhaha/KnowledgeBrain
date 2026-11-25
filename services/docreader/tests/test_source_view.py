@@ -1,4 +1,5 @@
 """Exercise the shared authenticated RPC, independent of an LLM provider."""
+from typing import Any, cast
 import hashlib
 import io
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from docreader.config import CONFIG
 from docreader.main import DocReaderServicer
 from docreader.proto.docreader_pb2 import SourceViewRequest
 from docreader.proto.docreader_pb2_grpc import DocReaderStub, add_DocReaderServicer_to_server
+
 
 
 @pytest.fixture
@@ -34,11 +36,11 @@ def rpc(monkeypatch):
 
 
 def request(raw, media_type, **overrides):
-    return SourceViewRequest(**dict(
+    return SourceViewRequest(**cast(Any, dict(
         file_content=raw, media_type=media_type, source_sha256=hashlib.sha256(raw).hexdigest(),
         page_ordinal=0, max_edge=min(CONFIG.pdf_render_max_edge, 1000),
         max_image_bytes=min(CONFIG.grpc_max_file_size_mb, 1_000_000),
-    ) | overrides)
+    ) | overrides))
 
 
 def pdf():
@@ -70,7 +72,9 @@ def test_rpc_preserves_uploaded_transparent_image_on_white(rpc):
     view = client.SourceView(request(buffer.getvalue(), "image/png"), metadata=metadata)
     assert (view.width, view.height) == (80, 40)
     with Image.open(io.BytesIO(view.image_data)) as image:
-        assert all(channel > 250 for channel in image.getpixel((40, 20)))
+        pixel = image.getpixel((40, 20))
+        assert isinstance(pixel, tuple)
+        assert all(channel > 250 for channel in pixel)
 
 
 @pytest.mark.parametrize("overrides", [

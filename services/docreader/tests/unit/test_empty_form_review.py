@@ -36,8 +36,11 @@ def test_empty_form_review_preserves_actual_content_and_missed_match_checks(kind
 
     assert (record is not None) is reviewed
     if reviewed:
+        assert record is not None
         assert record['task_id'] == 'task'
+        assert record is not None
         assert record['supports'] == supports
+        assert record is not None
         assert record['content']['blocks'] == ([{'kind': 'paragraph', 'text': text,
             'headers': [], 'rows': [], 'content_id': 'b1', 'target_ids': ['t1'],
             'support_ids': ['s1']}] if text is not None else [])

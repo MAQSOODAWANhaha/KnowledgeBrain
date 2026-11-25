@@ -1,5 +1,6 @@
 """Planning instructions stay out of Word while native forms retain their text."""
 
+from typing import TypeVar
 from io import BytesIO
 import json
 from zipfile import ZipFile
@@ -11,6 +12,14 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 
 from test_authoring_export import chapter, document, grid, source_ref, target, writing
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 @pytest.mark.parametrize("native_grid", [False, True])
@@ -42,7 +51,7 @@ def test_shared_form_instances_show_subjects_without_planning_instructions(tmp_p
         text = "\n".join(paragraphs)
         assert all(position["purpose"] not in text for position in positions)
         assert [paragraph.text for paragraph in doc.paragraphs
-                if paragraph.style.name == "Caption"] == ["投标人", "产品原厂"]
+                if _required(_required(paragraph.style).name) == "Caption"] == ["投标人", "产品原厂"]
         assert paragraphs.count(fixed_text) == 2
         assert len(doc.tables) == (2 if native_grid else 0)
         assert all(table.cell(1, 1).text == "" for table in doc.tables)
@@ -62,7 +71,7 @@ def test_reused_template_without_subject_keeps_copies_without_inventing_labels(t
     paragraphs = [paragraph.text for paragraph in doc.paragraphs]
     assert all(position["purpose"] not in "\n".join(paragraphs) for position in positions)
     assert paragraphs.count("真实原格式：签署人____，日期____。") == 2
-    assert not [paragraph for paragraph in doc.paragraphs if paragraph.style.name == "Caption"]
+    assert not [paragraph for paragraph in doc.paragraphs if _required(_required(paragraph.style).name) == "Caption"]
 
 
 def test_missing_template_keeps_subject_and_gap_without_dumping_internal_purpose(tmp_path):

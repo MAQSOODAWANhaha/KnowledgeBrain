@@ -1,4 +1,5 @@
 """Independent outline planning and compilation from a fixed human outline."""
+from typing import Any, cast
 
 from copy import deepcopy
 
@@ -51,13 +52,13 @@ async def test_outline_only_preserves_local_failure_gaps_in_its_own_artifact(tmp
 async def test_fixed_outline_skips_organization_and_preserves_identity_order_and_nested_goals(tmp_path):
     artifacts, requests = ArtifactStore(tmp_path), []
     fixed = AuthoringInput.model_validate(snapshot(artifacts)).model_dump()
-    outline = AuthoringOutline(schema_version=2, authoring_input=fixed, issues=[], chapters=[
+    outline = AuthoringOutline(schema_version=2, authoring_input=cast(Any, fixed), issues=[], chapters=cast(Any, [
         {"chapter_id": "human-parent", "title": "人工调整的技术篇", "targets": [], "children": [
             {"chapter_id": "stable-chapter", "title": "实施方法", "children": [], "targets": [
                 {"target_id": "stable-target", "kind": "narrative", "purpose": "按人工要求编写实施方法",
                  "rule_refs": [], "source_refs": []}]}]},
         {"chapter_id": "kept-empty", "title": "人工留空", "targets": [], "children": []},
-    ]).model_dump()
+    ])).model_dump()
     before = deepcopy(outline)
 
     async def execute(task, request, validate):
@@ -81,7 +82,7 @@ async def test_fixed_outline_skips_organization_and_preserves_identity_order_and
 async def test_fixed_empty_outline_is_not_repopulated_with_fallback_content(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     fixed = AuthoringInput.model_validate(snapshot(artifacts)).model_dump()
-    outline = AuthoringOutline(schema_version=2, authoring_input=fixed, issues=[], chapters=[]).model_dump()
+    outline = AuthoringOutline(schema_version=2, authoring_input=cast(Any, fixed), issues=[], chapters=[]).model_dump()
 
     async def forbidden_model_call(*_args):
         raise AssertionError("A manually empty outline has no writing targets.")
@@ -98,7 +99,7 @@ async def test_fixed_outline_from_another_snapshot_is_rejected_before_model_work
     artifacts = ArtifactStore(tmp_path)
     fixed = AuthoringInput.model_validate(snapshot(artifacts)).model_dump()
     other = {**fixed, "source_version": 2}
-    outline = AuthoringOutline(schema_version=2, authoring_input=other, issues=[], chapters=[]).model_dump()
+    outline = AuthoringOutline(schema_version=2, authoring_input=cast(Any, other), issues=[], chapters=[]).model_dump()
 
     async def forbidden_model_call(*_args):
         raise AssertionError("Mismatched outline input must not reach model work.")

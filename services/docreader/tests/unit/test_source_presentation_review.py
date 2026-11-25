@@ -1,4 +1,5 @@
 """Source projection must retain protected duties and reject stale row identities."""
+from typing import Any, cast
 
 from copy import deepcopy
 from hashlib import sha256
@@ -15,7 +16,7 @@ from test_source_presentation import fixture, load
 def test_protected_pending_source_duty_cannot_be_retired_as_decoration(tmp_path, guard):
     _, snapshot, documents, _, _, _ = data = fixture(tmp_path)
     window = {'document_id': 'document', 'page': 0, 'start_line': 0, 'end_line': 0}
-    adoption = item('form', **{guard: window if guard == 'condition' else [window]})
+    adoption = item('form', **cast(Any, {guard: window if guard == 'condition' else [window]}))
     raw = plan([{**node('form', 0, 1, document_id='document'), 'body_windows': [
         {'document_id': 'document', 'page': 0, 'start_line': 1, 'end_line': 4}]}], [adoption])
     compiled = compile_directory(raw, documents)

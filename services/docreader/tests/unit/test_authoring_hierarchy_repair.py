@@ -1,4 +1,5 @@
 """Last automatic structure review can apply a narrow, explicit hierarchy correction."""
+from typing import TypeVar, Any, cast
 from io import BytesIO
 
 from docx import Document
@@ -8,6 +9,14 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_pipeline import generate_document
 
 from test_authoring_pipeline_boundaries import budget, ordinary_response, outline, payload, snapshot
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 @pytest.mark.parametrize('titles', [('设备组成', '补充事项'), ('实施职责', '服务范围')])
@@ -33,11 +42,11 @@ async def test_final_automatic_review_moves_the_subtree_without_a_second_assembl
             return validate(outline(value, chapters=2))
         response = ordinary_response(task, value)
         if task == 'outline':
-            response['chapters'][0]['title'] = titles[0]
-            response['chapters'][1]['title'] = titles[1]
+            cast(Any, response)['chapters'][0]['title'] = titles[0]
+            cast(Any, response)['chapters'][1]['title'] = titles[1]
             if value.get('review_findings'):
                 # The bounded full-tree revision still leaves the child promoted.
-                response['chapters'][0]['title'] += '与安排'
+                cast(Any, response)['chapters'][0]['title'] += '与安排'
         return validate(response)
 
     async def published(reference):
@@ -56,7 +65,7 @@ async def test_final_automatic_review_moves_the_subtree_without_a_second_assembl
     assert child['targets'][0]['target_id'] == 'chapter-2:target-1'
     assert len(result['unit_refs']) == 2
     doc = Document(BytesIO(artifacts.read_bytes(result['docx_ref'])))
-    headings = [p.text for p in doc.paragraphs if p.style.name.startswith('Heading')]
+    headings = [p.text for p in doc.paragraphs if _required(_required(p.style).name).startswith('Heading')]
     assert titles[1] in headings
     assert '2 ' + titles[1] not in headings
     assert calls.count('outline') == 3

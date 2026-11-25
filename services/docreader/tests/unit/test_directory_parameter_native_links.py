@@ -1,5 +1,6 @@
 """Complete P-selected native originals are cited at their actual parent targets."""
 
+from typing import TypeVar
 from copy import deepcopy
 from hashlib import sha256
 from io import BytesIO
@@ -13,6 +14,14 @@ from docreader.tender import directory_compile as compiler
 from docreader.tender.authoring_coverage import pending_outline_issues
 from test_authoring_pipeline_boundaries import budget, snapshot
 from test_directory_compile import entry, item, node, plan, window
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 CONTRACT = 'source_bound_parameter_tables_v1'
@@ -249,7 +258,7 @@ async def test_native_originals_appear_once_in_word_and_child_has_one_response_w
         assert table.cell(1,1)._tc is table.cell(2,1)._tc and table.cell(1,1).text == label
         assert table.cell(1,2)._tc is table.cell(2,2)._tc and table.cell(1,2).text == ''
     start = next(i for i,paragraph in enumerate(word.paragraphs)
-                 if paragraph.style.name.startswith('Heading') and paragraph.text == '软件授权采购')
+                 if _required(_required(paragraph.style).name).startswith('Heading') and paragraph.text == '软件授权采购')
     child_text = '\n'.join(paragraph.text for paragraph in word.paragraphs[start:])
     assert '参见' in child_text and '完整交付授权证明' in child_text
     assert all(fragment not in child_text for fragment in ('源数','态势感知与安','全运营平台'))

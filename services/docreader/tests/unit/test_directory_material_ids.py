@@ -1,4 +1,5 @@
 """Request-local material identities must preserve sources and receipt ownership."""
+from typing import Any, cast
 
 from copy import deepcopy
 import json
@@ -108,7 +109,7 @@ def test_same_permanent_literal_in_different_namespaces_remains_distinct():
     assert projection.payload['chapters'][0]['id'] == 'c1'
     assert projection.payload['table_header_catalog'][0]['table_id'] == 't1'
     restored = projection.decode(response())
-    assert restored['table_headers'][0]['table_id'] == restored['assignments'][0]['chapter_id']
+    assert cast(Any, restored)['table_headers'][0]['table_id'] == cast(Any, restored)['assignments'][0]['chapter_id']
 
 
 def test_material_source_coordinate_arrays_have_explicit_fields_and_restore_the_entire_payload():
@@ -199,6 +200,7 @@ async def test_short_response_receipt_replays_with_the_same_mapping_without_send
     runner = executor(artifacts, receipts, budget)
     first = await _ask(runner, budget, 'directory_material', payload(), lambda x: x)
     second = await _ask(runner, budget, 'directory_material', payload(), lambda x: x)
+    assert first is not None
     assert first == second and first['assignments'][0]['chapter_id'] == 'chapter-long-id'
     assert len(calls) == len(receipts.rows) == 1
 

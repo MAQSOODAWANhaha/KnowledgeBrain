@@ -1,4 +1,5 @@
 """Explicit isolated-test initialization from the production SQL baseline."""
+from typing import Any, cast
 from pathlib import Path
 
 import psycopg
@@ -10,4 +11,4 @@ async def initialize_schema(dsn, sections=("analysis", "authoring")):
     async with await psycopg.AsyncConnection.connect(dsn) as conn:
         for section in sections:
             statement = source.split(f"-- BEGIN {section}\n", 1)[1].split(f"-- END {section}", 1)[0]
-            await conn.execute(statement)
+            await conn.execute(cast(Any, statement))

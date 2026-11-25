@@ -85,6 +85,8 @@ def native_docx():
 def native_xlsx():
     workbook = Workbook()
     sheet = workbook.active
+    if sheet is None:
+        raise RuntimeError("workbook has no active sheet")
     sheet.title = "资格材料"
     sheet.append(["资格条件", "证明文件"])
     sheet.append(["必须提交营业执照", "有效期内"])

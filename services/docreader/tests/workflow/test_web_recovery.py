@@ -1,4 +1,5 @@
 """Project-scoped same-run analysis recovery; all receipts are synthetic."""
+from typing import TypeVar
 import asyncio
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -12,6 +13,14 @@ from docreader.jobs.settings import Settings
 from docreader.tests.workflow.test_web_bridge import runtime as runtime
 from docreader.tests.workflow.test_web_bridge import payload, upload
 from docreader.workflow.nodes import WORKFLOW_PROTOCOL
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 async def failure(runtime, *, source_artifact=False, payment=None):
@@ -66,14 +75,18 @@ async def test_foreign_and_unauthorized_retry_never_reads_run_artifacts(runtime,
 async def test_early_failure_recovers_revision_one_and_preserves_source_zero_receipts(runtime, source_artifact):
     run, command = await failure(runtime, source_artifact=source_artifact)
     view = (await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"]
+    assert view is not None
     assert view["can_retry"] and view["failed_command_id"] == command["command_id"]
+    assert view is not None
     assert view["domain_revision"] == 1
     if source_artifact:
         assert run["artifacts"][0]["domain_revision"] == 0
         assert run["usage"][0]["domain_revision"] == 1
     submitted = await retry_analysis(runtime.bridge, payload(runtime, **retry_body(run, command)))
     current = await runtime.bridge.store.get_run(run["run_id"])
+    assert submitted is not None
     assert submitted["analysis"] == {"run_id": run["run_id"], "source_version": 1, "domain_revision": 1, "status": "pending"}
+    assert submitted is not None
     assert len(current["commands"]) == 2 and current["commands"][1]["command_id"] == submitted["command_id"]
     for key in ("artifacts", "usage", "revision", "history", "manifest_ref"):
         assert current[key] == run[key]
@@ -86,11 +99,15 @@ async def test_retry_same_key_concurrently_replays_even_after_completed(runtime)
     run, command = await failure(runtime)
     request = payload(runtime, **retry_body(run, command))
     one, two = await asyncio.gather(retry_analysis(runtime.bridge, request), retry_analysis(runtime.bridge, request))
+    assert one is not None
+    assert two is not None
     assert one["command_id"] == two["command_id"]
+    assert one is not None
     lease = await runtime.bridge.store.acquire(run["run_id"], one["command_id"], 1)
     await runtime.bridge.store.release(lease, "analysis-ready")
-    assert (await retry_analysis(runtime.bridge, request))["command_id"] == one["command_id"]
-    assert not (await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"]["can_retry"]
+    assert one is not None
+    assert _required((await retry_analysis(runtime.bridge, request)))["command_id"] == one["command_id"]
+    assert not _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])["can_retry"]
     assert len((await runtime.bridge.store.get_run(run["run_id"]))["commands"]) == 2
     for changed in ({"reason": "不同的恢复理由"}, {"failed_command_id": str(uuid4())}):
         with pytest.raises(WebError) as conflict:
@@ -113,12 +130,14 @@ async def test_payment_fence_matches_existing_domain_policy(runtime, payment):
     view = (await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"]
     request = payload(runtime, **retry_body(run, command))
     if payment != "current":
+        assert view is not None
         assert not view["can_retry"] and view["blocker"] == "payment_reconciliation"
         with pytest.raises(WebError) as blocked:
             await retry_analysis(runtime.bridge, request)
         assert blocked.value.code == "ANALYSIS_RECONCILIATION_REQUIRED" and blocked.value.status == 409
         assert await runtime.bridge.store.get_run(run["run_id"]) == run
     else:
+        assert view is not None
         assert view["can_retry"]
         await retry_analysis(runtime.bridge, request)
         assert (await runtime.bridge.store.get_run(run["run_id"]))["usage"] == run["usage"]
@@ -127,9 +146,9 @@ async def test_payment_fence_matches_existing_domain_policy(runtime, payment):
 async def test_pending_and_cancelled_are_not_advertised_as_recoverable(runtime):
     run, command = await failure(runtime)
     await runtime.bridge.store.retry(run["run_id"], 1, 1, command["command_id"], "direct-retry", "Fixture")
-    assert not (await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"]["can_retry"]
+    assert not _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])["can_retry"]
     await runtime.bridge.store.cancel(run["run_id"])
-    assert not (await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"]["can_retry"]
+    assert not _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])["can_retry"]
     with pytest.raises(WebError) as rejected:
         await retry_analysis(runtime.bridge, payload(runtime, **retry_body(run, command)))
     assert rejected.value.status == 409
@@ -141,6 +160,7 @@ async def test_legacy_protocol_has_an_explicit_operator_exit(runtime):
         await conn.execute("UPDATE tender_analysis_revisions SET execution_spec=%s WHERE run_id=%s",
                            (Jsonb({"workflow_protocol": {"schema_version": 1}}), run["run_id"]))
     view = (await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"]
+    assert view is not None
     assert not view["can_retry"] and view["blocker"] == "unsupported_protocol" and "管理员" in view["notice"]
     with pytest.raises(WebError) as rejected:
         await retry_analysis(runtime.bridge, payload(runtime, **retry_body(run, command)))
@@ -154,6 +174,7 @@ async def test_historical_revision_zero_is_not_silently_replaced(monkeypatch):
               "status": "failed", "commands": [], "usage": []}
     monkeypatch.setattr(web_recovery, "_owned_run", AsyncMock(return_value=legacy))
     view = (await analysis_recovery(None, {}))["recovery"]
+    assert view is not None
     assert not view["can_retry"] and view["blocker"] == "unsupported_revision" and "管理员" in view["notice"]
 
 

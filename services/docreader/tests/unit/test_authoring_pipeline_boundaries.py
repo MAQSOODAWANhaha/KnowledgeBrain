@@ -1,4 +1,5 @@
 """Regression boundaries found while reviewing the document-authoring path."""
+from typing import Any, cast
 
 from copy import deepcopy
 import json
@@ -387,9 +388,9 @@ async def test_unknown_outline_references_are_rejected_inside_the_executor_valid
         if task == "outline" and value.get("operation") != "assemble":
             invalid = deepcopy(response)
             if location == "constraint":
-                invalid["constraint_rule_ids"] = ["not-supplied"]
+                cast(Any, invalid)["constraint_rule_ids"] = ["not-supplied"]
             else:
-                invalid["findings"] = [{"code": "question", "detail": "待核对要求", "rule_ids": ["not-supplied"]}]
+                cast(Any, invalid)["findings"] = [{"code": "question", "detail": "待核对要求", "rule_ids": ["not-supplied"]}]
             with pytest.raises(ModelContractError) as error:
                 validate(invalid)
             corrections.append(error.value.errors)
@@ -903,7 +904,7 @@ async def test_multifragment_original_and_retained_rule_references_survive_outli
         actual_references.extend(
             ref for target in task["targets"] for ref in target["rule_refs"]
         )
-        basis = AuthoringBasis(authoring_input=context.input, response={}).model_dump()
+        basis = AuthoringBasis(authoring_input=cast(Any, context.input), response=cast(Any, {})).model_dump()
         semantic, _, _ = _load_task(artifacts, context, task, basis, [])
         assert len(semantic["rules"]) == len(
             {

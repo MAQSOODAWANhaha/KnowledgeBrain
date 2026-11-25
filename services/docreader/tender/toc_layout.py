@@ -8,7 +8,7 @@ import math
 import re
 from zipfile import BadZipFile, ZipFile
 
-from lxml import etree as ET
+from lxml import etree as ET  # pyright: ignore[reportAttributeAccessIssue]
 from pypdf import PdfReader
 import pypdfium2 as pdfium
 

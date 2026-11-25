@@ -1,5 +1,6 @@
 """Explicit layout semantics survive into the editable submission artifacts."""
 
+from typing import TypeVar, Any, cast
 from copy import deepcopy
 from io import BytesIO
 from zipfile import ZipFile
@@ -12,6 +13,14 @@ import pytest
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.evidence.references import SourceIndex
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def chapter(identity, *, targets=(), children=(), role="body", volume=False, title=None):
@@ -74,7 +83,7 @@ def test_explicit_cover_precedes_directory_without_chapter_number_or_title_guess
     document = word(artifacts, result)
     text = [p.text for p in document.paragraphs]
     assert text.index("实际封面内容，企业名称____。") < text.index("目录")
-    headings = [p.text for p in document.paragraphs if p.style.name.startswith("Heading")]
+    headings = [p.text for p in document.paragraphs if _required(_required(p.style).name).startswith("Heading")]
     assert headings == ["封面", "技术应答"]
     assert text.count("实际封面内容，企业名称____。") == 1
     assert outline == original
@@ -113,7 +122,7 @@ def test_directory_has_updatable_toc_field_and_existing_page_field(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     result = export_authoring_document(artifacts, {"chapters": [chapter("body", title="正文")]}, [])
     with ZipFile(BytesIO(artifacts.read_bytes(result["docx_ref"]))) as archive:
-        from lxml import etree
+        import lxml.etree as etree
 
         xml = etree.fromstring(archive.read("word/document.xml"))
         settings = etree.fromstring(archive.read("word/settings.xml"))
@@ -127,7 +136,7 @@ def test_directory_has_updatable_toc_field_and_existing_page_field(tmp_path):
         footer_xml = etree.fromstring(archive.read("word/footer1.xml"))
         assert footer_xml.xpath("//w:fldSimple/w:r", namespaces=namespaces)
     paragraphs = word(artifacts, result).paragraphs
-    assert [p.text for p in paragraphs if p.style.name.startswith('Heading')].count("正文") == 1
+    assert [p.text for p in paragraphs if _required(_required(p.style).name).startswith('Heading')].count("正文") == 1
     assert ["".join(text.text or "" for text in link.iter(qn('w:t')))
             for paragraph in paragraphs for link in paragraph._p.xpath('./w:hyperlink')].count("1 正文") == 1
 
@@ -161,8 +170,8 @@ def test_native_table_layout_uses_explicit_or_native_headers_and_keeps_original_
     assert table.cell(2, 0).text == "最终报价" and table.cell(2, 1).text == ""
     assert all(cell._tc.get_or_add_tcPr().find(qn("w:vAlign")).get(qn("w:val")) == "top"
                for row in table.rows for cell in row.cells)
-    assert sum(column.width for column in table.columns) <= Mm(160) + Mm(0.1)
-    assert table.columns[1].width / table.columns[0].width == pytest.approx(2, rel=.01)
+    assert sum(cast(Any, (column.width for column in table.columns))) <= Mm(160) + Mm(0.1)
+    assert cast(Any, table.columns[1].width) / cast(Any, table.columns[0].width) == pytest.approx(2, rel=.01)
     assert raw == original
 
 
@@ -178,7 +187,7 @@ def test_analysis_requirements_do_not_insert_tables_or_change_native_response_la
     assert len(document.tables) == 1
     table = document.tables[0]
     assert header_rows(table) == [0]
-    widths = [column.width for column in table.columns]
+    widths = [cast(Any, column.width) for column in table.columns]
     assert [value / sum(widths) for value in widths] == pytest.approx([1 / 3, 2 / 3], rel=.01)
     assert table.cell(0, 0)._tc is table.cell(0, 1)._tc
     assert table.cell(1, 0).text == "功能要求" and table.cell(1, 1).text == ""
@@ -235,7 +244,7 @@ def test_original_form_without_a_common_repeating_header_starts_its_chapter_on_a
     with ZipFile(BytesIO(artifacts.read_bytes(result["package_ref"]))) as package:
         documents.append(Document(BytesIO(package.read("volumes/001.docx"))))
     for document in documents:
-        heading = next(p for p in document.paragraphs if p.text == "主原式" and p.style.name.startswith("Heading"))
+        heading = next(p for p in document.paragraphs if p.text == "主原式" and _required(_required(p.style).name).startswith("Heading"))
         assert bool(heading.paragraph_format.page_break_before) is expected
         assert header_rows(document.tables[0]) == ([0] if count == 1 else [])
         assert document.tables[0].cell(1, 1).text == ""

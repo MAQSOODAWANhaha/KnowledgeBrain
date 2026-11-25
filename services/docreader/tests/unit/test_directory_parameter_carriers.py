@@ -1,5 +1,6 @@
 """Physical source slices cannot become separate responses after parameter expansion."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 
@@ -15,6 +16,14 @@ from docreader.tender.directory_compile import (
 from test_authoring_pipeline_boundaries import budget, snapshot
 from test_directory_compile import docs, item, node, plan, window
 from test_directory_parameter_continuations import parameter, response, source_case
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 SNAPSHOT = {'schema_version': 2, 'run_id': 'run', 'source_version': 1, 'domain_revision': 1}
@@ -126,7 +135,7 @@ async def test_native_continuation_tables_have_no_intervening_response_and_keep_
     child = outline['chapters'][0]['children'][0]
     paragraphs = [paragraph.text for paragraph in document.paragraphs]
     child_start = next(index for index, paragraph in enumerate(document.paragraphs)
-                       if paragraph.style.name.startswith('Heading') and paragraph.text == child['title'])
+                       if _required(_required(paragraph.style).name).startswith('Heading') and paragraph.text == child['title'])
     assert sum('我方响应：' in text for text in paragraphs[:child_start]) == 1
     assert sum('我方响应：' in text for text in paragraphs[child_start:]) == 1
     assert '转换的源、目的地址转换；须提供证明。' in '\n'.join(paragraphs[child_start:])

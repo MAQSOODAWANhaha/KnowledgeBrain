@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import cast
 import hashlib
 import json
 
@@ -64,7 +65,7 @@ def source_excerpts_text(artifacts, excerpts, *, source_join='paragraphs', repos
                         (cells[0]['start'], cells[0]['end'])):
                     raise ArtifactIntegrityError('response source must select one exact native cell fragment')
             if source_join == 'continuation':
-                position = (positions[excerpt['source_ref']['unit_id']], selected.get('row_start', -1))
+                position = (cast(dict, positions)[excerpt['source_ref']['unit_id']], selected.get('row_start', -1))
                 first, last = (*position, selected['start']), (*position, selected['end'])
                 if previous is not None and first < previous:
                     raise ArtifactIntegrityError('source continuation must be forward without overlap')

@@ -214,6 +214,8 @@ class TenderNodes:
             merged = {"schema_version": 2, "documents": [], "issues": list(registered["issues"]),
                       "native_range_count": 0, "stats": {}}
             for result in results:
+                if isinstance(result, BaseException):
+                    continue
                 for key in ("documents", "issues"):
                     merged[key].extend(result[key])
                 merged["native_range_count"] += result["native_range_count"]

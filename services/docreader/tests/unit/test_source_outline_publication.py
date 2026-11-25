@@ -1,4 +1,5 @@
 """Automatic source-outline publication rejects diagnostics without response positions."""
+from typing import Any, cast
 from copy import deepcopy
 
 import pytest
@@ -44,7 +45,7 @@ async def test_unusable_automatic_source_outline_is_failed_and_preserved(source_
     assert row['status'] == 'failed' and row.get('result_ref') is None
     assert row['error'] == {'type': 'SourceOutlineUnavailable'}
     store = document_execution.AuthoringStore('fixture')
-    rejected = [call for call in store.commit_artifact.await_args_list
+    rejected = [call for call in cast(Any, store.commit_artifact).await_args_list
                 if call.args[1] == 'directory-outline-unavailable']
     assert len(rejected) == 1
     assert source_runtime.artifacts.read_json(rejected[0].args[2]) == original
@@ -59,7 +60,7 @@ async def test_nested_manual_response_is_usable_without_claiming_semantic_accept
     reference = await source_runtime.execute(outline_only=True)
     assert source_runtime.rows['execution']['status'] == 'succeeded'
     assert source_runtime.artifacts.read_json(reference)['issues'] == source_runtime.outline['issues']
-    assert not [call for call in document_execution.AuthoringStore('fixture').commit_artifact.await_args_list
+    assert not [call for call in cast(Any, document_execution.AuthoringStore('fixture').commit_artifact).await_args_list
                 if call.args[1] == 'directory-outline-unavailable']
 
 
@@ -70,7 +71,7 @@ async def test_diagnostic_persistence_failure_cannot_publish_empty_success(sourc
         if stage == 'directory-outline-unavailable':
             raise OSError('synthetic diagnostic storage outage')
 
-    store.commit_artifact.side_effect = commit
+    cast(Any, store.commit_artifact).side_effect = commit
     with pytest.raises(OSError, match='diagnostic storage outage'):
         await source_runtime.execute(outline_only=True)
     assert source_runtime.rows['execution']['status'] == 'failed'

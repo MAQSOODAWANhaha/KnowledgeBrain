@@ -234,6 +234,7 @@ class WebBridge:
                     "VALUES (%s,%s,%s) RETURNING *",
                     (document_id, project_id, Jsonb(reference)),
                 )).fetchone()
+            assert saved is not None
             if str(saved["project_id"]) != project_id or saved["original_ref"] != reference:
                 raise Conflict("document already identifies different project content")
         return {"document": {"document_id": document_id, "file_name": row["file_name"]}}
@@ -623,6 +624,7 @@ class WebBridge:
                     return await replay_ended(self, payload)
                 current = status_row(await (await conn.execute("SELECT * FROM tender_authoring_jobs WHERE execution_id=%s FOR UPDATE",
                                                    (job["execution_id"],))).fetchone(), AuthoringJobStatus)
+                assert current is not None
                 if key not in current["resume_keys"]:
                     if current["status"] == AuthoringJobStatus.CANCELLED or execution and execution["cancel_requested"]:
                         raise Conflict("cancelled document execution cannot be resumed")
@@ -664,6 +666,7 @@ class WebBridge:
         from docreader.integrations.web_progress import authoring_progress
 
         job = status_row(job, AuthoringJobStatus)
+        assert job is not None
         execution = await self.authoring.get_execution(job["execution_id"], missing_ok=True)
         status = execution["status"] if execution else job["status"]
         if (status == AuthoringExecutionStatus.FAILED

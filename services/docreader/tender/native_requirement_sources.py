@@ -7,7 +7,7 @@ from copy import deepcopy
 import hashlib
 import json
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Union, cast
 
 from pydantic import AfterValidator, Field, StrictInt, ValidationError, create_model
 
@@ -401,17 +401,17 @@ def native_requirement_model(payload):
                              'Keep a pending requirement at this ref as unresolved only in native_dispositions.')
         body_ref = Annotated[body_ref, AfterValidator(allowed)]
     body_refs = Annotated[list[body_ref], Field(min_length=1, max_length=body_count)]
-    chapter = Literal.__getitem__(tuple(chapter_map)) if chapter_map else Literal['__none__']
+    chapter = cast(Any, Literal).__getitem__(tuple(chapter_map)) if chapter_map else Literal['__none__']
     native = create_model('NativeRequirementAssignmentView', __base__=NativeRequirementAssignment,
         body_refs=(body_refs, ...), chapter_ids=(Annotated[list[chapter], Field(max_length=len(chapter_map))], Field(default_factory=list)),
-        context_id=(Annotated[StrictInt, Field(ge=1, le=max(1, count))] | None, None))
+        context_id=(Union[Annotated[StrictInt, Field(ge=1, le=max(1, count))], None], None))
     context = create_model('NativeContextView', __base__=NativeContext, refs=(refs, ...),
-        parent_id=(Annotated[StrictInt, Field(ge=1, le=max(1, count))] | None, None))
+        parent_id=(Union[Annotated[StrictInt, Field(ge=1, le=max(1, count))], None], None))
     disposition = create_model('NativeDispositionView', __base__=NativeDisposition, refs=(refs, ...))
     legacy = RequirementAssignment
     if legacy_line_limit:
         points = _legacy_points(legacy_block, document_map)
-        document = Literal.__getitem__(tuple(document_map))
+        document = cast(Any, Literal).__getitem__(tuple(document_map))
         page = Annotated[StrictInt, Field(ge=0, le=max(p[1] for p in points))]
         line = Annotated[StrictInt, Field(ge=0, le=max(p[2] for p in points))]
         window = create_model('BoundedProseWindow', __base__=DirectoryWindow, document_id=(document, ...),

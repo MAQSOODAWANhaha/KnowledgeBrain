@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncIterator, Literal, overload
 import math
 import re
 import time
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
+from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from docreader.integrations.store import (
@@ -104,8 +104,8 @@ class AuthoringStore:
         self.dsn = dsn
 
     @asynccontextmanager
-    async def transaction(self):
-        async with await AsyncConnection.connect(
+    async def transaction(self) -> AsyncIterator[AsyncConnection[DictRow]]:
+        async with await AsyncConnection[DictRow].connect(
             self.dsn, row_factory=dict_row
         ) as conn:
             async with conn.transaction():
@@ -120,6 +120,18 @@ class AuthoringStore:
                 "SELECT request_id FROM tender_authoring_model_requests LIMIT 0"
             )
 
+    @overload
+    async def _execution(
+        self, conn: AsyncConnection[DictRow], execution_id: str, *,
+        lock: bool = False, missing_ok: Literal[False] = False,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def _execution(
+        self, conn: AsyncConnection[DictRow], execution_id: str, *,
+        lock: bool = False, missing_ok: Literal[True],
+    ) -> dict[str, Any] | None: ...
+
     async def _execution(self, conn, execution_id, *, lock=False, missing_ok=False):
         query = (
             "SELECT *, lease_until > clock_timestamp() AS lease_live "
@@ -128,7 +140,9 @@ class AuthoringStore:
         row = await (
             await conn.execute(query + (" FOR UPDATE" if lock else ""), (execution_id,))
         ).fetchone()
-        if row is None and not missing_ok:
+        if row is None:
+            if missing_ok:
+                return None
             raise StoreError("authoring execution not found")
         return status_row(row, AuthoringExecutionStatus)
 
@@ -153,6 +167,12 @@ class AuthoringStore:
                     "execution_id already identifies different authoring input or configuration"
                 )
             return row
+
+    @overload
+    async def get_execution(self, execution_id: str, *, missing_ok: Literal[False] = False) -> dict[str, Any]: ...
+
+    @overload
+    async def get_execution(self, execution_id: str, *, missing_ok: Literal[True]) -> dict[str, Any] | None: ...
 
     async def get_execution(self, execution_id, *, missing_ok=False):
         async with self.transaction() as conn:
@@ -195,6 +215,7 @@ class AuthoringStore:
                 or row["lease_live"]
             ):
                 return None
+            assert row is not None
             epoch = row["epoch"] + 1
             await self._abandon(conn, execution_id, "executor_lost", before_epoch=epoch)
             await conn.execute(
@@ -210,6 +231,7 @@ class AuthoringStore:
             async with self.transaction() as connection:
                 return await self.assert_fence(lease, connection)
         row = await self._execution(conn, lease.execution_id, lock=True)
+        assert row is not None
         if row["cancel_requested"]:
             raise Cancelled("authoring cancellation requested")
         if (
@@ -244,6 +266,7 @@ class AuthoringStore:
         async with self.transaction() as conn:
             row = await self.assert_fence(lease, conn)
             if status == AuthoringExecutionStatus.SUCCEEDED:
+                assert row is not None
                 expected = row["authoring_input"]
                 parent = status_row(
                     await (
@@ -279,6 +302,7 @@ class AuthoringStore:
     async def cancel(self, execution_id):
         async with self.transaction() as conn:
             row = await self._execution(conn, execution_id, lock=True)
+            assert row is not None
             if row["status"] == AuthoringExecutionStatus.SUCCEEDED:
                 return row
             await conn.execute(
@@ -293,8 +317,10 @@ class AuthoringStore:
         spec = _spec(spec)
         async with self.transaction() as conn:
             row = await self.assert_fence(lease, conn)
+            assert row is not None
             if row["execution_spec"] != spec:
                 raise Conflict("authoring execution configuration changed")
+            assert row is not None
             return row["execution_spec"]
 
     async def receipt(self, lease, stage, scope="", *, input_digest=None):
@@ -490,20 +516,21 @@ class AuthoringStore:
             if request is None:
                 raise StoreError("authoring model request not registered")
             execution = await self._execution(conn, request["execution_id"], lock=True)
-            row = status_row(
-                await (
-                    await conn.execute(
-                        "SELECT * FROM tender_authoring_model_requests WHERE request_id = %s FOR UPDATE",
-                        (request_id,),
-                    )
-                ).fetchone(),
-                ModelRequestStatus,
-            )
+            stored = await (
+                await conn.execute(
+                    "SELECT * FROM tender_authoring_model_requests WHERE request_id = %s FOR UPDATE",
+                    (request_id,),
+                )
+            ).fetchone()
+            assert stored is not None
+            row = status_row(stored, ModelRequestStatus)
             if status == ModelRequestStatus.SENT:
                 await self.assert_fence(
                     AuthoringLease(row["execution_id"], row["epoch"]), conn
                 )
+                assert row is not None
                 if row["status"] != ModelRequestStatus.PREPARED:
+                    assert row is not None
                     raise RequestReplayBlocked(request_id, row["status"])
                 attempts = [
                     status_row(entry, ModelRequestStatus)
@@ -543,6 +570,7 @@ class AuthoringStore:
                     [_request_digest(r) for r in matching],
                     _request_digest(row),
                 ):
+                    assert row is not None
                     raise ModelWorkUnitExhausted(row["task"])
             if (
                 row["response_ref"] is not None
@@ -552,19 +580,23 @@ class AuthoringStore:
                 raise Conflict(
                     "authoring model response cannot replace immutable received content"
                 )
+            assert row is not None
             terminal = row["status"] in {
                 ModelRequestStatus.SUCCEEDED,
                 ModelRequestStatus.FAILED,
             }
             observed = _recorded_first_data(activity) or {}
+            assert row is not None
             if (not terminal and row["sent_at"] is not None
                     and status in {ModelRequestStatus.FAILED, ModelRequestStatus.UNCERTAIN}
                     and "not_before" not in row["metadata"]):
-                count = (await (await conn.execute(
+                counted = await (await conn.execute(
                     "SELECT count(*) AS count FROM tender_authoring_model_requests WHERE execution_id = %s "
                     "AND task = %s AND metadata->>'logical_request_digest' = %s AND sent_at IS NOT NULL",
                     (row["execution_id"], row["task"], row["metadata"]["logical_request_digest"]),
-                )).fetchone())["count"]
+                )).fetchone()
+                assert counted is not None
+                count = counted["count"]
                 observed["not_before"] = time.time() + _request_retry_delay(error, count - 1)
             await conn.execute(
                 "UPDATE tender_authoring_model_requests SET status = %s, usage = COALESCE(usage, %s), "

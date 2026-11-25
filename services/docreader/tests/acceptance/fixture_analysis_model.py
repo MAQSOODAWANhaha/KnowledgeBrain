@@ -1,10 +1,19 @@
 """Synthetic v2 contract responses; never evidence of model semantic accuracy."""
+from typing import TypeVar
 from copy import deepcopy
 from uuid import uuid4
 
 from docreader.llm import ModelInfrastructureError
 
 from fixture_model import fixture_request_digest, fixture_source_texts
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 class AnalysisFixtureModel:
@@ -90,7 +99,7 @@ class AnalysisFixtureModel:
                     {key: value for key, value in payload.items() if key != "contract_feedback"}, images),
             })
             if prior["status"] == "succeeded":
-                return self.artifacts.read_json(prior["response_ref"])
+                return _required(self.artifacts).read_json(prior["response_ref"])
             await self.store.finish_request(request_id, "sent")
         if task == "extract" and self.fail_document in documents:
             if self.store:
@@ -100,5 +109,5 @@ class AnalysisFixtureModel:
                   else self.response(task, payload, images))
         if self.store:
             await self.store.finish_request(request_id, "succeeded", usage=None,
-                                            response_ref=self.artifacts.put_json(result))
+                                            response_ref=_required(self.artifacts).put_json(result))
         return result

@@ -1,4 +1,5 @@
 """Saved-file reviews retain their real input, receipts and publication fences."""
+from typing import Any, cast
 import asyncio
 from copy import deepcopy
 import hashlib
@@ -25,9 +26,9 @@ def runtime(tmp_path, monkeypatch):
     artifacts = ArtifactStore(tmp_path)
     snapshot = AuthoringInput(schema_version=2, run_id="saved-review-run", source_version=1,
                               domain_revision=1).model_dump()
-    outline = AuthoringOutline(schema_version=2, authoring_input=snapshot, issues=[], chapters=[{
+    outline = AuthoringOutline(schema_version=2, authoring_input=cast(Any, snapshot), issues=[], chapters=cast(Any, [{
         "chapter_id": "chapter-original", "title": "旧标题", "targets": [], "children": [],
-    }]).model_dump()
+    }])).model_dump()
     document = {"outline_ref": artifacts.put_json(outline), "basis_ref": artifacts.put_json({"materials": []}),
                 "unit_refs": [artifacts.put_json({"blocks": [{"text": "已过时的生成正文不得用于保存稿复核"}]})]}
     data, rows, calls, requests = saved_bytes(), {}, [], []

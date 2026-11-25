@@ -1,5 +1,6 @@
 """Independent authoring ownership, paid-call limits and publication use real PostgreSQL."""
 
+from typing import TypeVar, Any, cast
 import asyncio
 from dataclasses import asdict
 import hashlib
@@ -29,6 +30,14 @@ from docreader.integrations.store import (
 from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender.document_execution import _FrozenKnowledge, _digest
 
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
+
 
 @pytest_asyncio.fixture
 async def authoring_store(tmp_path):
@@ -41,7 +50,7 @@ async def authoring_store(tmp_path):
     store = AuthoringStore(make_conninfo(dsn, options=f"-c search_path={schema}"))
     await initialize_schema(store.dsn, sections=("authoring",))
     await store.setup()
-    store.test_artifacts = ArtifactStore(tmp_path)
+    cast(Any, store).test_artifacts = ArtifactStore(tmp_path)
     try:
         yield store
     finally:
@@ -621,7 +630,7 @@ def web_knowledge(store, artifacts, lease, handler):
                      "version_id": "37f9257d-f030-46cb-ae5b-e34dfebcb14b"}],
         base_url="https://knowledge.invalid", service_secret="synthetic-test-secret",
         transport=httpx.MockTransport(handler))
-    return _FrozenKnowledge(provider, provider.spec(), store, artifacts, lease)
+    return _FrozenKnowledge(provider, _required(provider).spec(), store, artifacts, lease)
 
 
 async def test_real_web_operation_counts_are_persisted_without_nested_retries(authoring_store, monkeypatch):

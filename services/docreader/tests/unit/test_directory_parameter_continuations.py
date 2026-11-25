@@ -1,5 +1,6 @@
 """A source parameter stays one response when its complete clause crosses pages."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 from types import SimpleNamespace
@@ -16,6 +17,14 @@ from docreader.tender.directory_compile import (
 from test_authoring_pipeline_boundaries import budget, snapshot
 from test_directory_compile import docs, item, node, plan, window
 from test_directory_plan_replay import Receipts
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def source_case():
@@ -148,7 +157,7 @@ async def test_cross_page_response_reaches_word_without_replacing_the_original_p
     assert [[cell.text for cell in row.cells] for row in document.tables[0].rows] == [['项目', '响应'], ['原表要求', '']]
     paragraphs = [p.text for p in document.paragraphs]
     start = next(index for index, paragraph in enumerate(document.paragraphs)
-                 if paragraph.style.name.startswith('Heading') and paragraph.text == child['title'])
+                 if _required(_required(paragraph.style).name).startswith('Heading') and paragraph.text == child['title'])
     tail = '\n'.join(paragraphs[start:])
     assert '母及符号；否则须提供替代方案。' in tail and '证明材料须厂家盖章。' in tail
     assert '我方响应：________（人工填写）' in tail

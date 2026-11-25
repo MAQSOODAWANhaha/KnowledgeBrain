@@ -5,6 +5,7 @@ from datetime import date, datetime
 import json
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import Store, StoreError
@@ -62,7 +63,7 @@ def parse_args():
     return parser.parse_args()
 
 
-async def run(args):
+async def run(args) -> dict[str, Any]:
     settings = Settings.from_env()
     store = Store(settings.dsn)
     artifacts = ArtifactStore(settings.artifact_root)
@@ -133,10 +134,10 @@ async def run(args):
         row = await store.cancel(args.run_id)
         return {"run_id": row["run_id"], "status": row["status"]}
     if args.command == "confirm":
-        row = await store.confirm(
+        row = cast(dict[str, Any], await store.confirm(
             args.run_id, args.source_version, args.digest, args.request_key, domain_revision=args.domain_revision,
             issue_resolutions=json.loads(args.resolutions.read_text()) if args.resolutions else None,
-        )
+        ))
         return {"command_id": row["command_id"], "status": row["status"]}
     if args.command == "retry":
         row = await store.retry(
@@ -176,6 +177,7 @@ async def run(args):
         )
         return {"run_id": args.run_id, "source_version": result["submitted_source_version"],
                 "domain_revision": result["submitted_domain_revision"], "status": result["status"]}
+    raise SystemExit(f"unknown command {args.command}")
 
 
 def _correction_ref(artifacts, run, source_version, revision, base_digest, corrected):

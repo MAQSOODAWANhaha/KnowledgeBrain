@@ -1,4 +1,5 @@
 """Stage scheduling preserves immutable receipts and deterministic aggregation."""
+from typing import Any, cast
 
 import asyncio
 
@@ -64,7 +65,7 @@ async def test_stage_runs_two_requests_and_aggregates_in_plan_order(tmp_path, ph
 async def test_stage_respects_the_existing_node_semaphore(tmp_path):
     data, context, payloads = await stage(tmp_path)
     model = ConcurrentModel()
-    model.semaphore = asyncio.Semaphore(1)
+    cast(Any, model).semaphore = asyncio.Semaphore(1)
     await context.execute("review", payloads, model, data[3])
     assert model.maximum == 1
     assert len(model.calls) == len(payloads)

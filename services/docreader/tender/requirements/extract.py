@@ -578,8 +578,8 @@ async def extract_items(pack: dict, model: Model, *, identity: dict, issues=(), 
         payload = item_payload(pack, identity=identity, issues=issues,
                                scope_decisions=scope_decisions, role=role)
         if hasattr(model, "call_validated"):
-            return await model.call_validated("extract", payload,
-                                              lambda value: _validate_item_response(pack, value, issues))
+            return await getattr(model, "call_validated")(
+                "extract", payload, lambda value: _validate_item_response(pack, value, issues))
         return _validate_item_response(pack, await model.call("extract", payload), issues)
     return _validate_item_response(pack, result, issues)
 

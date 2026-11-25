@@ -1,3 +1,4 @@
+from typing import TypeVar
 import io
 import os
 import shutil
@@ -14,6 +15,14 @@ from docreader.parser.excel_parser import ExcelParser
 from docreader.parser.xlsx_merge import fill_merged_cells_xlsx
 from docreader.parser.xlsx_repair import repair_xlsx_bytes
 from openpyxl.worksheet.worksheet import Worksheet
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def _active_sheet(wb: openpyxl.Workbook) -> Worksheet:
@@ -322,7 +331,7 @@ def test_native_numeric_and_formula_fidelity_is_not_flattened_to_str():
     ws["B1"], ws["B1"].number_format = datetime(2026, 1, 2), "yyyy-mm-dd"
     ws["C1"], ws["C1"].number_format = 1234.5, '#,##0.00"元"'
     ws["D1"] = "=C1*(1+A1)"
-    cells = [_cell_model(ws[address]).model_dump() for address in ("A1", "B1", "C1", "D1")]
+    cells = [_required(_cell_model(ws[address])).model_dump() for address in ("A1", "B1", "C1", "D1")]
     assert cells[0]["number_format"] == "0%"
     assert cells[0]["display_text"] == "15%"
     assert cells[0]["display_complete"] is True

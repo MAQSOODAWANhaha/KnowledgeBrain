@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -21,10 +21,10 @@ def outline():
               'source_refs': [source], 'template_refs': [{'source_ref': source, 'selectors': []}],
               'manual_fill': True}
     snapshot = AuthoringInput(schema_version=2, run_id='r', source_version=1, domain_revision=1)
-    return AuthoringOutline(schema_version=2, authoring_input=snapshot, issues=[], chapters=[
+    return AuthoringOutline(schema_version=2, authoring_input=snapshot, issues=[], chapters=cast(Any, [
         {'chapter_id': 'a', 'title': '同名', 'targets': [target], 'children': []},
         {'chapter_id': 'b', 'title': '同名', 'targets': [], 'children': []},
-    ]).model_dump(exclude_unset=True)
+    ])).model_dump(exclude_unset=True)
 
 
 def test_reorder_reparent_and_rename_preserve_the_exact_targets_and_snapshot():

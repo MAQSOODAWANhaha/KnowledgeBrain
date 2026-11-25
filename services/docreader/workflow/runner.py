@@ -1,10 +1,13 @@
 """A queue task owns one fenced graph invocation, ending at persistent interrupt."""
 import asyncio
 from contextlib import suppress
+from typing import Any, cast
 
 import psycopg
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
-from psycopg.rows import dict_row
+from psycopg import AsyncConnection
+from psycopg.rows import AsyncRowFactory, TupleRow, dict_row
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.store import Cancelled, StaleExecution, Store
@@ -24,15 +27,16 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
     async def invoke():
         nonlocal nodes
         artifacts = ArtifactStore(settings.artifact_root)
-        async with await psycopg.AsyncConnection.connect(
-            settings.dsn, autocommit=True, prepare_threshold=0, row_factory=dict_row,
+        async with await AsyncConnection.connect(
+            settings.dsn, autocommit=True, prepare_threshold=0,
+            row_factory=cast(AsyncRowFactory[TupleRow], dict_row),
         ) as conn:
             saver = FencedPostgresSaver(conn, store, lease)
             nodes = node_factory(store, artifacts, lease)
             if hasattr(nodes, "prepare"):
                 await nodes.prepare()
             graph = build_graph(nodes, saver)
-            config = {"configurable": {"thread_id": f"{run_id}:{source_version}:{lease.domain_revision}"}}
+            config: RunnableConfig = {"configurable": {"thread_id": f"{run_id}:{source_version}:{lease.domain_revision}"}}
             previous = await graph.aget_state(config)
             cmd = await store.get_command(command_id)
             if cmd["kind"] == "resume" and any(task.interrupts for task in previous.tasks):
@@ -43,7 +47,7 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
                 value = {"run_id": run_id, "source_version": source_version,
                          "domain_revision": lease.domain_revision, "status": RunStatus.RUNNING}
             # sync durability ensures interrupt and node states finish saving before receipt.
-            await graph.ainvoke(value, config, durability="sync")
+            await graph.ainvoke(cast(Any, value), config, durability="sync")
             final = await graph.aget_state(config)
             state = final.values
             paused = any(task.interrupts for task in final.tasks)
@@ -73,7 +77,7 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
         return
     except ModelWorkUnitExhausted as error:
         with suppress(StaleExecution, psycopg.Error):
-            await store.release(lease, RunStatus.FAILED, error=type(error).__name__,
+            await store.release(lease, cast(RunStatus, RunStatus.FAILED), error=type(error).__name__,
                                 metadata={"reason": "model_work_unit_retries_exhausted"})
         raise
     except Exception as error:
@@ -87,4 +91,4 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
             with suppress(asyncio.CancelledError, Exception):
                 await task
         if nodes is not None and hasattr(nodes, "close"):
-            await nodes.close()
+            await cast(Any, nodes).close()

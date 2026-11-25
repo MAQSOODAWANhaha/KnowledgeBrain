@@ -1,5 +1,6 @@
 """Issue tiers: hard blockers have a non-confirmation exit; semantic doubts need a human verdict."""
 
+from typing import TypeVar, Any, cast
 from pathlib import Path
 import re
 
@@ -12,6 +13,14 @@ from docreader.tender.requirements import extract_items, validate_item_correctio
 from test_analysis_checks import (
     ExtractModel, IDENTITY, Model, OperationBudget, run, scenario,
 )
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ANALYSIS_MODULES = ["tender/checks/analysis.py", "tender/requirements/extract.py", "tender/evidence/registration.py",
@@ -52,7 +61,7 @@ def resolutions(*entries):
 
 def test_resolutions_must_cover_exactly_the_pending_semantic_issues():
     accepted = validate_issue_resolutions(["b", "a"], resolutions(("b", "acknowledged"), ("a", "dismissed")))
-    assert [entry["issue_id"] for entry in accepted["resolutions"]] == ["a", "b"]
+    assert [entry["issue_id"] for entry in _required(accepted)["resolutions"]] == ["a", "b"]
     assert validate_issue_resolutions([], None) is None
     assert validate_issue_resolutions([], resolutions()) is None
     for pending, submitted in [
@@ -144,7 +153,7 @@ async def test_extraction_budget_refusal_remains_a_trusted_host_blocker(tmp_path
     artifacts, plan, items, _ = data
     pack = EvidenceRepository(artifacts).load_pack(plan["packs"][0])
     pack.setdefault("planning_details", {}).setdefault("budget", {})["fits"] = False
-    normalized = await extract_items(pack, ExtractModel(None), identity=IDENTITY)
+    normalized = await extract_items(pack, cast(Any, ExtractModel(None)), identity=IDENTITY)
     exceeded = {p["issue_id"] for p in assign_issues(normalized["issues"], pack["pack_id"])
                 if p["code"] == "extraction_budget_exceeded"}
     assert exceeded and exceeded <= set(normalized["host_issue_ids"])

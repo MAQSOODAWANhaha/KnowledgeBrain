@@ -1,4 +1,5 @@
 """Complete request admission estimates, never provider usage or output caps."""
+from typing import Any, cast
 
 import json
 
@@ -137,7 +138,7 @@ def test_images_have_reserves_but_base64_is_not_text_and_data_like_text_still_co
 
 
 def test_unknown_independent_vlm_capacity_is_not_reported_as_proven_fit():
-    result = budget(None).require("ocr", {}, images=[ImageInput(b"x", "image/png")])
+    result = budget(cast(Any, None)).require("ocr", {}, images=[ImageInput(b"x", "image/png")])
     assert result["context_tokens"] is None and result["fits"] is None
     assert result["input_tokens"] > 16384
 
@@ -165,7 +166,7 @@ def test_input_allowances_do_not_expand_the_provider_total_context():
     request = correction.request("verify", payload)
     assert "max_tokens" not in request and "max_completion_tokens" not in request
     with pytest.raises(ModelConfigurationError, match="total context"):
-        budget(None, correction=True)
+        budget(cast(Any, None), correction=True)
 
 
 def test_default_domain_prompts_are_actual_schema_text_and_snapshot_is_immutable(monkeypatch):

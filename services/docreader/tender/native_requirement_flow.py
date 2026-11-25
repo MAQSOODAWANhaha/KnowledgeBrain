@@ -7,7 +7,7 @@ from math import isfinite
 from pathlib import Path
 from subprocess import run, TimeoutExpired
 from tempfile import TemporaryDirectory
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Union, cast
 from xml.etree import ElementTree
 
 from pydantic import Field, StrictInt, create_model
@@ -263,9 +263,9 @@ def source_windows(ledger, source, documents, proof=None):
 def native_classification_model(payload):
     """Shared basis pool keeps the new C accepted graph bounded by S*K + S + D."""
     s = len(payload['requirement_cases'])
-    q = Literal.__getitem__(tuple(c['id'] for c in payload['requirement_cases'])) if s else Literal['__none__']
+    q = cast(Any, Literal).__getitem__(tuple(c['id'] for c in payload['requirement_cases'])) if s else Literal['__none__']
     chapters = tuple(c['id'] for c in payload['chapters'])
-    c = Literal.__getitem__(chapters) if chapters else Literal['__none__']
+    c = cast(Any, Literal).__getitem__(chapters) if chapters else Literal['__none__']
     ref = Annotated[StrictInt, Field(ge=0, le=max(0, payload['source_line_count'] - 1))]
     span = Annotated[tuple[ref, ref], Field(strict=False)]
     basis = create_model('NativeSharedBasis', __base__=Contract,
@@ -274,14 +274,14 @@ def native_classification_model(payload):
         item_ids=(Annotated[list[q], Field(min_length=1, max_length=max(s, 1))], ...),
         chapter_ids=(Annotated[list[c], Field(max_length=len(chapters))], Field(default_factory=list)),
         basis_windows=(Annotated[list, Field(max_length=0)], Field(default_factory=list)),
-        basis_id=(Annotated[StrictInt, Field(ge=1, le=max(1, s))] | None, None))
+        basis_id=(Union[Annotated[StrictInt, Field(ge=1, le=max(1, s))], None], None))
     item = create_model('NativeClassificationEvidence', __base__=Contract,
         kind=(ClassificationItem.model_fields['kind'].annotation, ...), range=(span, ...))
     reviewed = tuple(f['fact_id'] for f in payload.get('reviewed_source_facts', ()))
     reviewed_fields = {}
     if reviewed:
         disposition = create_model('JointReviewedBodyDisposition', __base__=ReviewedBodyDisposition,
-            fact_id=(Literal.__getitem__(reviewed), ...), chapter_id=(c | None, None))
+            fact_id=(cast(Any, Literal).__getitem__(reviewed), ...), chapter_id=(c | None, None))
         reviewed_fields['reviewed_body_dispositions'] = (
             Annotated[list[disposition], Field(min_length=len(reviewed), max_length=len(reviewed))], ...)
     return create_model('JointNativeClassificationPlan', __base__=NativeClassificationPlan,

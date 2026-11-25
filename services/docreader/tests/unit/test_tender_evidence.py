@@ -1,5 +1,6 @@
 """Real-parser contract tests; OCR text is deterministic and not semantic acceptance."""
 from __future__ import annotations
+from typing import TypeVar, Any, cast
 
 import io
 from dataclasses import replace
@@ -16,6 +17,14 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, Num
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.tender.evidence import EvidenceRepository, freeze_sources, plan_sources, register_manifest
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def save_office(document):
@@ -248,7 +257,7 @@ async def test_small_sections_merge_while_ranges_keep_their_identities(tmp_path,
 
 async def test_formula_display_incomplete_is_not_silent_success(tmp_path, artifacts):
     workbook = Workbook()
-    workbook.active.append(['Total', '=SUM(B2:B3)'])
+    _required(workbook.active).append(['Total', '=SUM(B2:B3)'])
     frozen = await freeze_sources(registration(tmp_path, artifacts, [('formula.xlsx', save_office(workbook))]), artifacts)
     index = artifacts.read_json(frozen)
     assert any(problem['code'] == 'spreadsheet_display_incomplete' and problem['detail'] == 'formula_cached_value_missing'
@@ -266,11 +275,11 @@ async def test_formula_display_incomplete_is_not_silent_success(tmp_path, artifa
 async def test_blank_spreadsheet_row_with_actual_image_anchor_is_not_compacted(tmp_path, artifacts):
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(['Field', 'Response'])
-    sheet.append([None, None])
-    sheet.append([None, None])
-    sheet.append(['Final', 'Value'])
-    sheet.add_image(ExcelImage(io.BytesIO(png())), 'B2')
+    _required(sheet).append(['Field', 'Response'])
+    _required(sheet).append([None, None])
+    _required(sheet).append([None, None])
+    _required(sheet).append(['Final', 'Value'])
+    _required(sheet).add_image(ExcelImage(io.BytesIO(png())), 'B2')
     frozen = await freeze_sources(registration(tmp_path, artifacts, [('anchored.xlsx', save_office(workbook))]), artifacts)
     packs = list(EvidenceRepository(artifacts).iter_packs(frozen))
     rows = {entry['row_start']: entry for pack in packs for entry in pack['body'] if 'row_start' in entry}
@@ -362,14 +371,15 @@ async def test_offset_adjacent_excel_tables_each_keep_their_own_headers(tmp_path
     from openpyxl.worksheet.table import Table
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(['First field', 'First value'])
+    _required(sheet).append(['First field', 'First value'])
     for row in range(2, 8):
-        sheet.cell(row, 1).value = f'First {row}'
-        sheet.cell(row, 2).value = 'Required'
+        _required(sheet).cell(row, 1).value = cast(Any, f'First {row}')
+        _required(sheet).cell(row, 2).value = cast(Any, 'Required')
+    assert sheet is not None
     sheet['D3'], sheet['E3'] = 'Second field', 'Second value'
     for row in range(4, 8):
-        sheet.cell(row, 4).value = f'Second {row}'
-        sheet.cell(row, 5).value = 'Required'
+        sheet.cell(row, 4).value = cast(Any, f'Second {row}')
+        sheet.cell(row, 5).value = cast(Any, 'Required')
     sheet.add_table(Table(displayName='FirstTable', ref='A1:B7'))
     sheet.add_table(Table(displayName='SecondTable', ref='D3:E7'))
     frozen = await freeze_sources(registration(tmp_path, artifacts, [('tables.xlsx', save_office(workbook))]),

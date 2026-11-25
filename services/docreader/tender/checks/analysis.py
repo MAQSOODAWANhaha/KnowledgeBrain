@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter, defaultdict
+from typing import Any, cast
 from copy import deepcopy
 import hashlib
 from itertools import groupby, pairwise
@@ -553,6 +554,7 @@ class _Analysis:
             rejected_relations = set()
             diagnostics = []
             seen = set()
+            assert declarations is not None
             for index, declaration in enumerate(declarations["relations"]):
                 if not isinstance(declaration, dict):
                     raise ModelContractError([{"path": ["relations", index], "code": "invalid_reference",
@@ -571,6 +573,7 @@ class _Analysis:
                                                "detail": "Associated relation has unknown item endpoints"}])
                 relations.add(relation["relation_id"])
                 value["relations"].append(relation)
+            assert declarations is not None
             for index, declaration in enumerate(declarations["decisions"]):
                 if not isinstance(declaration, dict):
                     raise ModelContractError([{"path": ["decisions", index], "code": "invalid_reference",
@@ -699,7 +702,7 @@ class _Analysis:
                 results.append(None)
                 continue
 
-            ref, value = result
+            ref, value = cast(tuple[Any, Any], result)
             self.operation_refs.append({"operation": phase, "work_unit_id": payload["work_unit_id"], "artifact_ref": ref})
             self.completed_model_requests += 1
             self.problems.extend(self.findings(value["findings"], payload))

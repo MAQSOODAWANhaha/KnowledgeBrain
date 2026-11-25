@@ -541,7 +541,7 @@ def _extract_xlsx_structured_units(content: bytes, images: dict[str, str] | None
             if element.tag.rsplit("}", 1)[-1] == "blip"
             and any(key.rsplit("}", 1)[-1] in {"embed", "link"} for key in element.attrib)
         )
-    if embedded_drawings != sum(len(sheet._images) for sheet in workbook.worksheets):
+    if embedded_drawings != sum(len(getattr(sheet, "_images", ())) for sheet in workbook.worksheets):
         workbook.close()
         raise ValueError("XLSX_IMAGE_UNSUPPORTED: drawing image occurrence was not extracted")
     try:
@@ -779,7 +779,7 @@ def _extract_xlsx_structured_units(content: bytes, images: dict[str, str] | None
                         grid=_listobject_grid(used, all_cells, used_merges),
                     )
                 )
-            for image_ordinal, image in enumerate(sheet._images):
+            for image_ordinal, image in enumerate(getattr(sheet, "_images", ())):
                 raw = image._data()
                 # openpyxl converts some supported formats to PNG in _data().
                 from PIL import Image as PillowImage

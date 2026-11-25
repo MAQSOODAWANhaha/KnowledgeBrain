@@ -1,4 +1,5 @@
 """Explicit review scope is pinned before execution and passed to compilation."""
+from typing import Any, cast
 
 import hashlib
 from importlib.resources import files
@@ -53,7 +54,7 @@ async def review_runtime(authoring_store, monkeypatch):
                 docx_ref=reference,
                 package_ref=reference,
                 gaps=[],
-                usage={},
+                usage=cast(Any, {}),
             ).model_dump()
         )
 

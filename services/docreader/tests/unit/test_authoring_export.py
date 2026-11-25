@@ -3,7 +3,7 @@
 from copy import deepcopy
 from io import BytesIO
 import json
-from typing import cast
+from typing import cast, TypeVar
 from zipfile import ZipFile
 
 from docx import Document
@@ -15,6 +15,14 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_excerpts import whole_source_excerpts
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.evidence.references import SourceIndex, fragment, selector
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def source_ref(artifacts, *, grid=None, text="", document_id="template", locator=None):
@@ -101,7 +109,7 @@ def test_docx_keeps_nested_order_and_unfilled_required_positions(tmp_path):
             {"kind": "table", "headers": ["阶段", "交付物"], "rows": [["部署", "配置记录"]]},
         ])])
     doc = document(artifacts, result)
-    headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+    headings = [p.text for p in doc.paragraphs if _required(_required(p.style).name).startswith("Heading")]
     assert headings == ["技术文件", "实施计划", "人员"]
     assert "按现有需求拟定实施步骤。" in [p.text for p in doc.paragraphs]
     assert [cell.text for cell in doc.tables[0].rows[1].cells] == ["部署", "配置记录"]
@@ -160,7 +168,7 @@ def test_pdf_table_keeps_each_source_row_height(tmp_path, monkeypatch):
     position = target('form', 'form', [ref], templates=[ref])
     result = export_authoring_document(artifacts, {'chapters': [chapter('a', '原式', [position])]}, [])
     rows = document(artifacts, result).tables[0].rows
-    assert [row.height.pt for row in rows] == [30, 50, 70]
+    assert [_required(row.height).pt for row in rows] == [30, 50, 70]
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in rows)
 
 
@@ -180,7 +188,7 @@ def test_single_row_pdf_form_keeps_the_source_box_height(tmp_path, monkeypatch):
     position = target('form', 'form', [ref], templates=[ref])
     result = export_authoring_document(artifacts, {'chapters': [chapter('a', '保证金', [position])]}, [])
     row = document(artifacts, result).tables[0].rows[0]
-    assert row.height.pt == 200
+    assert _required(row.height).pt == 200
     assert row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST
     assert row.cells[0].text == '银行汇款回单扫描件'
     assert row.cells[0].vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.CENTER

@@ -8,7 +8,7 @@ from copy import deepcopy
 import hashlib
 import json
 import math
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Callable, Literal, Protocol, cast
 
 from pydantic import (
     AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool,
@@ -430,6 +430,10 @@ class OutlineCandidateScope(Contract):
         return self
 
 
+def _omit_schema_default(schema: dict[str, Any]) -> None:
+    schema.pop("default", None)
+
+
 class OutlineAssemblyTarget(Contract):
     kind: ResponseTargetKind
     purpose: Text
@@ -441,7 +445,7 @@ class OutlineAssemblyTarget(Contract):
         "omission retains the unique previous choice for the same non-empty candidate set and subject, "
         "while explicit false restores default subject grouping."))
     candidate_scope: OutlineCandidateScope | SkipJsonSchema[None] = Field(
-        default=None, json_schema_extra=lambda schema: schema.pop("default", None), description=(
+        default=None, json_schema_extra=_omit_schema_default, description=(
         "Optionally select complete range_ids and rule_ids belonging to exactly one narrative candidate "
         "without a template or response table. Omit to inherit the full candidate initially, or the unique "
         "previous position's scope on revision. When previous positions are ambiguous, select the scope "
@@ -1726,7 +1730,7 @@ def recover_issue_routing(value, allowed_ids: set[str], path: str, diagnostics: 
     """Keep a finding when its optional routing cannot bind to this input."""
     if not isinstance(value, dict):
         return value
-    result = AnalysisIssue.omit_unknown_optional_fields(value)
+    result = cast(Callable[[Any], Any], AnalysisIssue.omit_unknown_optional_fields)(value)
     links = result.get("related_issue_ids")
     bad_links = "related_issue_ids" in result and (
         not isinstance(links, list) or not links or any(not isinstance(i, str) or i not in allowed_ids for i in links))

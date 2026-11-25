@@ -2,7 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from pydantic import Field, field_validator
 
@@ -477,7 +477,7 @@ def validate_reviewed_body_dispositions(compiled, documents, dispositions, facts
         if detail:
             raise ModelContractError([{'path': ['reviewed_body_dispositions'], 'code': 'reviewed_body_fact_invalid', 'detail': detail}])
         if scope == 'chapter':
-            validate_requirement_exclusions(compiled, [{**w, 'scope': scope} for w in fact['source_windows']])
+            validate_requirement_exclusions(compiled, [{**w, 'scope': scope} for w in cast(dict, fact)['source_windows']])
         seen.add(identity)
     if seen != set(required):
         raise ModelContractError([{'path': ['reviewed_body_dispositions'], 'code': 'reviewed_body_fact_incomplete',

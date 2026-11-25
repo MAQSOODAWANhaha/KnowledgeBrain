@@ -1,5 +1,6 @@
 """Synthetic corpus validity is separate from model quality and human acceptance."""
 
+from typing import TypeVar, Any, cast
 from copy import deepcopy
 import importlib.util
 import json
@@ -11,11 +12,21 @@ from docreader.llm.budget import RequestBudget
 from docreader.tender.prompts import get_prompt
 from docreader.tender.schema import Decision, SourceView, TenderItem
 
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
+
 
 PATH = Path(__file__).parents[1] / "acceptance/check_semantic_cases.py"
 SPEC = importlib.util.spec_from_file_location("semantic_cases", PATH)
-evaluation = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(evaluation)
+evaluation = importlib.util.module_from_spec(cast(Any, SPEC))
+loader = _required(SPEC).loader
+assert loader is not None
+loader.exec_module(evaluation)
 
 
 def corpus():

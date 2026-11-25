@@ -1,4 +1,5 @@
 """Layout receipts bind the actual fixed-outline document and exported ZIP."""
+from typing import Any, cast
 
 from hashlib import sha256
 
@@ -49,9 +50,9 @@ async def test_layout_receipt_is_saved_before_the_document_result(tmp_path, monk
     budget = RequestBudget(model='synthetic', context_tokens=131072, output_reserve=32768)
     if fail_receipt:
         with pytest.raises(RuntimeError, match='layout receipt unavailable'):
-            await authoring_pipeline.generate_document(artifacts, snapshot, budget, execute, **options)
+            await authoring_pipeline.generate_document(artifacts, snapshot, budget, execute, **cast(Any, options))
     else:
-        ref = await authoring_pipeline.generate_document(artifacts, snapshot, budget, execute, **options)
+        ref = await authoring_pipeline.generate_document(artifacts, snapshot, budget, execute, **cast(Any, options))
         result = artifacts.read_json(ref)
         assert result['docx_ref'] == events[-1]['docx_ref']
         assert result['package_ref'] == events[-1]['package_ref']
@@ -88,10 +89,10 @@ async def test_finished_layout_is_reused_after_receipt_commit_and_executor_loss(
     options = dict(outline=outline, render_pdf=render)
     with pytest.raises(RuntimeError, match='executor lost'):
         await authoring_pipeline.generate_document(artifacts, snapshot, budget, execute,
-                                                   on_layout=committed_then_lost, **options)
+                                                   on_layout=committed_then_lost, **cast(Any, options))
     reused = {saved['export_input_digest']: saved['export_result_ref']}
     ref = await authoring_pipeline.generate_document(artifacts, snapshot, budget, execute,
-        saved_layout_exports=reused, on_layout=committed_then_lost, **options)
+        saved_layout_exports=reused, on_layout=committed_then_lost, **cast(Any, options))
     result = artifacts.read_json(ref)
     assert len(renders) == 1
     assert result['docx_ref'] == saved['docx_ref'] and result['package_ref'] == saved['package_ref']

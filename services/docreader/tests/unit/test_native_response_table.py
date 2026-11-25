@@ -1,5 +1,6 @@
 """A source-bound response plan expands its adopted native form exactly once."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 
@@ -14,6 +15,14 @@ from docreader.tender.authoring_excerpts import response_row_id
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.evidence.references import SourceIndex, fragment, selector
 from docreader.tender.schema import ResponseTable, SourceExcerptRef
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def form_grid(*, fixed=False, merged=False, clause_numbers=False):
@@ -259,10 +268,10 @@ def test_native_expansion_reuses_pdf_row_heights_typography_widths_and_header(tm
     monkeypatch.setattr(export, '_pdf_table_typography', lambda *_: {'font_size': 12, 'padding': 2, 'line_spacing': 14})
     doc, _ = render(artifacts, target)
     table = doc.tables[0]
-    assert [row.height.pt for row in table.rows] == [11, 21, 22, 23, 24, 25, 25, 25, 25, 31]
+    assert [_required(row.height).pt for row in table.rows] == [11, 21, 22, 23, 24, 25, 25, 25, 25, 31]
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in table.rows)
-    assert all(run.font.size.pt == 12 for row in table.rows for cell in row.cells for run in cell.paragraphs[0].runs)
-    assert [round(column.width.mm) for column in table.columns] == [15, 50, 55, 35]
+    assert all(_required(run.font.size).pt == 12 for row in table.rows for cell in row.cells for run in cell.paragraphs[0].runs)
+    assert [round(_required(column.width).mm) for column in table.columns] == [15, 50, 55, 35]
     assert table.rows[0]._tr.find('./' + qn('w:trPr') + '/' + qn('w:tblHeader')) is not None
 
 

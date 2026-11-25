@@ -1,5 +1,6 @@
 """Full host labels survive Word's nine-level list limit and auxiliary appendices."""
 
+from typing import TypeVar
 from io import BytesIO
 import json
 import os
@@ -18,6 +19,14 @@ from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.word_navigation import read_docx_outline
 
 from test_authoring_export import chapter, target
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def deep_outline():
@@ -50,7 +59,7 @@ def native_labels(data):
     abstracts = {n.get(qn('w:abstractNumId')): n for n in numbering.findall(qn('w:abstractNum'))}
     states, labels = {}, []
     for paragraph in document.paragraphs:
-        if not paragraph.style.name.startswith('Heading'):
+        if not _required(_required(paragraph.style).name).startswith('Heading'):
             continue
         properties = paragraph._p.find(f"{qn('w:pPr')}/{qn('w:numPr')}")
         assert properties is not None
@@ -83,7 +92,7 @@ def test_full_host_paths_survive_sixteen_levels_and_returning_to_level_nine_in_m
     document, labels = native_labels(data)
     assert labels == expected
     assert len(next(label for title, label in labels if title == '最深业务项').split('.')) == 16
-    assert [p.text for p in document.paragraphs if p.style.name.startswith('Heading')] == [title for title, _ in expected]
+    assert [p.text for p in document.paragraphs if _required(_required(p.style).name).startswith('Heading')] == [title for title, _ in expected]
     toc = [''.join(node.text or '' for node in link.iter(qn('w:t')))
            for link in document.element.iter(qn('w:hyperlink'))]
     assert toc == [label + ' ' + title for title, label in expected]
@@ -104,8 +113,8 @@ def test_auxiliary_pending_sections_are_visible_but_never_body_navigation_headin
     document = Document(BytesIO(data))
     auxiliary = {'尚未归入响应表', '尚未安排的原响应', '适用性与来源待核'}
     assert auxiliary <= {p.text for p in document.paragraphs}
-    assert all(p.style.name == 'Title' for p in document.paragraphs if p.text in auxiliary)
-    assert [p.text for p in document.paragraphs if p.style.name.startswith('Heading')] == ['正式正文']
+    assert all(_required(_required(p.style).name) == 'Title' for p in document.paragraphs if p.text in auxiliary)
+    assert [p.text for p in document.paragraphs if _required(_required(p.style).name).startswith('Heading')] == ['正式正文']
     assert [item['title'] for item in read_docx_outline(data)['chapters']] == ['正式正文']
     toc = [''.join(node.text or '' for node in link.iter(qn('w:t')))
            for link in document.element.iter(qn('w:hyperlink'))]

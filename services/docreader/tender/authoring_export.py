@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Any, cast
 from ctypes import byref, c_double
 from io import BytesIO
 import json
@@ -1464,7 +1465,7 @@ class _Assembler:
         section.page_width, section.page_height = Mm(210), Mm(297)
         section.left_margin = section.right_margin = Mm(25)
         section.top_margin = section.bottom_margin = Mm(22)
-        normal = document.styles["Normal"]
+        normal = cast(Any, document.styles["Normal"])
         normal.font.name, normal.font.size = "宋体", Pt(11)
         normal.element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), "宋体")
         volumes = [path for chapter, path in entries if chapter.get("is_volume")
@@ -1543,12 +1544,13 @@ class _Assembler:
         reference = self.artifacts.put_bytes(raw, DOCX_MEDIA_TYPE)
         if self.render_pdf is None:
             return reference
+        render = self.render_pdf
         from docreader.tender.toc_layout import LayoutError, finalize_toc
         renders = []
 
         def render_pdf(candidate):
             candidate_ref = self.artifacts.put_bytes(candidate, DOCX_MEDIA_TYPE)
-            pdf, engine = self.render_pdf(candidate)
+            pdf, engine = render(candidate)
             pdf_ref = self.artifacts.put_bytes(pdf, 'application/pdf')
             renders.append({'docx_ref': candidate_ref, 'pdf_ref': pdf_ref, 'renderer_identity': engine})
             return pdf, engine

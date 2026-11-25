@@ -1,3 +1,4 @@
+from typing import TypeVar
 from io import BytesIO
 
 from docx import Document
@@ -8,6 +9,14 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.word_navigation import add_bookmark, bookmark_name, read_docx_outline
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def saved(document):
@@ -83,7 +92,7 @@ def test_cover_is_bound_without_adding_visible_heading(tmp_path):
     assert actual["chapters"][0]["chapter_id"] == "cover"
     assert actual["chapters"][0]["title"] == "封面"
     assert actual["chapters"][0]["targets"][0]["bookmark"] == bookmark_name("cover-target", "target")
-    assert not any(paragraph.style.name.startswith("Heading") for paragraph in Document(BytesIO(data)).paragraphs)
+    assert not any(_required(_required(paragraph.style).name).startswith("Heading") for paragraph in Document(BytesIO(data)).paragraphs)
 
 
 def test_submission_note_subtree_is_not_a_missing_word_chapter_or_an_orphan_body(tmp_path):

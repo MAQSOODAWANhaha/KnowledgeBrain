@@ -1,4 +1,5 @@
 """Structure can revise an automatic outline without pretending prose exists."""
+from typing import Any, cast
 
 from copy import deepcopy
 import json
@@ -75,7 +76,7 @@ async def test_structure_accepted_original_cache_precedes_compact_replanning(mon
     original = large_payload(large=True)
     monkeypatch.setattr(authoring_structure, "_structure_payload", lambda *_args, **_kwargs: (original, []))
     admitted = budget()
-    admitted.prompts = {"authoring_structure": PROMPT}
+    cast(Any, admitted).prompts = {"authoring_structure": PROMPT}
     admitted.context_tokens = 100
     expected = build_request(admitted.model, PROMPT, original, task="authoring_structure")
     calls = []
@@ -98,7 +99,7 @@ async def test_structure_accepted_compact_cache_precedes_compact_admission(monke
     original = large_payload(large=True)
     monkeypatch.setattr(authoring_structure, "_structure_payload", lambda *_args, **_kwargs: (original, []))
     admitted = budget()
-    admitted.prompts = {"authoring_structure": PROMPT}
+    cast(Any, admitted).prompts = {"authoring_structure": PROMPT}
     admitted.context_tokens = 100
     calls = []
 

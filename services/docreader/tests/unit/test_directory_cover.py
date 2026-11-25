@@ -1,5 +1,6 @@
 """An original cover retains its fillable fields before the generated directory."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 from zipfile import ZipFile
@@ -18,6 +19,14 @@ from test_authoring_pipeline_boundaries import budget, snapshot
 from test_directory_explicit_body_integration import TemplateModel, point, window
 from test_directory_compile import docs, item, node, plan
 from test_directory_compile import window as source_window
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 async def test_source_cover_fields_survive_real_word_before_directory_without_fake_data(tmp_path):
@@ -40,7 +49,7 @@ async def test_source_cover_fields_survive_real_word_before_directory_without_fa
     assert texts.count("投标人：________（盖章）") == 1
     assert texts.count("代表：________（签字）") == 1
     assert texts.count("日期：________") == 1
-    assert [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")] == ["投标函"]
+    assert [p.text for p in doc.paragraphs if _required(_required(p.style).name).startswith("Heading")] == ["投标函"]
     assert not any(task.startswith("authoring_write") for task in model.calls)
 
 

@@ -1,5 +1,6 @@
 """Assembly may distribute one compound candidate without widening it again."""
 
+from typing import TypeVar, Any, cast
 from copy import deepcopy
 import json
 
@@ -16,6 +17,14 @@ from docreader.tender.evidence.references import SourceIndex, fragment, selector
 from docreader.tender.schema import OutlineAssemblyTarget
 from test_assembly_source_handoff import BODY, CONDITION, context_fixture
 from test_structural_packing import source
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def text_of(artifacts, target):
@@ -194,8 +203,8 @@ def test_scope_requires_an_explicit_nonempty_pair_of_selections(scope):
 def test_scope_is_optional_and_accepts_one_complete_selection():
     assert OutlineAssemblyTarget(kind='narrative', purpose='实际要求', target_ids=['t1']).candidate_scope is None
     target = OutlineAssemblyTarget(kind='narrative', purpose='实际要求', target_ids=['t1'],
-        candidate_scope={'range_ids': ['x1'], 'rule_ids': []})
-    assert target.candidate_scope.range_ids == ['x1']
+        candidate_scope=cast(Any, {'range_ids': ['x1'], 'rule_ids': []}))
+    assert _required(target.candidate_scope).range_ids == ['x1']
 
 
 def test_scope_schema_does_not_offer_null_when_only_omission_means_inheritance():

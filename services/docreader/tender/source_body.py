@@ -1,7 +1,7 @@
 """Host-owned exact body bindings over frozen native cells and reader lines."""
 from copy import deepcopy
 import hashlib
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import Field
 
@@ -161,7 +161,7 @@ def _materialize(artifacts, snapshot, binding, repository, cache=None):
         if document_id == previous_document:
             if type(page) is int and type(previous_page) is int and page < previous_page:
                 raise ArtifactIntegrityError('body source parts cannot reverse physical pages')
-            if (part['join'] == 'continuation' and domain[0] != previous_domain[0]
+            if (part['join'] == 'continuation' and domain[0] != cast(tuple, previous_domain)[0]
                     and (type(page) is not int or type(previous_page) is not int or page <= previous_page)):
                 raise ArtifactIntegrityError('mixed source continuation requires proven forward physical pages')
         for first_position, second_position, first, last in ordered:

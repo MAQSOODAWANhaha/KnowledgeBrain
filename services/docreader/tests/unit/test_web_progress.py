@@ -1,4 +1,5 @@
 """Progress describes current immutable receipts, never estimated model completion."""
+from typing import Any, cast
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -232,17 +233,17 @@ def test_progress_exposes_only_known_phases_not_private_request_or_scope_identif
 
 async def test_authoring_view_adds_projection_from_existing_execution_read():
     bridge = WebBridge.__new__(WebBridge)
-    bridge.authoring = SimpleNamespace(get_execution=AsyncMock(return_value=execution(requests=[])))
+    cast(Any, bridge).authoring = SimpleNamespace(get_execution=AsyncMock(return_value=execution(requests=[])))
     view = await bridge.authoring_view(job())
     assert view["progress"]["identity"] == {**IDENTITY, "execution_id": "fixed-execution"}
-    bridge.authoring.get_execution.assert_awaited_once_with("fixed-execution", missing_ok=True)
+    cast(Any, bridge.authoring.get_execution).assert_awaited_once_with("fixed-execution", missing_ok=True)
 
 
 async def test_saved_review_view_keeps_authoring_progress_with_fixed_word_identity():
     from docreader.integrations.web_saved_review import review_view
 
     bridge = WebBridge.__new__(WebBridge)
-    bridge.authoring = SimpleNamespace(get_execution=AsyncMock(return_value=execution(receipts=[
+    cast(Any, bridge).authoring = SimpleNamespace(get_execution=AsyncMock(return_value=execution(receipts=[
         {"stage": "document-model-response", "scope": "authoring_review:saved-word-request"},
     ])))
     value = job(project_id="fixed-project", payload={"operation": "saved_review", "identity": IDENTITY,
@@ -259,7 +260,7 @@ async def test_analysis_view_adds_projection_without_new_model_or_store_calls(mo
     from docreader.integrations import web
 
     bridge = WebBridge.__new__(WebBridge)
-    bridge.store, bridge.artifacts = object(), object()
+    cast(Any, bridge).store, cast(Any, bridge).artifacts = object(), object()
     snapshot = {"verification_ref": None, "confirmation_ref": None}
     read = AsyncMock(return_value=snapshot)
     monkeypatch.setattr(web, "read_authoring_input", read)

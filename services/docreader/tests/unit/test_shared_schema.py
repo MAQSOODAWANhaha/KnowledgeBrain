@@ -1,4 +1,5 @@
 """One strict field dictionary across sources, plans, model stages and receipts."""
+from typing import Any, cast
 
 import importlib.util
 import json
@@ -63,24 +64,24 @@ def test_sources_extraction_verification_and_plan_share_json_identities(tmp_path
     requirement = Requirement(
         requirement_id="requirement-1", text="Deliver in 30 days.", subject="Supplier",
         evidence=[Evidence(range_id=identity.range_id, quote="30 days")], conditions=[], exceptions=[],
-        numbers=[{"value": 30, "unit": "days", "quote": "30 days"}], scoring={},
+        numbers=cast(Any, [{"value": 30, "unit": "days", "quote": "30 days"}]), scoring={},
         veto_risk=False, cross_references=[], applicable=True, applicability_basis="All suppliers.",
     )
-    extracted = Extraction(requirements=[requirement], dispositions=[{
+    extracted = Extraction(requirements=[requirement], dispositions=cast(Any, [{
         "range_id": identity.range_id, "status": "requirements", "reason": "Explicit delivery duty.",
         "requirement_ids": [requirement.requirement_id],
-    }])
+    }]))
     requirements_ref = artifacts.put_json(extracted.model_dump(mode="json"))
     restored = Extraction.model_validate(artifacts.read_json(requirements_ref))
     checked = Verification(reviewed_range_ids=[identity.range_id], findings=[])
     checked = Verification.model_validate_json(checked.model_dump_json())
     reference = RequirementRef(artifact_ref=ArtifactRef.model_validate(requirements_ref),
                                requirement_id=requirement.requirement_id)
-    response_plan = Plan(items=[{
+    response_plan = Plan(items=cast(Any, [{
         "requirement_id": reference.requirement_id, "target_kind": "body", "target": "2.1 Delivery",
         "action": "Commit to delivering in 30 days.", "material_needs": ["Approved delivery schedule"],
         "constraint_digest": "b" * 64,
-    }])
+    }]))
     response_plan = Plan.model_validate_json(response_plan.model_dump_json())
     assert restored.requirements[0].evidence[0].range_id == checked.reviewed_range_ids[0] == identity.range_id
     assert response_plan.items[0].requirement_id == reference.requirement_id == restored.requirements[0].requirement_id
@@ -154,12 +155,12 @@ def test_run_version_numbers_are_strict_positive_integers(field, value):
 def test_document_label_and_shared_source_receipt_revision_are_distinct():
     assert DocumentIdentity(document_id="d", document_version="2.1-revised").document_version == "2.1-revised"
     with pytest.raises(ValidationError):
-        DocumentIdentity(document_id="d", document_version=2)
+        DocumentIdentity(document_id="d", document_version=cast(Any, 2))
     source = SourceReceiptIdentity(run_id="r", source_version=2)
     assert source.domain_revision == 0
     for invalid in (False, 1, "0"):
         with pytest.raises(ValidationError):
-            SourceReceiptIdentity(run_id="r", source_version=2, domain_revision=invalid)
+            SourceReceiptIdentity(run_id="r", source_version=2, domain_revision=cast(Any, invalid))
 
 
 @pytest.mark.parametrize("type_,valid,wrong_entity", [

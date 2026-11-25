@@ -9,6 +9,7 @@ import asyncio
 from copy import deepcopy
 import hashlib
 import json
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -79,6 +80,7 @@ from docreader.tender.schema import (
     AUTHORING_GROUNDING_POLICY, AUTHORING_UNIT_BINDING_CONTRACT,
     AuthoringBasis, AuthoringBasisContent, AuthoringBlock, AuthoringBasisResponse, AuthoringCoverage, AuthoringDocument, AuthoringDocumentPlan,
     AuthoringInput, AuthoringOutline, AuthoringQueryPlan, AuthoringReviewRecord, AuthoringReviewResponse, AuthoringUsage,
+    OutlineChapter, OutlineIssue,
     KnowledgeMaterial, OutlineAssemblyResponse, OutlineResponse, SourceUnitRef, WritingResponse,
     WritingTask, WritingUnit,
 )
@@ -414,6 +416,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
                 [{'table_id': item['table_id'], 'action': 'unresolved'} for item in carriers
                  if item['table_id'] not in present], carriers)
     else:
+        assert materials is not None
         apply_directory_adjudications(compiled, documents, materials['directory_adjudications'])
         apply_chapter_titles(compiled, documents, materials['chapter_titles'], titles)
         apply_materials(compiled, documents, materials['assignments'],
@@ -517,6 +520,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
             compiled['issues'].append({'code': 'outline_directory_parameter_rejected',
                                        'detail': f'“{chapter["title"]}”的参数展开未完成，原章保留'})
             continue
+        assert plan is not None
         apply_parameters(compiled, documents, plan['chapters'])
     await _plan(execute, AuthoringTask.DIRECTORY_RESPONSE_FORM,
                 len((materials or {}).get('response_forms', [])), 'response-forms')
@@ -538,6 +542,7 @@ async def _request_directory_details(compiled, documents, budget, execute, ident
                 'detail': '逐条响应原式尚未完成有界来源选择，原表保留；请按其完整来源范围人工列条款或修订后重试。'})
             continue
         compiled.setdefault('_response_form_plans', []).append(form_plan)
+        assert form_plan is not None
         if not form_plan['complete']:
             pending['pending']['reason'] = 'selection_incomplete'
             compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
@@ -1381,11 +1386,11 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             fragments.append(fragment)
             context.read_units.update(read_units)
     if not fragments:
-        return AuthoringOutline(schema_version=2, authoring_input=context.input, issues=[], chapters=[{
+        return AuthoringOutline(schema_version=2, authoring_input=context.input, issues=[], chapters=cast(list[OutlineChapter], [{
             'chapter_id': 'chapter-1', 'title': '投标文件待补内容', 'children': [],
             'targets': [{'target_id': 'chapter-1:target-1', 'kind': 'narrative',
                          'purpose': '根据现有资料起草；招标目录及要求待补，不声称已覆盖。',
-                         'rule_refs': [], 'source_refs': []}]}]).model_dump()
+                         'rule_refs': [], 'source_refs': []}]}])).model_dump()
     refs = list({rule_ref_key(r): r for f in fragments for r in f.get('constraint_rule_refs', [])}.values())
     submission_refs = {_json(r): r for f in fragments for r in f.get('submission_refs', [])}
     available_sources = {_json(ref) for refs in context.sources.values() for ref in refs}
@@ -1423,7 +1428,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
             identity = f'p{len(parts) + 1}'
             part_ids[key] = identity
             part_map[identity] = part
-            descriptor = {'part_id': identity}
+            descriptor: dict[str, Any] = {'part_id': identity}
             try:
                 loaded = load_template_part(artifacts, part, **source_options)
                 unit, grid = loaded['unit'], loaded.get('grid')
@@ -1446,7 +1451,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 identity = f'x{len(excerpt_map) + 1}'
                 excerpt_ids[key] = identity
                 excerpt_map[identity] = ref
-                view = {'range_id': identity}
+                view: dict[str, Any] = {'range_id': identity}
                 try:
                     loaded = load_source_excerpt(artifacts, ref, **source_options)
                     view.update(text=loaded['text'], heading_path=loaded['unit'].get('heading_path', ''))
@@ -1999,6 +2004,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                 assembled = await _ask(execute, budget, 'outline', slim, assembly_validator(slim))
             except _LOCAL_FAILURES:
                 assembled = _join_assemblies(batch_results)
+        assert assembled is not None
         (chapters, omitted, exclusion_issues, excluded_origins, added_constraints, added_intents,
          candidate_bindings, candidate_selections) = assembled
         refs = list({rule_ref_key(ref): ref for ref in [*refs, *added_constraints]}.values())
@@ -2033,7 +2039,7 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
         for issue in issues:
             issue.pop('target_id', None)
         return AuthoringOutline(schema_version=2, authoring_input=context.input, chapters=_renumber(chapters),
-                                issues=issues, constraint_rule_refs=refs, submission_refs=submission_refs,
+                                issues=cast(list[OutlineIssue], issues), constraint_rule_refs=refs, submission_refs=submission_refs,
                                 search_intents=list({_json(intent): intent for intent in [
                                     *(intent for f in fragments for intent in f.get('search_intents', [])),
                                     *added_intents]}.values())).model_dump(exclude_unset=True)
@@ -2117,8 +2123,10 @@ async def _organize(artifacts, context, budget, execute, gaps, *, submission_sou
                             for identity, removed in decoration_exclusions.items()}} if decoration_exclusions else {})})
             await _plan(execute, 'outline', 1, 'structure-revision')
             try:
-                repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = await _ask(
+                repaired_assembly = await _ask(
                     execute, budget, 'outline', feedback, assembly_validator(feedback))
+                assert repaired_assembly is not None
+                repaired, omitted, new_issues, new_excluded, new_constraints, new_intents, _, _ = repaired_assembly
                 refs = list({rule_ref_key(ref): ref for ref in [*refs, *new_constraints]}.values())
                 candidate = finalize(repaired, new_issues, new_excluded, new_intents)
                 changed = candidate['chapters'] != outline['chapters']
@@ -2676,6 +2684,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     gaps.extend(structure_results['gaps'])
     if supplied_outline:
         _note_unassigned_rules(outline, context)
+    assert outline is not None
     if not any(c['targets'] for c in _flatten(outline['chapters'])):
         gaps.append(_gap('outline_empty', '当前大纲没有实际响应位置，保留待补正文；不代表已覆盖招标要求。'))
         if not supplied_outline:
@@ -2789,6 +2798,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                                          'material_ids': list(dict.fromkeys(by_alias[s] for s in entry['support_ids']))})
                 return AuthoringBasisContent(**{**value, 'shared_arrangements': arrangements}).model_dump()
             value = await _ask(execute, budget, 'authoring_basis', basis_payload(batch), validate_basis)
+            assert value is not None
             basis_response['shared_arrangements'] = list({_json(entry): entry for entry in [
                 *basis_response['shared_arrangements'], *value['shared_arrangements']]}.values())
             basis_response['gaps'].extend(value['gaps'])
@@ -2802,7 +2812,8 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         else:
             supported.append(arrangement)
     basis_response['shared_arrangements'] = supported
-    basis = AuthoringBasis(authoring_input=snapshot, response=basis_response, materials=materials).model_dump()
+    basis = AuthoringBasis(authoring_input=cast(AuthoringInput, snapshot),
+                           response=cast(AuthoringBasisContent, basis_response), materials=materials).model_dump()
     basis_ref = artifacts.put_json(basis)
     materials_ref = artifacts.put_json(materials)
     plan_digest = _plan_input_digest(snapshot, outline_ref, materials_ref, basis_ref, budget)
@@ -2888,10 +2899,11 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         if all(t.get('manual_fill', False) for t in task['targets']):
             unit = WritingUnit(task_id=task['task_id'], chapter_id=task['chapter_id'],
                 target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
-                blocks=[{'kind': 'paragraph', 'text': ('________（待附证明材料）' if t['kind'] == 'attachment' else
+                blocks=cast(list[AuthoringBlock], [{'kind': 'paragraph', 'text': (
+                        '________（待附证明材料）' if t['kind'] == 'attachment' else
                         '我方响应：________（人工填写）\n证明材料或附件位置：________（原条款要求时填写）'
                         if t.get('support_origins') == ['tender'] else '________（人工填写）')}
-                        for t in task['targets'] if t['kind'] != 'form'],
+                        for t in task['targets'] if t['kind'] != 'form']),
                 gaps=['此处为人工填写位置；最终报价等数据留空，不由模型代填或按0计算。']).model_dump()
             unit['gaps'].extend(source_issues)
             return done(unit, None)
@@ -2932,6 +2944,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                                target_ids=[t['target_id'] for t in task['targets']], status='placeholder',
                                error_type=type(error).__name__, gaps=['已达到本次执行的运行上限，本单元未生成，已保留待补位置。'
                                if isinstance(error, ExecutionBudgetExhausted) else '本单元生成未完成，已保留待补位置。']).model_dump()
+        assert unit is not None
         unit['gaps'].extend(source_issues)
         record = None if unit.get('error_type') else _review_record(
             task, unit, payload, sources, _task_materials(materials, task), rule_refs=context.rules)
@@ -2970,10 +2983,14 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             scopes = [{'task_id': task['task_id'], 'target_ids': review_scope(task)} for task in planned
                       if task['task_id'] in identities and review_scope(task)]
             coverage, _ = batch_coverage_view(entries, planned, batch, scope_index=coverage_index)
+            review_fields = {}
+            if scopes:
+                assert review_request is not None
+                review_fields['review_request'] = {'reason': review_request['reason'], 'targets': scopes}
             return {'grounding_policy': AUTHORING_GROUNDING_POLICY,
                     'units': [{k: v for k, v in record.items() if k != '_coverage_refs'} for record in batch],
                     **({'coverage': coverage} if coverage else {}),
-                    **({'review_request': {'reason': review_request['reason'], 'targets': scopes}} if scopes else {}),
+                    **review_fields,
                     'previous_findings': [{**{k: v for k, v in f.items() if k != 'content_ids'},
                                            'task_ids': [identity for identity in f['task_ids'] if identity in identities],
                                            'partial_context': bool(set(f['task_ids']) - identities),
@@ -3025,6 +3042,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 return value
             try:
                 value = await _ask(execute, budget, 'authoring_review', review_payload(batch), validate_review)
+                assert value is not None
                 findings.extend(value['findings'])
                 accepted_assessments.extend(value.get('assessments') or [])
                 completed.update(ids)
@@ -3040,6 +3058,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     def revision_payload(task):
         payload, sources, _ = _load_task(artifacts, context, task, basis, materials)
         if review_scope(task):
+            assert review_request is not None
             payload['review_request'] = {'reason': review_request['reason'], 'target_ids': review_scope(task)}
         return payload, sources, _support_bindings(sources, _task_materials(materials, task))
     def revision_bind(task, raw):
@@ -3091,7 +3110,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         findings=findings, coverage_assessments=accepted_assessments).model_dump())
     settled = settle_coverage(entries, units, unit_refs, accepted_assessments, knowledge_issues, query_plan['queries'])
     retrieval_ref = artifacts.put_json(AuthoringQueryPlan.model_validate({'queries': query_plan['queries']}).model_dump())
-    coverage = AuthoringCoverage(authoring_input=snapshot, outline_ref=outline_ref,
+    coverage = AuthoringCoverage(authoring_input=cast(AuthoringInput, snapshot), outline_ref=outline_ref,
         requirements_ref=requirements_ref, retrieval_ref=retrieval_ref, unit_refs=unit_refs,
         review_ref=review_ref, entries=settled).model_dump()
     coverage_ref = artifacts.put_json(coverage)
@@ -3123,7 +3142,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 'docx_ref': exported['docx_ref'], 'package_ref': exported['package_ref'],
                 'export_input_digest': export_digest, 'export_result_ref': export_ref})
     all_gaps = list({_json(g): g for g in [*gaps, *exported['gaps']]}.values())
-    result = AuthoringDocument(authoring_input=snapshot, outline_ref=outline_ref, requirements_ref=requirements_ref,
+    result = AuthoringDocument(authoring_input=cast(AuthoringInput, snapshot), outline_ref=outline_ref, requirements_ref=requirements_ref,
                                basis_ref=basis_ref,
                                unit_refs=unit_refs, review_ref=review_ref, initial_review_ref=initial_review_ref,
                                coverage_ref=coverage_ref,

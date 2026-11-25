@@ -4,6 +4,7 @@ Run pytest with -s to retain the aggregate JSON evidence. Source text, images an
 raw model responses are intentionally absent from that report.
 """
 
+from typing import TypeVar
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
@@ -35,6 +36,14 @@ from docreader.workflow.runner import execute_command
 
 sys.path.insert(0, str(Path(__file__).parent))
 from fixture_analysis_model import AnalysisFixtureModel
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 pytestmark = pytest.mark.integration
 
@@ -219,7 +228,7 @@ async def measurements(store, artifacts, row, calls):
         )).fetchone())["bytes"]
     async with AsyncPostgresSaver.from_conn_string(store.dsn) as saver:
         latest = await saver.aget_tuple({"configurable": {"thread_id": thread_id}})
-    state = latest.checkpoint["channel_values"]
+    state = _required(latest).checkpoint["channel_values"]
     assert not list(forbidden_keys(state)), "Checkpoints cannot contain documents, messages, or growing pack history"
     state_refs = unique_refs([state])
     assert len(state_refs) == 5  # register, native freeze, source plan, items, verification.
@@ -271,6 +280,7 @@ async def test_two_and_four_times_sources_have_linear_storage_and_constant_check
             paused = await store.get_run(run["run_id"])
             assert paused["status"] == "waiting-confirmation"
             resume = await store.confirm(run["run_id"], 1, paused["checklist_digest"], "approve-fixture", domain_revision=1)
+            assert resume is not None
             await execute_command(run["run_id"], resume["command_id"], 1, settings, factory)
             row = await store.get_run(run["run_id"])
             assert row["status"] == "analysis-ready"

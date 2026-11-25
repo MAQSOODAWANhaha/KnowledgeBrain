@@ -6,6 +6,7 @@ import io
 import json
 from collections import Counter
 from pathlib import Path
+from typing import Any, cast
 
 from docreader.models.document import AttachmentLocator, DocumentLocator, ImageLocator, StructuredSourceUnit, StructuredSourceUnitKind
 from docreader.parser.parser import Parser, detect_effective_file_type
@@ -36,7 +37,11 @@ def _supplement_pdf_images(document, content: bytes) -> None:
     for unit in document.structured_source_units:
         loc = unit.locator
         if isinstance(loc, ImageLocator) and loc.left is not None:
-            known[(loc.page_ordinal, tuple(round(v, 3) for v in (loc.left, loc.top, loc.right, loc.bottom)))] += 1
+            left, top, right, bottom = loc.left, loc.top, loc.right, loc.bottom
+            assert top is not None
+            assert right is not None
+            assert bottom is not None
+            known[(loc.page_ordinal, (round(left, 3), round(top, 3), round(right, 3), round(bottom, 3)))] += 1
     additions = []
     problems = []
     with _PDFIUM_LOCK:
@@ -48,15 +53,16 @@ def _supplement_pdf_images(document, content: bytes) -> None:
                 page = pdf[page_index]
                 try:
                     for occurrence, obj in enumerate(page.get_objects()):
-                        if obj.type != raw.FPDF_PAGEOBJ_IMAGE:
+                        image = cast(Any, obj)
+                        if image.type != raw.FPDF_PAGEOBJ_IMAGE:
                             continue
                         try:
-                            bounds = tuple(obj.get_bounds())
+                            bounds = cast(tuple[float, float, float, float], tuple(image.get_bounds()))
                             key = (page_index, tuple(round(v, 3) for v in bounds))
                             if known[key]:
                                 known[key] -= 1
                                 continue
-                            bitmap = obj.get_bitmap()
+                            bitmap = image.get_bitmap()
                             try:
                                 pixels = bitmap.to_pil()
                                 output = io.BytesIO()
@@ -121,7 +127,7 @@ def _xlsx_anchors(content: bytes) -> dict:
     result = {}
     try:
         for sheet_index, sheet in enumerate(workbook.worksheets):
-            for image_index, image in enumerate(sheet._images):
+            for image_index, image in enumerate(cast(Any, sheet)._images):
                 anchor = image.anchor
                 value = {"sheet_ordinal": sheet_index, "sheet_name": sheet.title,
                          "anchor_kind": type(anchor).__name__}

@@ -1,4 +1,5 @@
 """HTTP capacity rejections retain bounded attempts and honor retry timing."""
+from typing import Any, cast
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,7 @@ async def test_http_429_carries_only_parsed_retry_delay(monkeypatch, tmp_path, h
             await instance.call("extract", {})
 
     assert type(rejected.value).__name__ == "ModelRateLimitError"
-    assert rejected.value.retry_after_seconds == expected
+    assert cast(Any, rejected.value).retry_after_seconds == expected
     terminal = audit.events[-1]
     assert terminal["status"] == "failed" and terminal["error"]["type"] == "http_429"
     saved = artifacts.read_json(terminal["response_ref"])

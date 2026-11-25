@@ -1,4 +1,5 @@
 """Authoring references identify each retained rule without copying its facts."""
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -11,17 +12,17 @@ ITEM = {"artifact_ref": REF, "item_id": "original-item"}
 
 
 def test_whole_and_retained_references_have_distinct_identity():
-    whole = EffectiveItemRef(item_ref=ITEM)
-    first = EffectiveItemRef(item_ref=ITEM, decision_id="decision", rule_index=0)
-    second = EffectiveItemRef(item_ref=ITEM, decision_id="decision", rule_index=1)
+    whole = EffectiveItemRef(item_ref=cast(Any, ITEM))
+    first = EffectiveItemRef(item_ref=cast(Any, ITEM), decision_id="decision", rule_index=0)
+    second = EffectiveItemRef(item_ref=cast(Any, ITEM), decision_id="decision", rule_index=1)
     assert whole.model_dump(exclude_unset=True) == {"item_ref": ITEM}
     assert first != second
-    assert SourceUnitRef(source_index_ref=REF, unit_id="native-unit").source_index_ref.sha256 == REF["sha256"]
+    assert SourceUnitRef(source_index_ref=cast(Any, REF), unit_id="native-unit").source_index_ref.sha256 == REF["sha256"]
 
 
 def test_unknown_decision_pair_nulls_normalize_to_the_whole_item_reference():
     payload = {"item_ref": ITEM, "decision_id": None, "rule_index": None}
-    whole = EffectiveItemRef(item_ref=ITEM)
+    whole = EffectiveItemRef(item_ref=cast(Any, ITEM))
     normalized = EffectiveItemRef.model_validate(payload)
     assert normalized == whole
     assert normalized.model_dump(exclude_unset=True) == whole.model_dump(exclude_unset=True)

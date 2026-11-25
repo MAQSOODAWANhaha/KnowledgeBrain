@@ -192,7 +192,9 @@ def test_embedded_font_reader_collects_f06c_from_a_synthetic_cmap():
                 ctypes.memmove(destination, payload, len(payload))
             return 1
 
-    name, fingerprint, cmap = pdf_symbols._embedded_font(Raw, None, 0, {})
+    found = pdf_symbols._embedded_font(Raw, None, 0, {})
+    assert found is not None
+    name, fingerprint, cmap = found
     assert name == 'SyntheticSymbol' and fingerprint == hashlib.sha256(payload).hexdigest()
     assert cmap[0xF06C] == {GLYPH}
     assert pdf_symbols.verified_symbol(name, 0xF06C, [GLYPH], fingerprint) is None

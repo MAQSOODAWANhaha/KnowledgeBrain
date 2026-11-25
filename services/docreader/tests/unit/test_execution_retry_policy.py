@@ -1,4 +1,5 @@
 """Every failure retries three times; cancellation, stale leases and exhaustion stop."""
+from typing import Any, cast
 
 import asyncio
 import json
@@ -21,7 +22,7 @@ from docreader.llm.request import (
     ModelSemanticError("invalid_json_response"), ModelBudgetError("request too large"),
     ModelConfigurationError("configuration unavailable"), ModelInfrastructureError("service rejected"),
     ModelCorrectionStalled("no progress"), UncertainModelResponse("provider may have executed"),
-    RequestReplayBlocked("request", "sent"), RequestReplayBlocked("request", "uncertain"),
+    RequestReplayBlocked("request", cast(Any, "sent")), RequestReplayBlocked("request", cast(Any, "uncertain")),
     ConnectionError("connection failed"), TimeoutError("timed out"),
     psycopg.OperationalError("database unavailable"), psycopg.InterfaceError("connection closed"),
     Conflict("immutable inputs changed"),

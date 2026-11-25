@@ -9,7 +9,7 @@ from zipfile import ZipFile
 
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from lxml import etree
+from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def bookmark_name(identity: str, kind: str = "chapter") -> str:

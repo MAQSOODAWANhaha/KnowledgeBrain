@@ -1,10 +1,11 @@
 """Generated TOC caches are verified against actual PDF destinations."""
+from typing import Any, cast
 
 from io import BytesIO
 from zipfile import ZipFile
 
 from docx import Document
-from lxml import etree as ET
+import lxml.etree as ET
 from pypdf import PdfWriter
 from pypdf.generic import (
     ArrayObject, DictionaryObject, FloatObject, NameObject, NumberObject, StreamObject,
@@ -74,7 +75,7 @@ def pdf(titles=('Alpha',), *, pages=None, wrapped=False, labels=None, bad_title=
         dest = ArrayObject([writer.pages[destination_page - 1].indirect_reference,
             NameObject('/XYZ'), NumberObject(0), NumberObject(735 - target_ordinal * 25), NumberObject(0)])
         if named:
-            writer.add_named_destination_array(f'entry-{ordinal}', dest)
+            writer.add_named_destination_array(cast(Any, f'entry-{ordinal}'), dest)
             from pypdf.generic import TextStringObject
             dest = TextStringObject(f'entry-{ordinal}')
         for line, part in enumerate(parts):

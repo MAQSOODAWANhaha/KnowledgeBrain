@@ -31,4 +31,5 @@ async def test_workflow_runs_at_most_two_packs_without_dropping_work(tmp_path, m
     results = await nodes._packs(index, "extract-pack", process)
 
     assert maximum == 2
-    assert [item["pack_id"] for item in results] == [f"p{number}" for number in range(6)]
+    assert [item["pack_id"] for item in results if not isinstance(item, BaseException)] == [
+        f"p{number}" for number in range(6)]

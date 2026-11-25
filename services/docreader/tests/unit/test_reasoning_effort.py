@@ -1,5 +1,6 @@
 """Explicit request options are frozen before model audit, hashing and recovery."""
 
+from typing import TypeVar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from contextlib import asynccontextmanager
@@ -15,6 +16,14 @@ from docreader.llm.request import ModelConfigurationError, ModelSemanticError, b
 from docreader.tender.document_execution import _DocumentExecutor
 
 from test_tender_llm import environment, model, response
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 async def test_explicit_environment_option_reaches_real_analysis_body_and_execution_identity():
@@ -179,7 +188,7 @@ def test_chat_option_is_not_inherited_by_the_separately_configured_vlm(same_mode
         KNOWLEDGEBRAIN_VLM_MODEL='gpt-4o' if same_model else 'vision-fixture')
     client, _ = model(lambda _: response(), values=values)
     assert client.config.chat.reasoning_effort == 'medium'
-    assert client.config.vision.reasoning_effort is None
+    assert _required(client.config.vision).reasoning_effort is None
     assert 'reasoning_effort' not in client.request_budget(images=True).request('ocr', {'fixture': True})
 
 

@@ -162,8 +162,8 @@ async def test_new_outline_defaults_to_per_document_bid_format_chain(tmp_path, m
     huge = {'item_id': 'bulk', 'kind': 'obligation', 'text': '义务' * 30000,
             'evidence': [{'range_id': ranges['tender'], 'quote': '投标函'}]}
     extract_ref = artifacts.put_json({'items': [short, huge]})
-    snapshot = AuthoringInput(schema_version=2, run_id='default-chain', source_version=1, domain_revision=1,
-                              frozen_ref=frozen_ref, extract_refs=[extract_ref]).model_dump()
+    snapshot = AuthoringInput.model_validate({'schema_version': 2, 'run_id': 'default-chain', 'source_version': 1, 'domain_revision': 1,
+                              'frozen_ref': frozen_ref, 'extract_refs': [extract_ref]}).model_dump()
     sent = []
     store = _memory_store()
     _bind(monkeypatch, store)
@@ -218,8 +218,8 @@ async def test_saved_old_directory_contract_still_refuses_full_source_and_export
     artifacts = ArtifactStore(tmp_path)
     record, _index = _frozen_document(artifacts, 'tender', 'main', '投标文件格式\n' + ('全文行\n' * 4000))
     frozen_ref = artifacts.put_json({'documents': [record]})
-    snapshot = AuthoringInput(schema_version=2, run_id='old-contract', source_version=1, domain_revision=1,
-                              frozen_ref=frozen_ref).model_dump()
+    snapshot = AuthoringInput.model_validate({'schema_version': 2, 'run_id': 'old-contract', 'source_version': 1, 'domain_revision': 1,
+                              'frozen_ref': frozen_ref}).model_dump()
     sent = []
     store = _memory_store()
     _bind(monkeypatch, store)
@@ -272,8 +272,8 @@ async def test_named_old_contract_is_not_replaced_by_a_chain_predecessor(tmp_pat
     artifacts = ArtifactStore(tmp_path)
     record, _index = _frozen_document(artifacts, 'tender', 'main', MAIN)
     frozen_ref = artifacts.put_json({'documents': [record]})
-    snapshot = AuthoringInput(schema_version=2, run_id='inherit', source_version=1, domain_revision=1,
-                              frozen_ref=frozen_ref).model_dump()
+    snapshot = AuthoringInput.model_validate({'schema_version': 2, 'run_id': 'inherit', 'source_version': 1, 'domain_revision': 1,
+                              'frozen_ref': frozen_ref}).model_dump()
     store = _memory_store()
     _bind(monkeypatch, store)
     monkeypatch.setattr(document_execution, 'OpenAIModel', _model([]))
@@ -282,8 +282,8 @@ async def test_named_old_contract_is_not_replaced_by_a_chain_predecessor(tmp_pat
     assert store.rows['chain-prev']['execution_spec']['requirement_chain_contract'] == REQUIREMENT_CHAIN_CONTRACT
 
     huge, _index = _frozen_document(artifacts, 'tender', 'main', '投标文件格式\n' + ('全文行\n' * 4000))
-    huge_snapshot = AuthoringInput(schema_version=2, run_id='inherit', source_version=1, domain_revision=1,
-                                   frozen_ref=artifacts.put_json({'documents': [huge]})).model_dump()
+    huge_snapshot = AuthoringInput.model_validate({'schema_version': 2, 'run_id': 'inherit', 'source_version': 1, 'domain_revision': 1,
+                                   'frozen_ref': artifacts.put_json({'documents': [huge]})}).model_dump()
     sent = []
     monkeypatch.setattr(document_execution, 'OpenAIModel', _model(sent))
     with pytest.raises(SourceOutlineUnavailable):

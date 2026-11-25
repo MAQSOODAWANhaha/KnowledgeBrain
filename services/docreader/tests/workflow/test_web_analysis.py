@@ -1,4 +1,5 @@
 """Authenticated human review against real SQL and synthetic analysis only."""
+from typing import TypeVar
 import copy
 from types import SimpleNamespace
 from uuid import uuid4
@@ -11,6 +12,14 @@ from docreader.integrations.web_analysis import analysis_review, confirm_analysi
 from docreader.tests.acceptance.test_analysis import analysis_runtime as analysis_runtime
 from docreader.tests.acceptance.test_analysis import execute_analysis, result
 from docreader.tests.database import initialize_schema
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 @pytest.fixture
@@ -75,6 +84,7 @@ async def test_authorization_and_run_ownership_precede_artifact_access(review_ru
 async def test_exact_human_resolutions_and_same_key_confirmation(review_runtime):
     runtime = review_runtime
     _, review = await waiting(runtime, blocked=True)
+    assert review is not None
     assert review["human_issue_ids"] and not review["hard_blocking"] and review["sources_current"]
     body = confirmation(review)
     for resolutions in ([], body["issue_resolutions"]["resolutions"][1:],
@@ -85,11 +95,13 @@ async def test_exact_human_resolutions_and_same_key_confirmation(review_runtime)
             await confirm_analysis(runtime.bridge, payload(runtime, **(body | {"issue_resolutions": {
                 "schema_version": 1, "resolutions": resolutions}})))
         assert invalid.value.status == 400
+    assert review is not None
     assert not (await runtime.bridge.store.get_run(review["run_id"]))["confirmations"]
     before = len(runtime.calls)
     request = payload(runtime, **body)
     approved = await confirm_analysis(runtime.bridge, request)
-    assert (await confirm_analysis(runtime.bridge, request))["command_id"] == approved["command_id"]
+    assert approved is not None
+    assert _required((await confirm_analysis(runtime.bridge, request)))["command_id"] == approved["command_id"]
     changed = copy.deepcopy(request)
     changed["issue_resolutions"]["resolutions"][0]["reason"] = "不同理由"
     with pytest.raises(WebError) as reused:
@@ -115,8 +127,10 @@ async def test_text_correction_preserves_packs_and_replays_immutable_baseline(re
     originals = {entry["pack_id"]: artifacts.read_json(entry["artifact_ref"]) for entry in baseline["packs"]}
     request = payload(runtime, **correction(review))
     submitted = await correct_analysis(runtime.bridge, request)
+    assert submitted is not None
     assert submitted["submitted_domain_revision"] == 2
-    assert (await correct_analysis(runtime.bridge, request))["submitted_domain_revision"] == 2
+    assert _required((await correct_analysis(runtime.bridge, request)))["submitted_domain_revision"] == 2
+    assert review is not None
     revised = await runtime.bridge.store.get_run(review["run_id"])
     assert revised["domain_revision"] == 2 and len(revised["history"]["revisions"]) == 1
     corrected = artifacts.read_json(revised["revision"]["corrected_items_ref"])
@@ -158,4 +172,5 @@ async def test_text_correction_rejects_untrusted_or_invalid_edits(review_runtime
     with pytest.raises(WebError) as invalid:
         await correct_analysis(review_runtime.bridge, payload(review_runtime, **body))
     assert invalid.value.status == 400
+    assert review is not None
     assert (await review_runtime.bridge.store.get_run(review["run_id"]))["domain_revision"] == 1

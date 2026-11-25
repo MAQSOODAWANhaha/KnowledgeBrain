@@ -10,7 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from io import BytesIO
 from multiprocessing import get_context
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from ._docx_opc_patch import ensure_patched
 from PIL import Image
@@ -209,7 +209,7 @@ class _DocxNumbering:
             del counters[deeper]
         _, overrides = self._nums.get(num_id, (0, {}))
         start = overrides.get(ilvl, level["start"])
-        counters[ilvl] = start if ilvl not in counters else counters[ilvl] + 1
+        counters[ilvl] = cast(int, start if ilvl not in counters else counters[ilvl] + 1)
         label = level["text"]
         for index in range(9, 0, -1):
             if f"%{index}" not in label:
@@ -221,7 +221,7 @@ class _DocxNumbering:
             else:
                 parent = levels.get(index - 1, {})
                 value = overrides.get(index - 1, parent.get("start", 1))
-            rendered = _format_list_value(levels.get(index - 1, level)["fmt"], value)
+            rendered = _format_list_value(levels.get(index - 1, level)["fmt"], cast(int, value))
             label = label.replace(f"%{index}", rendered)
         return label, level["suff"]
 

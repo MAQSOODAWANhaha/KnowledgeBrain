@@ -1,5 +1,6 @@
 """Worker knowledge authentication is temporary and bound to fixed job selections."""
 
+from typing import TypeVar
 import asyncio
 import base64
 import hashlib
@@ -13,6 +14,14 @@ import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.web_knowledge import build_web_knowledge, normalize_knowledge_selections
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 PRODUCT = "4c78bf65-9ee2-4788-bc0c-f14769bb153f"
@@ -86,12 +95,12 @@ async def test_search_and_proof_original_use_only_temporary_job_scoped_authentic
         return httpx.Response(200, content=content)
 
     selected, artifacts = provider(handler), ArtifactStore(tmp_path)
-    result = await selected.search([{"target_id": "target", "query": "企业能力", "include_original": True}], artifacts)
+    result = await _required(selected).search([{"target_id": "target", "query": "企业能力", "include_original": True}], artifacts)
     assert result["issues"] == []
     material = result["materials"][0]
     assert material["attachment"] is True and artifacts.read_bytes(material["original_ref"]) == content
     assert [request["operation"] for request in requests] == ["search", "document", "file"]
-    persisted = json.dumps({"spec": selected.spec(), "result": result}, ensure_ascii=False)
+    persisted = json.dumps({"spec": _required(selected).spec(), "result": result}, ensure_ascii=False)
     assert SECRET not in persisted and "Bearer " not in persisted
     assert material["locator"]["searches"][0]["include_library"] is False
 
@@ -100,7 +109,7 @@ async def test_missing_server_configuration_is_nonblocking_and_never_uses_user_c
     monkeypatch.delenv("KNOWLEDGEBRAIN_INTERNAL_API_URL", raising=False)
     monkeypatch.delenv("GRPC_AUTH_TOKEN", raising=False)
     selected = build_web_knowledge(execution_id="job", selections=[SELECTION])
-    result = await selected.search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
+    result = await _required(selected).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
     assert result["materials"] == [] and result["issues"][0]["code"] == "knowledge_unconfigured"
 
 
@@ -119,7 +128,7 @@ async def test_selected_versions_reject_out_of_scope_hits_and_keep_valid_sibling
 
     source = build_web_knowledge(execution_id="job-fixed", selections=selected, base_url="https://api.invalid",
         service_secret=SECRET, transport=httpx.MockTransport(handler))
-    result = await source.search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
+    result = await _required(source).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
     assert len(sent) == 2 and len(result["materials"]) == 1
     assert result["materials"][0]["locator"]["version_id"] == VERSION
     assert {issue["code"] for issue in result["issues"]} == {"knowledge_hit_out_of_scope"}
@@ -137,7 +146,7 @@ async def test_internal_failures_retry_with_fresh_tokens_and_preserve_gap_withou
         expires.append(decode(request.headers["authorization"])["exp"])
         return httpx.Response(403, text="private service details " + SECRET)
 
-    result = await provider(handler).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
+    result = await _required(provider(handler)).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
     assert expires == [1800000060, 1800000070, 1800000080, 1800000090]
     assert result["materials"] == [] and result["issues"][0]["code"] == "knowledge_unavailable"
     assert SECRET not in json.dumps(result) and "private service details" not in json.dumps(result)
@@ -148,7 +157,7 @@ async def test_worker_cancellation_propagates_instead_of_becoming_a_knowledge_ga
         raise asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError):
-        await provider(handler).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
+        await _required(provider(handler)).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
 
 
 async def test_decoded_internal_responses_are_not_decompressed_twice(tmp_path, monkeypatch):
@@ -166,5 +175,5 @@ async def test_decoded_internal_responses_are_not_decompressed_twice(tmp_path, m
         return httpx.Response(200, content=content, headers={"content-encoding": "gzip",
             "content-length": str(len(content)), "content-type": "application/json"})
 
-    result = await provider(handler).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
+    result = await _required(provider(handler)).search([{"target_id": "target", "query": "查询"}], ArtifactStore(tmp_path))
     assert len(calls) == 1 and len(result["materials"]) == 1 and result["issues"] == []

@@ -1,4 +1,5 @@
 """Final-file profile regressions: no cleanup and no silently missing carriers."""
+from typing import TypeVar, Any, cast
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,14 @@ from docreader.main import DocReaderServicer
 from docreader.parser.parser import Parser
 from docreader.proto.docreader_pb2 import ReadConfig, ReadRequest
 from docreader.proto.docreader_pb2_grpc import DocReaderStub, add_DocReaderServicer_to_server
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def Document():
@@ -123,8 +132,8 @@ def test_pdf_preserves_all_pages_and_repeated_header_page_numbers(blank):
         assert sections == []
     else:
         # Uniform body text is one section that continues across pages.
-        assert {unit.locator.section_ordinal for unit in sections} == {0}
-        assert all(unit.locator.heading_path == "" for unit in sections)
+        assert {cast(Any, unit.locator).section_ordinal for unit in sections} == {0}
+        assert all(cast(Any, unit.locator).heading_path == "" for unit in sections)
         blob = "\n".join(unit.text for unit in sections)
         for index in range(4):
             assert "Repeating header" in blob
@@ -159,7 +168,7 @@ def test_unknown_inventory_profile_does_not_fall_back():
 
 def test_docx_used_notes_and_picture_bytes_have_immutable_inventory_identity():
     import zipfile
-    from lxml import etree
+    import lxml.etree as etree
     from PIL import Image
     doc = Document()
     paragraph = doc.add_paragraph("Notes follow")
@@ -206,7 +215,7 @@ def test_docx_used_notes_and_picture_bytes_have_immutable_inventory_identity():
     assert hashlib.sha256(image.getvalue()).hexdigest() in receipt["image_sha256"].values()
     pictures = [unit for unit in result.structured_source_units if unit.kind.value == "image_region"]
     assert len(pictures) == 1
-    assert pictures[0].locator.compound_parent.parent_kind == "table_cell"
+    assert _required(cast(Any, pictures[0].locator).compound_parent).parent_kind == "table_cell"
 
 
 def test_docx_unused_first_story_is_excluded_until_inherited_section_uses_it():
@@ -242,7 +251,7 @@ def test_header_footer_and_custom_style_are_not_checked():
     doc = Document()
     doc.add_heading("第一章", level=1)
     branded = doc.add_paragraph("品牌段落")
-    branded.style = doc.styles.add_style("BidderBrand", 1)
+    branded.style = cast(Any, doc.styles.add_style("BidderBrand", 1))
     doc.sections[0].header.paragraphs[0].text = "页眉内容"
     doc.sections[0].footer.paragraphs[0].text = "页脚内容"
     raw = BytesIO()
@@ -323,10 +332,10 @@ def test_table_nested_custom_styles_are_rejected(style_kind):
     cell.text = "报价100"
     if style_kind == "character":
         style = doc.styles.add_style("BidderCharacter", WD_STYLE_TYPE.CHARACTER)
-        cell.paragraphs[0].runs[0].style = style
+        cell.paragraphs[0].runs[0].style = cast(Any, style)
     else:
         style = doc.styles.add_style("BidderTable", WD_STYLE_TYPE.TABLE)
-        table.style = style
+        table.style = cast(Any, style)
     raw = BytesIO()
     doc.save(raw)
     entries = manifest(parse("table.docx", raw.getvalue()))["units"]
@@ -349,7 +358,7 @@ def test_toc_does_not_whitelist_adjacent_date_field():
 def test_package_root_signature_is_explicitly_rejected():
     doc = Document()
     doc.add_paragraph("已签署报价")
-    doc.part.package.rels.get_or_add_ext_rel(
+    _required(doc.part.package).rels.get_or_add_ext_rel(
         "http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/origin",
         "https://example.invalid/signature",
     )
@@ -370,10 +379,10 @@ def test_reconstruction_rejects_unrepresented_formatting(change):
     elif change == "font_size":
         paragraph.runs[0].font.size = Pt(22)
     elif change == "normal":
-        doc.styles["Normal"].font.size = Pt(22)
+        cast(Any, doc.styles["Normal"]).font.size = Pt(22)
     elif change == "heading":
         paragraph.style = "Heading 1"
-        doc.styles["Heading 1"].font.size = Pt(22)
+        cast(Any, doc.styles["Heading 1"]).font.size = Pt(22)
     elif change == "numbering":
         paragraph._p.get_or_add_pPr().append(OxmlElement("w:numPr"))
     else:
@@ -401,8 +410,8 @@ def test_toc_with_ordinary_body_is_not_silently_discarded():
 def test_standard_style_inheritance_cannot_hide_custom_formatting():
     doc = Document()
     custom = doc.styles.add_style("CustomBase", 1)
-    custom.font.bold = True
-    doc.styles["Normal"].base_style = custom
+    cast(Any, custom).font.bold = True
+    cast(Any, doc.styles["Normal"]).base_style = custom
     doc.add_paragraph("报价100万元")
     raw = BytesIO()
     doc.save(raw)

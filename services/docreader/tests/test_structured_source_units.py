@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import TypeVar, Any, cast
 
 from io import BytesIO
 
@@ -28,6 +29,14 @@ from docreader.parser.excel_parser import ExcelParser
 from docreader.parser.image_parser import ImageParser
 from docreader.parser.pdf_parser import PDFParser, _pdf_image_unit
 from docreader.proto.docreader_pb2 import ReadRequest
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def _image_bytes(fmt: str) -> bytes:
@@ -322,7 +331,7 @@ def test_docx_numbering_label_opens_the_chapter() -> None:
     document.save(raw)
     units = _docx_structured_units(_with_chapter_numbering(raw.getvalue()))
     sections = [unit for unit in units if unit.kind is StructuredSourceUnitKind.SECTION]
-    assert [unit.locator.heading_path for unit in sections] == [
+    assert [cast(Any, unit.locator).heading_path for unit in sections] == [
         "第一章 招标公告",
         "第二章 评标办法",
     ]
@@ -349,7 +358,7 @@ def test_docx_chapter_text_and_outline_level_own_the_following_body() -> None:
 
     units = _docx_structured_units(raw)
     sections = [unit for unit in units if unit.kind is StructuredSourceUnitKind.SECTION]
-    assert [unit.locator.heading_path for unit in sections] == [
+    assert [cast(Any, unit.locator).heading_path for unit in sections] == [
         "第一章 招标公告",
         "第一章 招标公告 > 1.1 项目概况",
         "评标办法",
@@ -458,7 +467,7 @@ def test_pdf_preserves_page_structure_where_supported() -> None:
     assert document.structured_source_units
     section = document.structured_source_units[0]
     assert section.key == "section:0:page:0"
-    assert section.locator.heading_path == ""
+    assert cast(Any, section.locator).heading_path == ""
     assert "Tender page" in section.text
 
 
@@ -530,8 +539,8 @@ def test_leading_nontext_content_keeps_empty_owner_and_real_child(carrier):
     assert owner.kind is StructuredSourceUnitKind.SECTION
     assert owner.text == ""
     if carrier == "table":
-        assert child.locator.section_ordinal == owner.locator.section_ordinal
-        assert child.grid.cells[0].text == "报价填写位置"
+        assert cast(Any, child.locator).section_ordinal == cast(Any, owner.locator).section_ordinal
+        assert _required(child.grid).cells[0].text == "报价填写位置"
     else:
-        assert child.locator.compound_parent.section_ordinal == owner.locator.section_ordinal
+        assert _required(cast(Any, child.locator).compound_parent).section_ordinal == cast(Any, owner.locator).section_ordinal
         assert child.kind is StructuredSourceUnitKind.IMAGE_REGION

@@ -1,5 +1,6 @@
 """Revision, immutable input, and checkpoint fences against real PostgreSQL."""
 
+from typing import TypeVar, Any, cast
 import asyncio
 import copy
 import json
@@ -14,6 +15,14 @@ from docreader.integrations.store import Conflict, InvalidConfirmation, StaleExe
 from docreader.workflow.persistence import FencedPostgresSaver, initialize_checkpoints
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 from test_store import expire, request_metadata, store as store, submitted
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -306,19 +315,19 @@ async def test_expired_worker_cannot_aput_or_aput_writes_after_new_executor_take
     run, command = await submitted(store)
     old_lease = await store.acquire(run["run_id"], command["command_id"], 1)
     lookup = {"configurable": {"thread_id": f"{run['run_id']}:1:1", "checkpoint_ns": ""}}
-    async with await psycopg.AsyncConnection.connect(store.dsn, autocommit=True, row_factory=dict_row) as old_conn:
+    async with await psycopg.AsyncConnection.connect(store.dsn, autocommit=True, row_factory=cast(Any, dict_row)) as old_conn:
         old = FencedPostgresSaver(old_conn, store, old_lease)
         initial = empty_checkpoint()
         initial["channel_values"] = {"probe": "old executor"}
         initial["channel_versions"] = {"probe": "1"}
-        saved = await old.aput(lookup, initial, {"source": "input", "step": 0, "parents": {}}, {"probe": "1"})
+        saved = await old.aput(cast(Any, lookup), initial, {"source": "input", "step": 0, "parents": {}}, {"probe": "1"})
         await old.aput_writes(saved, [("probe", "before pause")], "old-task")
         # Keep the old connection alive, exactly as a paused worker would; it has
         # not called release and cannot authorize its own later writes.
         await expire(store, run["run_id"])
         replacement = await store.acquire(run["run_id"], command["command_id"], 1)
         assert replacement.epoch > old_lease.epoch
-        async with await psycopg.AsyncConnection.connect(store.dsn, autocommit=True, row_factory=dict_row) as new_conn:
+        async with await psycopg.AsyncConnection.connect(store.dsn, autocommit=True, row_factory=cast(Any, dict_row)) as new_conn:
             new = FencedPostgresSaver(new_conn, store, replacement)
             fresh = empty_checkpoint()
             fresh["channel_values"] = {"probe": "new executor"}
@@ -328,10 +337,12 @@ async def test_expired_worker_cannot_aput_or_aput_writes_after_new_executor_take
                 await old.aput(latest, empty_checkpoint(), {"source": "loop", "step": 2, "parents": {}}, {})
             with pytest.raises(StaleExecution):
                 await old.aput_writes(latest, [("probe", "stale overwrite")], "resumed-old-task")
-            readback = await new.aget_tuple(lookup)
-            assert readback.checkpoint["id"] == fresh["id"]
-            assert readback.checkpoint["channel_values"]["probe"] == "new executor"
-            assert not any(value == "stale overwrite" for _, _, value in readback.pending_writes)
+            readback = await new.aget_tuple(cast(Any, lookup))
+            assert _required(readback).checkpoint["id"] == fresh["id"]
+            assert _required(readback).checkpoint["channel_values"]["probe"] == "new executor"
+            writes = _required(readback).pending_writes
+            assert writes is not None
+            assert not any(value == "stale overwrite" for _, _, value in writes)
 
 
 async def correction_input(store, *, cross_pack=False):

@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import hashlib
+from typing import Any, cast
 from itertools import groupby
 import json
 import re
@@ -91,7 +92,8 @@ class MaterialIds:
             return {key: deepcopy(entry) if key == 'grid' else compact(entry, (*path, key))
                     for key, entry in value.items()}
 
-        self.payload = compact(_walk(payload, lambda value, namespace, _path: self.forward[namespace][value]))
+        self.payload = cast(dict[str, Any], compact(
+            _walk(payload, lambda value, namespace, _path: self.forward[namespace][value])))
         self.payload['identity_format'] = contract
         self.payload['source_coordinate_format'] = 'material_source_arrays_v1'
         self.payload['source_coordinate_fields'] = {'point': list(_POINT_FIELDS), 'window': list(_WINDOW_FIELDS)}

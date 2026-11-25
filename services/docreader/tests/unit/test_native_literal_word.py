@@ -1,3 +1,4 @@
+from typing import TypeVar
 from io import BytesIO
 import json
 from zipfile import ZipFile
@@ -16,6 +17,14 @@ from docreader.tender.word_navigation import bookmark_name
 from test_directory_compile import fixture_titles, item, node, plan
 from test_native_requirement_sources import budget
 from test_source_presentation import pdf_bytes
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 async def test_frozen_two_page_literal_requirement_reaches_word_once(tmp_path):
@@ -93,7 +102,7 @@ async def test_frozen_two_page_literal_requirement_reaches_word_once(tmp_path):
     anchored, = [paragraph for paragraph in docx.paragraphs
                  if binder in paragraph._p.xpath('./w:bookmarkStart/@w:name')]
     assert anchored.text == expected
-    assert anchored.style.name == 'Normal'
+    assert _required(_required(anchored.style).name) == 'Normal'
     assert [paragraph.text for paragraph in docx.paragraphs].count(expected) == 1
     assert neighbor not in docx.element.body.xml
     with ZipFile(BytesIO(artifacts.read_bytes(delivery['package_ref']))) as package:

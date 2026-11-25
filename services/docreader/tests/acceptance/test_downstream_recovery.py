@@ -2,6 +2,7 @@
 
 All model answers are synthetic contract fixtures, with no external requests.
 """
+from typing import TypeVar
 from collections import Counter
 from copy import deepcopy
 import json
@@ -22,6 +23,14 @@ from docreader.workflow.runner import execute_command
 from fixture_analysis_model import AnalysisFixtureModel
 from fixture_model import fixture_request_digest
 from test_phase1 import output, runtime as runtime
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 pytestmark = pytest.mark.integration
 
@@ -130,7 +139,7 @@ def _executor(runtime, run, *, scope_repeats=88, fail_operation=None, candidates
             budget.require(task, payload, images)
             operation = payload.get("operation", task)
             attempts[operation] += 1
-            calls.append((self.lease.domain_revision, task, deepcopy(payload)))
+            calls.append((_required(self.lease).domain_revision, task, deepcopy(payload)))
             error = None
             if operation == fail_operation and attempts[operation] == 2 and not failed:
                 failed = True
@@ -150,15 +159,15 @@ def _executor(runtime, run, *, scope_repeats=88, fail_operation=None, candidates
                                             line=1, column=21, offset=20))
             if error is not None:
                 request_id = uuid4().hex
-                await self.store.begin_request(self.lease, request_id, "synthetic-analysis-fixture", task, {
+                await _required(self.store).begin_request(self.lease, request_id, "synthetic-analysis-fixture", task, {
                     "request_digest": fixture_request_digest(task, payload, images),
                     "test_double": True, "external_request": False,
                 })
-                await self.store.finish_request(request_id, "sent")
-                response_ref = (self.artifacts.put_json({"content": '{"schema_version":2}]}',
+                await _required(self.store).finish_request(request_id, "sent")
+                response_ref = (_required(self.artifacts).put_json({"content": '{"schema_version":2}]}',
                                 "finish_reason": "stop", "stream_complete": True})
                                 if isinstance(error, ModelJSONError) else None)
-                await self.store.finish_request(request_id, "failed", response_ref=response_ref,
+                await _required(self.store).finish_request(request_id, "failed", response_ref=response_ref,
                     error={"type": "invalid_json_response" if isinstance(error, ModelJSONError) else
                                     "injected_confirmed_service_rejection"})
                 raise error

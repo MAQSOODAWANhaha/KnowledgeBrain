@@ -3,6 +3,7 @@
 These cases exercise the real model client and durable execution, not document
 content acceptance or the external knowledge provider.
 """
+from typing import Any, cast
 
 import asyncio
 from copy import deepcopy
@@ -198,7 +199,9 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
     reference = await execute(analysis_runtime, execution_id, handler)
     value = artifacts.read_json(reference)
     row = await AuthoringStore(settings.dsn).get_execution(execution_id)
+    assert row is not None
     assert row["status"] == "succeeded" and len(row["requests"]) == len(sent) == 2
+    assert row is not None
     assert {request["task"] for request in row["requests"]} == {
         "outline",
         "authoring_write",
@@ -220,7 +223,9 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
         len([r for r in row["receipts"] if r["stage"] == "document-model-response"])
         == 2
     )
+    assert row is not None
     assert "fixture-key" not in json.dumps(row["execution_spec"])
+    assert row is not None
     assert row["execution_spec"]["retry_policy"] == "split_transport_contract_v1"
     assert (
         row["execution_spec"]["outline_assembly_planning_contract"]
@@ -245,6 +250,7 @@ async def test_unconfirmed_snapshot_runs_multiple_tasks_and_reuses_completed_exe
     assert await execute(analysis_runtime, execution_id, handler) == reference
     assert len(sent) == 2 and len(pipeline.snapshots) == 1
     assert await store.get_run(run["run_id"]) == before
+    assert row is not None
     units = [r for r in row["receipts"] if r["stage"] == "document-unit"]
     assert len(units) == len(pipeline.published_units) == 1
     assert pipeline.saved_units == [[]]
@@ -318,6 +324,7 @@ async def test_explicit_predecessor_rebinds_cached_json_without_fabricating_paid
         analysis_runtime, second, handler, previous_execution_id=first
     )
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(second)
+    assert row is not None
     assert len(sent) == 2 and row["requests"] == []
     assert (
         analysis_runtime[1].read_json(reference)["usage"]
@@ -327,6 +334,7 @@ async def test_explicit_predecessor_rebinds_cached_json_without_fabricating_paid
         value["binding"] == "current-host-identities"
         for value in pipeline.observed[-2:]
     )
+    assert row is not None
     inherited = [r for r in row["receipts"] if r["stage"] == "document-model-response"]
     assert len(inherited) == 2
     assert all(r["metadata"]["reused_from_execution_id"] == first for r in inherited)
@@ -371,6 +379,7 @@ async def test_explicit_assembly_tokenizer_reaches_http_and_correction_without_e
     execution_id = uuid4().hex
     await run(execution_id)
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
+    assert row is not None
     assert row["status"] == "succeeded" and len(sent) == 3
     assembly_requests = [
         request for request in row["requests"] if request["task"] == "outline"
@@ -386,6 +395,7 @@ async def test_explicit_assembly_tokenizer_reaches_http_and_correction_without_e
     assert "contract_feedback" in json.loads(
         sent[1]["messages"][1]["content"][0]["text"]
     )
+    assert row is not None
     frozen_budget = row["execution_spec"]["budget"]
     assert frozen_budget["tokenized"]["tokenizer"] == "o200k_base"
     assert frozen_budget["tokenized"]["operations"] == {"outline": ["assemble"]}
@@ -449,11 +459,14 @@ async def test_explicit_authoring_tokenizer_survives_execution_budget_reconstruc
         transport=httpx.MockTransport(handler),
     )
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
+    assert row is not None
     assert row["status"] == "succeeded" and len(sent) == len(row["requests"]) == 2
+    assert row is not None
     assert row["execution_spec"]["budget"] == stored_budget.spec()
     assert all(request.get("reasoning_effort") == reasoning_effort for request in sent)
     if reasoning_effort is None:
         assert all("reasoning_effort" not in request for request in sent)
+    assert row is not None
     for entry in row["requests"]:
         metadata = entry["metadata"]
         assert metadata["method"] == RequestBudget.TOKENIZED_METHOD
@@ -493,7 +506,9 @@ async def test_revision_reuses_only_requests_with_identical_inputs(
         analysis_runtime, second, handler, previous_execution_id=first
     )
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(second)
+    assert row is not None
     assert len(sent) == 3 and len(row["requests"]) == 1
+    assert row is not None
     assert row["requests"][0]["task"] == "authoring_write"
     assert analysis_runtime[1].read_json(reference)["usage"]["sent_requests"] == 1
 
@@ -598,7 +613,7 @@ async def test_publication_failure_resumes_fixed_snapshot_and_knowledge_without_
         if status == "succeeded" and not failed:
             failed.append(True)
             raise psycopg.OperationalError("synthetic publication outage")
-        return await original(self, lease, status, **kwargs)
+        return await original(self, lease, cast(Any, status), **kwargs)
 
     execution_id = uuid4().hex
     with monkeypatch.context() as patch:
@@ -669,6 +684,7 @@ async def test_persistence_failure_is_not_swallowed_into_a_placeholder(
     ):
         await execute(analysis_runtime, execution_id, handler)
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
+    assert row is not None
     assert sent == [] and row["status"] == "failed" and row["result_ref"] is None
 
 
@@ -705,7 +721,9 @@ async def test_parent_cancellation_before_publication_preserves_receipts_without
             lambda request: response({"value": "accepted"}),
         )
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
+    assert row is not None
     assert row["status"] == "failed" and row["result_ref"] is None
+    assert row is not None
     assert len(row["requests"]) == 2
 
 
@@ -733,7 +751,9 @@ async def test_caller_cancellation_stops_inflight_call_and_keeps_uncertain_recei
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=3)
     row = await AuthoringStore(analysis_runtime[2].dsn).get_execution(execution_id)
+    assert row is not None
     assert row["status"] == "failed" and row["result_ref"] is None
+    assert row is not None
     assert len(row["requests"]) == 1 and row["requests"][0]["status"] == "uncertain"
 
 
@@ -1018,7 +1038,9 @@ async def test_actual_pipeline_exports_forms_and_evidence_despite_one_exhausted_
             for name in package.namelist()
         )
     row = await AuthoringStore(settings.dsn).get_execution(execution_id)
+    assert row is not None
     assert row["status"] == "succeeded"
+    assert row is not None
     assert sum(request["status"] == "failed" for request in row["requests"]) == 5
     assert (
         value["usage"]["retry_requests"] == 4

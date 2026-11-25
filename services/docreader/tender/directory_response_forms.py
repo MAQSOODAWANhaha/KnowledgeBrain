@@ -5,7 +5,7 @@ from functools import lru_cache
 import hashlib
 import json
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Union, cast
 
 from pydantic import Field, StrictInt, ValidationError, create_model
 
@@ -98,14 +98,15 @@ def _response_model(count, row_count, column_count):
     refs = Annotated[list[ref], Field(min_length=1, max_length=count)]
     context = create_model('ResponseFormContext', __base__=Contract, refs=(refs, ...))
     row = create_model('ResponseFormRow', __base__=Contract, refs=(refs, ...),
-        context_index=(Annotated[StrictInt, Field(ge=0, le=max(0, count - 1))] | None, None), source_join=(_JOIN, 'paragraphs'))
+        context_index=(Union[Annotated[StrictInt, Field(ge=0, le=max(0, count - 1))], None], None),
+        source_join=(_JOIN, 'paragraphs'))
     guidance = create_model('ResponseFormGuidance', __base__=Contract,
         kind=(Literal['reference', 'procedure'], ...), refs=(refs, ...), source_join=(_JOIN, 'paragraphs'))
     disposition = create_model('ResponseFormDisposition', __base__=Contract, refs=(refs, ...), kind=(_KINDS, ...))
-    layout = create_model('ResponseFormLayout', __base__=Contract,
-        **{key: (Annotated[StrictInt, Field(ge=0, le=limit)], ...) for key, limit in [
-            ('repeat_start_row', row_count - 1), ('repeat_end_row', row_count - 1),
-            *[(key, column_count - 1) for key in ('sequence_column', 'source_column', 'response_column', 'proof_column')]]})
+    layout_fields = cast(dict[str, Any], {key: (Annotated[StrictInt, Field(ge=0, le=limit)], ...) for key, limit in [
+        ('repeat_start_row', row_count - 1), ('repeat_end_row', row_count - 1),
+        *[(key, column_count - 1) for key in ('sequence_column', 'source_column', 'response_column', 'proof_column')]]})
+    layout = create_model('ResponseFormLayout', __base__=Contract, **layout_fields)
     return create_model('ResponseFormPlan', __base__=Contract, layout=(layout | None, None),
         contexts=(Annotated[list[context], Field(max_length=count)], Field(default_factory=list)),
         table_context_refs=(Annotated[list[ref], Field(max_length=count)], Field(default_factory=list)),
@@ -127,7 +128,9 @@ def _decision_model(count, row_count, column_count, mandate_count):
 @lru_cache(maxsize=128)
 def _role_model(count, row_count, column_count, mandate_count):
     original = _decision_model(count, row_count, column_count, mandate_count)
-    row = create_model('ResponseFormRoleRow', __base__=original.model_fields['rows'].annotation.__args__[0],
+    rows_annotation = original.model_fields['rows'].annotation
+    assert rows_annotation is not None
+    row = create_model('ResponseFormRoleRow', __base__=rows_annotation.__args__[0],
                        source_role=(_ROW_ROLES, ...))
     return create_model('ResponseFormRoleDecisionPlan', __base__=original,
                         rows=(Annotated[list[row], Field(max_length=count)], Field(default_factory=list)))
@@ -165,7 +168,8 @@ def _lines(text):
 
 
 class ResponseFormView:
-    def __init__(self, artifacts, compiled, documents, selection, snapshot, *, contract=RESPONSE_FORM_CONTRACT):
+    def __init__(self, artifacts, compiled, documents, selection, snapshot, *,
+                 contract: str | None = RESPONSE_FORM_CONTRACT):
         if contract not in RESPONSE_FORM_CONTRACTS:
             raise ValueError('unsupported native response form contract')
         validate_response_form_selections(compiled, documents, [selection])

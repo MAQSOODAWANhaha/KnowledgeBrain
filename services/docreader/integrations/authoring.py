@@ -92,7 +92,9 @@ def _available_input(artifacts: ArtifactStore, row: dict, identity: dict) -> dic
             if not current(entry, "extract-pack"):
                 continue
             reference, root = load(entry["artifact_ref"], "extract-pack")
-            if root is not None and isinstance(root.get("items"), list) and reference["sha256"] not in seen:
+            if reference is None or root is None:
+                continue
+            if isinstance(root.get("items"), list) and reference["sha256"] not in seen:
                 seen.add(reference["sha256"])
                 value["extract_refs"].append(reference)
         value["extract_refs"].sort(key=lambda ref: ref["sha256"])

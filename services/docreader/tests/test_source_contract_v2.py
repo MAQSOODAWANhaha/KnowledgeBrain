@@ -1,4 +1,5 @@
 """Native carriers and rendered Markdown share one deterministic source map."""
+from typing import TypeVar
 import hashlib
 import json
 from io import BytesIO
@@ -12,6 +13,14 @@ from docreader.parser.docx_parser import _docx_structured_units, _tc_text
 from docreader.parser.excel_parser import ExcelParser
 from docreader.parser.output_inventory import parse_output_inventory
 from docreader.parser.source_contract import attach_source_contract
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def contract(document):
@@ -52,7 +61,7 @@ def test_docx_duplicate_text_tables_and_utf8_spans_have_stable_order():
     table_unit = next(unit for unit in units if unit.grid)
     identity = next(unit for unit in receipt['units'] if unit['unit_id'] == table_unit.key)
     assert table_unit.text == ''
-    assert table_unit.grid.cells[1].text == '10\n20'
+    assert _required(table_unit.grid).cells[1].text == '10\n20'
     assert identity['table_id'] == table_unit.key
     span = identity['rendered_spans'][0]
     displayed = result.content.encode()[span['start_byte']:span['end_byte']].decode()
@@ -67,9 +76,9 @@ def test_docx_duplicate_text_tables_and_utf8_spans_have_stable_order():
 def test_xlsx_grid_maps_to_the_actual_rendered_rows_even_with_empty_text():
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(['列1', '列2'])
-    sheet.append(['相同', '😀'])
-    sheet.append(['相同', '😀'])
+    _required(sheet).append(['列1', '列2'])
+    _required(sheet).append(['相同', '😀'])
+    _required(sheet).append(['相同', '😀'])
     raw = BytesIO()
     workbook.save(raw)
     result = ExcelParser(file_name='source.xlsx', file_type='xlsx').parse(raw.getvalue())

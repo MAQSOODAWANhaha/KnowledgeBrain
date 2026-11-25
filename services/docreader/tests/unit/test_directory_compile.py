@@ -1,3 +1,4 @@
+from typing import TypeVar
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.tender.authoring_pipeline import generate_document
@@ -8,6 +9,14 @@ import pytest
 
 from docreader.tender.document_execution import load_prompts
 from test_authoring_pipeline_boundaries import payload as request_payload
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def fixture_titles(payload, names=None):
@@ -124,7 +133,8 @@ def docs(pages, *documents):
 def node(identity, page, line, parent=None, content=None, document_id='tender'):
     value = {'id': identity, 'heading': point(page, line, document_id), 'parent_id': parent}
     if content is not None:
-        value['content_start'] = point(*content, document_id)
+        content_page, content_line = content
+        value['content_start'] = point(content_page, content_line, document_id)
     return value
 
 
@@ -239,7 +249,7 @@ def test_content_presentation_keeps_source_order_without_a_numbered_heading(tmp_
     document = Document(BytesIO(artifacts.read_bytes(
         export_authoring_document(artifacts, outline, units)['docx_ref'])))
     assert [chapter['title'] for chapter in outline['chapters']] == ['封面', '投标函']
-    headings = [paragraph.text for paragraph in document.paragraphs if paragraph.style.name.startswith('Heading')]
+    headings = [paragraph.text for paragraph in document.paragraphs if _required(_required(paragraph.style).name).startswith('Heading')]
     assert not any(text.endswith('封面') or text.endswith('投标函') for text in headings)
     body = [paragraph.text for paragraph in document.paragraphs]
     assert '某某项目' in body and '正文' in body

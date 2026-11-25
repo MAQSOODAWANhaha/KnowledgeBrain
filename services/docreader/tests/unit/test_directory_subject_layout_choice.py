@@ -1,5 +1,6 @@
 """A source subject layout can change without weakening the current material or condition."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 
@@ -16,6 +17,14 @@ from docreader.tender.directory_compile import (
 )
 from test_authoring_pipeline_boundaries import snapshot
 from test_directory_compile import docs, item, node, plan, point, window
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 SNAPSHOT = {'schema_version': 2, 'run_id': 'subject-layout', 'source_version': 1, 'domain_revision': 1}
@@ -111,9 +120,9 @@ def test_blank_word_has_one_joint_signed_form_with_the_full_current_condition(tm
     result = export_authoring_document(ArtifactStore(tmp_path / 'artifacts'), outline, [])
     document = Document(BytesIO((tmp_path / 'artifacts' / result['docx_ref']['relative_path']).read_bytes()))
     start = next(index for index, p in enumerate(document.paragraphs)
-                 if p.style.name.startswith('Heading') and p.text == chapter['title'])
+                 if _required(_required(p.style).name).startswith('Heading') and p.text == chapter['title'])
     end = next(index for index in range(start + 1, len(document.paragraphs))
-               if document.paragraphs[index].style.name.startswith('Heading'))
+               if _required(_required(document.paragraphs[index].style).name).startswith('Heading'))
     text = '\n'.join(p.text for p in document.paragraphs[start:end])
     assert text.count('投标人盖章：________；制造商盖章：________') == 1
     assert '代理商须有原厂授权，制造商和代理商不得同时参与。\n仍须另附支持服务证明。' in text
@@ -273,6 +282,7 @@ async def test_material_wire_acceptance_restores_subject_choice_and_keeps_the_sa
     accepted = await pipeline._ask(execute, RequestBudget(model='fixture'), 'directory_material', payload,
                                    lambda value: pipeline._accept_material_plan(value, [], compiled, documents))
     assert compiled == original
+    assert accepted is not None
     assert accepted['directory_adjudications'] == raw['directory_adjudications']
 
 

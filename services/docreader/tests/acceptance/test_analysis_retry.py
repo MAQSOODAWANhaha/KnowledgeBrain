@@ -1,5 +1,6 @@
 """Explicit same-revision analysis recovery with isolated synthetic platform_models."""
 
+from typing import TypeVar
 from collections import Counter
 from uuid import uuid4
 
@@ -16,6 +17,14 @@ from fixture_model import fixture_request_digest
 from test_analysis import analysis_runtime as analysis_runtime, execute_analysis, result
 from test_phase1 import output, runtime as runtime
 
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
+
 
 pytestmark = pytest.mark.integration
 
@@ -30,16 +39,16 @@ def _executor(runtime, failure_count):
             if task == "extract" and "annex" in documents and len(failed_requests) < failure_count:
                 self.calls.append((task, payload))
                 request_id = uuid4().hex
-                await self.store.begin_request(self.lease, request_id, "synthetic-analysis-fixture", task, {
+                await _required(self.store).begin_request(self.lease, request_id, "synthetic-analysis-fixture", task, {
                     "request_digest": fixture_request_digest(task, payload, images),
                     "test_double": True, "external_request": False,
                 })
-                await self.store.finish_request(request_id, "sent")
-                response_ref = self.artifacts.put_json({
+                await _required(self.store).finish_request(request_id, "sent")
+                response_ref = _required(self.artifacts).put_json({
                     "content": '{"schema_version":2,"items":[]} }',
                     "finish_reason": "stop", "stream_complete": True,
                 })
-                await self.store.finish_request(request_id, "failed", response_ref=response_ref,
+                await _required(self.store).finish_request(request_id, "failed", response_ref=response_ref,
                                                 error={"type": "invalid_json"})
                 failed_requests.append(request_id)
                 raise ModelSemanticError("injected complete response with invalid JSON")

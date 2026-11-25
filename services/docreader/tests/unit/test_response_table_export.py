@@ -1,5 +1,6 @@
 """Business response rows preserve complete source text and leave unknown answers blank."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 
@@ -10,6 +11,14 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.authoring_excerpts import load_source_excerpt
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment, selector
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def excerpts(artifacts, texts):
@@ -169,7 +178,7 @@ def test_unmatched_narrative_does_not_invent_a_general_or_special_chapter(tmp_pa
             {"target_id": "scope", "kind": "narrative", "purpose": "供货范围",
              "rule_refs": [{"decision_id": "shown-rule"}], "source_refs": [], "source_excerpts": selected}]}], "targets": []}]}
     doc = opened(artifacts, export_authoring_document(artifacts, tree, [unit(chapter_id="item", target_ids=["scope"])]))
-    headings = [paragraph.text for paragraph in doc.paragraphs if paragraph.style.name.startswith("Heading")]
+    headings = [paragraph.text for paragraph in doc.paragraphs if _required(_required(paragraph.style).name).startswith("Heading")]
     assert any(text.endswith("供货范围及可选配置") for text in headings)
     assert not any("技术附表A" in text for text in headings)
     assert not any(text.endswith("通用部分") or text.endswith("专用部分") for text in headings)

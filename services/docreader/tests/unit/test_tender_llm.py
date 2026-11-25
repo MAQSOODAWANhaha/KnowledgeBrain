@@ -1,5 +1,6 @@
 """Deterministic transport/configuration tests: these are not semantic LLM acceptance."""
 
+from typing import TypeVar, Any, cast
 import asyncio
 import hashlib
 import json
@@ -22,6 +23,14 @@ from docreader.llm.config import completions_url
 from docreader.llm.usage import UsageLedger, reported_usage
 from docreader.integrations.store import Conflict
 from docreader.integrations.artifacts import ArtifactStore
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def environment(**extra):
@@ -260,7 +269,7 @@ def response(
     ]
     if usage:
         envelopes.append(
-            {
+            cast(Any, {
                 "choices": [],
                 "usage": {
                     "prompt_tokens": 13,
@@ -268,7 +277,7 @@ def response(
                     "total_tokens": 20,
                     "prompt_tokens_details": {"cached_tokens": 3},
                 },
-            }
+            })
         )
     return sse_response(envelopes)
 
@@ -376,7 +385,7 @@ async def test_durable_request_wait_precedes_the_sent_fence(monkeypatch, deadlin
     async def sleep(seconds):
         waits.append(seconds)
 
-    audit.request_not_before = request_not_before
+    cast(Any, audit).request_not_before = request_not_before
     monkeypatch.setattr(client_module.time, "time", lambda: 100.0)
     monkeypatch.setattr(client_module.asyncio, "sleep", sleep)
     client, _ = model(lambda request: (sent.append(request), response())[1], audit)
@@ -398,7 +407,7 @@ async def test_cancel_during_durable_request_wait_never_sends(monkeypatch):
     async def sleep(seconds):
         raise asyncio.CancelledError()
 
-    audit.request_not_before = request_not_before
+    cast(Any, audit).request_not_before = request_not_before
     monkeypatch.setattr(client_module.time, "time", lambda: 100.0)
     monkeypatch.setattr(client_module.asyncio, "sleep", sleep)
     client, _ = model(lambda request: sent.append(request), audit)
@@ -787,7 +796,7 @@ async def test_snapshot_prompt_is_the_prompt_actually_sent():
     def handler(request):
         seen.append(json.loads(request.content)["messages"][0]["content"])
         assert (
-            audit.spec["prompts"]["extract"]
+            _required(audit.spec)["prompts"]["extract"]
             == hashlib.sha256(source_prompt.encode()).hexdigest()
         )
         assert seen[-1] == expected_prompt
@@ -822,7 +831,7 @@ async def test_exact_sent_body_has_same_measurement_as_planner_and_budget_is_pin
         await client.call("extract", payload)
     assert seen == [budget.request("extract", payload)]
     assert budget.measure_request(seen[0], "extract") == expected
-    assert audit.spec["budget"]["chat"] == budget.spec()
+    assert _required(audit.spec)["budget"]["chat"] == budget.spec()
     for key, value in expected.items():
         assert audit.events[0]["metadata"][key] == value
 

@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -35,7 +36,7 @@ def test_host_statuses_preserve_wire_values(status_type, values):
         status_type("unknown")
 
 
-def connection(row):
+def connection(row) -> Any:
     cursor = SimpleNamespace(fetchone=AsyncMock(return_value=row), fetchall=AsyncMock(return_value=[row]))
     return SimpleNamespace(execute=AsyncMock(return_value=cursor))
 
@@ -59,7 +60,7 @@ async def test_unknown_command_status_is_rejected_at_read():
         yield connection({"status": "broken"})
 
     store = Store("")
-    store.transaction = transaction
+    store.transaction = cast(Any, transaction)
     with pytest.raises(ValueError, match="CommandStatus"):
         await store.get_command("command")
 
@@ -84,7 +85,7 @@ async def test_unknown_project_status_is_rejected_even_for_read():
         yield connection({"status": "broken"})
 
     bridge = WebBridge.__new__(WebBridge)
-    bridge.store = SimpleNamespace(transaction=transaction)
+    cast(Any, bridge).store = SimpleNamespace(transaction=transaction)
     with pytest.raises(ValueError, match="ProjectStatus"):
         await bridge.authorize({"project_id": str(uuid4()), "owner_user_id": str(uuid4())})
 
@@ -92,7 +93,7 @@ async def test_unknown_project_status_is_rejected_even_for_read():
 @pytest.mark.asyncio
 async def test_unknown_job_status_is_not_returned_as_normal_progress():
     bridge = WebBridge.__new__(WebBridge)
-    bridge.authoring = SimpleNamespace(get_execution=AsyncMock(return_value=None))
+    cast(Any, bridge).authoring = SimpleNamespace(get_execution=AsyncMock(return_value=None))
     with pytest.raises(ValueError, match="AuthoringJobStatus"):
         await bridge.authoring_view({"execution_id": "job", "status": "broken", "payload": {}, "error": None})
 

@@ -1,5 +1,6 @@
 """Host hierarchy numbers use native Word lists and stay out of editable business names."""
 
+from typing import TypeVar
 from io import BytesIO
 import json
 from zipfile import ZipFile
@@ -10,6 +11,14 @@ from docx.oxml.ns import qn
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.word_navigation import read_docx_outline
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 def chapter(identity, title, *, children=(), role='body', volume=False):
@@ -22,7 +31,7 @@ def chapter(identity, title, *, children=(), role='body', volume=False):
 
 def numbered_headings(data):
     document = Document(BytesIO(data))
-    headings = [p for p in document.paragraphs if p.style.name.startswith('Heading')]
+    headings = [p for p in document.paragraphs if _required(_required(p.style).name).startswith('Heading')]
     paths, counters = [], [0] * 9
     for paragraph in headings:
         properties = paragraph._p.find(qn('w:pPr')).find(qn('w:numPr'))

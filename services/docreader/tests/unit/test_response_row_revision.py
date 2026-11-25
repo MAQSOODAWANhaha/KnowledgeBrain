@@ -61,6 +61,7 @@ def test_previous_row_answer_uses_current_short_row_reference_without_recopying_
     unit = {"row_fills": [{"row_id": "stable-b", "text": "资料支持的实际功能。", "material_ids": ["knowledge-version"],
                             "source_refs": [], "source_excerpts": []}]}
     previous = _previous_content(task, unit, payload, {}, bindings)
+    assert previous is not None
     assert previous["row_fills"] == [{"row_id": "q2", "text": "资料支持的实际功能。",
                                       "support_ids": ["k4"], "content_id": "r1"}]
     assert _has_content(unit)

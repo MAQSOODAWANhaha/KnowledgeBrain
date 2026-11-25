@@ -1,5 +1,6 @@
 """Assembly receives actual context; fixture choices do not test model semantics."""
 
+from typing import TypeVar
 from copy import deepcopy
 from io import BytesIO
 import json
@@ -18,6 +19,14 @@ from docreader.tender.evidence.references import SourceIndex
 from docreader.tender.schema import AuthoringOutline
 
 from test_structural_packing import source
+
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
 
 
 SUBMISSION_TEXT = (
@@ -400,7 +409,7 @@ async def test_explanatory_candidate_exclusion_keeps_submission_basis_and_real_f
 
     word = Document(BytesIO(artifacts.read_bytes(result["docx_ref"])))
     body = "\n".join(node.text or "" for node in word.element.iter(qn("w:t")))
-    assert [p.text for p in word.paragraphs if p.style.name.startswith("Heading")] == ["财务资料"]
+    assert [p.text for p in word.paragraphs if _required(_required(p.style).name).startswith("Heading")] == ["财务资料"]
     assert sum("TOC" in (node.text or "") for node in word.element.iter(qn("w:instrText"))) == 1
     assert all(text not in body for text in (SUBMISSION_TEXT, "装订安排说明", "待整理内容", "补充内容"))
     assert body.count("（本部分内容待补）") == 0  # The rendered form keeps the blank cell; no second pending chapter.

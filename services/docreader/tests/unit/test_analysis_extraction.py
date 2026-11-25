@@ -1,4 +1,5 @@
 """Version-two extraction keeps provenance and delegates business meaning to review."""
+from typing import Any, cast
 
 from copy import deepcopy
 
@@ -411,7 +412,7 @@ async def test_empty_table_template_has_contextual_disposition_without_fabricate
 async def test_only_host_proven_blank_pages_skip_model_and_keep_source_identity():
     blank = source("blank", "", empty=True, non_requirement_reason="blank_page")
     model = FixedModel(None)
-    extracted = await extract_items(pack([blank]), model, identity=IDENTITY)
+    extracted = await extract_items(pack([blank]), cast(Any, model), identity=IDENTITY)
     assert model.calls == [] and extracted["items"] == []
     assert extracted["dispositions"] == [{"range_id": "blank", "status": "non_item",
         "reason": "blank_page", "item_ids": []}]
@@ -424,7 +425,7 @@ async def test_known_indivisible_extraction_budget_failure_keeps_unresolved_cove
     problem = {"issue_id": "source-1", "code": "source_partial", "detail": "必要附件仍缺页。", "blocking": True}
     model = FixedModel(None)
     frozen = pack([source(), blank], issues=[problem], planning_details={"budget": {"fits": False}})
-    extracted = await extract_items(frozen, model, identity=IDENTITY, issues=[problem])
+    extracted = await extract_items(frozen, cast(Any, model), identity=IDENTITY, issues=[problem])
     assert model.calls == [] and extracted["items"] == [] and extracted["relations"] == []
     assert [(entry["range_id"], entry["status"]) for entry in extracted["dispositions"]] == [
         ("r1", "unresolved"), ("blank", "non_item")]

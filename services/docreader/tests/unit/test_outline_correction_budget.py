@@ -1,4 +1,5 @@
 """Unknown outline references need small, admissible correction feedback."""
+from typing import Any, cast
 from copy import deepcopy
 import json
 
@@ -36,7 +37,7 @@ def test_global_outline_reference_errors_identify_one_scalar(tmp_path, path):
     field = response
     for key in path[:-1]:
         field = field[key]
-    field.append("not-supplied")
+    cast(Any, field).append("not-supplied")
     with pytest.raises(ModelContractError) as error:
         context.validate(response)
     assert error.value.errors[0]["path"] == path

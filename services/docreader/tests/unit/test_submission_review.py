@@ -473,6 +473,7 @@ def test_revision_selects_the_current_template_alias_not_a_same_unit_context_ali
         identity: {"origin": "tender", "source_ref": reference} for identity in sources
     }
     previous = _previous_content(task, current, payload, sources, bindings)
+    assert previous is not None
     assert previous["cell_fills"][0]["source_id"] == "s1"
     current["cell_fills"][0]["target_ids"] = []
     assert _previous_content(task, current, payload, sources, bindings) is None

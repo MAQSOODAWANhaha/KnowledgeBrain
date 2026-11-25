@@ -1,4 +1,5 @@
 """Run with TENDER_TEST_DATABASE_URL and TENDER_TEST_REDIS_URL against real services."""
+from typing import TypeVar, Any, cast
 import asyncio
 import os
 from pathlib import Path
@@ -30,6 +31,14 @@ if os.environ.get("TENDER_TEST_REDIS_URL"):
 sys.path.insert(0, str(Path(__file__).parent))
 from skeleton_worker import SkeletonNodes, skeleton_command
 
+_T = TypeVar("_T")
+
+
+def _required(value: _T | None) -> _T:
+    assert value is not None
+    return value
+
+
 pytestmark = pytest.mark.integration
 
 
@@ -47,7 +56,7 @@ async def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("TENDER_DATABASE_URL", dsn)
     monkeypatch.setenv("TENDER_REDIS_URL", redis_url)
     monkeypatch.setenv("TENDER_ARTIFACT_ROOT", str(tmp_path))
-    settings = Settings(dsn, redis_url, tmp_path, lease_seconds=2, heartbeat_seconds=0.2, redeliver_seconds=0.1)
+    settings = Settings(dsn, redis_url, tmp_path, lease_seconds=2, heartbeat_seconds=0.2, redeliver_seconds=cast(Any, 0.1))
     store = Store(dsn)
     await initialize_schema(store.dsn)
     await store.setup()
@@ -100,7 +109,7 @@ async def test_redis_failure_claim_tokens_and_receipt_replay(setup):
     def unavailable(*args):
         raise ConnectionError("injected Redis unavailable")
 
-    await dispatch_once(store, unavailable, redeliver_seconds=0.1)
+    await dispatch_once(store, unavailable, redeliver_seconds=cast(Any, 0.1))
     cmd = await command_for(store, run)
     assert cmd["status"] == "pending"
     lease = await store.acquire(run["run_id"], cmd["command_id"], 1, lease_seconds=2)
@@ -135,18 +144,18 @@ async def test_old_executor_cannot_write_postgres_checkpoint(setup):
     lease = await store.acquire(run["run_id"], cmd["command_id"], 1)
     config = {"configurable": {"thread_id": f"{run['run_id']}:1:1"}}
     async with await psycopg.AsyncConnection.connect(
-        settings.dsn, autocommit=True, row_factory=dict_row,
+        settings.dsn, autocommit=True, row_factory=cast(Any, dict_row),
     ) as conn:
         old = FencedPostgresSaver(conn, store, lease)
         graph = build_graph(SkeletonNodes(store, ArtifactStore(settings.artifact_root), lease), old)
         await graph.ainvoke({"run_id": run["run_id"], "source_version": 1, "domain_revision": 1,
-                             "status": RunStatus.RUNNING}, config, durability="sync")
-        checkpoint = await old.aget_tuple(config)
+                             "status": RunStatus.RUNNING}, cast(Any, config), durability="sync")
+        checkpoint = await old.aget_tuple(cast(Any, config))
         await store.release(lease, "retry")
         replacement = await store.acquire(run["run_id"], cmd["command_id"], 1)
         assert replacement.epoch > lease.epoch
         with pytest.raises(StaleExecution):
-            await old.aput(checkpoint.config, checkpoint.checkpoint, checkpoint.metadata, {})
+            await old.aput(_required(checkpoint).config, _required(checkpoint).checkpoint, _required(checkpoint).metadata, {})
         await store.release(replacement, "blocked")
 
 
@@ -244,7 +253,7 @@ async def test_worker_sigkill_redelivery_and_persistent_interrupt(setup, tmp_pat
 
     proc = start()
     try:
-        await dispatch_once(store, skeleton_command.send, redeliver_seconds=0.1)
+        await dispatch_once(store, skeleton_command.send, redeliver_seconds=cast(Any, 0.1))
         await wait_status(store, run["run_id"], "running")
         # Ensure at least one committed business artifact precedes the hard kill.
         for _ in range(100):
@@ -256,14 +265,14 @@ async def test_worker_sigkill_redelivery_and_persistent_interrupt(setup, tmp_pat
         marker.unlink()
         await asyncio.sleep(2.2)
         proc = start()
-        await dispatch_once(store, skeleton_command.send, redeliver_seconds=0.1)
+        await dispatch_once(store, skeleton_command.send, redeliver_seconds=cast(Any, 0.1))
         row = await wait_status(store, run["run_id"], "waiting-confirmation")
         assert len(row["artifacts"]) == 1
         os.killpg(proc.pid, signal.SIGKILL)
         await asyncio.to_thread(proc.wait)
         await store.confirm(run["run_id"], 1, row["checklist_digest"], "after-restart")
         proc = start()
-        await dispatch_once(store, skeleton_command.send, redeliver_seconds=0.1)
+        await dispatch_once(store, skeleton_command.send, redeliver_seconds=cast(Any, 0.1))
         await wait_status(store, run["run_id"], "analysis-ready")
     finally:
         if proc.poll() is None:
