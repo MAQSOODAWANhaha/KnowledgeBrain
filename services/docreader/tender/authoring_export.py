@@ -33,7 +33,7 @@ DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingm
 _XML_ILLEGAL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]")
 _ENTERPRISE_SLOT = re.compile(r"保证金|签署人|签字人")
 _SIGNATORY_NAME = re.compile(
-    r"((?:签字或签章|签字|签章|签署人|签字人)\)?\s*[:：]\s*)([^\s（(）)。，,、:：]{1,12})"
+    r"((?:签字或签章|签字|签章|签署人|签字人)[)）]?\s*[:：]\s*)([^\s（(）)。，,、:：]{1,12})"
 )
 
 

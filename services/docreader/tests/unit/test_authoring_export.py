@@ -136,6 +136,8 @@ def test_missing_enterprise_deposit_and_signatory_stay_blank(tmp_path):
         ]),
         writing("sign-task", "c", ["letter"], blocks=[
             {"kind": "paragraph", "text": "法定代表人(签字或签章):李四"},
+            {"kind": "paragraph", "text": "法定代表人（签字或签章）：王五"},
+            {"kind": "paragraph", "text": "单位负责人或其授权代表（签字）：李四"},
         ]),
     ])
     word = document(artifacts, result)
@@ -145,15 +147,19 @@ def test_missing_enterprise_deposit_and_signatory_stay_blank(tmp_path):
         table.rows[1].cells[2].text
         for table in word.tables
         if table.rows[0].cells[0].text == "项目名称")
+    signatures = [paragraph.text for paragraph in word.paragraphs if "签字" in paragraph.text or "签章" in paragraph.text]
     print(
         f"deposit_cell={cells[1]!r} signatory_cell={cells[3]!r} "
-        f"column_deposit={column_deposit!r} pending={pending[0]['detail']!r}")
+        f"column_deposit={column_deposit!r} pending={pending[0]['detail']!r} "
+        f"signatures={signatures!r}")
     assert cells[1] in {"", "待补"}
     assert cells[3] in {"", "待补"}
     assert column_deposit in {"", "待补"}
     rendered = "\n".join(cells + [paragraph.text for paragraph in word.paragraphs])
-    assert "128000" not in rendered and "李四" not in rendered
+    assert "128000" not in rendered and "李四" not in rendered and "王五" not in rendered
     assert "法定代表人(签字或签章):" in rendered
+    assert "法定代表人（签字或签章）：" in rendered
+    assert "单位负责人或其授权代表（签字）：" in rendered
     assert pending and all("待补" in gap["detail"] for gap in pending)
 
 
