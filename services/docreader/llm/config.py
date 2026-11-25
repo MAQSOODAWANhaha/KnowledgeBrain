@@ -89,7 +89,9 @@ class ModelConfig:
         if not raw_context.isascii() or not raw_context.isdecimal() or not 1 <= context <= 4_194_304:
             raise ModelConfigurationError("KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS must be an integer between 1 and 4194304")
         chat = ModelEndpoint(base_url, key, model, context,
-                             reasoning_effort=_setting(values, "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT") or None)
+                             reasoning_effort=normalize_reasoning_effort(
+                                 _setting(values, "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT") or None
+                             ))
         try:
             vision = _vision(values, chat)
         except ModelConfigurationError as error:

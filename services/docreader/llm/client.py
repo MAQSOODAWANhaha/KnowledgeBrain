@@ -42,7 +42,8 @@ from docreader.llm.streaming import (
     invalid_json_constant,
 )
 from docreader.tender.prompts import ANALYSIS_PROMPT_TASKS
-from docreader.tender.schema import ArtifactRef, ModelRequestStatus, Task
+from docreader.tender.schema import ArtifactRef, Task
+from docreader.tender.status import ModelRequestStatus
 from docreader.workflow.state import WORKFLOW_PROTOCOL
 
 
@@ -600,7 +601,7 @@ class OpenAIModel:
     async def _finish(
         self,
         request_id,
-        status: ModelRequestStatus,
+        status: str,
         usage,
         error_type,
         started,
@@ -628,7 +629,7 @@ class OpenAIModel:
             error["provider_error"] = _redact_response(provider_error, secrets)
         if error is not None and transport_diagnostics is not None:
             error.update(transport_diagnostics)
-        if error_type == "http_429" and (retry_after := _nonnegative_seconds(retry_after_seconds)) is not None:
+        if error is not None and error_type == "http_429" and (retry_after := _nonnegative_seconds(retry_after_seconds)) is not None:
             error["retry_after_seconds"] = retry_after
         await self.store.finish_request(
             request_id,

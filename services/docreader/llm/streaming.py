@@ -78,7 +78,7 @@ class StreamResponse:
         self.finish_reason = None
         self.failure = None
         self.provider_error = None
-        self.counts = {key: 0 for key in (
+        self.counts: dict[str, int | float] = {key: 0 for key in (
             "raw_received_chunks", "raw_received_bytes", "received_chunks", "received_bytes", "sse_events", "heartbeat_events",
             "content_deltas", "thinking_deltas", "tool_deltas", "usage_events", "done_events",
         )}

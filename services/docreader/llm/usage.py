@@ -26,7 +26,7 @@ def _request_marks(row: dict, usage: dict) -> list[str]:
     if type(completion) is int and type(reserve) is int and completion > reserve:
         marks.append("completion_above_reserve")
     first = metadata.get("first_data_seconds")
-    if type(first) in {int, float} and not isinstance(first, bool) and first >= SLOW_FIRST_DATA_SECONDS:
+    if isinstance(first, (int, float)) and not isinstance(first, bool) and first >= SLOW_FIRST_DATA_SECONDS:
         marks.append("slow_first_data")
     return marks
 
@@ -37,8 +37,8 @@ def _timing_observation(rows):
     for key in ("first_data_seconds", "first_raw_seconds", "first_content_seconds",
                 "max_raw_idle_seconds", "semaphore_wait_seconds"):
         values = sorted(value for row in rows
-                        if type(value := (row.get("metadata") or {}).get(key)) in {int, float}
-                        and math.isfinite(value) and value >= 0)
+                        if isinstance(value := (row.get("metadata") or {}).get(key), (int, float))
+                        and not isinstance(value, bool) and math.isfinite(value) and value >= 0)
         result[key] = {"observations": len(values), "missing": len(rows) - len(values),
                        "max": values[-1] if values else None,
                        "p50": values[math.ceil(len(values) * .5) - 1] if values else None,

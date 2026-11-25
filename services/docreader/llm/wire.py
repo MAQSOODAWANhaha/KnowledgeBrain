@@ -3,6 +3,7 @@ from copy import deepcopy
 import re
 import hashlib
 import json
+from typing import Any, cast
 
 
 _FIELDS = {
@@ -31,7 +32,7 @@ class WirePayload:
         self.mapping = {}
         self.original_work_unit = payload.get('work_unit_id')
         self.original_work_units = {self.original_work_unit} if self.original_work_unit else set()
-        self.payload = deepcopy(payload)
+        self.payload: dict[str, Any] = deepcopy(payload)
         if not self.enabled:
             return
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
@@ -43,7 +44,7 @@ class WirePayload:
                     for key in ('source_range_id', 'parent_range_id', 'start', 'end'):
                         entry.pop(key, None)
         self._collect({key: value for key, value in self.payload.items() if key != 'contract_feedback'})
-        self.payload = self._walk(self.payload, self._encode)
+        self.payload = cast(dict[str, Any], self._walk(self.payload, self._encode))
 
     def _collect(self, value):
         if isinstance(value, dict):
@@ -82,7 +83,7 @@ class WirePayload:
             return selected[0] if len(selected) == 1 else '!unbound:' + identity
         return self.mapping.get(prefix, {}).get(identity, identity) if isinstance(identity, str) else identity
 
-    def decode(self, response):
+    def decode(self, response: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled:
             return response
         reverse = {prefix: {short: original for original, short in values.items()}
@@ -105,4 +106,4 @@ class WirePayload:
             # Do not let a copied permanent ID bypass the request-local contract.
             return '!unbound:' + identity
 
-        return self._walk(response, restore)
+        return cast(dict[str, Any], self._walk(response, restore))

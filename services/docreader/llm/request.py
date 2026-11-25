@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Literal, Sequence, cast
+from typing import Any, Literal, Sequence, cast
 
 
 MODEL_RETRY_POLICY = "split_transport_contract_v1"
@@ -135,7 +135,7 @@ def model_retry_delay(attempt, *, rate_limited=False, retry_after_seconds=None):
     if not rate_limited:
         return delay
     hint = retry_after_seconds
-    if type(hint) not in {int, float} or not math.isfinite(hint) or hint < 0:
+    if not isinstance(hint, (int, float)) or isinstance(hint, bool) or not math.isfinite(hint) or hint < 0:
         hint = 0
     return min(120, max(30 * delay, hint))
 
@@ -201,7 +201,7 @@ def build_request(model: str, prompt: str, payload: dict,
         from docreader.llm.contracts import schema_prompt
 
         prompt = schema_prompt(prompt, task, payload)
-    content = [{"type": "text", "text": serialized}]
+    content: list[dict[str, Any]] = [{"type": "text", "text": serialized}]
     content.extend({"type": "image_url", "image_url": {"url": image_data_url(image)}} for image in images)
     request = {"model": model,
             "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}],

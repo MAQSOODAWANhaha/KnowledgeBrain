@@ -106,7 +106,7 @@ class RequestBudget:
             raise ModelConfigurationError(
                 "tokenized authoring requires the verified o200k_base tokenizer"
             )
-        self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+        self.reasoning_effort: ReasoningEffort | None = normalize_reasoning_effort(reasoning_effort)
         self.tokenizer = tokenizer
         self.tokenized_outline_assembly = tokenized_outline_assembly
         self.tokenized_authoring = tokenized_authoring
