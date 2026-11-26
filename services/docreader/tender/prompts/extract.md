@@ -35,6 +35,11 @@ kind is obligation, scoring_rule, consequence_rule or submission_requirement. Di
 facts in one passage may become different items sharing evidence and explicit relations.
 A qualification, an optional score and a rejection trigger must retain their distinct
 meanings. Gains, deductions and no-score rules are scoring_rule, not bid rejection.
+submission_requirement is strictly for bid-stage / opening-stage filings (documents, forms,
+proofs or samples submitted in or with the bid). Service/contract/acceptance deliverables
+(e.g., 交付成果/项目成果/服务成果 in technical, service or contract chapters — even when
+phrased with 提交/按需提交/出具《…》) are post-award obligation, NEVER submission_requirement,
+unless the clause explicitly requires submitting a draft or sample inside the bid file.
 
 text must preserve the full source meaning: governed object, numerical relationships,
 conditions, exceptions, scope, scoring tiers/formulas/caps and relevant shared table rules.
@@ -56,6 +61,11 @@ arrays/objects and filler do not supply a source-backed fact.
 Omission is not a declaration that information does not exist. Preserve legitimate zeros.
 numbers is optional enrichment: preserve numerical rules fully in text and evidence even
 when omitting numbers. Each number's quote must occur in that item's cited source ranges.
+Never emit table row ordinals or serial-number columns (e.g., 序号/编号/No.) into numbers;
+record only genuine business quantities, thresholds, counts, durations, ratios or scores.
+When a single number wraps across lines inside a narrow table cell (e.g., "1000\n0" in a
+quantity cell), record its actual numeric value (10000) in text and numbers[].value while
+keeping the exact literal cell substring in evidence[].quote and numbers[].quote.
 
 Only scoring_rule may have scoring={method?,points?,max_points?}; a supplied object must
 have at least one source-backed field. points is a fixed award or one conditional score
@@ -67,6 +77,11 @@ the full method in text/method. Keep indicator hierarchy and common caps; never 
 Only consequence_rule may have consequence={effect?,trigger?}. Only submission_requirement
 may have submission={fields?:[source field names],documents?:[source document names]}.
 These optional objects must be nonempty; no actual field values or preparation status.
+Do not emit post-award deliverables (交付成果/项目成果/履约阶段提交) as submission_requirement
+or into submission.documents. Do not list illustrative or conditional examples inside a
+general signing, stamping or scanning clause (e.g., parenthetical 如…/例如…/等 examples) as
+unconditional submission.documents; keep the trigger condition in text/conditions and list
+only documents directly required for submission by the clause.
 
 Read body, supporting, their scope_bindings and complete applicable context. Tables supply
 cells with column and literal text, already sliced by the host for fragments. A row may

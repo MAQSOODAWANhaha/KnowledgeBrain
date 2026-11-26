@@ -678,6 +678,8 @@ def _page_chars(textpage, page, raw) -> tuple:
         return [], 0.0
     width, height = page.get_size()
     invisible = _collect_invisible_boxes(page, raw) if FILTER_HIDDEN_TEXT else []
+    is_generated = getattr(raw, "FPDFText_IsGenerated", None)
+    textpage_raw = getattr(textpage, "raw", None)
 
     chars: list = []
     for i in range(n):
@@ -688,6 +690,12 @@ def _page_chars(textpage, page, raw) -> tuple:
         ch = textpage.get_text_range(i, 1)
         if ch in ("\r", "\n"):
             continue
+        if ch.isspace() and is_generated is not None and textpage_raw is not None:
+            try:
+                if is_generated(textpage_raw, i) == 1:
+                    continue
+            except Exception:
+                pass
         x0, x1 = (left, right) if left <= right else (right, left)
         y0, y1 = (bottom, top) if bottom <= top else (top, bottom)
         if FILTER_HIDDEN_TEXT:

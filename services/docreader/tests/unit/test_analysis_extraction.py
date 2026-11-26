@@ -456,3 +456,39 @@ def test_stored_host_blank_disposition_is_rebuilt_for_correction():
     response["dispositions"][-1]["reason"] = "编辑不能改写宿主已证实的空白页事实。"
     with pytest.raises(CorrectionValidationError, match="invalid_host_disposition"):
         validate_item_correction(pack([source(), blank]), response)
+
+
+@pytest.mark.asyncio
+async def test_bug316_wrapped_table_cell_number_keeps_literal_quote_and_semantic_value():
+    from docreader.tender.prompts import get_prompt
+
+    row = source(
+        text="11 | 漏洞扫描系统最大IP资源数 | 1000\n0",
+        kind="table_region",
+        cells=[
+            {"column": 0, "text": "11", "start": 0, "end": 2},
+            {"column": 1, "text": "漏洞扫描系统最大IP资源数", "start": 5, "end": 18},
+            {"column": 2, "text": "1000\n0", "start": 21, "end": 27},
+        ],
+    )
+    response = result(
+        items=[{
+            "item_id": "p1:i1",
+            "kind": "obligation",
+            "text": "漏洞扫描系统最大IP资源数为10000。",
+            "numbers": [{"value": 10000, "unit": "", "quote": "1000\n0"}],
+            "evidence": [{"range_id": "r1", "quote": "1000\n0"}],
+        }],
+        dispositions=[],
+    )
+    extracted = await extract_items(pack([row]), FixedModel(response), identity=IDENTITY)
+    assert extracted["issues"] == []
+    assert extracted["items"][0]["numbers"] == [{"value": 10000, "unit": "", "quote": "1000\n0"}]
+
+    extract_prompt = get_prompt("extract")
+    verify_prompt = get_prompt("verify")
+    assert "table row ordinals" in extract_prompt
+    assert "wraps across lines inside a narrow table cell" in extract_prompt
+    assert "post-award obligation, NEVER submission_requirement" in extract_prompt
+    assert "illustrative or conditional examples" in extract_prompt
+    assert "table row ordinals mistaken for business quantities" in verify_prompt

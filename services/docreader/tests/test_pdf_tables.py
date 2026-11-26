@@ -356,3 +356,56 @@ def test_sparsify_drops_covered_shells_and_tiles() -> None:
         (1, 0, 1),
         (1, 1, 1),
     ]
+
+
+def test_bug316_page_chars_drops_pdfium_generated_spaces_but_keeps_real_spaces() -> None:
+    from types import SimpleNamespace
+    from docreader.parser.pdf_parser import _page_chars
+
+    # Mirrors PDFium's synthetic space (FPDFText_IsGenerated == 1) whose point box
+    # falls between '1' and '0' inside a table cell, while a real space (== 0) survives.
+    entries = [
+        ("1", (10.0, 20.0, 14.0, 28.0), 0),
+        (" ", (15.0, 24.0, 15.0, 24.0), 1),  # generated phantom space -> drop
+        ("0", (16.0, 20.0, 20.0, 28.0), 0),
+        ("0", (21.0, 20.0, 25.0, 28.0), 0),
+        ("0", (26.0, 20.0, 30.0, 28.0), 0),
+        ("0", (31.0, 20.0, 35.0, 28.0), 0),
+        ("0", (36.0, 20.0, 40.0, 28.0), 0),
+        (" ", (41.0, 20.0, 44.0, 28.0), 0),  # real literal space -> keep
+        ("S", (45.0, 20.0, 49.0, 28.0), 0),
+        ("Q", (50.0, 20.0, 54.0, 28.0), 0),
+        ("L", (55.0, 20.0, 59.0, 28.0), 0),
+        ("/", (60.0, 20.0, 63.0, 28.0), 0),
+        ("S", (64.0, 20.0, 68.0, 28.0), 0),
+        ("。", (69.0, 20.0, 72.0, 23.0), 0),
+    ]
+
+    class FakeTextPage:
+        raw = object()
+
+        def count_chars(self) -> int:
+            return len(entries)
+
+        def get_charbox(self, idx: int):
+            return entries[idx][1]
+
+        def get_text_range(self, idx: int, count: int) -> str:
+            assert count == 1
+            return entries[idx][0]
+
+    class FakePage:
+        def get_size(self):
+            return (200.0, 100.0)
+
+        def get_objects(self):
+            return iter(())
+
+    raw = SimpleNamespace(
+        FPDFText_IsGenerated=lambda _tp, idx: entries[idx][2],
+    )
+    chars, _width = _page_chars(FakeTextPage(), FakePage(), raw)
+    horizontal = [(0.0, 0.0, 100.0), (0.0, 50.0, 100.0)]
+    vertical = [(0.0, 0.0, 50.0), (100.0, 0.0, 50.0)]
+    grid, = _tables_from_rules(horizontal, vertical, chars)
+    assert grid.cells[0].text == "100000 SQL/S。"
