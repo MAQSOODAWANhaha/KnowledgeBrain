@@ -7,12 +7,14 @@ import json
 import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.llm import ModelInfrastructureError, ModelSemanticError
+from docreader.llm import ModelInfrastructureError
 from docreader.llm.budget import RequestBudget
+from docreader.llm.request import ModelConfigurationError
 from docreader.tender.checks.analysis import _Analysis, assign_issues, build_catalog, current_items, verify_analysis
 from docreader.tender.evidence import planner
 from docreader.tender.evidence.freeze import plan_sources
 from docreader.tender.evidence.references import EvidenceRepository, SourceIndex, fragment
+from docreader.tender.evidence.view import resolve_evidence_quote, supplied_evidence_texts
 from docreader.tender.requirements import extract_items, item_payload
 from test_structural_packing import source
 
@@ -231,17 +233,12 @@ async def test_table_evidence_uses_only_sent_cell_text_or_explicit_row_text(tmp_
     context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
     original = context.indices["main"].ranges[0]
     row = {"range_id":original["range_id"],"cells":[{"column":0,"text":"姓名"},{"column":1,"text":"证书"}]}
-    view = {"body":[],"supporting":[],key:[row]}
-    payload = context.payload("associate", "associate-1", source_views=[view])
+    views = [{"body":[],"supporting":[],key:[row]}]
 
-    def cited(quote):
-        return [{"evidence":[{"range_id":original["range_id"],"quote":quote}]}]
-
-    context.evidence(cited("证书"),payload)
-    with pytest.raises(ModelSemanticError,match="exact supplied source substring"):
-        context.evidence(cited(original["text"]),payload)
+    assert resolve_evidence_quote(original["range_id"], "证书", context.sources, supplied_evidence_texts(views, context.sources)) is not None
+    assert resolve_evidence_quote(original["range_id"], original["text"], context.sources, supplied_evidence_texts(views, context.sources)) is None
     row["text"] = original["text"]
-    context.evidence(cited(original["text"]),payload)
+    assert resolve_evidence_quote(original["range_id"], original["text"], context.sources, supplied_evidence_texts(views, context.sources)) is not None
 
 
 @pytest.mark.asyncio
@@ -252,18 +249,13 @@ async def test_table_alias_cannot_reintroduce_an_unsent_canonical_row(tmp_path):
     alias = fragment(original,0,original["end"]-1)
     context.sources[alias["range_id"]] = alias
     row = {"range_id":original["range_id"],"cells":[{"column":0,"text":"姓名"},{"column":1,"text":"证书"}]}
-    view = {"body":[row],"supporting":[],"source_aliases":[{"range_id":alias["range_id"],
-        "segments":[{"range_id":original["range_id"],"start":alias["start"],"end":alias["end"]}]}]}
-    payload = context.payload("associate", "associate-1", source_views=[view])
+    views = [{"body":[row],"supporting":[],"source_aliases":[{"range_id":alias["range_id"],
+        "segments":[{"range_id":original["range_id"],"start":alias["start"],"end":alias["end"]}]}]}]
+    texts = supplied_evidence_texts(views, context.sources)
 
-    def cited(quote):
-        return [{"evidence":[{"range_id":alias["range_id"],"quote":quote}]}]
-
-    context.evidence(cited("姓名"),payload)
-    with pytest.raises(ModelSemanticError,match="exact supplied source substring"):
-        context.evidence(cited(alias["text"]),payload)
-    with pytest.raises(ModelSemanticError,match="exact supplied source substring"):
-        context.evidence(cited("证书"),payload)
+    assert resolve_evidence_quote(alias["range_id"], "姓名", context.sources, texts) is not None
+    assert resolve_evidence_quote(alias["range_id"], alias["text"], context.sources, texts) is None
+    assert resolve_evidence_quote(alias["range_id"], "证书", context.sources, texts) is None
 
 
 @pytest.mark.asyncio
@@ -273,11 +265,10 @@ async def test_text_alias_can_quote_across_contiguous_sent_segments(tmp_path):
     original = context.indices["main"].ranges[0]
     middle = len(original["text"])//2
     first,second = fragment(original,0,middle),fragment(original,middle,original["end"])
-    view = {"body":[first,second],"supporting":[],"source_aliases":[{"range_id":original["range_id"],
+    views = [{"body":[first,second],"supporting":[],"source_aliases":[{"range_id":original["range_id"],
         "segments":[{"range_id":entry["range_id"],"start":entry["start"],"end":entry["end"]}
-                    for entry in [first,second]]}]}
-    payload = context.payload("associate", "associate-1", source_views=[view])
-    context.evidence([{"evidence":[{"range_id":original["range_id"],"quote":original["text"]}]}],payload)
+                    for entry in [first,second]]}]}]
+    assert resolve_evidence_quote(original["range_id"], original["text"], context.sources, supplied_evidence_texts(views, context.sources)) is not None
 
 
 def physical_pdf(index, *, unit_pages=(0,1), page_count=2, partial_unit=None, missing_page=None):
@@ -782,35 +773,6 @@ async def test_association_keeps_valid_siblings_and_sends_untraceable_declaratio
 
 
 @pytest.mark.asyncio
-async def test_association_restores_linebreaks_in_relations_decisions_and_retained_rules_without_mutating_raw(tmp_path):
-    data = await scenario(tmp_path, documents=[("main", "main", [("负责人应持\nA证。", "obligation"),
-                                                               ("评分\n条款。", "scoring_rule")])], analysis_issue=True)
-    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
-    items = list(context.items.values())
-    sources = [e["range_id"] for item in items for e in item["evidence"]]
-    payload = context.payload("associate", "associate-1", source_views=context.views(sources),
-                              items=items, issues=context.problems)
-    citation = {**items[0]["evidence"][0], "quote": items[0]["evidence"][0]["quote"].replace("\n", "")}
-    raw = {"schema_version": 2, "relations": [{"relation_id": "associate-1:l1",
-        "from_item_id": items[0]["item_id"], "to_item_id": items[1]["item_id"], "relation": "两事项有关联。",
-        "evidence": [citation]}], "decisions": [{"decision_id": "associate-1:d1",
-        "issue_ids": [p["issue_id"] for p in context.problems], "reason": "核对来源并保留原条款。",
-        "relation_ids": ["associate-1:l1"], "evidence": [citation], "amendment": {
-            "target_item_id": items[0]["item_id"], "effect": "delete", "affected_scope": "部分原条款",
-            "replacement_item_ids": [], "retained_rules": [{"text": items[0]["text"], "scope": "原条款保留部分",
-                                                             "evidence": [citation]}]}}], "findings": []}
-    before = deepcopy(raw)
-    result = context.validate(raw, payload)
-    assert raw == before and result["findings"] == []
-    assert {d["path"] for d in result["diagnostics"]} == {
-        "relations[0].evidence[0].quote", "decisions[0].evidence[0].quote",
-        "decisions[0].amendment.retained_rules[0].evidence[0].quote"}
-    assert all(d["code"] == "evidence_quote_restored" and d["start"] == 0
-               and d["end"] == len(items[0]["evidence"][0]["quote"]) for d in result["diagnostics"])
-    assert result["decisions"][0]["evidence"][0]["quote"] == items[0]["evidence"][0]["quote"]
-
-
-@pytest.mark.asyncio
 async def test_relation_only_association_skips_joint_and_keeps_relations_unverified(tmp_path):
     data = await scenario(tmp_path)
 
@@ -842,34 +804,6 @@ async def test_untraceable_decision_cannot_close_existing_issue_and_joint_receiv
     assert result["blocking"] is True and result["accepted_decision_ids"] == []
     assert result["resolved_issue_ids"] == [] and data[0].read_json(result["decisions_ref"]) == []
     assert any(p["code"] == "condition_unclear" for p in result["issues"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["quote", "missing_quote", "rejected_relation"])
-async def test_association_keeps_valid_decision_when_another_declaration_cannot_be_traced(tmp_path, invalid):
-    data = await scenario(tmp_path, analysis_issue=True)
-    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
-    items = list(context.items.values())[:2]
-    ranges = {e["range_id"] for item in items for e in item["evidence"]}
-    payload = context.payload("associate", "associate-1", source_views=context.views(ranges),
-                              items=items, issues=context.problems)
-    raw = resolution(payload)
-    valid = {**deepcopy(raw["decisions"][0]), "decision_id": "associate-1:d2"}
-    if invalid == "quote":
-        raw["decisions"][0]["evidence"][0]["quote"] = "原文无此引文"
-    elif invalid == "missing_quote":
-        del raw["decisions"][0]["evidence"][0]["quote"]
-    else:
-        raw["relations"] = [{"relation_id": "associate-1:l1", "from_item_id": items[0]["item_id"],
-            "to_item_id": items[1]["item_id"], "relation": "证据尚不成立的关联。",
-            "evidence": [{**items[0]["evidence"][0], "quote": "原文无此引文"}]}]
-        raw["decisions"][0]["relation_ids"] = ["associate-1:l1"]
-    raw["decisions"].append(valid)
-    before = deepcopy(raw)
-    result = context.validate(raw, payload)
-    assert raw == before and [d["decision_id"] for d in result["decisions"]] == ["associate-1:d2"]
-    assert result["relations"] == []
-    assert any("decisions[0]" in finding["detail"] for finding in result["findings"])
 
 
 @pytest.mark.asyncio
@@ -1262,3 +1196,16 @@ async def test_analysis_payloads_are_content_stable_across_host_revisions(tmp_pa
     assert all(payload["work_unit_id"].startswith("review-") for payload in left)
     assert all("source_version" not in payload and "domain_revision" not in payload for payload in left)
     assert all(len(payload["work_unit_id"].split("-", 1)[-1]) == 12 for payload in left)
+
+
+@pytest.mark.asyncio
+async def test_analysis_validate_rejects_retired_locate_and_associate_operations(tmp_path):
+    data = await scenario(tmp_path)
+    context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
+    locate_payload = context.payload("locate", "locate-1")
+    assert "catalog" not in locate_payload
+    with pytest.raises(ModelConfigurationError, match="Unsupported verify operation: locate"):
+        context.validate({"schema_version": 2, "candidates": [], "findings": []}, locate_payload)
+    associate_payload = context.payload("associate", "associate-1")
+    with pytest.raises(ModelConfigurationError, match="Unsupported verify operation: associate"):
+        context.validate({"schema_version": 2, "relations": [], "decisions": [], "findings": []}, associate_payload)

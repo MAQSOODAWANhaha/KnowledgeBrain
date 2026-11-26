@@ -19,15 +19,12 @@ from pydantic import ValidationError
 from docreader.integrations.store import Cancelled, StaleExecution
 from docreader.llm import ModelSemanticError
 from docreader.llm.budget import RequestBudget
-from docreader.llm.request import ModelContractError, ModelWorkUnitExhausted
+from docreader.llm.request import ModelConfigurationError, ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.evidence.packing import SupportingIndex
 from docreader.tender.evidence.references import EvidenceRepository
-from docreader.tender.evidence.view import (
-    host_reviewed_ranges, resolve_evidence_quote, source_view, supplied_evidence_texts,
-)
+from docreader.tender.evidence.view import host_reviewed_ranges, source_view
 from docreader.tender.schema import (
-    AssociationResult, Decision, LocateResult, Relation, assign_issues, enforce_issue_policy, is_hard_blocking, issue,
-    recover_issue_routing,
+    assign_issues, is_hard_blocking, issue, recover_issue_routing,
 )
 
 
@@ -200,7 +197,6 @@ class _Analysis:
     def __init__(self, source_plan, items_index, artifacts, identity, budget):
         self.plan, self.artifacts, self.identity, self.budget = source_plan, artifacts, identity, budget
         self.repo = EvidenceRepository(artifacts)
-        self.catalog = build_catalog(source_plan, artifacts)
         self.roles = {document["document_id"]: document["role"] for document in source_plan["documents"]}
         self.document_order = {document["document_id"]:number for number,document in enumerate(source_plan["documents"])}
         self.sources, self.indices, self.owners = {}, {}, {}
@@ -302,7 +298,7 @@ class _Analysis:
 
     def payload(self, operation, work_unit, **fields):
         return {"schema_version": 2, "operation": operation, "work_unit_id": work_unit,
-                **({"catalog": self.catalog} if operation == "locate" else {}), "source_views": [],
+                "source_views": [],
                 "items": [], "relations": [], "decisions": [], "dispositions": [],
                 "issues": [], "candidates": [],
                 **fields}
@@ -408,9 +404,6 @@ class _Analysis:
 
     def findings(self, values, payload):
         allowed = _view_ids(payload["source_views"])
-        if payload["operation"] == "locate":
-            allowed |= {e["range_id"] for field in ("items", "relations")
-                        for entry in payload[field] for e in entry["evidence"]}
         allowed |= {p["range_id"] for p in payload["issues"] if p.get("range_id")}
         items = {item["item_id"] for item in payload["items"]}
         for index, finding in enumerate(values):
@@ -420,216 +413,49 @@ class _Analysis:
                                            "detail": "Finding refers to an identity absent from its request"}])
         return assign_issues(values, payload["work_unit_id"])
 
-    def evidence(self, values, payload, path="", *, offset=0):
-        allowed = _view_ids(payload["source_views"])
-        texts = supplied_evidence_texts(payload["source_views"], self.sources)
-        diagnostics = []
-        for index, value in enumerate(values):
-            for number, citation in enumerate(value["evidence"]):
-                resolved = (resolve_evidence_quote(citation["range_id"], citation["quote"], self.sources, texts)
-                            if citation["range_id"] in allowed else None)
-                if resolved is None:
-                    raise ModelSemanticError("Analysis evidence is not an exact supplied source substring")
-                if resolved["quote"] != citation["quote"]:
-                    citation["quote"] = resolved["quote"]
-                    diagnostics.append({"code": "evidence_quote_restored",
-                        "path": f"{path}[{index + offset}].evidence[{number}].quote", "range_id": citation["range_id"],
-                        "start": resolved["start"], "end": resolved["end"]})
-        return diagnostics
-
-    def unresolved_association(self, declaration, payload, path, reason):
-        items = {item["item_id"]: item for item in payload["items"]}
-        ids = {declaration[key] for key in ("from_item_id", "to_item_id")
-               if isinstance(declaration.get(key), str) and declaration[key] in items}
-        amendment = declaration.get("amendment")
-        if isinstance(amendment, dict):
-            replacements = amendment.get("replacement_item_ids", [])
-            ids.update(item_id for item_id in [amendment.get("target_item_id"),
-                       *(replacements if isinstance(replacements, list) else [])]
-                       if isinstance(item_id, str) and item_id in items)
-        issue_ids = declaration.get("issue_ids", [])
-        ids.update(item_id for problem in payload["issues"]
-                   if isinstance(issue_ids, list) and problem["issue_id"] in issue_ids
-                   for item_id in problem.get("item_ids", []) if item_id in items)
-        supplied = _view_ids(payload["source_views"])
-        citations = declaration.get("evidence", [])
-        ranges = [citation["range_id"] for citation in (citations if isinstance(citations, list) else [])
-                  if isinstance(citation, dict) and isinstance(citation.get("range_id"), str)
-                  and citation["range_id"] in supplied]
-        ranges.extend(e["range_id"] for item_id in sorted(ids) for e in items[item_id]["evidence"]
-                      if e["range_id"] in supplied)
-        pending = {key: declaration[key] for key in ("relation_id", "from_item_id", "to_item_id", "relation",
-                   "decision_id", "issue_ids", "reason", "evidence", "relation_ids", "amendment") if key in declaration}
-        detail = (f"Association {payload['work_unit_id']} {path} needs independent source review ({reason}). "
-                  f"Pending declaration: {json.dumps(pending, ensure_ascii=False, separators=(',', ':'))}")
-        return issue("analysis_association_unresolved", detail, ranges[0] if ranges else None,
-                     **({"item_ids": sorted(ids)} if ids else {}))
-
     def validate(self, response, payload):
         from docreader.tender.schema import AnalysisReviewResponse
 
         operation = payload["operation"]
-        schema = {"review": AnalysisReviewResponse, "locate": LocateResult, "associate": AssociationResult}[operation]
+        if operation != "review":
+            raise ModelConfigurationError(f"Unsupported verify operation: {operation}")
         response = deepcopy(response)
-        declarations = None
         selector_diagnostics = []
         if isinstance(response, dict) and isinstance(response.get("findings"), list):
             allowed = {p["issue_id"] for p in payload["issues"]}
             response["findings"] = [recover_issue_routing(finding, allowed, f"findings[{index}]", selector_diagnostics)
                                     for index, finding in enumerate(response["findings"])]
-        if operation == "review" and isinstance(response, dict):
+        if isinstance(response, dict):
             ignored = [f"reviewed_{name}_ids" for name in ("range", "item", "relation", "decision")
                        if f"reviewed_{name}_ids" in response]
             for key in ignored:
                 response.pop(key)
             if ignored:
                 selector_diagnostics.append({"code": "model_review_scope_ignored", "fields": ignored})
-        if operation == "locate" and isinstance(response, dict) and isinstance(response.get("candidates"), list):
-            for index, candidate in enumerate(response["candidates"]):
-                ranges = candidate.get("range_ids") if isinstance(candidate, dict) else None
-                if not isinstance(ranges, list) or not all(isinstance(identity, str) for identity in ranges):
-                    continue
-                repeated = [identity for identity, count in Counter(ranges).items() if count > 1]
-                if repeated:
-                    candidate["range_ids"] = list(dict.fromkeys(ranges))
-                    selector_diagnostics.append({"code": "candidate_range_ids_deduplicated",
-                                                 "path": f"candidates[{index}].range_ids", "range_ids": repeated})
-        if operation == "associate" and isinstance(response, dict):
-            if not all(isinstance(response.get(key), list) for key in ("relations", "decisions")):
-                raise ModelContractError([{"path": [key], "code": "list_type", "detail": "Expected an array"}
-                    for key in ("relations", "decisions") if not isinstance(response.get(key), list)])
-            declarations = {key: response[key] for key in ("relations", "decisions")}
-            response.update(relations=[], decisions=[])
         try:
-            value = schema.model_validate(response).model_dump(exclude_unset=True)
+            value = AnalysisReviewResponse.model_validate(response).model_dump(exclude_unset=True)
         except ValidationError as error:
             raise ModelContractError([{"path": list(entry["loc"]), "code": entry["type"], "detail": entry["msg"]}
                                       for entry in error.errors(include_url=False, include_input=False)]) from None
         if selector_diagnostics:
             value["diagnostics"] = selector_diagnostics
         self.findings(value["findings"], payload)
-        if operation == "review":
-            expected = {"range": _view_ids(payload["source_views"]),
-                        "item": {i["item_id"] for i in payload["items"]},
-                        "relation": {i["relation_id"] for i in payload["relations"]},
-                        "decision": {i["decision_id"] for i in payload["decisions"]}}
-            accepted = value["accepted_decision_ids"]
-            if not set(accepted) <= expected["decision"]:
-                raise ModelContractError([{"path": ["accepted_decision_ids"], "code": "unknown_decision",
-                                           "detail": "Accept only decisions supplied in this request"}])
-            value["accepted_decision_ids"] = list(dict.fromkeys(accepted))
-            # Receipt scope comes from the immutable input, never a model's ID echo.
-            for name, identities in expected.items():
-                value[f"reviewed_{name}_ids"] = sorted(identities)
-        elif operation == "locate":
-            allowed_ranges = (_view_ids(payload["source_views"])
-                | {e["range_id"] for field in ("items", "relations")
-                   for entry in payload[field] for e in entry["evidence"]}
-                | {p["range_id"] for p in payload["issues"] if p.get("range_id")})
-            allowed_sections = {(document["document_id"], section["section_id"])
-                                for document in payload["catalog"] for section in document["sections"]}
-            allowed_pages = {document["document_id"]:document["page_count"]
-                             for document in payload["catalog"] if "page_count" in document}
-            allowed_items = {i["item_id"] for i in payload["items"]}
-            allowed_issues = {p["issue_id"] for p in payload["issues"]}
-            seen = set()
-            for index, candidate in enumerate(value["candidates"]):
-                self.namespace(candidate["candidate_id"], payload, "c", seen, ["candidates", index, "candidate_id"])
-                if (not set(candidate["range_ids"]) <= allowed_ranges
-                        or not set(candidate["item_ids"]) <= allowed_items
-                        or not set(candidate["issue_ids"]) <= allowed_issues
-                        or not {(ref["document_id"], ref["section_id"])
-                                for ref in candidate.get("section_refs", [])} <= allowed_sections
-                        or any(ref["document_id"] not in allowed_pages
-                               or not 0 <= ref["page_ordinal"] < allowed_pages[ref["document_id"]]
-                               for ref in candidate.get("page_refs", []))):
-                    raise ModelContractError([{"path": ["candidates", index], "code": "unknown_reference",
-                        "detail": "Candidate refers to an identity absent from its discovery request"}])
-        else:
-            item_map = {i["item_id"]: i for i in payload["items"]}
-            items = set(item_map)
-            issue_map = {p["issue_id"]: p for p in payload["issues"]}
-            issues = set(issue_map)
-            relations = {r["relation_id"] for r in payload["relations"]}
-            rejected_relations = set()
-            diagnostics = []
-            seen = set()
-            assert declarations is not None
-            for index, declaration in enumerate(declarations["relations"]):
-                if not isinstance(declaration, dict):
-                    raise ModelContractError([{"path": ["relations", index], "code": "invalid_reference",
-                                               "detail": "Associated relation has no bindable identity"}])
-                self.namespace(declaration.get("relation_id"), payload, "l", seen, ["relations", index, "relation_id"])
-                path = f"relations[{index}]"
-                try:
-                    relation = Relation.model_validate(declaration).model_dump(exclude_unset=True)
-                    diagnostics.extend(self.evidence([relation], payload, "relations", offset=index))
-                except (ValidationError, ModelSemanticError):
-                    rejected_relations.add(declaration["relation_id"])
-                    value["findings"].append(self.unresolved_association(declaration, payload, path, "invalid evidence or fields"))
-                    continue
-                if not {relation["from_item_id"], relation["to_item_id"]} <= items:
-                    raise ModelContractError([{"path": ["relations", index], "code": "invalid_reference",
-                                               "detail": "Associated relation has unknown item endpoints"}])
-                relations.add(relation["relation_id"])
-                value["relations"].append(relation)
-            assert declarations is not None
-            for index, declaration in enumerate(declarations["decisions"]):
-                if not isinstance(declaration, dict):
-                    raise ModelContractError([{"path": ["decisions", index], "code": "invalid_reference",
-                                               "detail": "Associated decision has no bindable identity"}])
-                self.namespace(declaration.get("decision_id"), payload, "d", seen, ["decisions", index, "decision_id"])
-                path = f"decisions[{index}]"
-                try:
-                    decision = Decision.model_validate(declaration).model_dump(exclude_unset=True)
-                    diagnostics.extend(self.evidence([decision], payload, "decisions", offset=index))
-                    if set(decision.get("relation_ids", [])) & rejected_relations:
-                        raise ModelSemanticError("Decision refers to a relation without valid source evidence")
-                except (ValidationError, ModelSemanticError):
-                    value["findings"].append(self.unresolved_association(declaration, payload, path, "invalid evidence or fields"))
-                    continue
-                if (not set(decision["issue_ids"]) <= issues
-                        or not set(decision.get("relation_ids", [])) <= relations):
-                    raise ModelContractError([{"path": ["decisions", index], "code": "invalid_reference",
-                                               "detail": "Decision has unknown resolution targets"}])
-                cited = {self.source_identity(e["range_id"]) for e in decision["evidence"]}
-                amendment = decision.get("amendment")
-                if amendment:
-                    if (amendment["target_item_id"] not in items
-                            or not set(amendment["replacement_item_ids"]) <= items
-                            or amendment["target_item_id"] in amendment["replacement_item_ids"]):
-                        raise ModelContractError([{"path": ["decisions", index, "amendment"], "code": "invalid_reference",
-                                               "detail": "Amendment has unknown or cyclic item targets"}])
-                try:
-                    for issue_id in decision["issue_ids"]:
-                        source_id = issue_map[issue_id].get("range_id")
-                        if source_id and self.source_identity(source_id) not in cited:
-                            raise ModelSemanticError("missing original issue source evidence")
-                    if amendment:
-                        for item_id in [amendment["target_item_id"], *amendment["replacement_item_ids"]]:
-                            original = {self.source_identity(e["range_id"]) for e in item_map[item_id]["evidence"]}
-                            if not original & cited:
-                                raise ModelSemanticError("missing original or replacement source evidence")
-                        diagnostics.extend(self.evidence(amendment["retained_rules"], payload,
-                                                          f"{path}.amendment.retained_rules"))
-                except ModelSemanticError as error:
-                    value["findings"].append(self.unresolved_association(declaration, payload, path, str(error)))
-                    continue
-                value["decisions"].append(decision)
-            if diagnostics:
-                value.setdefault("diagnostics", []).extend(diagnostics)
+        expected = {"range": _view_ids(payload["source_views"]),
+                    "item": {i["item_id"] for i in payload["items"]},
+                    "relation": {i["relation_id"] for i in payload["relations"]},
+                    "decision": {i["decision_id"] for i in payload["decisions"]}}
+        accepted = value["accepted_decision_ids"]
+        if not set(accepted) <= expected["decision"]:
+            raise ModelContractError([{"path": ["accepted_decision_ids"], "code": "unknown_decision",
+                                       "detail": "Accept only decisions supplied in this request"}])
+        value["accepted_decision_ids"] = list(dict.fromkeys(accepted))
+        # Receipt scope comes from the immutable input, never a model's ID echo.
+        for name, identities in expected.items():
+            value[f"reviewed_{name}_ids"] = sorted(identities)
         return value
 
     def source_identity(self, range_id):
         return self.sources.get(range_id, {}).get("source_range_id", range_id)
-
-    @staticmethod
-    def namespace(identity, payload, suffix, seen, path):
-        if (not isinstance(identity, str) or identity in seen
-                or re.fullmatch(re.escape(payload["work_unit_id"]) + rf":{suffix}[1-9][0-9]*", identity) is None):
-            raise ModelContractError([{"path": path, "code": "invalid_identity",
-                                       "detail": "Use a unique identity in this work unit namespace"}])
-        seen.add(identity)
 
     def operation_plan(self, phase, payloads):
         descriptors = []
@@ -915,17 +741,14 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     if not isinstance(source_reviews, list):
         raise ValueError("Cached source review requests must be an array")
     review_plan_ref, source_reviewed = await context.execute("review", source_reviews, model, save)
-    # Routing is host bookkeeping. It must not become another locate model round.
+    # Routing is host bookkeeping. It must not become another model round.
     await asyncio.to_thread(context.route_problems)
-    locate_plan_ref = association_plan_ref = joint_plan_ref = None
     candidates = list(context.local_candidates)
-    joint, reviewed = [], []
     decisions, relations = [], list(context.relations.values())
-    unverified, associated_only = set(), {candidate["candidate_id"] for candidate in candidates}
-    completed = [result for result in [*source_reviewed, *reviewed] if result]
+    completed = [result for result in source_reviewed if result]
     required = {"range": context.review_targets, "item": set(context.items),
-                "relation": {r["relation_id"] for r in relations} - unverified,
-                "decision": {d["decision_id"] for d in decisions}}
+                "relation": {r["relation_id"] for r in relations},
+                "decision": set()}
     coverage = {name: {identity for result in completed for identity in result[f"reviewed_{name}_ids"]}
                 for name in required if name != "range"}
     coverage["range"] = set()
@@ -934,39 +757,13 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
             assigned = {entry["range_id"] for entry in payload["dispositions"]}
             coverage["range"].update(assigned.intersection(result["reviewed_range_ids"]))
     missing = {name: sorted(ids - coverage[name]) for name, ids in required.items() if ids - coverage[name]}
-    joint_candidates = {c["candidate_id"] for payload, result in zip(joint, reviewed, strict=True)
-                        if result for c in payload["candidates"]}
-    if unreviewed := {c["candidate_id"] for c in candidates} - joint_candidates - associated_only:
-        missing["candidate"] = sorted(unreviewed)
     if missing:
         problems = assign_issues([issue("analysis_review_incomplete",
-            "Necessary source, item, relation, decision or joint-candidate coverage is incomplete.")], "coverage")
+            "Necessary source, item, relation or decision coverage is incomplete.")], "coverage")
         context.problems.extend(problems)
         context.host_issue_ids.update(problem["issue_id"] for problem in problems)
-    accepted = set()
-    for payload, result in zip(joint, reviewed, strict=True):
-        if result and not any(enforce_issue_policy(p)["blocking"] for p in result["findings"]):
-            accepted.update(result["accepted_decision_ids"])
-        elif result is None:
-            continue
-    # Source integrity, scope bindings and missing extraction require an explicit
-    # revision. Even an accepted proposal cannot mutate those host-owned facts.
-    for decision in decisions:
-        if set(decision["issue_ids"]) & context.protected:
-            accepted.discard(decision["decision_id"])
-        if decision["decision_id"] not in accepted:
-            context.problems.extend(assign_issues([issue("decision_not_accepted",
-                "A proposed resolution was not independently accepted or requires an explicit revision.")], decision["decision_id"]))
-    amended = [d for d in decisions if d["decision_id"] in accepted and d.get("amendment")]
-    targets = Counter(d["amendment"]["target_item_id"] for d in amended)
-    replacement_ids = {i for d in amended for i in d["amendment"]["replacement_item_ids"]}
-    for decision in amended:
-        target = decision["amendment"]["target_item_id"]
-        if targets[target] > 1 or target in replacement_ids:
-            accepted.discard(decision["decision_id"])
-            context.problems.extend(assign_issues([issue("amendment_effect_unresolved",
-                "Overlapping or chained net amendment decisions require one complete reviewed effect.")], target))
-    resolved = {q for d in decisions if d["decision_id"] in accepted for q in d["issue_ids"]}
+    accepted: set[str] = set()
+    resolved: set[str] = set()
     all_issues = assign_issues(context.problems, "analysis")
     active = [p for p in all_issues if p["issue_id"] not in resolved]
     hard = {p["issue_id"] for p in active
@@ -978,16 +775,16 @@ async def verify_analysis(source_plan, items_index, artifacts, model, budget, *,
     candidates_ref = await asyncio.to_thread(artifacts.put_json, candidates)
     return {"schema_version": 2, "blocking": bool(missing or context.incomplete_requests) or any(p["blocking"] for p in active),
             "hard_blocking": bool(missing or context.incomplete_requests or hard), "human_issue_ids": human,
-            "unverified_relation_ids": sorted(unverified),
+            "unverified_relation_ids": [],
             "issues": active, "all_issues": all_issues, "resolved_issue_ids": sorted(resolved),
             "accepted_decision_ids": sorted(accepted), "item_refs": context.item_refs,
             "relations_ref": relations_ref, "decisions_ref": decisions_ref, "candidates_ref": candidates_ref,
-            "review_plan_ref": review_plan_ref, "locate_plan_ref": locate_plan_ref,
-            "association_plan_ref": association_plan_ref, "joint_plan_ref": joint_plan_ref,
+            "review_plan_ref": review_plan_ref, "locate_plan_ref": None,
+            "association_plan_ref": None, "joint_plan_ref": None,
             "operation_refs": context.operation_refs,
             "problem_routing": context.problem_routing,
             "coverage": {"reviewed": {name: sorted(ids) for name, ids in coverage.items()},
-                         "joint_candidate_ids": sorted(joint_candidates), "missing": missing,
+                         "joint_candidate_ids": [], "missing": missing,
                          "incomplete_work_unit_ids": context.incomplete_requests},
             "counts": {"items": len(context.items), "ranges": len(context.owners), "relations": len(relations),
                        "decisions": len(decisions), "candidates": len(candidates),

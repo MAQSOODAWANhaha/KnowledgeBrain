@@ -40,9 +40,7 @@ class ConcurrentModel(Model):
             self.active -= 1
 
 
-@pytest.mark.parametrize("phase,operation", [
-    ("review", "review"), ("locate", "locate"), ("associate", "associate"), ("joint", "review"),
-])
+@pytest.mark.parametrize("phase,operation", [("review", "review")])
 async def test_stage_runs_two_requests_and_aggregates_in_plan_order(tmp_path, phase, operation):
     data, context, payloads = await stage(tmp_path, operation)
     model = ConcurrentModel()
