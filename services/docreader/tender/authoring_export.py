@@ -1846,11 +1846,13 @@ class _Assembler:
         chapter_id = chapter["chapter_id"]
         chapter_start = len(document.element.body) - 1
         rendered_heading = None
+        heading_paragraph = None
         if heading:
             path = self.display_paths.get(chapter_id, path)
             rendered_heading = self.catalog_titles.get(chapter_id) or _display_title(chapter['title'])
             heading_level = self.rendered_levels.get(chapter_id, len(path))
             paragraph = document.add_heading(rendered_heading, level=min(max(heading_level, 1), 9))
+            heading_paragraph = paragraph._p
             if numbering_id is not None and chapter_id not in self.catalog_titles and not _SOURCE_NUMBERED.match(rendered_heading.strip()):
                 # Word has nine native levels; a private list preserves a deeper host label without advancing level nine.
                 if len(path) > 9:
@@ -1917,6 +1919,7 @@ class _Assembler:
                        if _carried_source(target) and not forms.get(target["target_id"])}
         for target_index, target in enumerate(targets):
             start_index = len(document.element.body) - 1
+            heading_only = False
             target_id = target["target_id"]
             if target.get("subject"):
                 subject = document.add_paragraph(target["subject"], style="Caption")
@@ -2006,13 +2009,18 @@ class _Assembler:
                     and target_id not in carried_ids):
                 document.add_paragraph("（本部分内容待补）")
                 self.gap("export_content_pending", "响应位置尚无写作内容。", chapter_id, target_id)
+            target_bookmarked = False
             if len(document.element.body) - 1 > start_index:
                 add_bookmark(document.element.body[start_index], target_id, "target")
+                target_bookmarked = True
             else:
                 for ordinal, _ in linked:
                     if ordinal in unit_anchors:
                         add_bookmark(unit_anchors[ordinal], target_id, "target")
+                        target_bookmarked = True
                         break
+            if not target_bookmarked and heading_only and heading_paragraph is not None:
+                add_bookmark(heading_paragraph, target_id, "target")
         for ordinal, unit in enumerate(units):
             if ordinal not in rendered:
                 self.writing_unit(document, unit, chapter_id, blocked_forms, manual_forms,

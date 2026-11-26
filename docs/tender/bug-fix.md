@@ -1,6 +1,6 @@
 # 招投标活跃问题与修复记录
 
-本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-341**）。
+本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-342**）。
 已闭环的历史缺陷记录保存在 Git 历史，不在此长期堆积；跨模块高频防错规则沉淀在 [LESSONS.md](../../LESSONS.md)，动态运行状态只维护在 [交接](README.md#当前状态交接)。
 
 ## 维护约定
@@ -34,7 +34,7 @@
 - 现象与影响：Bidding 大纲在 `kb-literal-candidate` 恢复成功后，执行 `post-outline-export-Aytf4ruN/export.py` 在 `authoring_export.py` 第 1462 行 `document.add_paragraph(issue["detail"])` 抛出 `ValueError: All strings must be XML compatible: Unicode or ASCII, no NULL bytes or control characters`，导致 `completed-bidding` 未能生成 `template.docx`。
 - 根因：`Bidding.pdf` 物理第 21 页（`page_ordinal: 20, char_index: 626`）行末连字符在 PDFium 中返回 `pdfium_unicode: 2`、`text: '\ufffe'`（`U+FFFE`），进入冻结单元 `literal:page:20:d5cdfc3ddfdc9e065f63`（`“业务系统-电子招投标\ufffe参与的项目-招标业务管理-标前质疑”`）及大纲未归属待核项 `issues[699]['detail']`。`U+FFFE` 属于 XML 1.0 非法字符，`python-docx` / `lxml` 写入 `<w:t>` 时直接拒绝。
 - 解决方案：Word 导出写入段落和单元格前去掉 `U+FFFE` 等 XML 1.0 非法码位。冻结源与 JSON 台账保持原字节。
-- 验证：`test_export_xml_text.py`。真实 Bidding 导出与 `check_bidding.py` 尚未重跑。
+- 验证：`test_export_xml_text.py`；真实 `BiddingFile.pdf` 离线宿主目录计划整稿导出与 `acceptance_eval` 通过（原式表全匹配且无 XML 非法字符报错）。含模型分析台账的完整 `check_bidding.py` 复跑尚未执行。
 
 ## BUG-250：原文原子未列全时整包拒收并再发模型
 
@@ -190,3 +190,11 @@
 - 根因：`decode_placements` 未将字面字符串 `"null"` 归一为 `None`；`compile_plans` 直接把整份文档的 `ocr_issues`（含全书版式行对齐待核）全部拼入大纲 `issues`，未按大纲实际复制窗口过滤。
 - 改法：`decode_placements` 将字面 `"null"` 归一为 `None`（其余非法值仍严格拒收）；`compile_plans` 仅保留落入大纲实际复制窗口页码内的 `outline_directory_literal_pending`。
 - 验证：`test_item_placement.py` 与 `directory_compile` Red→Green 单测覆盖。
+
+## BUG-341：纯标题去重章节的首个目标丢失 Word 书签，导致定位和覆盖评测报缺
+
+- 状态：已修，离线回归与安服多级大纲重导通过；待真实工作台全链路复验。
+- 现象与影响：父章节首个 `form` 目标的 `purpose` 与章节标题相同时，导出器抑制重复正文及占位行，未在该章节生成额外段落，致使该 `target_id` 的 Word 书签未被写入；工作台位置跳转无法定位这些目标，`acceptance_eval` 报告 `docx_missing_targets` 并连带把已归属到这些目标的事项判为 `target_missing_in_docx`。
+- 根因：`services/docreader/tender/authoring_export.py` 仅在目标循环新增 body 节点或渲染写作单元时写入 `target` 书签，`heading_only` 路径两者皆无且未回落挂载到章节标题段落 `heading_paragraph`。
+- 改法：在 `_Assembler.chapter` 记录当前章节的标题段落 `heading_paragraph`，当 `heading_only` 目标未在正文新增节点且未挂接写作单元书签时，将 `target` 书签锚定到 `heading_paragraph`。
+- 验证：`services/docreader/tests/unit/test_toc_pagination.py` 新增 Red→Green 用例验证 `read_docx_outline` 书签绑定与 `acceptance_eval` 零缺失；安服多级大纲样本离线重导验证 `missing_target_ids` 归零、已放置规则零缺失且原式表全匹配。待隔离环境重建并由真实工作台与 ONLYOFFICE 全链路复验。

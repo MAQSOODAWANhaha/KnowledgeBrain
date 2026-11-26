@@ -6,8 +6,9 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from docreader.integrations.artifacts import ArtifactStore
+from docreader.tender.acceptance_eval import evaluate_acceptance
 from docreader.tender.authoring_export import export_authoring_document
-from docreader.tender.word_navigation import bookmark_name
+from docreader.tender.word_navigation import bookmark_name, read_docx_outline
 
 from test_authoring_layout import native_part
 
@@ -218,3 +219,72 @@ def test_original_table_at_body_start_keeps_both_anchors_without_a_break_carrier
     names = [node.get(qn("w:name")) for node in first.iter(qn("w:bookmarkStart"))]
     assert names.count(bookmark_name("source")) == names.count(bookmark_name("source:1", "target")) == 1
     assert not [paragraph for paragraph in document.paragraphs if not paragraph.text]
+
+
+def test_bug341_heading_only_target_keeps_target_bookmark_for_navigation_and_eval(tmp_path):
+    artifacts = ArtifactStore(tmp_path)
+    extract_ref = artifacts.put_json({"items": []})
+    rule_ref = {"item_ref": {"item_id": "pack-1:i1", "artifact_ref": extract_ref}}
+    requirements = {
+        "rules": [
+            {
+                "rule_ref": rule_ref,
+                "rule": {
+                    "kind": "requirement",
+                    "text": "投标保证金人民币26,000.00元。",
+                    "evidence": [{"quote": "投标保证金人民币26,000.00元。"}],
+                },
+            }
+        ]
+    }
+    outline = {
+        "chapters": [
+            chapter(
+                "chapter-7",
+                "五、投标保证金证明",
+                targets=[
+                    {
+                        "target_id": "chapter-7:target-1",
+                        "kind": "form",
+                        "purpose": "五、投标保证金证明",
+                        "rule_refs": [rule_ref],
+                        "source_refs": [],
+                        "manual_fill": True,
+                        "support_origins": ["tender"],
+                    }
+                ],
+                children=[
+                    chapter(
+                        "chapter-7.1",
+                        "5-1 电子保函",
+                        targets=[
+                            {
+                                "target_id": "chapter-7.1:target-1",
+                                "kind": "form",
+                                "purpose": "5-1 电子保函",
+                                "rule_refs": [],
+                                "source_refs": [],
+                                "manual_fill": True,
+                                "support_origins": ["tender"],
+                            }
+                        ],
+                    )
+                ],
+            )
+        ]
+    }
+    result = export_authoring_document(artifacts, outline, [], requirements=requirements)
+    docx_bytes = artifacts.read_bytes(result["docx_ref"])
+    nav = read_docx_outline(docx_bytes, outline["chapters"])
+    parent = next(node for node in nav["chapters"] if node["chapter_id"] == "chapter-7")
+    assert parent["bookmark"] == bookmark_name("chapter-7")
+    assert parent["targets"][0]["bookmark"] == bookmark_name("chapter-7:target-1", "target")
+
+    evaluation = evaluate_acceptance(
+        outline=outline,
+        docx_bytes=docx_bytes,
+        requirements=requirements,
+        gaps=[],
+    )
+    assert evaluation["criteria"]["file_usability"]["missing_target_ids"] == []
+    assert evaluation["criteria"]["requirements_coverage"]["counts"]["missing"] == 0
