@@ -622,6 +622,21 @@ def _evaluate_original_tables(
     }
 
 
+_ADOPTED_REMOVAL_MARKER = "复核明确否定的内容未采用"
+
+
+def _removed_by_review_scopes(gaps: list[dict[str, Any]] | None) -> tuple[set[str], set[tuple[str | None, str | None]]]:
+    task_ids: set[str] = set()
+    locations: set[tuple[str | None, str | None]] = set()
+    for gap in gaps or []:
+        if gap.get("code") == "writing_gap" and _ADOPTED_REMOVAL_MARKER in (gap.get("detail") or ""):
+            if gap.get("task_id"):
+                task_ids.add(str(gap["task_id"]))
+            if gap.get("chapter_id") or gap.get("target_id"):
+                locations.add((gap.get("chapter_id"), gap.get("target_id")))
+    return task_ids, locations
+
+
 def _evaluate_no_fabrication(
     outline: dict[str, Any],
     coverage: dict[str, Any] | None,
@@ -638,6 +653,8 @@ def _evaluate_no_fabrication(
             target_meta[target["target_id"]] = (cid, title, target)
 
     violations: list[dict[str, Any]] = []
+    removed_task_ids, removed_locations = _removed_by_review_scopes(gaps)
+    removed_by_review = 0
     entries = (coverage or {}).get("entries") if isinstance(coverage, dict) else None
     if isinstance(entries, list):
         for entry in entries:
@@ -677,19 +694,29 @@ def _evaluate_no_fabrication(
         code = gap.get("code")
         if code in _FABRICATION_GAP_CODES:
             cid = gap.get("chapter_id")
-            key = (code, cid, gap.get("target_id"), gap.get("detail"))
+            tid = gap.get("target_id")
+            task_id = gap.get("task_id")
+            if code == "unsupported_content" and (
+                (task_id and str(task_id) in removed_task_ids)
+                or ((cid or tid) and (cid, tid) in removed_locations)
+            ):
+                removed_by_review += 1
+                continue
+            key = (code, cid, tid, gap.get("detail"))
             if key in seen_gap_keys:
                 continue
             seen_gap_keys.add(key)
             violations.append({
                 "chapter_id": cid,
                 "chapter_title": chapter_titles.get(cid, "") if cid else "",
-                "target_id": gap.get("target_id"),
+                "target_id": tid,
                 "coverage_id": None,
                 "code": code,
                 "detail": gap.get("detail", ""),
             })
     for code, count in ((report or {}).get("document_gaps") or {}).items():
+        if code == "unsupported_content" and count and count <= removed_by_review:
+            continue
         if code in _FABRICATION_GAP_CODES and count and not any(v["code"] == code for v in violations):
             violations.append({
                 "chapter_id": None,
@@ -716,6 +743,7 @@ def _evaluate_no_fabrication(
         "counts": {
             "coverage_entries": len(entries) if isinstance(entries, list) else None,
             "violations": len(violations),
+            "removed_by_review": removed_by_review,
         },
         "violations": violations,
     }

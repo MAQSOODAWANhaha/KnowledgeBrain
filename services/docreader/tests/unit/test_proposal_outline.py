@@ -429,4 +429,5 @@ async def test_expand_proposal_outlines_prunes_empty_generated_leaf_sections(tmp
     )
     proposal = result["chapters"][0]
     assert [c["title"] for c in proposal["children"]] == ["11.1 总体方案", "承诺"]
+    assert proposal["children"][0]["targets"][0]["related_target_ids"] == []
     assert sorted(_collect_rule_ids([proposal])) == [f"i{n}" for n in range(1, 7)]

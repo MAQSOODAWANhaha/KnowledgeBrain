@@ -1999,30 +1999,42 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     # arrangements instead of repeatedly asking the model to copy and recheck them.
     basis_batches = list(_batches(basis_records, budget, 'authoring_basis', basis_payload))
     await _plan(execute, 'authoring_basis', len(basis_batches), 'basis')
-    for batch in basis_batches:
-        try:
-            def validate_basis(raw):
-                value = _parse(AuthoringBasisResponse, raw)
-                value['project_background'] = value['approach'] = ''
-                if len(_json(value).encode()) > 12000:
-                    raise ModelContractError([{'path': [], 'code': 'basis_summary_too_large',
-                        'detail': 'Keep the shared proposal within 12000 UTF-8 bytes; detailed requirements remain in writing tasks.'}])
-                allowed = {s['support_id'] for s in basis_payload(batch)['supports']}
-                arrangements = []
-                for entry in value['shared_arrangements']:
-                    if not entry['support_ids'] or set(entry['support_ids']) - allowed:
-                        value['gaps'].append('一项共同安排缺少可用资料引用，未采用，相关应答留空。')
-                        continue
-                    arrangements.append({**{k: v for k, v in entry.items() if k != 'support_ids'},
-                                         'material_ids': list(dict.fromkeys(by_alias[s] for s in entry['support_ids']))})
-                return AuthoringBasisContent(**{**value, 'shared_arrangements': arrangements}).model_dump()
-            value = await _ask(execute, budget, 'authoring_basis', basis_payload(batch), validate_basis)
-            assert value is not None
-            basis_response['shared_arrangements'] = list({_json(entry): entry for entry in [
-                *basis_response['shared_arrangements'], *value['shared_arrangements']]}.values())
-            basis_response['gaps'].extend(value['gaps'])
-        except _LOCAL_FAILURES as error:
-            gaps.append(_gap('basis_partial', f'部分共同依据未形成（{type(error).__name__}）；保留已有方案和待补信息。'))
+    basis_limiter = asyncio.Semaphore(concurrency)
+
+    async def basis_one(batch):
+        payload = basis_payload(batch)
+        allowed = {s['support_id'] for s in payload['supports']}
+
+        def validate_basis(raw):
+            value = _parse(AuthoringBasisResponse, raw)
+            value['project_background'] = value['approach'] = ''
+            if len(_json(value).encode()) > 12000:
+                raise ModelContractError([{'path': [], 'code': 'basis_summary_too_large',
+                    'detail': 'Keep the shared proposal within 12000 UTF-8 bytes; detailed requirements remain in writing tasks.'}])
+            arrangements = []
+            for entry in value['shared_arrangements']:
+                if not entry['support_ids'] or set(entry['support_ids']) - allowed:
+                    value['gaps'].append('一项共同安排缺少可用资料引用，未采用，相关应答留空。')
+                    continue
+                arrangements.append({**{k: v for k, v in entry.items() if k != 'support_ids'},
+                                     'material_ids': list(dict.fromkeys(by_alias[s] for s in entry['support_ids']))})
+            return AuthoringBasisContent(**{**value, 'shared_arrangements': arrangements}).model_dump()
+
+        async with basis_limiter:
+            try:
+                return await _ask(execute, budget, 'authoring_basis', payload, validate_basis), None
+            except _LOCAL_FAILURES as error:
+                return None, _gap('basis_partial', f'部分共同依据未形成（{type(error).__name__}）；保留已有方案和待补信息。')
+
+    basis_results = await asyncio.gather(*(basis_one(batch) for batch in basis_batches))
+    for value, gap in basis_results:
+        if gap is not None:
+            gaps.append(gap)
+            continue
+        assert value is not None
+        basis_response['shared_arrangements'] = list({_json(entry): entry for entry in [
+            *basis_response['shared_arrangements'], *value['shared_arrangements']]}.values())
+        basis_response['gaps'].extend(value['gaps'])
     known_materials = {m['material_id'] for m in candidates}
     supported = []
     for arrangement in basis_response['shared_arrangements']:
@@ -2217,8 +2229,11 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                         for f in previous if set(f['task_ids']) & identities]}
         batches = list(_batches(records, budget, 'authoring_review', review_payload))
         await _plan(execute, 'authoring_review', len(batches), f'review-{review_round}')
-        for batch in batches:
+
+        async def review_one(batch):
             ids = {entry['task_id'] for entry in batch}
+            payload = review_payload(batch)
+
             def validate_review(raw):
                 body = {key: value for key, value in raw.items() if key != 'assessments'} if isinstance(raw, dict) else raw
                 value = _parse(AuthoringReviewResponse, body)
@@ -2259,16 +2274,32 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                         for task_id in item['reviewed_task_ids'] if task_id in unit_by_task}
                 value['assessments'] = accepted
                 return value
-            try:
-                value = await _ask(execute, budget, 'authoring_review', review_payload(batch), validate_review)
-                assert value is not None
-                findings.extend(value['findings'])
-                accepted_assessments.extend(value.get('assessments') or [])
-                completed.update(ids)
-                replaced.update(i for i, f in enumerate(previous) if f['task_ids'] and set(f['task_ids']) <= ids)
-            except _LOCAL_FAILURES as error:
-                findings.append({'code': 'review_unavailable', 'detail': f'本批实际正文尚未复核（{type(error).__name__}）。',
-                                 'task_ids': sorted(ids), 'suggestion': '保留文件，后续针对这些单元重试复核。'})
+
+            async with limiter:
+                try:
+                    value = await _ask(execute, budget, 'authoring_review', payload, validate_review)
+                    assert value is not None
+                    return (
+                        value['findings'],
+                        value.get('assessments') or [],
+                        ids,
+                        {i for i, f in enumerate(previous) if f['task_ids'] and set(f['task_ids']) <= ids},
+                    )
+                except _LOCAL_FAILURES as error:
+                    return (
+                        [{'code': 'review_unavailable', 'detail': f'本批实际正文尚未复核（{type(error).__name__}）。',
+                          'task_ids': sorted(ids), 'suggestion': '保留文件，后续针对这些单元重试复核。'}],
+                        [],
+                        set(),
+                        set(),
+                    )
+
+        batch_results = await asyncio.gather(*(review_one(batch) for batch in batches))
+        for batch_findings, batch_assessments, batch_completed, batch_replaced in batch_results:
+            findings.extend(batch_findings)
+            accepted_assessments.extend(batch_assessments)
+            completed.update(batch_completed)
+            replaced.update(batch_replaced)
         return findings, completed, replaced
     findings, _, _ = await review(review_records, unit_by_task={unit['task_id']: unit for unit in units})
     initial_review_ref = artifacts.put_json(AuthoringReviewRecord(

@@ -205,3 +205,89 @@ async def test_generate_document_compiles_a_directory_instead_of_organizing(monk
         artifacts, context.input, budget, execute, outline_only=True, concurrency=concurrency)
     outline = artifacts.read_json(reference)
     assert "outline_empty" in {issue["code"] for issue in outline["issues"]}
+
+
+async def test_authoring_review_runs_multiple_batches_concurrently_and_preserves_order(tmp_path):
+    from docreader.integrations.artifacts import ArtifactStore
+    from docreader.llm.budget import RequestBudget
+    from docreader.tender.schema import AuthoringInput
+
+    artifacts = ArtifactStore(tmp_path)
+    snapshot = AuthoringInput.model_validate({
+        "schema_version": 2, "run_id": "rev-conc", "source_version": 1, "domain_revision": 1,
+    }).model_dump()
+    outline = {
+        "schema_version": 2,
+        "authoring_input": snapshot,
+        "issues": [],
+        "chapters": [
+            {
+                "chapter_id": f"ch-{idx}",
+                "title": f"方案章节{idx}",
+                "children": [],
+                "is_volume": False,
+                "presentation_role": "body",
+                "targets": [{
+                    "target_id": f"ch-{idx}:t1",
+                    "kind": "narrative",
+                    "purpose": f"编制方案章节{idx}",
+                    "manual_fill": False,
+                    "support_origins": ["knowledge"],
+                    "rule_refs": [],
+                    "source_refs": [],
+                }],
+            }
+            for idx in (1, 2)
+        ],
+    }
+    materials = [
+        {"material_id": f"m-{idx}", "title": f"资料{idx}", "text": ("企业服务规范正文内容" * 260),
+         "usage": "reference", "attachment": False, "locator": {"target_ids": [f"ch-{idx}:t1"]}}
+        for idx in (1, 2)
+    ]
+
+    in_flight = 0
+    max_review_in_flight = 0
+    both_reviews = asyncio.Event()
+
+    async def execute(task, request, validate):
+        nonlocal in_flight, max_review_in_flight
+        body = json.loads(request["messages"][1]["content"][0]["text"])
+        if task == "authoring_structure":
+            return validate({"findings": []})
+        if task == "authoring_basis":
+            return validate({"shared_arrangements": [], "gaps": []})
+        if task == "authoring_write":
+            tid = body["targets"][0]["target_id"]
+            sid = body["targets"][0]["support_ids"][0]
+            return validate({
+                "blocks": [{"kind": "paragraph", "text": "依据企业规范编制。" * 40, "target_ids": [tid], "support_ids": [sid]}],
+                "cell_fills": [], "row_fills": [], "attachment_ids": [], "gaps": [],
+            })
+        assert task == "authoring_review"
+        in_flight += 1
+        max_review_in_flight = max(max_review_in_flight, in_flight)
+        if in_flight >= 2:
+            both_reviews.set()
+        await asyncio.wait_for(both_reviews.wait(), timeout=2.0)
+        in_flight -= 1
+        wids = [unit["task_id"] for unit in body["units"]]
+        return validate({"findings": [{
+            "code": "review_note", "detail": f"checked-{wids[0]}", "task_ids": wids,
+            "content_ids": [], "suggestion": "", "can_revise": False, "reject_content": False,
+        }]})
+
+    # Short prompts + tight budget forces 2 separate review batches (1 writing unit per review batch).
+    prompts = {
+        task: "Return JSON."
+        for task in ("authoring_structure", "authoring_basis", "authoring_write", "authoring_review")
+    }
+    budget = RequestBudget(context_tokens=16000, output_reserve=1000, model="unused", prompts=prompts)
+    doc_ref = await pipeline.generate_document(
+        artifacts, snapshot, budget, execute,
+        outline=outline, materials=materials, concurrency=2,
+    )
+    doc = artifacts.read_json(doc_ref)
+    review = artifacts.read_json(doc["review_ref"])
+    assert max_review_in_flight == 2
+    assert [f["detail"] for f in review["findings"]] == ["checked-w1", "checked-w2"]

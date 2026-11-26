@@ -257,7 +257,6 @@ def _output_fits(budget, rule_ids: list[str]) -> bool:
 
 def _materialize_sections(
     parent_chapter_id: str,
-    form_target_id: str,
     sections: list[dict[str, Any]],
     assignments: dict[str, str | None],
     rule_refs_by_id: dict[str, dict[str, Any]],
@@ -296,7 +295,7 @@ def _materialize_sections(
                     "source_refs": [],
                     "manual_fill": False,
                     "support_origins": ["knowledge"],
-                    "related_target_ids": [form_target_id],
+                    "related_target_ids": [],
                 })
             built.append({
                 "chapter_id": chapter_id,
@@ -341,7 +340,7 @@ async def _assign_rules_in_batches(
     """Oversized fallback: assign rules into the generated section tree using item_placement batching."""
     from docreader.tender.item_placement import place_items
 
-    synthetic_chapters, _ = _materialize_sections("proposal", "form", sections, {}, {})
+    synthetic_chapters, _ = _materialize_sections("proposal", sections, {}, {})
     synthetic_outline = {"chapters": synthetic_chapters, "issues": []}
     target_to_sid: dict[str, str] = {}
 
@@ -442,7 +441,7 @@ async def expand_proposal_outlines(
             return chapter, form, answer, None, None
 
         new_children, leftover = _materialize_sections(
-            chapter["chapter_id"], form["target_id"], sections, assignments, rule_refs_by_id
+            chapter["chapter_id"], sections, assignments, rule_refs_by_id
         )
         return chapter, form, answer, new_children, leftover
 

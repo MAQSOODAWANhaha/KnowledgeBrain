@@ -388,3 +388,39 @@ def test_unknown_inputs_stay_unknown_and_explicit_pending_is_not_silent_omission
     loaded_score = json.loads(out_path.read_text(encoding="utf-8"))
     assert loaded_score["summary"]["machine_passed"] == 4
 
+
+def test_removed_unsupported_content_is_audited_separately_while_unremoved_still_fails(tmp_path):
+    artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
+    docx_bytes = artifacts.read_bytes(exported["docx_ref"])
+
+    # When _adopt_reviewed stripped the rejected block (matching writing_gap present), no_fabrication stays machine_passed.
+    removed_gaps = [
+        *exported["gaps"],
+        {"code": "writing_gap", "task_id": "task-2", "chapter_id": "ch-2", "target_id": "t-2",
+         "detail": "复核明确否定的内容未采用，相应位置留空；其他有据内容保留。"},
+        {"code": "unsupported_content", "task_id": "task-2", "chapter_id": "ch-2", "target_id": "t-2",
+         "detail": "历史复核发现已由宿主剔除。"},
+    ]
+    cleaned = evaluate_acceptance(
+        outline=outline, docx_bytes=docx_bytes, requirements=requirements,
+        coverage=coverage, gaps=removed_gaps, artifacts=artifacts,
+    )
+    fab_ok = cleaned["criteria"]["no_fabrication"]
+    assert fab_ok["machine_passed"] is True
+    assert fab_ok["counts"]["violations"] == 0
+    assert fab_ok["counts"]["removed_by_review"] == 1
+
+    # Without matching host removal confirmation, unsupported_content MUST still fail no_fabrication.
+    leaked_gaps = [
+        *exported["gaps"],
+        {"code": "unsupported_content", "task_id": "task-2", "chapter_id": "ch-2", "target_id": "t-2",
+         "detail": "未剔除的无据内容。"},
+    ]
+    leaked = evaluate_acceptance(
+        outline=outline, docx_bytes=docx_bytes, requirements=requirements,
+        coverage=coverage, gaps=leaked_gaps, artifacts=artifacts,
+    )
+    assert leaked["criteria"]["no_fabrication"]["machine_passed"] is False
+    assert leaked["criteria"]["no_fabrication"]["status"] == "fail"
+    assert leaked["criteria"]["no_fabrication"]["counts"]["removed_by_review"] == 0
+

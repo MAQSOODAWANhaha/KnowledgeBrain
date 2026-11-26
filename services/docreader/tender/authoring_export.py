@@ -544,7 +544,7 @@ def _pdf_table_borders(artifacts, source, locator) -> dict[str, int] | None:
         with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
             page = pdf[page_ordinal]
             for obj in page.get_objects():
-                if obj.type != raw.FPDF_PAGEOBJ_PATH:
+                if raw.FPDFPageObj_GetType(obj) != raw.FPDF_PAGEOBJ_PATH:
                     continue
                 try:
                     ox0, oy0, ox1, oy1 = obj.get_bounds()
