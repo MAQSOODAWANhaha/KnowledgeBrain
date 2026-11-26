@@ -47,11 +47,16 @@ def _ocr_response(value):
 
 
 class TenderNodes:
-    def __init__(self, store, artifacts, lease, model=None):
+    DEFAULT_CONCURRENCY = 6
+
+    def __init__(self, store, artifacts, lease, model=None, *, concurrency: int = DEFAULT_CONCURRENCY):
+        if type(concurrency) is not int or concurrency < 1:
+            raise ValueError("workflow concurrency must be a positive integer")
         self.store, self.artifacts, self.lease = store, artifacts, lease
         self.model = model
         self.repo = EvidenceRepository(artifacts)
-        self.semaphore = asyncio.Semaphore(2)
+        self.concurrency = concurrency
+        self.semaphore = asyncio.Semaphore(concurrency)
         self._ocr_locks = {}
         self._budget = None
 
@@ -59,7 +64,13 @@ class TenderNodes:
         if self.model is None:
             from docreader.llm import ModelConfig, OpenAIModel
 
-            self.model = OpenAIModel(ModelConfig.from_env(), self.store, self.lease, artifacts=self.artifacts)
+            self.model = OpenAIModel(
+                ModelConfig.from_env(),
+                self.store,
+                self.lease,
+                concurrency=self.concurrency,
+                artifacts=self.artifacts,
+            )
         return self.model
 
     def _request_budget(self):

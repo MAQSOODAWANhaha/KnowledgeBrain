@@ -478,7 +478,7 @@ class _Analysis:
             return plan
 
         plan_ref = await save(f"analysis-{phase}-plan", planned, inputs={"plan_digest": plan_digest})
-        semaphore = getattr(model, "semaphore", None) or asyncio.Semaphore(2)
+        semaphore = getattr(model, "semaphore", None) or getattr(model, "_semaphore", None) or asyncio.Semaphore(2)
         scope_locks = {payload["work_unit_id"]: asyncio.Lock() for payload in payloads}
         stopped = asyncio.Event()
 

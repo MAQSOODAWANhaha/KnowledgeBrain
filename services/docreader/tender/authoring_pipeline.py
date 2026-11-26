@@ -1796,7 +1796,7 @@ def _adopt_reviewed(units, findings, artifacts, superseded):
 
 
 async def generate_document(artifacts, snapshot, budget, execute, *, materials=(), knowledge=None,
-                            concurrency=2, review_request=None, submission_sources=(), on_outline=None,
+                            concurrency=6, review_request=None, submission_sources=(), on_outline=None,
                             outline=None, outline_only=False, saved_units=(), on_unit=None,
                             saved_plan=None, on_plan=None, directory_plans=None, directory_documents=None,
                             directory_contract=None, render_pdf=None, on_layout=None, saved_layout_exports=None,

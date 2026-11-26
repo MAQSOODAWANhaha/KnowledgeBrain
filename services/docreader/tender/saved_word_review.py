@@ -130,7 +130,9 @@ def _prepare_review(artifacts, document, data):
     return records, gaps, contexts, fallback
 
 
-async def review_saved_word(artifacts, document, data, budget, execute, *, reason=""):
+async def review_saved_word(artifacts, document, data, budget, execute, *, reason="", concurrency=6):
+    if type(concurrency) is not int or concurrency < 1:
+        raise ValueError("saved word review concurrency must be positive")
     records, gaps, contexts, fallback = await asyncio.to_thread(_prepare_review, artifacts, document, data)
     entries = [{**record, "context_id": record["chapter_id"] or "unbound"} for record in records]
     findings, reviewed = [], []
@@ -139,7 +141,9 @@ async def review_saved_word(artifacts, document, data, budget, execute, *, reaso
         return {"operation": "review_saved_word", "reason": reason, "records": batch,
                 "contexts": {identity: contexts.get(identity, [fallback]) for identity in sorted(used)}}
     batches = await asyncio.to_thread(lambda: list(_batches(entries, budget, "authoring_review", payload)))
-    for batch in batches:
+    limiter = asyncio.Semaphore(concurrency)
+
+    async def review_one(batch):
         ids = {record["task_id"] for record in batch}
         def validate(raw):
             value = _parse(AuthoringReviewResponse, raw)
@@ -151,10 +155,17 @@ async def review_saved_word(artifacts, document, data, budget, execute, *, reaso
             return value
         request = build_request(budget.model, PROMPT, payload(batch), task="authoring_review",
                                 reasoning_effort=budget.reasoning_effort)
-        try:
-            budget.require_request(request, "authoring_review")
-            response = await execute("authoring_review", request, validate)
-        except (ModelBudgetError, ModelWorkUnitExhausted) as error:
+        async with limiter:
+            try:
+                budget.require_request(request, "authoring_review")
+                response = await execute("authoring_review", request, validate)
+            except (ModelBudgetError, ModelWorkUnitExhausted) as error:
+                return None, ids, error
+        return response, ids, None
+
+    batch_results = await asyncio.gather(*(review_one(batch) for batch in batches))
+    for response, ids, error in batch_results:
+        if error is not None or response is None:
             gaps.append({"code": "saved_word_review_unavailable", "detail": f"保存稿记录 {', '.join(sorted(ids))} 尚未完成复核（{type(error).__name__}），请人工核查或恢复任务。"})
             continue
         findings.extend(response["findings"])
@@ -166,7 +177,7 @@ async def review_saved_word(artifacts, document, data, budget, execute, *, reaso
 
 async def execute_saved_review(analysis_store, artifacts, config, budget, *, execution_id, snapshot, document_ref,
                                saved_ref, version_id, docx_sha256, reason, transport=None,
-                               lease_seconds=60, heartbeat_seconds=20, timeout_seconds=60):
+                               lease_seconds=60, heartbeat_seconds=20, timeout_seconds=60, concurrency=6):
     if budget.reasoning_effort != getattr(config.chat, "reasoning_effort", None):
         raise ModelConfigurationError("saved review budget differs from configured reasoning effort")
     store = AuthoringStore(analysis_store.dsn)
@@ -195,10 +206,11 @@ async def execute_saved_review(analysis_store, artifacts, config, budget, *, exe
         if hashlib.sha256(data).hexdigest() != docx_sha256:
             raise ArtifactIntegrityError("saved Word review input changed")
         document = await asyncio.to_thread(artifacts.read_json, document_ref)
-        async with OpenAIModel(config, store, lease, prompts={}, concurrency=1, timeout_seconds=timeout_seconds,
+        async with OpenAIModel(config, store, lease, prompts={}, concurrency=concurrency, timeout_seconds=timeout_seconds,
                                artifacts=artifacts, transport=transport) as client:
             executor = _DocumentExecutor(client, store, artifacts, lease, admitted, spec, None)
-            report = await review_saved_word(artifacts, document, data, admitted, executor, reason=reason)
+            report = await review_saved_word(artifacts, document, data, admitted, executor,
+                                             reason=reason, concurrency=concurrency)
         report.update(version_id=version_id, docx_sha256=docx_sha256, reason=reason,
                       analysis_identity={key: snapshot[key] for key in ("run_id", "source_version", "domain_revision")},
                       usage=_usage((await store.get_execution(execution_id))["requests"]))
