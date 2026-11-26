@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -13,7 +14,7 @@ from uuid import UUID
 
 import httpx
 
-from docreader.integrations.authoring_knowledge import KnowledgeProvider
+from docreader.integrations.authoring_knowledge import KnowledgeProvider, validate_knowledge_concurrency
 
 
 def normalize_knowledge_selections(values):
@@ -77,7 +78,8 @@ class _ExecutionTransport(httpx.AsyncBaseTransport):
 
 
 class WebKnowledgeProvider:
-    def __init__(self, *, execution_id, selections, base_url, service_secret, transport):
+    def __init__(self, *, execution_id, selections, base_url, service_secret, transport, concurrency: int = 6):
+        self.concurrency = validate_knowledge_concurrency(concurrency)
         self.selections = normalize_knowledge_selections(selections)
         self.base_url = None
         try:
@@ -91,7 +93,8 @@ class WebKnowledgeProvider:
         self.providers = [KnowledgeProvider(base_url=self.base_url,
             auth=_WorkerAuth(execution_id, service_secret) if configured else None,
             product_id=selection["product_id"], version_id=selection["version_id"], include_library=False,
-            transport=_ExecutionTransport(self.base_url, execution_id, selection, transport) if configured else None)
+            transport=_ExecutionTransport(self.base_url, execution_id, selection, transport) if configured else None,
+            concurrency=self.concurrency)
             for selection in self.selections]
 
     def spec(self):
@@ -100,8 +103,14 @@ class WebKnowledgeProvider:
 
     async def search(self, queries, artifacts, *, run_operation=None):
         materials, issues = {}, []
-        for provider in self.providers:
-            result = await provider.search(queries, artifacts, run_operation=run_operation)
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def fetch_provider(provider):
+            async with semaphore:
+                return await provider.search(queries, artifacts, run_operation=run_operation)
+
+        results = await asyncio.gather(*(fetch_provider(provider) for provider in self.providers))
+        for result in results:
             issues.extend(result["issues"])
             for material in result["materials"]:
                 identity = material["material_id"]
@@ -114,11 +123,12 @@ class WebKnowledgeProvider:
         return {"materials": list(materials.values()), "issues": issues}
 
 
-def build_web_knowledge(*, execution_id, selections, base_url=None, service_secret=None, transport=None):
+def build_web_knowledge(*, execution_id, selections, base_url=None, service_secret=None, transport=None,
+                        concurrency: int = 6):
     selected = normalize_knowledge_selections(selections)
     if not selected:
         return None
     return WebKnowledgeProvider(execution_id=execution_id, selections=selected,
         base_url=base_url if base_url is not None else os.environ.get("KNOWLEDGEBRAIN_INTERNAL_API_URL"),
         service_secret=service_secret if service_secret is not None else os.environ.get("GRPC_AUTH_TOKEN"),
-        transport=transport)
+        transport=transport, concurrency=concurrency)

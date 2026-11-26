@@ -20,7 +20,11 @@ from docreader.integrations.authoring import (
     read_authoring_input,
 )
 from docreader.integrations.authoring_store import AuthoringStore
-from docreader.integrations.authoring_knowledge import KnowledgeResponseError, KnowledgeUnavailable
+from docreader.integrations.authoring_knowledge import (
+    KnowledgeResponseError,
+    KnowledgeUnavailable,
+    validate_knowledge_concurrency,
+)
 from docreader.integrations.store import Cancelled, Conflict, StaleExecution
 from docreader.llm.budget import RequestBudget
 from docreader.llm.client import OpenAIModel
@@ -320,10 +324,12 @@ class _DocumentExecutor:
 
 
 class _FrozenKnowledge:
-    def __init__(self, provider, spec, store, artifacts, lease):
+    def __init__(self, provider, spec, store, artifacts, lease, *, concurrency: int = 6):
+        self.concurrency = validate_knowledge_concurrency(concurrency)
         self.provider, self._spec = provider, deepcopy(spec)
         self.store, self.artifacts, self.lease = store, artifacts, lease
         self._operation_locks = {}
+        self._snapshot_locks = {}
 
     def spec(self):
         return deepcopy(self._spec)
@@ -356,11 +362,19 @@ class _FrozenKnowledge:
             query = entry.get("query")
             if isinstance(query, str) and isinstance(entry.get("query_id"), str) and entry.get("query_id"):
                 query_ids.setdefault(query, entry["query_id"])
-        for query, targets in grouped.items():
-            value = await self._query(
-                query, artifacts, include_original=query in original_queries,
-                query_id=query_ids.get(query),
-            )
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def fetch_query(query: str):
+            async with semaphore:
+                return await self._query(
+                    query,
+                    artifacts,
+                    include_original=query in original_queries,
+                    query_id=query_ids.get(query),
+                )
+
+        results = await asyncio.gather(*(fetch_query(query) for query in grouped))
+        for (_, targets), value in zip(grouped.items(), results):
             issues.extend(
                 {**issue, "target_id": target}
                 for issue in value["issues"]
@@ -457,55 +471,56 @@ class _FrozenKnowledge:
                 "include_original": include_original,
             }
         )
-        receipt = await self.store.receipt(
-            self.lease, "knowledge-snapshot", digest, input_digest=digest
-        )
-        if receipt is not None:
-            value = await asyncio.to_thread(
-                self.artifacts.read_json, receipt["artifact_ref"]
+        async with self._snapshot_locks.setdefault(digest, asyncio.Lock()):
+            receipt = await self.store.receipt(
+                self.lease, "knowledge-snapshot", digest, input_digest=digest
             )
-            if (
-                not isinstance(value, dict)
-                or value.get("query") != query
-                or value.get("provider") != self._spec
-                or value.get("include_original", False) != include_original
-            ):
-                raise ArtifactIntegrityError(
-                    "knowledge receipt belongs to another query or retrieval scope"
+            if receipt is not None:
+                value = await asyncio.to_thread(
+                    self.artifacts.read_json, receipt["artifact_ref"]
                 )
+                if (
+                    not isinstance(value, dict)
+                    or value.get("query") != query
+                    or value.get("provider") != self._spec
+                    or value.get("include_original", False) != include_original
+                ):
+                    raise ArtifactIntegrityError(
+                        "knowledge receipt belongs to another query or retrieval scope"
+                    )
+                return value
+            # A single query has one fixed local target. Real target relationships
+            # belong to the current outline and never enter the reusable receipt.
+            request = {"query": query, "target_id": "query"}
+            if include_original:
+                request["include_original"] = True
+            if query_id:
+                request["query_id"] = query_id
+            result = await self.provider.search([request], artifacts, run_operation=self.run_operation)
+            value = {
+                "query": query,
+                "provider": self._spec,
+                "include_original": include_original,
+                "materials": deepcopy(result["materials"]),
+                "issues": [
+                    {key: item for key, item in issue.items() if key != "target_id"}
+                    for issue in result["issues"]
+                ],
+            }
+            value["issues"] = list(
+                {_digest(issue): issue for issue in value["issues"]}.values()
+            )
+            for material in value["materials"]:
+                material.setdefault("locator", {}).pop("target_ids", None)
+            reference = await asyncio.to_thread(self.artifacts.put_json, value)
+            await self.store.commit_artifact(
+                self.lease,
+                "knowledge-snapshot",
+                reference,
+                scope=digest,
+                input_digest=digest,
+            )
             return value
-        # A single query has one fixed local target. Real target relationships
-        # belong to the current outline and never enter the reusable receipt.
-        request = {"query": query, "target_id": "query"}
-        if include_original:
-            request["include_original"] = True
-        if query_id:
-            request["query_id"] = query_id
-        result = await self.provider.search([request], artifacts, run_operation=self.run_operation)
-        value = {
-            "query": query,
-            "provider": self._spec,
-            "include_original": include_original,
-            "materials": deepcopy(result["materials"]),
-            "issues": [
-                {key: item for key, item in issue.items() if key != "target_id"}
-                for issue in result["issues"]
-            ],
-        }
-        value["issues"] = list(
-            {_digest(issue): issue for issue in value["issues"]}.values()
-        )
-        for material in value["materials"]:
-            material.setdefault("locator", {}).pop("target_ids", None)
-        reference = await asyncio.to_thread(self.artifacts.put_json, value)
-        await self.store.commit_artifact(
-            self.lease,
-            "knowledge-snapshot",
-            reference,
-            scope=digest,
-            input_digest=digest,
-        )
-        return value
 
 
 async def execute_document(
@@ -773,7 +788,9 @@ async def execute_document(
             input_digest=spec["materials_digest"],
         )
         frozen_knowledge = (
-            _FrozenKnowledge(knowledge, knowledge_spec, store, artifacts, lease)
+            _FrozenKnowledge(
+                knowledge, knowledge_spec, store, artifacts, lease, concurrency=concurrency
+            )
             if knowledge is not None
             else None
         )

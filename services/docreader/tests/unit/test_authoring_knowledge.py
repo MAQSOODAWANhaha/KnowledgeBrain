@@ -1,6 +1,7 @@
 """Knowledge retrieval freezes excerpts without certifying business suitability."""
 
 import asyncio
+from collections import Counter
 import json
 
 import httpx
@@ -161,7 +162,7 @@ async def test_failed_retrieval_retries_three_times_and_preserves_other_targets(
 
     result = await provider(handler).search([
         {"target_id": "bad", "query": "失败"}, {"target_id": "ok", "query": "成功"}], ArtifactStore(tmp_path))
-    assert requests == ["失败"] * 4 + ["成功"]
+    assert Counter(requests) == {"失败": 4, "成功": 1}
     assert waits == [1, 2, 4]
     assert len(result["materials"]) == 1
     assert result["issues"][0]["target_id"] == "bad"

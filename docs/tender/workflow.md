@@ -120,7 +120,7 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 
 | 阶段 | 任务 | 次数 |
 | --- | --- | --- |
-| Q 知识检索 | HTTP（非模型） | 每检索词 1 次 `search`；命中文档各 1 次 `document`；需原件各 1 次 `file`（各最多 4 次尝试） |
+| Q 知识检索 | HTTP（非模型） | 默认并发 `6` 调度去重检索词与已选资料版本并按输入顺序确定性归并；每检索词 1 次 `search`、命中文档各 1 次 `document`、需原件各 1 次 `file`（各最多 4 次尝试） |
 | 依据 | `authoring_basis` | 按预算分批，每批 1 次 |
 | 结构复核 | `authoring_structure` | 每次正文执行 1 次（超限改紧凑投影，仍超限记告警） |
 | W 写作 | `authoring_write` | 每个有允许依据的任务 1 次（大任务按子片拆）；全人工/无依据不写 |
@@ -140,6 +140,6 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 - **解析与分包边界**：
   - Excel 正文取唯一 row 范围、raw 留全网格、drawing anchor 补图片偏移、全空行压缩视图但留 `body` 身份、`display_incomplete_reason` 升级为可见问题；Word SECTION 保留原生定位；PDF 补齐 image occurrence，字形抽取跳过 PDFium 合成的零宽占位空格（`FPDFText_IsGenerated`）以避免表格与正文断字断数，重复页边与不可读图记 `partial`，原件损坏属技术失败。
   - `supporting` 只累计前文同节/祖先节条件与表头（混合小章包用 `scope_binding.applies_to_range_ids` 绑定）；无法切出完整条件句时写 `pack.pending_scope_context`（仅定位与 `scope_binding` 元数据，不含正文/表格/图像），模型空 findings 不解除阻断。
-- **模型层**：`ModelConfig.from_env(mapping=None)` 单一配置源（可选大纲分层配置 `KNOWLEDGEBRAIN_OUTLINE_*` 仅作用于 `outline` 作业，未配置时沿用 Chat）；`OpenAIModel(config, store, lease, prompts, concurrency=2, timeout_seconds=60).call(task, payload, images=())` 关闭 SDK 重试，仅接受本地图像字节/data URL；分析节点 `TenderNodes`、编制执行入口 `execute_document`/`generate_document` 与保存稿复核 `execute_saved_review` 均默认有界并发 `6`（共享进程内 429 冷却保护）。
+- **模型层**：`ModelConfig.from_env(mapping=None)` 单一配置源（可选大纲分层配置 `KNOWLEDGEBRAIN_OUTLINE_*` 仅作用于 `outline` 作业，未配置时沿用 Chat）；`OpenAIModel(config, store, lease, prompts, concurrency=2, timeout_seconds=60).call(task, payload, images=())` 关闭 SDK 重试，仅接受本地图像字节/data URL；分析节点 `TenderNodes`、编制执行入口 `execute_document`/`generate_document`、保存稿复核 `execute_saved_review` 与知识检索（`KnowledgeProvider`/`WebKnowledgeProvider`/`_FrozenKnowledge`）均默认有界并发 `6`（模型请求共享进程内 429 冷却保护，知识检索并发不改变 `spec()`、HTTP 次数或持久化回执/重试额度）。
   - 默认连续 60 秒无非空原始响应字节超时（收到流字节重计时，不限总墙钟）；`timeout`、`retry_policy=split_transport_contract_v1`、`outline_source_binding_contract=batch_excerpt_coverage_v1` 计入冻结执行身份。
   - 请求状态 `prepared → sent → succeeded / failed / uncertain`（真实 usage 缺失留 `null`，收部分流后超时记 `uncertain`）；错误分 `ModelInfrastructureError` / `ModelSemanticError` / `ModelConfigurationError`；429 按 30/60/120 秒退避并持久化 `not_before`；同一进程内某端点收到 429 后，该端点的全部并发槽位在冷却结束前都不发新请求（冷却取 `Retry-After`，至少 30 秒、至多 120 秒；不跨进程共享）；首原始字节/首解码块/首非空正文/最大 raw 静默/排队耗时独立计量且不进请求身份。
