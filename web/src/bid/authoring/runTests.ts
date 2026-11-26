@@ -7,6 +7,7 @@ import "./sha256.test";
 import "./routes.test";
 import "./outlineTree.test";
 import "./pendingQueue.test";
+import "../analysisReviewHelpers.test";
 
 await runAll();
 const { failed, passed } = testSummary();

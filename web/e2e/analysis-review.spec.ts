@@ -135,3 +135,121 @@ test("local human input can be explicitly discarded without sending a request", 
   expect(f.state.calls).toHaveLength(0);
   await expect.poll(() => page.evaluate(id => sessionStorage.getItem(`kb.analysis-review:${id}`), project)).toBeNull();
 });
+
+test("grouped batch verdict filters by issue code and preserves existing manual decisions", async ({ page }) => {
+  await fixture(page);
+  const review: AnalysisReviewView = {
+    run_id: "analysis", source_version: 1, domain_revision: 1, status: "waiting-confirmation",
+    checklist_digest: "c".repeat(64), sources_current: true, hard_blocking: false,
+    human_issue_ids: ["cross-1", "cross-2", "sem-1"],
+    issues: [
+      { issue_id: "cross-1", code: "unresolved_cross_reference", detail: "请核对第3章引用。" },
+      { issue_id: "cross-2", code: "unresolved_cross_reference", detail: "请核对第5章引用。" },
+      { issue_id: "sem-1", code: "semantic_ambiguity", detail: "请确认响应时间计算口径。" },
+    ],
+    correction: null,
+  };
+  const calls: Array<{ body: { issue_resolutions: { resolutions: Array<{ issue_id: string; verdict: string; reason: string }> } } }> = [];
+  await page.route("**/analysis/review", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ review }) }));
+  await page.route("**/analysis/confirm", async route => {
+    calls.push({ body: route.request().postDataJSON() });
+    review.status = "pending";
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ analysis: review }) });
+  });
+
+  await page.goto(`/#/bids/${project}/analysis`);
+  await expect(page.getByText("已完成 0 / 3 项待确认问题", { exact: true })).toBeVisible();
+
+  await page.getByRole("combobox", { name: "问题 1 人工判定", exact: true }).click();
+  await page.getByRole("option", { name: "保留为已知问题", exact: true }).click();
+  await page.getByLabel("问题 1 判定理由").fill("已单独核对第3章条款，保留跟进。");
+
+  await page.getByRole("combobox", { name: "按问题类型筛选", exact: true }).click();
+  await page.getByRole("option", { name: "跨处引用未定位（unresolved_cross_reference）（1/2）", exact: true }).click();
+  await expect(page.getByRole("group", { name: /^问题 \d+$/ })).toHaveCount(2);
+
+  const batch = page.getByRole("group", { name: "按筛选结果批量判定", exact: true });
+  await batch.getByRole("combobox", { name: "批量人工判定", exact: true }).click();
+  await page.getByRole("option", { name: "核对后排除此问题", exact: true }).click();
+  await batch.getByLabel("批量判定理由").fill("被引用条款在同一上传文件中已完整呈现。");
+  await batch.getByRole("button", { name: "应用批量判定", exact: true }).click();
+
+  await expect(page.getByText("已完成 2 / 3 项待确认问题", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("问题 1 判定理由")).toHaveValue("已单独核对第3章条款，保留跟进。");
+  await expect(page.getByLabel("问题 2 判定理由")).toHaveValue("被引用条款在同一上传文件中已完整呈现。");
+
+  await page.getByRole("combobox", { name: "按问题类型筛选", exact: true }).click();
+  await page.getByRole("option", { name: "语义歧义（semantic_ambiguity）（0/1）", exact: true }).click();
+  await expect(page.getByRole("group", { name: /^问题 \d+$/ })).toHaveCount(1);
+  await page.getByRole("combobox", { name: "问题 3 人工判定", exact: true }).click();
+  await page.getByRole("option", { name: "保留为已知问题", exact: true }).click();
+  await page.getByLabel("问题 3 判定理由").fill("口径明确按自然日计算。");
+
+  await page.getByRole("button", { name: "提交人工确认", exact: true }).click();
+  await expect.poll(() => calls.length).toBe(1);
+  expect(calls[0].body.issue_resolutions.resolutions).toEqual([
+    { issue_id: "cross-1", verdict: "acknowledged", reason: "已单独核对第3章条款，保留跟进。" },
+    { issue_id: "cross-2", verdict: "dismissed", reason: "被引用条款在同一上传文件中已完整呈现。" },
+    { issue_id: "sem-1", verdict: "acknowledged", reason: "口径明确按自然日计算。" },
+  ]);
+});
+
+test("large issue lists paginate DOM rows and allow batch confirmation of 250 issues", async ({ page }) => {
+  await fixture(page);
+  const humanIds: string[] = [];
+  const issues: AnalysisReviewView["issues"] = [];
+  for (let i = 1; i <= 240; i++) {
+    const id = `cross-${i}`;
+    humanIds.push(id);
+    issues.push({ issue_id: id, code: "unresolved_cross_reference", detail: `跨处引用问题 ${i}` });
+  }
+  for (let i = 1; i <= 10; i++) {
+    const id = `quote-${i}`;
+    humanIds.push(id);
+    issues.push({ issue_id: id, code: "evidence_quote_mismatch", detail: `引文差异问题 ${i}` });
+  }
+  const review: AnalysisReviewView = {
+    run_id: "analysis", source_version: 1, domain_revision: 1, status: "waiting-confirmation",
+    checklist_digest: "c".repeat(64), sources_current: true, hard_blocking: false,
+    human_issue_ids: humanIds, issues, correction: null,
+  };
+  let resolutions: Array<{ issue_id: string; verdict: string; reason: string }> = [];
+  await page.route("**/analysis/review", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ review }) }));
+  await page.route("**/analysis/confirm", async route => {
+    const body = route.request().postDataJSON();
+    resolutions = body.issue_resolutions.resolutions;
+    review.status = "pending";
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ analysis: review }) });
+  });
+
+  await page.goto(`/#/bids/${project}/analysis`);
+  await expect(page.getByText("已完成 0 / 250 项待确认问题", { exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: /^问题 \d+$/ })).toHaveCount(20);
+  await expect(page.getByText("第 1 / 13 页（共 250 项）", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "问题列表下一页", exact: true }).click();
+  await expect(page.getByRole("group", { name: "问题 21", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: /^问题 \d+$/ })).toHaveCount(20);
+
+  const batch = page.getByRole("group", { name: "按筛选结果批量判定", exact: true });
+  await page.getByRole("combobox", { name: "按问题类型筛选", exact: true }).click();
+  await page.getByRole("option", { name: "跨处引用未定位（unresolved_cross_reference）（0/240）", exact: true }).click();
+  await batch.getByRole("combobox", { name: "批量人工判定", exact: true }).click();
+  await page.getByRole("option", { name: "核对后排除此问题", exact: true }).click();
+  await batch.getByLabel("批量判定理由").fill("已核对原文件对应章节，引用条款存在。");
+  await batch.getByRole("button", { name: "应用批量判定", exact: true }).click();
+  await expect(page.getByText("已完成 240 / 250 项待确认问题", { exact: true })).toBeVisible();
+
+  await page.getByRole("combobox", { name: "按问题类型筛选", exact: true }).click();
+  await page.getByRole("option", { name: "引文与原文不一致（evidence_quote_mismatch）（0/10）", exact: true }).click();
+  await batch.getByRole("combobox", { name: "批量人工判定", exact: true }).click();
+  await page.getByRole("option", { name: "保留为已知问题", exact: true }).click();
+  await batch.getByLabel("批量判定理由").fill("已标记原文页码核对，保留后续人工校验。");
+  await batch.getByRole("button", { name: "应用批量判定", exact: true }).click();
+  await expect(page.getByText("已完成 250 / 250 项待确认问题", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "提交人工确认", exact: true }).click();
+  await expect.poll(() => resolutions.length).toBe(250);
+  expect(resolutions.filter(r => r.verdict === "dismissed")).toHaveLength(240);
+  expect(resolutions.filter(r => r.verdict === "acknowledged")).toHaveLength(10);
+});
