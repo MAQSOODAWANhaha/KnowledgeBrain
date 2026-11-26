@@ -5,6 +5,7 @@ Rules and five questions: workflow.md「新链格式补位与事项归属」; co
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 import json
 import re
@@ -399,7 +400,7 @@ async def expand_proposal_outlines(
     await _plan(execute, AuthoringTask.PROPOSAL_OUTLINE, len(candidates), "proposal-outline")
     items_map, _ = _source_context_maps(artifacts, outline.get("authoring_input"))
 
-    for chapter, form, answer in candidates:
+    async def expand_one(chapter: dict[str, Any], form: dict[str, Any], answer: dict[str, Any]):
         rules = list(answer.get("rule_refs") or [])
         rule_refs_by_id: dict[str, dict[str, Any]] = {}
         keyed_rules: dict[str, dict[str, Any]] = {}
@@ -433,16 +434,22 @@ async def expand_proposal_outlines(
                     sections, rule_refs_by_id, keyed_rules, budget, execute, ask, fits_placement
                 )
         except (ModelWorkUnitExhausted, ModelBudgetError):
+            return chapter, form, answer, None, None
+
+        new_children, leftover = _materialize_sections(
+            chapter["chapter_id"], form["target_id"], sections, assignments, rule_refs_by_id
+        )
+        return chapter, form, answer, new_children, leftover
+
+    results = await asyncio.gather(*(expand_one(chapter, form, answer) for chapter, form, answer in candidates))
+    for chapter, _form, answer, new_children, leftover in results:
+        if new_children is None:
             outline.setdefault("issues", []).append({
                 "code": PROPOSAL_PENDING_CODE,
                 "detail": f"「{chapter['title']}」未能生成二级/三级方案子目录（请求未采纳或超出预算），保留单目标应答位待人工编排。",
                 "rule_refs": [],
             })
             continue
-
-        new_children, leftover = _materialize_sections(
-            chapter["chapter_id"], form["target_id"], sections, assignments, rule_refs_by_id
-        )
         chapter["children"] = [*new_children, *(chapter.get("children") or [])]
         if leftover:
             answer["rule_refs"] = leftover

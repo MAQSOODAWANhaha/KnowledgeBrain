@@ -72,6 +72,7 @@ class ModelConfig:
     chat: ModelEndpoint
     vision: ModelEndpoint | None
     vision_error: str | None = field(default=None, repr=False)
+    outline: ModelEndpoint | None = None
 
     @classmethod
     def from_env(cls, mapping: Mapping[str, str] | None = None) -> ModelConfig:
@@ -92,17 +93,44 @@ class ModelConfig:
                              reasoning_effort=normalize_reasoning_effort(
                                  _setting(values, "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT") or None
                              ))
+        outline = _outline(values, chat)
         try:
             vision = _vision(values, chat)
         except ModelConfigurationError as error:
             # A text-only run does not need VLM configuration.
-            return cls(chat, None, str(error))
-        return cls(chat, vision)
+            return cls(chat, None, str(error), outline=outline)
+        return cls(chat, vision, outline=outline)
 
     def for_images(self) -> ModelEndpoint:
         if self.vision is None:
             raise ModelConfigurationError(self.vision_error or "VLM configuration is required")
         return self.vision
+
+    def for_outline(self) -> ModelConfig:
+        if self.outline is None:
+            return self
+        return ModelConfig(self.outline, self.vision, self.vision_error, outline=self.outline)
+
+
+def _outline(values: Mapping[str, str], chat: ModelEndpoint) -> ModelEndpoint | None:
+    url = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_BASE_URL")
+    key = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_API_KEY", secret=True)
+    model = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_MODEL")
+    raw_context = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS")
+    effort = normalize_reasoning_effort(_setting(values, "KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT") or None)
+    if not any((url, key.strip(), model, raw_context)):
+        if effort is None:
+            return None
+        return ModelEndpoint(chat.base_url, chat.api_key, chat.model, chat.context_tokens, reasoning_effort=effort)
+    if not _valid_url(url) or not key.strip() or not model or model == "stub-chat":
+        raise ModelConfigurationError("valid OUTLINE base URL, API key and model are required")
+    try:
+        context = int(raw_context)
+    except ValueError:
+        context = 0
+    if not raw_context.isascii() or not raw_context.isdecimal() or not 1 <= context <= 4_194_304:
+        raise ModelConfigurationError("KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS must be an integer between 1 and 4194304")
+    return ModelEndpoint(url, key, model, context, reasoning_effort=effort)
 
 
 def _vision(values: Mapping[str, str], chat: ModelEndpoint) -> ModelEndpoint:

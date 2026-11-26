@@ -219,14 +219,14 @@ def _bare_annex(text):
     return _ANNEX_ONLY.match(text) is not None
 
 
-def _validate_label(label, name, text, path):
+def _validate_label(label, text, path):
     if label is None:
         return None
     cleaned = label.strip()
     if not cleaned:
         return None
-    if _annex_code(cleaned) or _compact(cleaned) not in _compact(text) or _compact(name) not in _compact(cleaned):
-        raise ModelContractError([_issue('章节展示标题 label 必须是所引原行的连续片段、包含文件名且不含附件编号', [*path, 'label'])])
+    if _annex_code(cleaned) or _compact(cleaned) not in _compact(text):
+        raise ModelContractError([_issue('章节展示标题 label 必须是所引原行的连续片段且不含附件编号', [*path, 'label'])])
     return cleaned
 
 
@@ -262,7 +262,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         seen_heads.setdefault(tuple(heads), set()).add(_compact(name))
         if _annex_code(name) or _compact(name) not in _compact(text):
             raise ModelContractError([_issue('章节名称必须是标题原行里的文件名，不能是附件编号或新写的名称', [*path, 'name'])])
-        label = _validate_label(chapter.get('label'), name, text, path)
+        label = _validate_label(chapter.get('label'), text, path)
         parent_ref = chapter.get('parent_heading_ref')
         if parent_ref is not None and parent_ref >= heads[0]:
             raise ModelContractError([_issue('上级章行号 parent_heading_ref 必须位于当前章之前', [*path, 'parent_heading_ref'])])

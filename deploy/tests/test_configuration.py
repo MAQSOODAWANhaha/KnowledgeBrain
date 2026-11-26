@@ -126,7 +126,7 @@ class DeploymentConfiguration(unittest.TestCase):
                               "docreader.jobs.healthcheck", name.removeprefix("python-tender-")])
             self.assertEqual(services[name]["healthcheck"]["timeout"], "10s")
         for key, value in api.items():
-            if key.startswith(("KNOWLEDGEBRAIN_CHAT_", "KNOWLEDGEBRAIN_VLM_")) and key != "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT":
+            if key.startswith(("KNOWLEDGEBRAIN_CHAT_", "KNOWLEDGEBRAIN_VLM_", "KNOWLEDGEBRAIN_OUTLINE_")) and key != "KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT":
                 for name in ("docreader", "python-tender-worker"):
                     self.assertEqual(services[name]["environment"][key], value)
         self.assertEqual(services["docreader"]["environment"]["GRPC_AUTH_TOKEN"],
@@ -180,6 +180,7 @@ class DeploymentConfiguration(unittest.TestCase):
         for name in ("retention", "python-tender-init", "python-tender-dispatcher"):
             self.assertNotIn("KNOWLEDGEBRAIN_CHAT_API_KEY", services[name]["environment"])
             self.assertNotIn("KNOWLEDGEBRAIN_VLM_API_KEY", services[name]["environment"])
+            self.assertNotIn("KNOWLEDGEBRAIN_OUTLINE_API_KEY", services[name]["environment"])
         self.assertNotIn("REDIS_URL", services["python-tender-init"]["environment"])
 
 

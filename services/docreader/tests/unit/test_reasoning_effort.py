@@ -304,3 +304,85 @@ async def test_document_option_mismatch_is_rejected_before_any_input_or_cached_e
     with pytest.raises(ModelConfigurationError):
         await execute_document(None, None, config, budget, execution_id='fixture-execution',
                                run_id='fixture-run', source_version=1, domain_revision=1)
+
+
+def test_outline_model_tiering_supports_effort_override_and_dedicated_fast_endpoint():
+    plain = ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high'))
+    assert plain.outline is None and plain.for_outline() is plain
+
+    lighter = ModelConfig.from_env(environment(
+        KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high',
+        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='low',
+    ))
+    assert lighter.chat.reasoning_effort == 'high'
+    outline_only = lighter.for_outline()
+    assert outline_only.chat.model == lighter.chat.model
+    assert outline_only.chat.base_url == lighter.chat.base_url
+    assert outline_only.chat.reasoning_effort == 'low'
+
+    dedicated = ModelConfig.from_env(environment(
+        KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high',
+        KNOWLEDGEBRAIN_OUTLINE_BASE_URL='https://fast.invalid/v1',
+        KNOWLEDGEBRAIN_OUTLINE_API_KEY='synthetic-outline-secret',
+        KNOWLEDGEBRAIN_OUTLINE_MODEL='fast-outline-model',
+        KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS='65536',
+    ))
+    fast_cfg = dedicated.for_outline()
+    assert fast_cfg.chat.model == 'fast-outline-model'
+    assert fast_cfg.chat.context_tokens == 65536
+    assert fast_cfg.chat.reasoning_effort is None  # Never silently inherits chat.reasoning_effort.
+    assert dedicated.chat.model == 'gpt-4o' and dedicated.chat.reasoning_effort == 'high'
+
+    with pytest.raises(ModelConfigurationError):
+        ModelConfig.from_env(environment(KNOWLEDGEBRAIN_OUTLINE_MODEL='fast-only'))
+
+    with pytest.raises(ModelConfigurationError) as bad:
+        ModelConfig.from_env(environment(KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='secret-bad-effort'))
+    assert 'secret-bad-effort' not in str(bad.value)
+
+
+@pytest.mark.parametrize('operation,expected_model,expected_effort', [
+    ('outline', 'fast-outline-model', 'low'),
+    ('document', 'gpt-4o', 'high'),
+])
+async def test_web_job_routes_only_outline_operation_to_configured_outline_tier(
+    monkeypatch, operation, expected_model, expected_effort,
+):
+    from docreader.integrations import web
+    from docreader.tender import document_execution
+
+    config = ModelConfig.from_env(environment(
+        KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high',
+        KNOWLEDGEBRAIN_OUTLINE_BASE_URL='https://fast.invalid/v1',
+        KNOWLEDGEBRAIN_OUTLINE_API_KEY='synthetic-outline-secret',
+        KNOWLEDGEBRAIN_OUTLINE_MODEL='fast-outline-model',
+        KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS='65536',
+        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='low',
+    ))
+    monkeypatch.setattr(ModelConfig, 'from_env', classmethod(lambda _: config))
+    job = {'status': 'pending', 'project_id': 'fixture-project', 'payload': {'owner_user_id': 'fixture-owner',
+        'operation': operation, 'request': {}, 'materials': [], 'identity': {
+            'run_id': 'fixture-run', 'source_version': 1, 'domain_revision': 1}}}
+    captured = []
+
+    async def sql(*_):
+        return SimpleNamespace(fetchone=AsyncMock(return_value=deepcopy(job)))
+
+    @asynccontextmanager
+    async def transaction():
+        yield SimpleNamespace(execute=sql)
+
+    bridge = SimpleNamespace(setup=AsyncMock(), authorize=AsyncMock(), artifacts=None,
+        store=SimpleNamespace(transaction=transaction), job=AsyncMock(return_value={'status': 'running'}),
+        authoring=SimpleNamespace(get_execution=AsyncMock(return_value=None)))
+    monkeypatch.setattr(web, 'WebBridge', lambda _: bridge)
+    if operation == 'document':
+        from docreader.integrations import web_layout
+        monkeypatch.setattr(web_layout, 'build_web_layout', lambda **_: SimpleNamespace(spec=lambda: {}))
+
+    async def execute(_store, _artifacts, actual_config, budget, **_):
+        captured.append((actual_config.chat.model, actual_config.chat.reasoning_effort, budget.model, budget.reasoning_effort))
+
+    monkeypatch.setattr(document_execution, 'execute_document', execute)
+    await web.execute_authoring_job('fixture-execution', None)
+    assert captured == [(expected_model, expected_effort, expected_model, expected_effort)]

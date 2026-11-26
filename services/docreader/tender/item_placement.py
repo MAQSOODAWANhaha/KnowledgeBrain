@@ -27,8 +27,8 @@ NOT_REQUIRED = {
 }
 _SEMANTIC = ('kind', 'subject', 'scope', 'text', 'conditions', 'exceptions', 'submission', 'consequence', 'scoring')
 _OPENING = 120
-# A whole 715-item ledger fit the window but the model answered three rows; the pilot's 345 passed.
-PLACEMENT_BATCH_ITEMS = 240
+# Keep each batch small enough to avoid long-tail reasoning bloat while fitting in one parallel wave.
+PLACEMENT_BATCH_ITEMS = 120
 # Stop a batch at half the input window. Packing to the ceiling still fits, but the relay
 # spends many minutes before the first token.
 PLACEMENT_BATCH_INPUT_FRACTION = 0.5
@@ -184,9 +184,7 @@ def placement_payload(positions, items, ids):
             'positions': [{'id': key, 'title_path': value['title_path'], 'kind': value['kind'],
                            'opening': value['opening'], **({'origin': 'outside_format'} if value['outside_format'] else {})}
                           for key, value in positions.items()],
-            'requirements': [{'id': key, **items[key]['semantic'],
-                              'evidence': [{'page': None if e['page'] is None else e['page'] + 1, 'quote': e['quote']}
-                                           for e in items[key]['evidence']]} for key in ids]}
+            'requirements': [{'id': key, **items[key]['semantic']} for key in ids]}
 
 
 def _output_fits(budget, ids, positions):
@@ -221,18 +219,27 @@ def plan_batches(budget, positions, items, fits):
         used, limit = _placement_input_tokens(budget, placement_payload(positions, items, ids))
         return used <= int(limit * PLACEMENT_BATCH_INPUT_FRACTION)
 
-    batches, current, unsent = [], [], []
-    for key in items:
-        if within_half([*current, key]):
-            current.append(key)
+    keys = list(items)
+    batches, unsent, index = [], [], 0
+    while index < len(keys):
+        chunk = keys[index:index + PLACEMENT_BATCH_ITEMS]
+        if within_half(chunk):
+            batches.append(chunk)
+            index += len(chunk)
             continue
-        if current:
-            batches.append(current)
-        current = [key] if payload_ok([key]) else []
-        if not current:
-            unsent.append(key)
-    if current:
-        batches.append(current)
+        if not payload_ok(chunk[:1]):
+            unsent.append(chunk[0])
+            index += 1
+            continue
+        low, high = 1, len(chunk) - 1
+        while low < high:
+            mid = (low + high + 1) // 2
+            if within_half(chunk[:mid]):
+                low = mid
+            else:
+                high = mid - 1
+        batches.append(chunk[:low])
+        index += low
     return batches, unsent
 
 

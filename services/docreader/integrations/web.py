@@ -838,9 +838,10 @@ async def execute_authoring_job(execution_id, settings):
     try:
         await bridge.authorize({"project_id": str(job["project_id"]), "owner_user_id": job["payload"]["owner_user_id"]}, write=True)
         config = ModelConfig.from_env()
-        budget = RequestBudget(context_tokens=config.chat.context_tokens, model=config.chat.model,
+        active_config = config.for_outline() if _operation(job) == "outline" else config
+        budget = RequestBudget(context_tokens=active_config.chat.context_tokens, model=active_config.chat.model,
                                tokenizer="o200k_base", tokenized_outline_assembly=True, tokenized_authoring=True,
-                               reasoning_effort=config.chat.reasoning_effort)
+                               reasoning_effort=active_config.chat.reasoning_effort)
         async def wait_for_cancellation():
             # Cancellation can arrive before execute_document creates its row.
             while True:
@@ -872,11 +873,11 @@ async def execute_authoring_job(execution_id, settings):
         if _operation(job) == "saved_review":
             from docreader.tender.saved_word_review import execute_saved_review
             options = job["payload"]
-            work = asyncio.create_task(execute_saved_review(bridge.store, bridge.artifacts, config, budget,
+            work = asyncio.create_task(execute_saved_review(bridge.store, bridge.artifacts, active_config, budget,
                 execution_id=execution_id, snapshot=options["snapshot"], document_ref=options["document_ref"],
                 saved_ref=options["saved_ref"], **options["request"]))
         else:
-            work = asyncio.create_task(execute_document(bridge.store, bridge.artifacts, config, budget, execution_id=execution_id,
+            work = asyncio.create_task(execute_document(bridge.store, bridge.artifacts, active_config, budget, execution_id=execution_id,
                 **job["payload"]["identity"], **request, materials=job["payload"]["materials"]))
         cancellation = asyncio.create_task(wait_for_cancellation())
         try:

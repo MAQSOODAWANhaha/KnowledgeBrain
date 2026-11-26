@@ -345,3 +345,49 @@ async def test_generate_document_runs_proposal_outline_in_requirement_chain(tmp_
     proposal = next(ch for ch in outline["chapters"] if ch["title"] == "十一、项目服务方案")
     assert [child["title"] for child in proposal["children"]] == ["1.1 总体实施方案", "1.2 售后保障方案"]
     assert sorted(_collect_rule_ids([proposal])) == [f"i{n}" for n in range(1, 7)]
+
+
+async def test_expand_proposal_outlines_runs_multiple_candidates_concurrently_in_order(tmp_path):
+    import asyncio
+
+    artifacts, outline = _proposal_fixture(tmp_path, rule_count=6)
+    second = deepcopy(outline["chapters"][0])
+    second["chapter_id"] = "chapter-12"
+    second["title"] = "十二、售后服务方案"
+    second["targets"][0]["target_id"] = "chapter-12:target-1"
+    second["targets"][1]["target_id"] = "chapter-12:target-1:answer"
+    second["targets"][1]["related_target_ids"] = ["chapter-12:target-1"]
+    second["children"][0]["chapter_id"] = "chapter-12.1"
+    outline["chapters"].append(second)
+
+    in_flight = 0
+    max_in_flight = 0
+    both_entered = asyncio.Event()
+
+    async def execute(task, request, validate):
+        nonlocal in_flight, max_in_flight
+        body = json.loads(request["messages"][1]["content"][0]["text"])
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        if in_flight >= 2:
+            both_entered.set()
+        await asyncio.wait_for(both_entered.wait(), timeout=2.0)
+        in_flight -= 1
+        prefix = "1" if "十一" in body["chapter_title"] else "2"
+        return validate({
+            "sections": [
+                {"id": "s1", "parent_id": None, "title": f"{prefix}.1 总体安排"},
+                {"id": "s2", "parent_id": None, "title": f"{prefix}.2 质量保障"},
+            ],
+            "assignments": [[row["id"], "s1" if i < 3 else "s2"] for i, row in enumerate(body["requirements"])],
+        })
+
+    budget = RequestBudget(model="unused")
+    result = await expand_proposal_outlines(
+        outline, artifacts, budget, execute, authoring_pipeline._ask,
+        lambda p: authoring_pipeline._fits(budget, AuthoringTask.PROPOSAL_OUTLINE, p),
+        lambda p: authoring_pipeline._fits(budget, AuthoringTask.ITEM_PLACEMENT, p),
+    )
+    assert max_in_flight == 2
+    assert [c["title"] for c in result["chapters"][0]["children"]] == ["1.1 总体安排", "1.2 质量保障", "承诺"]
+    assert [c["title"] for c in result["chapters"][1]["children"]] == ["2.1 总体安排", "2.2 质量保障", "承诺"]

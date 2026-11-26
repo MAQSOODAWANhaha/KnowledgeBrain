@@ -530,7 +530,7 @@ async def execute_document(
     authoring_input_ref=None,
     requirement_chain_contract=None,
     layout_renderer=None,
-    concurrency: int = 2,
+    concurrency: int = 6,
     lease_seconds: float = 60,
     heartbeat_seconds: float = 20,
     timeout_seconds: float = 60,

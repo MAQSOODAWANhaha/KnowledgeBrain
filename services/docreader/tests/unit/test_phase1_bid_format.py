@@ -768,6 +768,24 @@ def test_bug337_bid_format_outline_rejects_invalid_label_and_parent_heading_ref(
         decode_bid_format_outline({'chapters': chapters}, prepared)
 
 
+def test_bid_format_outline_accepts_split_two_line_numbered_label_and_form_name():
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    pages = [
+        '第六章 投标文件格式\n五、投标保证金证明\n5-1 投标保证金采用电子保函形式（通宝函）\n投标保函\n保函正文\n',
+    ]
+    prepared = _Prepared([{'document_id': 'tender', 'role': 'main', 'pages': pages}], _snapshot())
+    refs = {text.strip(): ref for ref, text in prepared.sections[0]['payload']['lines']}
+    plan = decode_bid_format_outline({'chapters': [
+        {'heading_refs': [refs['五、投标保证金证明']], 'label': '五、投标保证金证明', 'name': '投标保证金证明'},
+        {'heading_refs': [refs['5-1 投标保证金采用电子保函形式（通宝函）'], refs['投标保函']],
+         'label': '5-1 投标保证金采用电子保函形式（通宝函）', 'name': '投标保函',
+         'parent_heading_ref': refs['五、投标保证金证明']},
+    ]}, prepared)
+    assert plan['nodes'][1]['name'] == '5-1 投标保证金采用电子保函形式（通宝函）'
+    assert plan['nodes'][1]['parent_id'] == plan['nodes'][0]['id']
+
+
 async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tmp_path):
     import json
     import re

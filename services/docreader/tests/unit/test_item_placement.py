@@ -203,7 +203,11 @@ async def test_a_failed_batch_leaves_its_items_pending_and_named():
 def test_batches_stop_at_half_the_input_budget_and_still_send_a_single_item():
     budget = RequestBudget(context_tokens=8192, output_reserve=512, tokenizer="o200k_base")
     positions = placement.placement_positions(outline())
-    items = {f"r{n}": item(n, quote="事项" * 500) for n in range(1, 8)}
+    items = {}
+    for n in range(1, 8):
+        row = item(n)
+        row["semantic"]["text"] = "事项" * 500
+        items[f"r{n}"] = row
 
     def fits(payload):
         from docreader.tender.authoring_pipeline import _fits
@@ -223,6 +227,26 @@ def test_batches_stop_at_half_the_input_budget_and_still_send_a_single_item():
     one = budget.require_request(_request(budget, "item_placement", alone), "item_placement")
     assert one["fits"] is True
     assert any(batch[0] == "r1" for batch in batches)
+
+
+def test_placement_payload_omits_redundant_evidence_and_caps_batches_at_120():
+    assert placement.PLACEMENT_BATCH_ITEMS == 120
+    positions = placement.placement_positions(outline())
+    items = {f"r{n}": item(n, quote="重复摘录" * 20) for n in range(1, 250)}
+    payload = placement.placement_payload(positions, items, ["r1", "r2"])
+    assert all("evidence" not in row for row in payload["requirements"])
+    batches, unsent = placement.plan_batches(RequestBudget(), positions, items, lambda _payload: True)
+    assert [len(batch) for batch in batches] == [120, 120, 9] and unsent == []
+
+
+def test_binary_search_batch_planner_isolates_oversized_middle_item():
+    positions = placement.placement_positions(outline())
+    items = {f"r{n}": item(n) for n in range(1, 5)}
+    batches, unsent = placement.plan_batches(
+        RequestBudget(), positions, items,
+        lambda payload: all(row["id"] != "r2" for row in payload["requirements"]),
+    )
+    assert batches == [["r1"], ["r3", "r4"]] and unsent == ["r2"]
 
 
 def test_batches_never_exceed_the_soft_item_cap(monkeypatch):

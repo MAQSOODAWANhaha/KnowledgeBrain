@@ -85,10 +85,10 @@
 
 流水线：`格式章节选择` → `格式补位` → `编译` → `事项归属` → `宿主结算`（字段见 [字段字典 · 新链事项归属](field-dictionary.md#新链事项归属)）：
 
-1. **格式章节选择（`bid_format_source_outline_v1`）**：通常 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。模型按招标文件原文结构同时返回 `parent_heading_ref`（上级章 `heading_refs[0]` 行号，根章为 `null`）与可选 `label`（含原文序号与大小写的展示标题），宿主严格校验 `parent_heading_ref` 指向本节先出现的已选章节、同文档且无环，且 `label` 必须为所引 `heading_refs` 原文连续子串、包含 `name` 且不以 `附件`/`附录`/`附表` 映射号开头；存在独立封面时始终置顶。标题行整体超出准入预算时按原文顺序分片，每片 1 次逻辑请求，切点优先落在附件编号或编号式样标题前，必要时附带只读 `parent_context` 供跨片父引用；每片只回本片标题、不回 `body`，宿主合并后按整节规则统一校验。单行连同 Prompt 仍超限、或分片请求失败时，该片标题不进大纲并记 `outline_directory_plan_failed`；全部分片失败时本次大纲执行失败。每份登记文档（主件、附件、补遗、澄清）各找一个格式章节锚点，按登记顺序各发各的请求（仅主件有格式章节时与单文档请求相同），每节的隐含复制窗口和不适用范围都止于本节末尾，不跨文档。补遗或澄清格式章节里的每一章记 `outline_directory_format_source`，写明来源文档和页码；不同文档出现同名格式时各章都保留，记 `outline_directory_format_conflict` 交编制人员核定，宿主和模型都不择一。
+1. **格式章节选择（`bid_format_source_outline_v1`）**：通常 1 次逻辑请求（宿主兜底 0 次），仅读格式章节短标题行；单独成行标题、子编号格式与可选提交方式各成一章，同行“或”择一成一章，“不适用”不选。模型按招标文件原文结构同时返回 `parent_heading_ref`（上级章 `heading_refs[0]` 行号，根章为 `null`）与可选 `label`（含原文序号与大小写的展示标题），宿主严格校验 `parent_heading_ref` 指向本节先出现的已选章节、同文档且无环，且 `label` 必须为所引 `heading_refs` 原文连续子串且不以 `附件`/`附录`/`附表` 映射号开头（支持首行序号标题与次行文件名拆行的原式）；存在独立封面时始终置顶。标题行整体超出准入预算时按原文顺序分片，每片 1 次逻辑请求，切点优先落在附件编号或编号式样标题前，必要时附带只读 `parent_context` 供跨片父引用；每片只回本片标题、不回 `body`，宿主合并后按整节规则统一校验。单行连同 Prompt 仍超限、或分片请求失败时，该片标题不进大纲并记 `outline_directory_plan_failed`；全部分片失败时本次大纲执行失败。每份登记文档（主件、附件、补遗、澄清）各找一个格式章节锚点，按登记顺序各发各的请求（仅主件有格式章节时与单文档请求相同），每节的隐含复制窗口和不适用范围都止于本节末尾，不跨文档。补遗或澄清格式章节里的每一章记 `outline_directory_format_source`，写明来源文档和页码；不同文档出现同名格式时各章都保留，记 `outline_directory_format_conflict` 交编制人员核定，宿主和模型都不择一。
 2. **格式补位（宿主 0 次调用）**：`submission_requirement` 点名且不在格式章节内的必交文件，宿主在引证页及前页找同名独立标题行补成 `outside_format` 候选章，追加在主格式章节末尾（不按物理页码插队到封面或第一章之前），无事项落入则删除。补遗或澄清内联替换某张原式（无格式章节标题、证据页在补遗或澄清里）且格式章节已有同名章时，宿主在该补遗或澄清的引证页及前页找同名独立标题行补成一章，记 `outline_directory_format_conflict`；这一章不是 `outside_format` 候选，不因无事项落入而删除。
-3. **事项归属（`item_placement`）与待核过滤**：按预算分批（每批 ≤ `240` 条，且多条一批时输入不超过准入输入预算的一半），每批都带完整位置目录；单条事项连同位置目录仍超出准入预算时不发送，与未采纳批次一样记 `outline_item_placement_failed` 留待核，不中断执行。单条事项未超过整窗时仍单独发送。每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核；解码将字面字符串 `"null"` 归一为 `null`）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。`outline_directory_literal_pending` 仅保留落入大纲实际复制窗口的页/行，不把非格式页的重复表行混入大纲待核。
-4. **方案子大纲展开（`proposal_outline`）**：对已挂知识应答位、无固定原表且归属规则数 ≥ `6` 条的开放编制方案章，宿主汇总本章规则摘要与对应招标文件原文小节标题清单（同时涵盖评标办法与采购需求），发有界模型请求生成二级/三级子章节树并按短 ID 分配全部规则。输入装不下准入预算一半时，自动拆为「1 次仅基于小节标题与评分摘要生成子章节树 + 复用 `item_placement` 半窗分批把本章规则归属到子章」。宿主校验树深度（相对父章 ≤ 2 级）、无环、ID 唯一且规则 100% 守恒（`null` 留父章总述）；调用失败或拒收时保留父章原单目标应答位并记 `outline_proposal_structure_pending`，不阻断大纲与导出。
+3. **事项归属（`item_placement`）与待核过滤**：按预算分批（每批 ≤ `120` 条，且多条一批时输入不超过准入输入预算的一半），每批都带完整位置目录与本批事项语义字段（不重复发送引证摘录 `evidence`）；单条事项连同位置目录仍超出准入预算时不发送，与未采纳批次一样记 `outline_item_placement_failed` 留待核，不中断执行。单条事项未超过整窗时仍单独发送。每批 1 次逻辑请求，模型只回位置短 ID、理由代码（`evaluation`/`performance`/`document_wide`/`not_applicable`）或 `null`（待核；解码将字面字符串 `"null"` 归一为 `null`）；宿主落账为 `rule_refs`、`constraint_rule_refs`、`outline_rule_excluded` 或覆盖台账 `pending`。`outline_directory_literal_pending` 仅保留落入大纲实际复制窗口的页/行，不把非格式页的重复表行混入大纲待核。
+4. **方案子大纲展开（`proposal_outline`）**：对已挂知识应答位、无固定原表且归属规则数 ≥ `6` 条的开放编制方案章，宿主汇总本章规则摘要与对应招标文件原文小节标题清单（同时涵盖评标办法与采购需求），并发发起有界模型请求（结果按原章节顺序落账）生成二级/三级子章节树并按短 ID 分配全部规则。输入装不下准入预算一半时，自动拆为「1 次仅基于小节标题与评分摘要生成子章节树 + 复用 `item_placement` 半窗分批把本章规则归属到子章」。宿主校验树深度（相对父章 ≤ 2 级）、无环、ID 唯一且规则 100% 守恒（`null` 留父章总述）；调用失败或拒收时保留父章原单目标应答位并记 `outline_proposal_structure_pending`，不阻断大纲与导出。
 
 ### 新链方案正文与评标待核
 
@@ -110,7 +110,7 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 | 阶段 | 任务 / Prompt | 次数 | 随什么增长 | 单次输入与超限去向 | 代码入口 |
 | --- | --- | --- | --- | --- | --- |
 | 格式章节选择 | `directory_plan` / `bid_format_outline` | 每份含格式章节的文档 1 次（超限按原文顺序分片） | 格式章节数与分片数（通常 1） | 仅短标题行；单片超限或失败该片留待核并记 `outline_directory_plan_failed` | `select_bid_format_plan` |
-| 事项归属 | `item_placement` | 按预算分批（每批 ≤ 240 条、多条不超过半窗） | 有效事项数与位置目录规模 | 完整位置目录 + 本批事项；单条超限或未采纳留 `outline_item_placement_failed` 待核 | `place_items` |
+| 事项归属 | `item_placement` | 按预算分批（每批 ≤ 120 条、多条不超过半窗） | 有效事项数与位置目录规模 | 完整位置目录 + 本批事项语义字段；单条超限或未采纳留 `outline_item_placement_failed` 待核 | `place_items` |
 | 方案子大纲 | `proposal_outline` | 仅规则数 ≥ 6 条的开放方案章每章 1 次（超窗拆为 1 次仅树 + `item_placement` 分批归属） | 开放方案章数 | 本章规则摘要 + 原文小节标题清单；失败或拒收保留单目标位并记 `outline_proposal_structure_pending` | `expand_proposal_outlines` |
 
 - 单次输入边界、跨片父引用与缺口规则见[新链格式补位与事项归属](#新链格式补位与事项归属)。
@@ -140,6 +140,6 @@ Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；�
 - **解析与分包边界**：
   - Excel 正文取唯一 row 范围、raw 留全网格、drawing anchor 补图片偏移、全空行压缩视图但留 `body` 身份、`display_incomplete_reason` 升级为可见问题；Word SECTION 保留原生定位；PDF 补齐 image occurrence，重复页边与不可读图记 `partial`，原件损坏属技术失败。
   - `supporting` 只累计前文同节/祖先节条件与表头（混合小章包用 `scope_binding.applies_to_range_ids` 绑定）；无法切出完整条件句时写 `pack.pending_scope_context`（仅定位与 `scope_binding` 元数据，不含正文/表格/图像），模型空 findings 不解除阻断。
-- **模型层**：`ModelConfig.from_env(mapping=None)` 单一配置源；`OpenAIModel(config, store, lease, prompts, concurrency=2, timeout_seconds=60).call(task, payload, images=())` 关闭 SDK 重试，仅接受本地图像字节/data URL。
+- **模型层**：`ModelConfig.from_env(mapping=None)` 单一配置源（可选大纲分层配置 `KNOWLEDGEBRAIN_OUTLINE_*` 仅作用于 `outline` 作业，未配置时沿用 Chat）；`OpenAIModel(config, store, lease, prompts, concurrency=2, timeout_seconds=60).call(task, payload, images=())` 关闭 SDK 重试，仅接受本地图像字节/data URL；编制执行入口 `execute_document` 默认并发 `6`。
   - 默认连续 60 秒无非空原始响应字节超时（收到流字节重计时，不限总墙钟）；`timeout`、`retry_policy=split_transport_contract_v1`、`outline_source_binding_contract=batch_excerpt_coverage_v1` 计入冻结执行身份。
   - 请求状态 `prepared → sent → succeeded / failed / uncertain`（真实 usage 缺失留 `null`，收部分流后超时记 `uncertain`）；错误分 `ModelInfrastructureError` / `ModelSemanticError` / `ModelConfigurationError`；429 按 30/60/120 秒退避并持久化 `not_before`；同一进程内某端点收到 429 后，该端点的全部并发槽位在冷却结束前都不发新请求（冷却取 `Retry-After`，至少 30 秒、至多 120 秒；不跨进程共享）；首原始字节/首解码块/首非空正文/最大 raw 静默/排队耗时独立计量且不进请求身份。
