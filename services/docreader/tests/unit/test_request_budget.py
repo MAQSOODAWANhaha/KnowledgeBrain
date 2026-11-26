@@ -61,9 +61,6 @@ def test_analysis_source_views_report_body_and_support_without_changing_admissio
     request = b.request(task, payload)
     measured = b.measure_request(request)
     exact_text_bytes = len(request["messages"][0]["content"].encode()) + len(request["messages"][1]["content"][0]["text"].encode())
-    if task == "extract":
-        exact_text_bytes += len(json.dumps(request["response_format"]["json_schema"], ensure_ascii=False,
-                                           separators=(",", ":")).encode())
     expected = {
         field: sum(len(json.dumps(view[field], ensure_ascii=False, separators=(",", ":")).encode()) - 2
                    for view in payload["source_views"])

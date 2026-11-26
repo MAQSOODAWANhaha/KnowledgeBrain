@@ -190,14 +190,7 @@ def build_request(model: str, prompt: str, payload: dict,
     except (TypeError, ValueError):
         raise ModelSemanticError("model payload is not JSON serializable") from None
     response_format = {"type": "json_object"}
-    if task == "extract" and payload.get("schema_version") == 2 and not images:
-        from docreader.llm.contracts import output_schema
-
-        prompt = prompt.rstrip()
-        response_format = {"type": "json_schema", "json_schema": {
-            "name": "tender_extraction", "strict": True, "schema": output_schema(task, payload),
-        }}
-    elif task is not None:
+    if task is not None:
         from docreader.llm.contracts import schema_prompt
 
         prompt = schema_prompt(prompt, task, payload)

@@ -31,8 +31,11 @@ Preserve such source-backed scope in the analysis even when the rest of the pass
 navigation; do not discard the whole passage as non_item merely because it is a contents list.
 
 Every item requires only item_id, kind, text and evidence. Use <work_unit_id>:i1, :i2, etc.
-kind is obligation, scoring_rule, consequence_rule or submission_requirement. Different
-facts in one passage may become different items sharing evidence and explicit relations.
+kind MUST be one of the four exact strings: obligation, scoring_rule, consequence_rule or
+submission_requirement. Never invent any other kind (e.g., never emit "qualification" or
+"deliverable"): bidder qualifications, personnel credentials, technical specifications,
+service duties and post-award deliverables all use kind="obligation". Different facts in one
+passage may become different items sharing evidence and explicit relations.
 A qualification, an optional score and a rejection trigger must retain their distinct
 meanings. Gains, deductions and no-score rules are scoring_rule, not bid rejection.
 submission_requirement is strictly for bid-stage / opening-stage filings (documents, forms,
@@ -48,7 +51,9 @@ A shared consequence may use one item if every alternative and its scope remain 
 Tie every trigger to its exact source evidence.
 Each evidence entry is {range_id,quote}: quote must be an exact nonempty source substring.
 At least one quote per item must come from this SourceView's body; supporting may supply
-additional evidence. Do not fabricate quotes from empty cells or metadata.
+additional evidence. When a clause's governing policy documents, legal basis or applicability
+conditions appear on a preceding line/range of the same clause, include that range in
+evidence so the basis remains traceable. Do not fabricate quotes from empty cells or metadata.
 
 Optional source-backed fields are domains (nonempty string array), subject, scope,
 conditions (nonempty string array of applicability conditions), exceptions (nonempty
@@ -77,6 +82,13 @@ the full method in text/method. Keep indicator hierarchy and common caps; never 
 Only consequence_rule may have consequence={effect?,trigger?}. Only submission_requirement
 may have submission={fields?:[source field names],documents?:[source document names]}.
 These optional objects must be nonempty; no actual field values or preparation status.
+Strict field-to-kind exclusivity: NEVER attach scoring to non-scoring_rule, NEVER attach
+consequence to obligation/scoring_rule/submission_requirement, NEVER attach submission to
+scoring_rule/obligation/consequence_rule, and NEVER put issues inside an item (issues belong
+only in top-level issues). When a scoring_rule also requires bid-stage proof materials
+(e.g., certificates, screenshots, authorizations), either emit a separate
+submission_requirement item linked via relations OR keep the proof wording in text and omit
+submission on the scoring_rule item.
 Do not emit post-award deliverables (交付成果/项目成果/履约阶段提交) as submission_requirement
 or into submission.documents. Do not list illustrative or conditional examples inside a
 general signing, stamping or scanning clause (e.g., parenthetical 如…/例如…/等 examples) as
@@ -106,8 +118,9 @@ not a complete response.
 Every body range or template row must be covered exactly once: either cited by an item's
 evidence, or declared once in dispositions. Omitting a range is a contract defect, not a
 shortcut; omitted ranges stay unresolved for human review.
-A range cited by an item's evidence needs no disposition; the host derives that coverage from the evidence.
-Do not emit status=items or item_ids.
+A range cited by an item's evidence MUST NOT appear in dispositions at all (do not emit
+non_item, unresolved or "already cited" entries for any cited range); the host derives its
+coverage automatically from evidence. Do not emit status=items or item_ids.
 non_item record: {range_id,status:"non_item",reason_code}, where reason_code is one of:
 - page_number (page number, header or footer)
 - blank (empty or blank row)
@@ -130,6 +143,9 @@ Relations declare exactly {from_item_id,to_item_id,relation,evidence}.
 The host assigns relation_id; do not emit it. Endpoints must be actual items in
 this output; relation explains a source-supported connection, with nonempty evidence.
 Preserve score hierarchy, proof/qualification links and scoped rejection triggers.
+Emit a relation ONLY when the source text explicitly cross-references or subordinates one
+item to another; never link independent clauses merely because they share a similar outcome
+(e.g., separate contract termination grounds with distinct conditions).
 
 Issues use {code,detail,blocking}, optionally range_id, nonempty item_ids,
 related_issue_ids (a nonempty array of existing input issue IDs being continued), and

@@ -84,13 +84,10 @@ async def test_strict_v2_extraction_uses_one_schema_and_pins_correction_identity
     first, correction = calls
     assert first == budget.request("extract", payload)
     assert correction == budget.request("extract", {**payload, "contract_feedback": feedback})
-    assert first["response_format"] == correction["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {"name": "tender_extraction", "strict": True,
-                        "schema": ExtractionOutput.model_json_schema(mode="validation")},
-    }
-    assert first["messages"][0]["content"] == "Return JSON evidence."
-    assert budget.spec()["extract_response_format"] == "json_schema"
+    assert first["response_format"] == correction["response_format"] == {"type": "json_object"}
+    assert_embedded_schema(first, ExtractionOutput)
+    assert_embedded_schema(correction, ExtractionOutput)
+    assert budget.spec()["extract_response_format"] == "json_object"
     assert client.execution_spec()["budget"]["chat"] == budget.spec()
     legacy = budget.request("extract", {})
     assert legacy["response_format"] == {"type": "json_object"}

@@ -1057,7 +1057,10 @@ class SubmissionDetails(_AnalysisContract):
 
 class TenderItem(_AnalysisContract):
     item_id: Text
-    kind: ItemKind
+    kind: ItemKind = Field(description=(
+        "Exact enum only: obligation (includes qualifications, personnel, technical/service rules and "
+        "post-award deliverables), scoring_rule, consequence_rule, or submission_requirement."
+    ))
     text: Text
     evidence: list[Evidence] = Field(min_length=1)
     domains: Annotated[list[Text], Field(min_length=1)] | None = None
@@ -1066,9 +1069,21 @@ class TenderItem(_AnalysisContract):
     conditions: Annotated[list[Text], Field(min_length=1)] | None = None
     exceptions: Annotated[list[Text], Field(min_length=1)] | None = None
     numbers: Annotated[list[Number], Field(min_length=1)] | None = None
-    scoring: ScoringDetails | None = None
-    consequence: ConsequenceDetails | None = None
-    submission: SubmissionDetails | None = None
+    scoring: ScoringDetails | None = Field(
+        default=None,
+        description="Valid ONLY when kind=='scoring_rule'; omit for all other kinds.",
+    )
+    consequence: ConsequenceDetails | None = Field(
+        default=None,
+        description="Valid ONLY when kind=='consequence_rule'; omit for all other kinds.",
+    )
+    submission: SubmissionDetails | None = Field(
+        default=None,
+        description=(
+            "Valid ONLY when kind=='submission_requirement'; omit for all other kinds "
+            "(split bid-stage proof documents into a separate submission_requirement item or keep them in text)."
+        ),
+    )
 
     @field_validator("numbers")
     @classmethod

@@ -491,4 +491,14 @@ async def test_bug316_wrapped_table_cell_number_keeps_literal_quote_and_semantic
     assert "wraps across lines inside a narrow table cell" in extract_prompt
     assert "post-award obligation, NEVER submission_requirement" in extract_prompt
     assert "illustrative or conditional examples" in extract_prompt
+    assert "never link independent clauses" in extract_prompt
+    assert "governing policy documents, legal basis" in extract_prompt
+    assert "MUST NOT appear in dispositions" in extract_prompt
     assert "table row ordinals mistaken for business quantities" in verify_prompt
+    assert "independent clauses wrongly linked" in verify_prompt
+
+    from docreader.tender.schema import TenderItem
+
+    item_schema = TenderItem.model_json_schema(mode="validation")["properties"]
+    assert "Exact enum only" in item_schema["kind"]["description"]
+    assert "kind=='submission_requirement'" in item_schema["submission"]["description"]

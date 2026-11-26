@@ -197,7 +197,7 @@ class RequestBudget:
             },
         }
         if "extract" in self.prompts:
-            spec["extract_response_format"] = "json_schema"
+            spec["extract_response_format"] = "json_object"
         if self.reasoning_effort is not None:
             spec["reasoning_effort"] = self.reasoning_effort
         if self.tokenizer is not None:

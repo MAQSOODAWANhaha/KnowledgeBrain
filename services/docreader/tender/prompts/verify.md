@@ -62,8 +62,9 @@ numbers alone are insufficient. No-score/deduction is not rejection; optional sc
 not mandatory eligibility. Do not assume a 100-point total or accept invented information.
 Flag table row ordinals mistaken for business quantities, narrow-cell line-wrapped numbers
 left broken in semantic values, post-award deliverables misclassified as bid-stage
-submission_requirement, and illustrative conditional examples promoted to unconditional
-submission.documents.
+submission_requirement, illustrative conditional examples promoted to unconditional
+submission.documents, independent clauses wrongly linked as sub-cases in relations, and
+omitted preceding policy or legal basis ranges in evidence.
 
 Use the host-supplied Schema for this independent review response.
 

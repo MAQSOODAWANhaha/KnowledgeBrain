@@ -1,6 +1,6 @@
 # 招投标活跃问题与修复记录
 
-本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-342**）。
+本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-343**）。
 已闭环的历史缺陷记录保存在 Git 历史，不在此长期堆积；跨模块高频防错规则沉淀在 [LESSONS.md](../../LESSONS.md)，动态运行状态只维护在 [交接](README.md#当前状态交接)。
 
 ## 维护约定
@@ -79,11 +79,11 @@
 
 ## BUG-314：未经允许转包的合同后果错绑到另一解除条件
 
-- 状态：安服原件与同源核验候选台账已复核，待修订。
-- 现象与影响：物理第 48 页 §15.4 规定未经允许转包或分包时的赔偿、违约金、可解除和退还。第 49 页 §17.6 另规定严重违约且协商无效时可以书面通知解除。台账把前者挂成后者的具体情形，可能让独立后果被错误附加条件。
-- 根因：抽取关系把两条同样涉及解除的独立触发合并。
-- 改法：去掉错绑关系，保留两条独立原文及其各自后果。
-- 验证：用未经允许转包、严重违约但协商仍有效、严重违约且协商无效三个场景核对台账与响应措辞。
+- 状态：已修上游抽取与核验 Prompt，待全量真实文件重跑复验。
+- 现象与影响：物理第 48 页 §15.4 规定未经允许转包或分包时的赔偿、违约金、可解除和退还。第 49 页 §17.6 另规定严重违约且协商无效时可以书面通知解除。抽取关系把前者挂成后者的具体情形，导致独立后果被错误附加条件。
+- 根因：`extract.md` 对 `relations` 未明确禁止仅因后果相似而关联独立条款。
+- 改法：在 `extract.md` 与 `verify.md` 明确仅当原文显式交叉引用或从属限定时才建立 `relations`，禁止把后果相似的独立条款（如不同合同解除情形）错绑为从属关系。
+- 验证：离线 Prompt 契约回归；待全量真实文件重跑核对 §15.4 与 §17.6 关系。
 
 ## BUG-316：授权清单的技术量值因字形断开而保留错误空白
 
@@ -103,11 +103,11 @@
 
 ## BUG-319：小微企业价格扣除事项缺少本条政策依据
 
-- 状态：安服整份核验检出，原件与两处事项已对照，待补引证。
-- 现象与影响：物理第 33 页第十五条明确用两份政策文件引出 10% 扣除。该处事项保留比例和优惠对象，引证未覆盖前置政策行。物理第 13 页前附表的独立事项已保留两份政策文件，整份规则仍可查。
-- 根因：事项只引用比例及后续文字，遗漏跨行的规则依据。
-- 改法：补入第十五条的同源引证，保留前附表适用条件和原有比例。
-- 验证：从两个事项均可回溯政策及适用条件，核对报价说明仍按原件适用范围表述。
+- 状态：已修上游抽取与核验 Prompt，待全量真实文件重跑复验。
+- 现象与影响：物理第 33 页第十五条明确用两份政策文件引出 10% 扣除。该处事项保留比例和优惠对象，但 `evidence` 遗漏了前置政策依据行。
+- 根因：`extract.md` 未提醒跨行前置政策/法律依据须纳入同事项 `evidence`。
+- 改法：在 `extract.md` 与 `verify.md` 明确当规则依据的政策文件、法律条款或适用前提位于同条款前置行/范围时，必须将该前置范围一并纳入 `evidence`。
+- 验证：离线 Prompt 契约回归；待全量真实文件重跑核对第 33 页第十五条引证完整性。
 
 ## BUG-320：第三方盖章文件的举例被列为必交材料
 
@@ -196,3 +196,11 @@
 - 根因：`services/docreader/tender/authoring_export.py` 仅在目标循环新增 body 节点或渲染写作单元时写入 `target` 书签，`heading_only` 路径两者皆无且未回落挂载到章节标题段落 `heading_paragraph`。
 - 改法：在 `_Assembler.chapter` 记录当前章节的标题段落 `heading_paragraph`，当 `heading_only` 目标未在正文新增节点且未挂接写作单元书签时，将 `target` 书签锚定到 `heading_paragraph`。
 - 验证：`services/docreader/tests/unit/test_toc_pagination.py` 新增 Red→Green 用例验证 `read_docx_outline` 书签绑定与 `acceptance_eval` 零缺失；安服多级大纲样本离线重导验证 `missing_target_ids` 归零、已放置规则零缺失且原式表全匹配。待隔离环境重建并由真实工作台与 ONLYOFFICE 全链路复验。
+
+## BUG-342：v2 文本抽取省略系统提示词 Schema 导致兼容网关下大量合同违例与丢项
+
+- 状态：已修，待受影响分包对比实测与全量重跑复验。
+- 现象与影响：实跑安服 5 个分包（`openai/gpt-5.6-luna`）共产生 36 条合同类阻断问题：3 条核心事项因非法 `kind` 整条丢弃（含项目经理与技术负责人资格要求）、12 条评分/义务事项误带 `submission`/`consequence` 或非法 `issues` 字段触发 `extraction_optional_fields_unresolved`、3 处已引用范围重复声明 `non_item` 触发 `extraction_disposition_unresolved`。
+- 根因：`services/docreader/llm/request.py` 对 v2 `extract` 仅在 `response_format.json_schema` 发送非全必填 `strict: True` Schema 而跳过 `schema_prompt()`；当 OpenAI 兼容网关忽略或降级 `response_format.json_schema` 时，模型完全看不到 JSON Schema；同时 `TenderItem` 字段描述与 `extract.md` 未把 `kind` 枚举边界、字段互斥（如评分项附带证明材料应拆项或省略 `submission`）和已引范围禁写 `disposition` 写透。
+- 改法：`build_request` 取消 v2 `extract` 独有的非严格 `response_format.json_schema` 特例，与其他任务统一为 `response_format={"type": "json_object"}` + 系统提示词内嵌单份同源 Schema（`extract_response_format` 记为 `json_object`，避免双份 Schema 挤占输入预算）；在 `TenderItem` Schema 字段描述与 `extract.md` 明确 `kind` 四值边界、`scoring`/`consequence`/`submission` 严格互斥及已引范围禁发 `disposition`。
+- 验证：`test_generated_output_requests.py`、`test_analysis_packing.py`、`test_analysis_extraction.py` 回归通过；安服受影响 3 个分包前后实测对比中合同阻断项由 33 条降至 13 条（`pack-961a9cbe` 7→0、`pack-446dc741` 13→2 且项目经理/技术负责人不再丢项、`pack-96443e84` 评分项 `submission` 违例 11→0）。
