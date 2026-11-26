@@ -406,6 +406,8 @@ class WebBridge:
         return reference, outline
 
     async def outline_view(self, project_id):
+        from docreader.integrations.web_outline import project_context_sources
+
         async with self.store.transaction() as conn:
             head = await (await conn.execute("SELECT * FROM tender_outline_revisions WHERE project_id=%s "
                 "ORDER BY revision DESC LIMIT 1", (project_id,))).fetchone()
@@ -420,8 +422,23 @@ class WebBridge:
         if completed:
             reference, outline = await self.execution_outline(project_id, completed["execution_id"])
             candidate = {"execution_id": completed["execution_id"], "sha256": reference["sha256"], "outline": outline}
-        return {"draft": await self.outline_draft(head) if head else None,
-                "candidate": candidate, "generation": views[0] if views else None}
+        draft = await self.outline_draft(head) if head else None
+        source_outline = (
+            draft["outline"]
+            if draft and draft.get("sources_current", True)
+            else (candidate["outline"] if candidate else (draft["outline"] if draft else None))
+        )
+        context_sources = (
+            await asyncio.to_thread(project_context_sources, self.artifacts, source_outline)
+            if source_outline is not None
+            else None
+        )
+        return {
+            "draft": draft,
+            "candidate": candidate,
+            "generation": views[0] if views else None,
+            "project_context_sources": context_sources,
+        }
 
     async def save_outline(self, payload):
         from docreader.tender.outline_edit import apply_outline_edit

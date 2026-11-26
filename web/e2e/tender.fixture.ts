@@ -93,8 +93,30 @@ async function fixture(page: Page) {
     downloads: [] as string[], saved: null as object | null,
     report: null as ExecutionReportView | null, reportReads: [] as string[] };
   let opened = 0;
-  const outline: OutlineView = { draft: { revision_id: "outline-r1", revision: 1, parent_id: null,
-    execution_id: "outline-execution", sha256: sha, outline: { chapters }, sources_current: true }, candidate: null, generation: null };
+  const sampleExcerpt = {
+    source_ref: { source_index_ref: { sha256: "b".repeat(64) }, unit_id: "unit-bg" },
+    selectors: [{ range_id: "range-bg-1", source_range_id: "range-bg-1", start: 0, end: 24 }],
+  };
+  const outline: OutlineView = {
+    draft: { revision_id: "outline-r1", revision: 1, parent_id: null,
+      execution_id: "outline-execution", sha256: sha, outline: { chapters }, sources_current: true },
+    candidate: null,
+    generation: null,
+    project_context_sources: {
+      available: true,
+      reason: null,
+      frozen_sha256: null,
+      options: [{
+        option_id: "ctx-1",
+        range_id: "range-bg-1",
+        document_id: "tender",
+        page: 5,
+        heading_path: "第一章 项目背景",
+        preview: "本项目覆盖云平台与办公终端运维服务。",
+        excerpt: sampleExcerpt,
+      }],
+    },
+  };
   const outlineReceipts = new Map<string, NonNullable<OutlineView["draft"]>>();
   const outlineHistory = new Map([[outline.draft!.revision_id, structuredClone(outline.draft!)]]);
   await page.route("**/api/**", async route => {
@@ -134,8 +156,12 @@ async function fixture(page: Page) {
       const collectTargets = (nodes: TenderChapter[]) => { for (const chapter of nodes) { for (const target of chapter.targets) targets.set(target.target_id, target); collectTargets(chapter.children); } };
       for (const value of outlineHistory.values()) collectTargets(value.outline.chapters);
       const restore = (nodes: OutlineNode[]): TenderChapter[] => nodes.map(node => {
-        const { writing_goal, target_ids, ...arrangement } = node;
-        const assigned = target_ids ? target_ids.map(id => targets.get(id)!).filter(Boolean) : old.get(node.chapter_id)?.targets ?? [];
+        const { writing_goal, target_ids, source_additions, ...arrangement } = node;
+        const additions = new Map((source_additions ?? []).map(item => [item.target_id, item.project_context_excerpts]));
+        const assigned = (target_ids ? target_ids.map(id => targets.get(id)!).filter(Boolean) : old.get(node.chapter_id)?.targets ?? [])
+          .map(target => additions.has(target.target_id)
+            ? { ...target, project_context_excerpts: additions.get(target.target_id) }
+            : target);
         return { ...old.get(node.chapter_id), ...arrangement, is_volume: node.is_volume ?? false, presentation_role: node.presentation_role ?? "body",
           targets: writing_goal !== undefined ? writing_goal ? [{ target_id: `manual-response-${node.chapter_id}`, kind: "narrative", purpose: writing_goal }] : [] : assigned, children: restore(node.children) };
       });

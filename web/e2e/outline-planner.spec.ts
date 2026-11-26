@@ -347,3 +347,52 @@ test("a pending-only adjudication sends no decisions and keeps the outline clean
   await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 1");
   await expect(page.getByRole("button", { name: "保存大纲草稿", exact: true })).toBeDisabled();
 });
+
+test("project context picker binds and clears main-document excerpts with outline save", async ({ page }) => {
+  const f = await fixture(page);
+  await f.ready();
+  await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
+  await page.getByRole("button", { name: "选择项目背景", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "选择项目背景" });
+  await expect(drawer.getByRole("status").filter({ hasText: "已选" })).toHaveText("已选 0 处");
+  await drawer.getByRole("checkbox", { name: /本项目覆盖云平台与办公终端运维服务/ }).click();
+  await expect(drawer.getByRole("status").filter({ hasText: "已选" })).toHaveText("已选 1 处");
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByText(/已绑 1 处项目背景/)).toBeVisible();
+  await expect(page.getByTestId("outline-save-status")).toHaveText("有未保存修改");
+  await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
+  await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 2");
+  expect(f.state.outlineSaves[0].body.chapters[0].source_additions).toEqual([
+    {
+      target_id: "target-1",
+      project_context_excerpts: f.outline.project_context_sources!.options.map(item => item.excerpt),
+    },
+  ]);
+
+  await page.getByRole("button", { name: "选择项目背景", exact: true }).click();
+  await drawer.getByRole("button", { name: "清空背景", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText(/已绑 1 处项目背景/)).toHaveCount(0);
+  await page.getByRole("button", { name: "保存大纲草稿", exact: true }).click();
+  await expect(page.getByTestId("outline-save-status")).toHaveText("已保存修订 3");
+  expect(f.state.outlineSaves[1].body.chapters[0].source_additions).toEqual([
+    { target_id: "target-1", project_context_excerpts: [] },
+  ]);
+});
+
+test("project context picker shows reason and disables binding when amendments exist", async ({ page }) => {
+  const f = await fixture(page);
+  f.outline.project_context_sources = {
+    available: false,
+    reason: "主件有补遗或澄清，请核对适用范围后再绑定方案背景。",
+    frozen_sha256: null,
+    options: [],
+  };
+  await f.ready();
+  await page.getByRole("tab", { name: "大纲编排", exact: true }).click();
+  await page.getByRole("button", { name: "选择项目背景", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "选择项目背景" });
+  await expect(drawer.getByText("主件有补遗或澄清，请核对适用范围后再绑定方案背景。", { exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "清空背景", exact: true })).toBeDisabled();
+});

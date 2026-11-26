@@ -1,6 +1,6 @@
 import { describe, expect, it } from "./harness";
-import { assignTarget, editChapter, findChapter, moveChapter, moveRelative, outlineNodes, removeChapter, reviewTargetIds } from "./outlineTree";
-import type { TenderChapter } from "../api/workbench";
+import { assignTarget, canBindProjectContext, editChapter, findChapter, moveChapter, moveRelative, outlineNodes, removeChapter, reviewTargetIds } from "./outlineTree";
+import type { SourceExcerptRef, TenderChapter } from "../api/workbench";
 
 const node = (id: string, children: TenderChapter[] = []): TenderChapter => ({ chapter_id: id, title: id, children, targets: [] });
 
@@ -61,5 +61,28 @@ describe("outline arrangement", () => {
     expect(reviewTargetIds(tree)).toEqual(["real-response", "child-response"]);
     expect(reviewTargetIds([tree[1]])).toEqual([]);
     expect(tree[0].targets[0]).toBe(target);
+  });
+  it("checks eligible targets and serializes project context edits into source_additions", () => {
+    const excerpt: SourceExcerptRef = {
+      source_ref: { source_index_ref: { sha256: "a".repeat(64) }, unit_id: "unit-1" },
+      selectors: [{ range_id: "range-1", source_range_id: "range-1", start: 0, end: 12 }],
+    };
+    const eligible = { target_id: "t-ok", kind: "narrative", purpose: "方案", support_origins: ["knowledge"] };
+    const manual = { target_id: "t-manual", kind: "narrative", purpose: "签字", manual_fill: true };
+    const form = { target_id: "t-form", kind: "form", purpose: "原表" };
+    const nativeBody = { target_id: "t-native", kind: "narrative", purpose: "原文", source_body_contract: "source_bound_native_body_v1" };
+    expect(canBindProjectContext(eligible)).toBe(true);
+    expect(canBindProjectContext(manual)).toBe(false);
+    expect(canBindProjectContext(form)).toBe(false);
+    expect(canBindProjectContext(nativeBody)).toBe(false);
+
+    const tree = [{ ...node("ch-1"), targets: [eligible, form] }];
+    expect(outlineNodes(tree)).toEqual([{ chapter_id: "ch-1", title: "ch-1", children: [] }]);
+    expect(outlineNodes(tree, { "t-ok": [excerpt] })).toEqual([
+      { chapter_id: "ch-1", title: "ch-1", source_additions: [{ target_id: "t-ok", project_context_excerpts: [excerpt] }], children: [] },
+    ]);
+    expect(outlineNodes(tree, { "t-ok": [] })).toEqual([
+      { chapter_id: "ch-1", title: "ch-1", source_additions: [{ target_id: "t-ok", project_context_excerpts: [] }], children: [] },
+    ]);
   });
 });

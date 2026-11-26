@@ -17,10 +17,26 @@ export type TenderItem = {
   submission?: { fields?: string[]; documents?: string[] };
 };
 export type RuleRef = { item_ref: { item_id: string; artifact_ref?: { sha256: string } }; decision_id?: string | null; rule_index?: number | null };
+export type SourceExcerptSelector = { range_id: string; source_range_id: string; start: number; end: number };
+export type SourceExcerptRef = {
+  source_ref: { source_index_ref: { sha256: string; relative_path?: string; size?: number; media_type?: string }; unit_id: string };
+  selectors: SourceExcerptSelector[];
+};
+export type ProjectContextOption = {
+  option_id: string; range_id: string; document_id: string;
+  page?: number | null; heading_path?: string | null; preview: string; excerpt: SourceExcerptRef;
+};
+export type ProjectContextSources = {
+  available: boolean; reason: string | null; frozen_sha256: string | null; options: ProjectContextOption[];
+};
+export type OutlineSourceAddition = { target_id: string; project_context_excerpts: SourceExcerptRef[] };
 export type TenderTarget = {
   target_id: string; kind: string; purpose: string; manual_fill?: boolean;
   rule_refs?: RuleRef[]; source_refs?: Array<{ unit_id: string }>; bookmark?: string | null;
   related_target_ids?: string[];
+  support_origins?: string[]; template_refs?: unknown[]; response_table?: unknown | null;
+  response_form_pending?: unknown | null; source_body_contract?: string | null;
+  project_context_excerpts?: SourceExcerptRef[];
 };
 export type TenderChapter = {
   chapter_id: string; title: string; children: TenderChapter[]; targets: TenderTarget[];
@@ -28,14 +44,21 @@ export type TenderChapter = {
   presentation_role?: string; writing_goal?: string;
   target_ids?: string[];
 };
-export type OutlineNode = Pick<TenderChapter, "chapter_id" | "title" | "is_volume" | "presentation_role" | "writing_goal"> & { children: OutlineNode[]; target_ids?: string[] };
+export type OutlineNode = Pick<TenderChapter, "chapter_id" | "title" | "is_volume" | "presentation_role" | "writing_goal"> & {
+  children: OutlineNode[]; target_ids?: string[]; source_additions?: OutlineSourceAddition[];
+};
 export type OutlineHistoryEntry = { revision_id: string; revision: number; parent_id: string | null; created_at: string };
-export type OutlineDocument = { chapters: TenderChapter[]; issues?: TenderIssue[]; authoring_input?: ReviewIdentity };
+export type OutlineDocument = { chapters: TenderChapter[]; issues?: TenderIssue[]; authoring_input?: ReviewIdentity & { frozen_ref?: { sha256?: string } } };
 export type OutlineRevision = {
   revision_id: string; revision: number; parent_id: string | null; execution_id: string; sha256: string;
   outline: OutlineDocument; sources_current: boolean; newer_analysis_identity?: ReviewIdentity | null;
 };
-export type OutlineView = { draft: OutlineRevision | null; candidate: { execution_id: string; sha256: string; outline: OutlineDocument } | null; generation: TenderExecution | null };
+export type OutlineView = {
+  draft: OutlineRevision | null;
+  candidate: { execution_id: string; sha256: string; outline: OutlineDocument } | null;
+  generation: TenderExecution | null;
+  project_context_sources?: ProjectContextSources | null;
+};
 export type EvaluationResolution = "pending" | "evaluation" | "reference" | "document_wide" | "target";
 export type EvaluationDecision = { rule_ref: RuleRef; resolution: EvaluationResolution; target_id?: string };
 export type OutlineSave = { expected_revision_id: string | null; source_revision_id?: string; source_execution_id?: string; chapters: OutlineNode[]; evaluation_decisions?: EvaluationDecision[] };

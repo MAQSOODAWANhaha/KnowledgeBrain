@@ -20,16 +20,28 @@ import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../../api";
 import { randomUuid } from "../../uuid";
-import { executionError, tenderApi, type DocumentStart, type OutlineRevision, type OutlineSave, type OutlineView, type TenderChapter, type TenderIssue, type TenderItem } from "../api/workbench";
+import { executionError, tenderApi, type DocumentStart, type OutlineNode, type OutlineRevision, type OutlineSave, type OutlineView, type SourceExcerptRef, type TenderChapter, type TenderIssue, type TenderItem, type TenderTarget } from "../api/workbench";
 import { EvaluationReview, pendingEvaluation, submittedDecisions, type Decisions } from "./EvaluationReview";
-import { canEditManualGoal, editChapter, findChapter, manualGoal, moveChapter, moveRelative, outlineNodes, removeChapter } from "./outlineTree";
+import { ProjectContextPicker } from "./ProjectContextPicker";
+import { canBindProjectContext, canEditManualGoal, editChapter, findChapter, manualGoal, moveChapter, moveRelative, outlineNodes, removeChapter, sameExcerptList, type ProjectContextEdits } from "./outlineTree";
 import { OutlineRecovery } from "./OutlineRecovery";
 import { inProgress as running } from "../executionStatus";
 import { TaskProgress } from "../TaskProgress";
 
-type Working = { chapters: TenderChapter[]; issues?: TenderIssue[]; decisions?: Decisions; expected: string | null; sourceRevision?: string; sourceExecution?: string; saved: string | null };
+type Working = { chapters: TenderChapter[]; issues?: TenderIssue[]; decisions?: Decisions; contextEdits?: ProjectContextEdits; expected: string | null; sourceRevision?: string; sourceExecution?: string; saved: string | null };
 type SaveFlight = { body: OutlineSave; attempt: MutationAttempt; working: Working };
 const signature = (chapters: TenderChapter[]) => JSON.stringify(outlineNodes(chapters));
+const submittedNodeSignature = (nodes: OutlineNode[]) => JSON.stringify(function strip(list: OutlineNode[]): OutlineNode[] {
+  return list.map(({ source_additions: _additions, children, ...rest }) => ({ ...rest, children: strip(children) }));
+}(nodes));
+const submittedContextEdits = (nodes: OutlineNode[]): ProjectContextEdits => Object.fromEntries(
+  function collect(list: OutlineNode[]): Array<[string, SourceExcerptRef[]]> {
+    return list.flatMap(node => [
+      ...(node.source_additions ?? []).map(item => [item.target_id, item.project_context_excerpts] as [string, SourceExcerptRef[]]),
+      ...collect(node.children),
+    ]);
+  }(nodes),
+);
 const fromDraft = (draft: OutlineRevision): Working => ({ chapters: draft.outline.chapters, issues: draft.outline.issues ?? [], expected: draft.revision_id, sourceRevision: draft.revision_id, saved: signature(draft.outline.chapters) });
 
 export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPending, onGenerateBody, onUnsafeChange, onExecutionAction }: {
@@ -54,6 +66,7 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
   const [conflict, setConflict] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [contextTargetId, setContextTargetId] = useState<string | null>(null);
   const generationKey = `kb.outline-generation:${projectId}`;
   const [generationAttempt, setGenerationAttempt] = useState<MutationAttempt | null>(() => {
     try { const value = JSON.parse(sessionStorage.getItem(generationKey) ?? "null") as MutationAttempt | null; return typeof value?.idempotencyKey === "string" ? value : null; } catch { return null; }
@@ -79,7 +92,8 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
     void poll(); return () => { abort.abort(); clearTimeout(timer); };
   }, [read]);
   const decided = submittedDecisions(working?.decisions ?? {});
-  const dirty = !!working && (working.saved === null ? !!working.chapters.length || !!working.sourceExecution || !!working.sourceRevision : signature(working.chapters) !== working.saved || !!decided.length);
+  const hasContextEdits = !!Object.keys(working?.contextEdits ?? {}).length;
+  const dirty = !!working && (working.saved === null ? !!working.chapters.length || !!working.sourceExecution || !!working.sourceRevision : signature(working.chapters) !== working.saved || !!decided.length || hasContextEdits);
   useEffect(() => { onUnsafeChange(dirty || !!pending || saving); }, [dirty, pending, saving, onUnsafeChange]);
   useEffect(() => {
     if (!pending || !working) return;
@@ -102,7 +116,7 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
     if (!working || saving || disabled && !pending || !hasSource) return;
     const flight = pending ?? { body: { expected_revision_id: working.expected,
       ...(working.sourceRevision ? { source_revision_id: working.sourceRevision } : {}),
-      ...(working.sourceExecution ? { source_execution_id: working.sourceExecution } : {}), chapters: outlineNodes(tree),
+      ...(working.sourceExecution ? { source_execution_id: working.sourceExecution } : {}), chapters: outlineNodes(tree, working.contextEdits),
       ...(decided.length ? { evaluation_decisions: decided } : {}) }, attempt: createMutationAttempt(), working };
     try { sessionStorage.setItem(storageKey, JSON.stringify({ ...flight, working })); }
     catch { setNotice("无法保存浏览器恢复信息，大纲尚未发送。请检查浏览器存储后重试。"); return; }
@@ -113,8 +127,9 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
       setWorking(current => current && { ...current, expected: draft.revision_id, sourceRevision: draft.revision_id, sourceExecution: undefined,
         issues: draft.outline.issues ?? [],
         decisions: JSON.stringify(submittedDecisions(current.decisions ?? {})) === JSON.stringify(flight.body.evaluation_decisions ?? []) ? {} : current.decisions,
+        contextEdits: JSON.stringify(current.contextEdits ?? {}) === JSON.stringify(submittedContextEdits(flight.body.chapters)) ? {} : current.contextEdits,
         saved: signature(draft.outline.chapters),
-        chapters: signature(current.chapters) === JSON.stringify(flight.body.chapters) ? draft.outline.chapters : current.chapters });
+        chapters: signature(current.chapters) === submittedNodeSignature(flight.body.chapters) ? draft.outline.chapters : current.chapters });
       sessionStorage.removeItem(storageKey); setPending(null); await read();
     } catch (error) {
       if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429) {
@@ -139,7 +154,7 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
   const adopt = () => {
     if (!remote?.candidate || !working || dirty || pending) return;
     setWorking({ chapters: remote.candidate.outline.chapters, issues: remote.candidate.outline.issues ?? [], expected: remote.draft?.revision_id ?? null, sourceExecution: remote.candidate.execution_id, saved: null });
-    setSelectedId(null); setNotice("已载入候选大纲，请核对并保存为草稿修订后生成正文。");
+    setSelectedId(null); setContextTargetId(null); setNotice("已载入候选大纲，请核对并保存为草稿修订后生成正文。");
   };
   async function executionAction(action: "resume" | "cancel") {
     if (!remote?.generation) return;
@@ -174,6 +189,18 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
     } catch (error) { if (request === readRequest.current) setNotice(error instanceof Error ? error.message : "最新修订读取失败，请重试。"); }
   };
   const evaluationRefs = pendingEvaluation(working?.issues ?? []);
+  const findTarget = (nodes: TenderChapter[], id: string): TenderTarget | undefined => {
+    for (const node of nodes) {
+      const hit = node.targets.find(item => item.target_id === id);
+      if (hit) return hit;
+      const nested = findTarget(node.children, id);
+      if (nested) return nested;
+    }
+  };
+  const contextTarget = contextTargetId ? (findTarget(tree, contextTargetId) ?? null) : null;
+  const loadedFrozenSha = working?.sourceExecution && remote?.candidate?.execution_id === working.sourceExecution
+    ? remote.candidate.outline.authoring_input?.frozen_ref?.sha256
+    : confirmed?.outline.authoring_input?.frozen_ref?.sha256 ?? remote?.draft?.outline.authoring_input?.frozen_ref?.sha256;
   const moves = [["up", "上移"], ["down", "下移"], ["indent", "降为子级"], ["outdent", "提升一级"]] as const;
   return <VStack gap={0} height="100%" minHeight={0} role="region" aria-label="大纲编排工作区">
     <Toolbar label="大纲操作" dividers={["bottom"]}
@@ -181,7 +208,7 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
       endContent={<>
         {dirty && <Button variant="ghost" isDisabled={saving || !!pending} onClick={() => {
           if (window.confirm(remote?.draft ? "放弃当前未保存的大纲调整，载入最新修订？" : "放弃当前未保存的大纲调整？")) {
-            setWorking(remote?.draft ? fromDraft(remote.draft) : { chapters: [], expected: null, saved: null }); setConfirmed(remote?.draft ?? null); setSelectedId(null); setConflict(false);
+            setWorking(remote?.draft ? fromDraft(remote.draft) : { chapters: [], expected: null, saved: null }); setConfirmed(remote?.draft ?? null); setSelectedId(null); setContextTargetId(null); setConflict(false);
           }
         }} label="放弃当前调整" />}
         <Button variant="secondary" isDisabled={disabled && !generationAttempt || generating || running(remote?.generation?.status) && !generationAttempt} onClick={() => void generate()} label={generationAttempt ? "确认同一次大纲生成请求" : "生成大纲"} />
@@ -215,7 +242,7 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
           if (dirty && !window.confirm("载入历史大纲会替换当前未保存的编排，继续？")) return;
           setWorking({ chapters: draft.outline.chapters, issues: draft.outline.issues ?? [], expected: remote?.draft?.revision_id ?? null,
             sourceRevision: draft.revision_id, saved: null });
-          setConfirmed(null); setSelectedId(null); setNotice("已载入历史大纲，请核对后另存新修订。");
+          setConfirmed(null); setSelectedId(null); setContextTargetId(null); setNotice("已载入历史大纲，请核对后另存新修订。");
         }} />
     </VStack>
     <Layout height="fill"
@@ -243,9 +270,34 @@ export function OutlinePlanner({ projectId, items, disabled, bodyBusy, bodyPendi
           : <Text type="supporting">已有章节的响应要求随原始引用保留，调整名称或层级不会改写要求。</Text>}
         <VStack gap={2}>
           <Heading level={3}>关联响应（只读）</Heading>
-          {selected.targets.length ? selected.targets.map(target => <Card key={target.target_id} padding={3}><Item density="compact" label={target.purpose} description={`${target.rule_refs?.length ?? 0} 条要求引用 · ${target.source_refs?.length ?? 0} 处来源引用`} /></Card>)
-            : <Text type="supporting">此章节尚无关联响应。</Text>}
+          {selected.targets.length ? selected.targets.map(target => {
+            const effective = working?.contextEdits?.[target.target_id] ?? target.project_context_excerpts ?? [];
+            const contextSummary = effective.length ? ` · 已绑 ${effective.length} 处项目背景` : "";
+            return <Card key={target.target_id} padding={3}><HStack hAlign="between" vAlign="center" gap={3}>
+              <Item density="compact" label={target.purpose} description={`${target.rule_refs?.length ?? 0} 条要求引用 · ${target.source_refs?.length ?? 0} 处来源引用${contextSummary}`} />
+              {canBindProjectContext(target) && <Button size="sm" variant="secondary" isDisabled={editingDisabled || !!pending} onClick={() => setContextTargetId(target.target_id)} label="选择项目背景" />}
+            </HStack></Card>;
+          }) : <Text type="supporting">此章节尚无关联响应。</Text>}
         </VStack>
+        <ProjectContextPicker
+          isOpen={!!contextTarget}
+          onOpenChange={open => { if (!open) setContextTargetId(null); }}
+          target={contextTarget}
+          sources={remote?.project_context_sources}
+          outlineFrozenSha={loadedFrozenSha}
+          selectedExcerpts={contextTarget ? (working?.contextEdits?.[contextTarget.target_id] ?? contextTarget.project_context_excerpts ?? []) : []}
+          disabled={editingDisabled || !!pending}
+          onChange={nextExcerpts => {
+            if (!contextTarget) return;
+            setWorking(current => {
+              if (!current) return current;
+              const nextEdits = { ...(current.contextEdits ?? {}) };
+              if (sameExcerptList(nextExcerpts, contextTarget.project_context_excerpts ?? [])) delete nextEdits[contextTarget.target_id];
+              else nextEdits[contextTarget.target_id] = nextExcerpts;
+              return { ...current, contextEdits: nextEdits };
+            });
+          }}
+        />
       </VStack> : <EmptyState title="选择章节进行编排" description="在左侧章节结构中选择一个章节。" />}</LayoutContent>} />
   </VStack>;
 }
