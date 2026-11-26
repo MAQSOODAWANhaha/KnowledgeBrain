@@ -92,10 +92,11 @@ function ItemContent({ item }: { item: TenderItem }) {
 
 const TARGET_KIND = { form: "规定表单", attachment: "证明附件" } as Record<string, string>;
 
-export function ChapterInspector({ chapter, view, draftId, contextMatches = true, onLocate, onDownload }: {
+export function ChapterInspector({ chapter, view, draftId, contextMatches = true, onLocate, onDownload, onOpenPendingQueue }: {
   chapter: TenderChapter | null; view: WorkbenchView; draftId?: string; contextMatches?: boolean;
   onLocate(bookmark?: string | null): void;
   onDownload(url: string, name: string): Promise<void>;
+  onOpenPendingQueue?: () => void;
 }) {
   const [tab, setTab] = useState<"requirements" | "supports" | "gaps">("requirements");
   const targets = chapter?.targets ?? [];
@@ -142,6 +143,11 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
           <Text type="supporting">真实证明须沿用原件。来源引用和检索命中均需核对其适用性。</Text>
         </>}
         {tab === "gaps" && <>
+          {onOpenPendingQueue && !!view.pending_queue?.length && <HStack>
+            <Button size="sm" variant="secondary"
+              label={`打开编制待核队列（${view.pending_queue.filter(item => item.status === "pending").length} 项未处理）`}
+              onClick={onOpenPendingQueue} />
+          </HStack>}
           {gaps.length ? gaps.map((gap, index) => {
             const target = targets.find(item => item.target_id === gap.target_id);
             const sameChapter = gap.chapter_id === chapter.chapter_id || !!target;

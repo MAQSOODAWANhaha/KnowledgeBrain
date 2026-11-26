@@ -64,10 +64,24 @@ export type TaskProgressView = {
   request_states: { prepared: number; sent: number; uncertain: number; failed: number; received: number };
   rejected_responses: number;
 };
+export type PendingGapStatus = "pending" | "resolved" | "need_material" | "accepted_gap";
+export type PendingQueueItem = {
+  gap_id: string; code: string; detail: string;
+  chapter_id: string | null; chapter_title: string | null;
+  target_id: string | null; target_purpose: string | null; bookmark: string | null;
+  status: PendingGapStatus; note: string;
+  created_at: string | null; handled_at: string | null; handling_duration_ms: number | null;
+};
+export type PendingQueueSummary = {
+  total: number; pending: number; handled: number;
+  by_status: Record<PendingGapStatus, number>;
+  handling_duration_ms: { observations: number; avg: number | null; max: number | null; p95: number | null };
+};
 export type ExecutionReportView = {
   execution_id: string; status: string; kind: "outline" | "document"; requests: number;
   stages: Record<string, { stage: string; logical_requests: number; requests: number; reported_tokens: { total_tokens?: number } }>;
   failures: Array<{ stage: string; task: string; kind: string; code: string; count: number; reported_tokens: number; unknown_usage: number }>;
+  pending_queue?: PendingQueueSummary;
 };
 export type TenderExecution = {
   execution_id: string; status: string; error?: unknown;
@@ -92,6 +106,7 @@ export type WorkbenchView = {
   outline: { chapters: TenderChapter[]; version_id?: string | null } | null;
   current_docx: TenderDraft | null;
   gaps: TenderIssue[];
+  pending_queue?: PendingQueueItem[];
   coverage?: { state: "unknown" | "draft"; pending: number | null; unreviewed: number | null; headline: string;
     applies_to?: { execution_id: string; version_id: string; docx_sha256: string } };
   requirements?: { rules: Array<{ rule_ref: RuleRef; rule: TenderItem | null; target_ids: string[] }> } | null;
@@ -135,6 +150,17 @@ export const tenderApi = {
   },
   async executionReport(id: string, execution: string, signal?: AbortSignal): Promise<ExecutionReportView | null> {
     return (await v2Request<{ report: ExecutionReportView | null }>(`${projectPath(id)}/executions/${encodeURIComponent(execution)}/report`, { signal })).data.report;
+  },
+  async updatePendingItem(
+    id: string,
+    execution: string,
+    gapId: string,
+    body: { status: PendingGapStatus; note?: string },
+  ): Promise<{ item: PendingQueueItem; summary: PendingQueueSummary }> {
+    return (await v2Request<{ item: PendingQueueItem; summary: PendingQueueSummary }>(
+      `${projectPath(id)}/executions/${encodeURIComponent(execution)}/pending/${encodeURIComponent(gapId)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    )).data;
   },
   async outlineRevision(id: string, revision: string, signal?: AbortSignal): Promise<{ draft: OutlineRevision; available_targets: TenderTarget[] }> {
     return (await v2Request<{ draft: OutlineRevision; available_targets: TenderTarget[] }>(`${projectPath(id)}/outline/revisions/${encodeURIComponent(revision)}`, { signal })).data;

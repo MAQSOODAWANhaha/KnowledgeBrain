@@ -1,6 +1,7 @@
 import { expect, type Page } from "@playwright/test";
 import type { DocxCurrent } from "../src/bid/api/docx";
-import type { ExecutionReportView, OutlineNode, OutlineSave, OutlineView, TenderChapter, TenderDocxCurrent, TenderDraft, WorkbenchView } from "../src/bid/api/workbench";
+import type { ExecutionReportView, OutlineNode, OutlineSave, OutlineView, PendingGapStatus, PendingQueueItem, TenderChapter, TenderDocxCurrent, TenderDraft, WorkbenchView } from "../src/bid/api/workbench";
+import { summarizePendingItems } from "../src/bid/authoring/pendingQueue";
 
 const project = "11111111-1111-4111-8111-111111111111";
 const path = `/api/v3/tender-projects/${project}`;
@@ -65,12 +66,28 @@ async function fixture(page: Page) {
     authoring: { execution_id: "execution-word-v1", status: "succeeded" },
     context_execution_id: "execution-word-v1", outline: { version_id: "word-v1", chapters },
     current_docx: draft(), versions: [draft()], gaps: [{ code: "missing_material", detail: "项目人员资料待补。", chapter_id: "chapter-2" }],
+    pending_queue: [{
+      gap_id: "gap-staff-1",
+      code: "missing_material",
+      detail: "项目人员资料待补。",
+      chapter_id: "chapter-2",
+      chapter_title: "第二章 实施团队",
+      target_id: "target-2",
+      target_purpose: "项目团队成员证书",
+      bookmark: "kb_target_2",
+      status: "pending",
+      note: "",
+      created_at: "2026-11-25T10:00:00Z",
+      handled_at: null,
+      handling_duration_ms: null,
+    }],
   };
   const state = { current: metadata() as DocxCurrent | null, reads: 0, failRead: false, loseStart: false, failClose: false,
     failOutlineSave: false, loseOutlineSave: false, loseOutlineStart: false,
     outlineSaves: [] as { body: OutlineSave; key: string | undefined }[],
     calls: [] as string[], starts: [] as { body: unknown; key: string | undefined; kind: string }[],
     executions: [] as { action: string; key: string | undefined }[], uploads: [] as string[],
+    pendingUpdates: [] as { execution: string; gapId: string; status: PendingGapStatus; note: string }[],
     opens: [] as { version_id: string; mode: string }[],
     saves: [] as { body: unknown; key: string | undefined }[],
     downloads: [] as string[], saved: null as object | null,
@@ -148,6 +165,24 @@ async function fixture(page: Page) {
     if (url.pathname.includes("/executions/") && url.pathname.endsWith("/report") && method === "GET") {
       state.reportReads.push(decodeURIComponent(url.pathname.split("/").at(-2)!));
       return json({ report: state.report });
+    }
+    const pendingMatch = url.pathname.match(/\/executions\/([^/]+)\/pending\/([^/]+)$/);
+    if (pendingMatch && method === "PUT") {
+      const execution = decodeURIComponent(pendingMatch[1]);
+      const gapId = decodeURIComponent(pendingMatch[2]);
+      const body = request.postDataJSON() as { status: PendingGapStatus; note?: string };
+      const note = (body.note ?? "").trim();
+      state.pendingUpdates.push({ execution, gapId, status: body.status, note });
+      const items = (view.pending_queue ??= []) as PendingQueueItem[];
+      const targetItem = items.find(entry => entry.gap_id === gapId);
+      if (!targetItem) return json({ error: { message: "待核事项不存在" } }, 404);
+      targetItem.status = body.status;
+      targetItem.note = note;
+      targetItem.handled_at = body.status === "pending" ? null : "2026-11-25T10:00:25Z";
+      targetItem.handling_duration_ms = body.status === "pending" ? null : 25000;
+      const summary = summarizePendingItems(items);
+      if (state.report) state.report.pending_queue = summary;
+      return json({ item: targetItem, summary });
     }
     if (url.pathname.includes("/executions/") && /\/(resume|cancel)$/.test(url.pathname)) {
       state.executions.push({ action: url.pathname.split("/").at(-1)!, key: request.headers()["idempotency-key"] });

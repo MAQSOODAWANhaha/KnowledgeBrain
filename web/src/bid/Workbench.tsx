@@ -41,6 +41,7 @@ import { AnalysisPane, analysisTabs, ChapterInspector, ChapterTree, flattenChapt
 import { AnalysisReview } from "./AnalysisReview";
 import { AnalysisRecovery } from "./AnalysisRecovery";
 import { ChapterRevision } from "./authoring/ChapterRevision";
+import { PendingQueue } from "./authoring/PendingQueue";
 import { SavedWordReview } from "./authoring/SavedWordReview";
 import { KnowledgeSelection, type KnowledgeSelection as KnowledgeChoice } from "./KnowledgeSelection";
 import { inProgress, executionStatus } from "./executionStatus";
@@ -146,7 +147,13 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const [recoveryUnsafe, setRecoveryUnsafe] = useState(false);
   const [revisionUnsafe, setRevisionUnsafe] = useState(false);
   const [savedReviewUnsafe, setSavedReviewUnsafe] = useState(false);
-  const unsafe = wordUnsafe || outlineUnsafe || analysisUnsafe || recoveryUnsafe || revisionUnsafe || savedReviewUnsafe;
+  const [pendingQueueUnsafe, setPendingQueueUnsafe] = useState(false);
+  const [pendingNotes, setPendingNotes] = useState<Record<string, string>>({});
+  const pendingNotesDirty = Object.entries(pendingNotes).some(([gapId, draft]) => {
+    const item = (view?.pending_queue ?? []).find(entry => entry.gap_id === gapId);
+    return item !== undefined && draft !== item.note;
+  });
+  const unsafe = wordUnsafe || outlineUnsafe || analysisUnsafe || recoveryUnsafe || revisionUnsafe || savedReviewUnsafe || pendingQueueUnsafe || pendingNotesDirty;
   const knowledgeKey = `kb.tender-knowledge:${projectId}`;
   const [knowledgeSelections, setKnowledgeSelections] = useState<KnowledgeChoice[]>(() => {
     try { const value: unknown = JSON.parse(sessionStorage.getItem(knowledgeKey) ?? "[]"); return Array.isArray(value) ? value.filter(item => item && typeof item.product_id === "string" && typeof item.version_id === "string") : []; }
@@ -164,7 +171,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const [navigationNotice, setNavigationNotice] = useState<string | null>(null);
   const [openRequest, setOpenRequest] = useState<OpenRequest | null>(null);
   useEffect(() => { if (step === "authoring" && authoringMode === "body" && openRequest) setBodyOpened(true); }, [step, authoringMode, openRequest]);
-  const [tool, setTool] = useState<"revision" | "savedReview" | "execution" | "regenerate" | null>(null);
+  const [tool, setTool] = useState<"revision" | "savedReview" | "pendingQueue" | "execution" | "regenerate" | null>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (step !== "authoring" || authoringMode !== "body") return;
@@ -235,9 +242,18 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     return () => { abort.abort(); clearTimeout(timer); };
   }, [reload, retry]);
   useEffect(() => {
-    if (!outlineUnsafe && !analysisUnsafe && !recoveryUnsafe && !revisionUnsafe && !savedReviewUnsafe) return;
+    const hasPendingDirty = pendingQueueUnsafe || pendingNotesDirty;
+    if (!outlineUnsafe && !analysisUnsafe && !recoveryUnsafe && !revisionUnsafe && !savedReviewUnsafe && !hasPendingDirty) return;
     const originalHash = window.location.hash;
-    const warn = () => setNotice(analysisUnsafe || recoveryUnsafe ? "请先提交或放弃分析修改，再离开项目。" : revisionUnsafe || savedReviewUnsafe ? "请先提交或放弃复核修改，再离开项目。" : "请先保存并确认大纲调整，再离开项目。");
+    const warn = () => setNotice(
+      analysisUnsafe || recoveryUnsafe
+        ? "请先提交或放弃分析修改，再离开项目。"
+        : revisionUnsafe || savedReviewUnsafe
+          ? "请先提交或放弃复核修改，再离开项目。"
+          : hasPendingDirty
+            ? "请先提交或放弃待核备注修改，再离开项目。"
+            : "请先保存并确认大纲调整，再离开项目。",
+    );
     const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     const click = (event: MouseEvent) => {
       const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
@@ -251,7 +267,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     });
     window.addEventListener("beforeunload", unload); document.addEventListener("click", click, true);
     return () => { window.removeEventListener("beforeunload", unload); document.removeEventListener("click", click, true); unguard(); };
-  }, [outlineUnsafe, analysisUnsafe, recoveryUnsafe, revisionUnsafe, savedReviewUnsafe, projectId, step]);
+  }, [outlineUnsafe, analysisUnsafe, recoveryUnsafe, revisionUnsafe, savedReviewUnsafe, pendingQueueUnsafe, pendingNotesDirty, projectId, step]);
   const onCurrentChange = useCallback((current: DocxCurrent | null) => setPinned(current as TenderDocxCurrent | null), []);
   const onNavigationResult = useCallback((result: WordNavigationResult) => {
     setNavigationNotice(result.ok ? "已定位 Word 中的书签位置。" : result.reason ?? "位置需要重新关联，请在 Word 中核对。");
@@ -366,6 +382,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
       { label: "核对已保存的 Word 内容", onClick: () => openReviewTool("savedReview") },
       { type: "divider" as const },
     ] : []),
+    { label: "编制待核队列", onClick: () => setTool("pendingQueue") },
     { label: "执行详情", onClick: () => setTool("execution") },
     { label: "直接生成整稿", onClick: () => setTool("regenerate") },
   ];
@@ -496,7 +513,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
                   <Panel isShown={tool === "savedReview"} padding={3} gap={2}><HStack hAlign="between" vAlign="center"><Heading level={2}>核对已保存的 Word 内容</Heading><Button size="sm" variant="ghost" label="返回章节核对" onClick={() => setTool(null)} /></HStack>
                     <SavedWordReview projectId={projectId} version={savedReviewVersion} readOnly={!!ended} disabled={wordUnsafe || busy} onUnsafeChange={setSavedReviewUnsafe} />
                   </Panel>
-                  <Panel isShown={tool !== "revision" && tool !== "savedReview"}><ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} /></Panel>
+                  <Panel isShown={tool !== "revision" && tool !== "savedReview"}><ChapterInspector chapter={selected} view={view} draftId={draftId} contextMatches={contextMatches} onLocate={locate} onDownload={download} onOpenPendingQueue={() => setTool("pendingQueue")} /></Panel>
                 </Panel>
               </LayoutPanel>} />
         </Panel>
@@ -518,6 +535,22 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
             <List hasDividers>{view.gaps.map((gap, index) => <ListItem key={`${gap.code}:${index}`} label={gap.detail} />)}</List>
           </VStack></Card>}
         </VStack>}
+        <Drawer isOpen={tool === "pendingQueue"} onOpenChange={closeTool} label="编制待核队列" width={560}>
+          <DrawerHeader title="编制待核队列" onOpenChange={closeTool} />
+          {tool === "pendingQueue" && (
+            <PendingQueue
+              projectId={projectId}
+              executionId={view.context_execution_id ?? null}
+              items={view.pending_queue ?? []}
+              readOnly={!!ended}
+              draftNotes={pendingNotes}
+              onDraftNotesChange={setPendingNotes}
+              onLocate={bookmark => { locate(bookmark); setTool(null); }}
+              onUpdated={() => reload()}
+              onUnsafeChange={setPendingQueueUnsafe}
+            />
+          )}
+        </Drawer>
         <Drawer isOpen={tool === "execution"} onOpenChange={closeTool} label="执行详情" width={440}>
           <DrawerHeader title="执行详情" onOpenChange={closeTool} />
           <VStack gap={3}>

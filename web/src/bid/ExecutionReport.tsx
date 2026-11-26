@@ -1,10 +1,12 @@
 import { Banner } from "@astryxdesign/core/Banner";
 import { Heading } from "@astryxdesign/core/Heading";
+import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { pixel, Table } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useEffect, useState } from "react";
 import { tenderApi, type ExecutionReportView } from "./api/workbench";
+import { formatDurationMs } from "./authoring/pendingQueue";
 
 const kinds: Record<string, string> = { send: "发送失败", contract: "未通过业务验收" };
 const tokens = (value: number | undefined) => value === undefined ? "未知" : String(value);
@@ -47,5 +49,20 @@ export function ExecutionReport({ projectId, executionId, status }: { projectId:
         ]} />}
       <Text type="supporting">按失败消耗的 Token 排序。</Text>
     </VStack>
+    {report.pending_queue && <VStack gap={1}>
+      <Heading level={3}>待核人工处理</Heading>
+      <MetadataList label={{ width: 96 }}>
+        <MetadataListItem label="待核总数">{report.pending_queue.total} 项</MetadataListItem>
+        <MetadataListItem label="未处理">{report.pending_queue.pending} 项</MetadataListItem>
+        <MetadataListItem label="已处理">{report.pending_queue.by_status.resolved} 项</MetadataListItem>
+        <MetadataListItem label="补资料">{report.pending_queue.by_status.need_material} 项</MetadataListItem>
+        <MetadataListItem label="接受空缺">{report.pending_queue.by_status.accepted_gap} 项</MetadataListItem>
+        <MetadataListItem label="处理时长">
+          {report.pending_queue.handling_duration_ms.observations
+            ? `均值 ${formatDurationMs(report.pending_queue.handling_duration_ms.avg)} · P95 ${formatDurationMs(report.pending_queue.handling_duration_ms.p95)} · 最大 ${formatDurationMs(report.pending_queue.handling_duration_ms.max)}（${report.pending_queue.handling_duration_ms.observations} 项样本）`
+            : "暂无已处理样本"}
+        </MetadataListItem>
+      </MetadataList>
+    </VStack>}
   </VStack>;
 }
