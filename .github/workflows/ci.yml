@@ -226,6 +226,22 @@ jobs:
         run: npm test --prefix web
       - name: build
         run: npm run build --prefix web
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: mock e2e
+        # Mocked API routes against the built SPA; *-live specs need the full stack.
+        working-directory: web
+        run: npx playwright test -c playwright.config.ts
+      - name: Preserve e2e evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
 
   python:
     runs-on: *runner
