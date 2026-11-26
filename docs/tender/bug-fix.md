@@ -263,3 +263,11 @@
 - 根因：前端工作台每次按键重渲染全量表单并全量序列化 `working.base` 进 `sessionStorage`；后端抽取按分包工作、模型只看到本包视图，跨包引用被记成待人工问题，宿主尚未用全文件目录先行消解跨包引用或按问题类型分级，财务表格版式解析产生孤立表头碎片。
 - 改法：前端 `web/src/bid/AnalysisReview.tsx` 与 `analysisReviewHelpers.ts` 已改为 `React.memo` 行组件、`Map`/`Set` $O(N)$ 索引、预序列化不可变基线与防抖草稿缓存、20 项分页及按问题类型/状态筛选与批量人工判定（保留已有手动判定）。后端全文件跨包引用消解与非语义问题分级属于分析链路与 Prompt 变更，待按变更五问完成设计。
 - 验证：前端单元测试 `analysisReviewHelpers.test.ts` 与 Playwright `analysis-review.spec.ts`（含分组批量判定与 250 条分页批量确认）已通过；后端降噪待设计与实跑复验。
+
+## BUG-350：格式章节外同页或跨页多张补位表复制窗口重叠，导致编译拒收整份大纲
+
+- 状态：已修，离线单测与 `BiddingFile.pdf` 端到端全链路实测复验通过。
+- 现象与影响：`BiddingFile.pdf` 大纲阶段 `directory_plan` 已成功返回全部投标文件格式章节，但执行以 `SourceOutlineUnavailable`（`outline_empty`）失败、整份大纲清空。
+- 根因：`services/docreader/tender/item_placement.py` 的 `submission_form_nodes` 对每个格式外 `submission_requirement` 候选章独立从标题行复制到最末引证页末尾，既未在同文档下一个补位候选章标题行前截断，也未规避已有格式节点行、`format_pages`、明示「不适用」式样及页眉/页码装饰行。当同页出现多张外置附表（如 `技术附表 G` 与子表 `附表 G.1`、`附表 G.2` 同在第 70 页）时，各节点 `body_windows` 互相重叠，触发 `directory_compile._validate_body_owners` 抛出 `DirectoryPlanRejected`，导致 `compile_plans` 退回空目录。
+- 改法：在 `submission_form_nodes` 中先收集并按 `(document_id, page, line)` 排序全部候选标题（跳过已归属节点、`format_pages` 及 `_NOT_APPLICABLE` 行），再按顺序为每张候选表切分互不重叠的 `body_windows`（止于下一候选章标题、已有节点行或 `format_pages` 之前，并跳过非网格页边装饰行）。规则并入 [业务工作流 · 新链格式补位与事项归属](workflow.md#新链格式补位与事项归属)。
+- 验证：`services/docreader/tests/unit/test_item_placement.py` 新增 Red→Green 用例覆盖同页多表切分、不跨入已有格式节点/`format_pages`、跳过不适用式样与页眉页码装饰行，并通过 `compile_bid_format_plan` 端到端编译。

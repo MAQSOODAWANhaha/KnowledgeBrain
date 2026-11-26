@@ -12,6 +12,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
+from docreader.tender.bid_format_outline import _NOT_APPLICABLE, _page_edges
 from docreader.tender.directory_compile import _FORMAT_ITEM, _REVISIONS, _ROLE_LABEL
 from docreader.tender.schema import Contract, Text
 from docreader.tender.status import AuthoringTask
@@ -74,10 +75,67 @@ def _items(context):
     return rows
 
 
+def _grid_points(documents):
+    points = set()
+    for document in documents:
+        identity = document['document_id']
+        parts = document.get('template_parts') or {}
+        for page, units in enumerate(document.get('line_units') or []):
+            for line, unit_id in enumerate(units or []):
+                if unit_id in parts:
+                    points.add((identity, page, line))
+    return points
+
+
+def _existing_plan_lines(plan):
+    lines, ids = set(), set()
+    for node in plan.get('nodes', []):
+        if isinstance(node.get('id'), str):
+            ids.add(node['id'])
+        heading = node.get('heading')
+        if isinstance(heading, dict) and all(k in heading for k in ('document_id', 'page', 'line')):
+            lines.add((heading['document_id'], heading['page'], heading['line']))
+        for window in node.get('body_windows') or ():
+            doc_id, page = window['document_id'], window['page']
+            for line_no in range(window['start_line'], window['end_line'] + 1):
+                lines.add((doc_id, page, line_no))
+    return lines, ids
+
+
+def _partition_form_windows(document_id, pages, start_page, start_line, last_page, *,
+                            next_point, existing_lines, format_pages, page_edges):
+    """Copy lines from heading through last_page without crossing boundaries or page edges."""
+    windows = []
+    for current in range(start_page, last_page + 1):
+        if (document_id, current) in format_pages:
+            break
+        start = start_line if current == start_page else 0
+        count = len(pages[current].splitlines())
+        stopped = False
+        for line_no in range(start, count):
+            if next_point is not None and (current, line_no) >= next_point:
+                stopped = True
+                break
+            if (document_id, current, line_no) in existing_lines:
+                stopped = True
+                break
+            if (document_id, current, line_no) in page_edges and (current, line_no) != (start_page, start_line):
+                continue
+            if windows and windows[-1]['page'] == current and windows[-1]['end_line'] + 1 == line_no:
+                windows[-1]['end_line'] = line_no
+            else:
+                windows.append({'document_id': document_id, 'page': current,
+                                'start_line': line_no, 'end_line': line_no})
+        if stopped:
+            break
+    return windows
+
+
 def submission_form_nodes(documents, plan, items, format_pages):
     """Plan nodes for named submission forms that the bid-format chapter does not contain.
 
     BUG-332: an amendment or clarification that restates a form already in the outline is added too, as a conflict.
+    BUG-350: candidates are sorted per document and partitioned before the next candidate, existing nodes, or format_pages.
     """
     named = {}
     for node in plan.get('nodes', []):
@@ -86,6 +144,8 @@ def submission_form_nodes(documents, plan, items, format_pages):
         stripped = _FORMAT_ITEM.sub('', raw_name.strip(), count=1).strip()
         if stripped:
             named.setdefault(_compact(stripped), node)
+    existing_lines, existing_ids = _existing_plan_lines(plan)
+    page_edges = _page_edges(documents) - _grid_points(documents)
     roles = {document['document_id']: document.get('role') or 'main' for document in documents}
     wanted = {}
     for row in items:
@@ -98,11 +158,11 @@ def submission_form_nodes(documents, plan, items, format_pages):
             if key in named:
                 outside = [e for e in outside if roles.get(e['document_id']) in _REVISIONS]
             if key and outside:
-                wanted.setdefault(key, {'name': name, 'rows': [], 'evidence': [], 'conflict': named.get(key)})
+                wanted.setdefault(key, {'name': name.strip(), 'rows': [], 'evidence': [], 'conflict': named.get(key)})
                 wanted[key]['rows'].append(row)
                 wanted[key]['evidence'].extend(outside)
     by_id = {document['document_id']: document for document in documents}
-    nodes = []
+    candidates, claimed_headings = [], set()
     for key, entry in wanted.items():
         heading = None
         for document_id, page in sorted({(e['document_id'], e['page']) for e in entry['evidence']}):
@@ -110,9 +170,16 @@ def submission_form_nodes(documents, plan, items, format_pages):
             if document is None:
                 continue
             for candidate in (page - 1, page):
-                if 0 <= candidate < len(document['pages']):
+                if 0 <= candidate < len(document['pages']) and (document_id, candidate) not in format_pages:
                     lines = document['pages'][candidate].splitlines()
-                    found = next((i for i, line in enumerate(lines) if _compact(line) == key), None)
+                    found = next(
+                        (i for i, text in enumerate(lines)
+                         if _compact(text) == key
+                         and (document_id, candidate, i) not in existing_lines
+                         and (document_id, candidate, i) not in claimed_headings
+                         and not _NOT_APPLICABLE.search(text.strip())),
+                        None,
+                    )
                     if found is not None:
                         heading = (document_id, candidate, found)
                         break
@@ -120,16 +187,33 @@ def submission_form_nodes(documents, plan, items, format_pages):
                 break
         if heading is None:
             continue
+        claimed_headings.add(heading)
+        candidates.append((heading, entry))
+    candidates.sort(key=lambda pair: pair[0])
+    nodes, seq = [], 0
+    for idx, (heading, entry) in enumerate(candidates):
         document_id, page, line = heading
         pages = by_id[document_id]['pages']
-        last = max(e['page'] for e in entry['evidence'] if e['document_id'] == document_id)
-        windows = []
-        for current in range(page, last + 1):
-            count = len(pages[current].splitlines())
-            start = line if current == page else 0
-            if count > start:
-                windows.append({'document_id': document_id, 'page': current, 'start_line': start, 'end_line': count - 1})
-        nodes.append({'node': {'id': f'submission-{len(nodes) + 1}', 'parent_id': None, 'response_kind': 'form',
+        evidence_pages = [e['page'] for e in entry['evidence'] if e['document_id'] == document_id and e['page'] >= page]
+        last = max(evidence_pages, default=page)
+        next_point = (
+            (candidates[idx + 1][0][1], candidates[idx + 1][0][2])
+            if idx + 1 < len(candidates) and candidates[idx + 1][0][0] == document_id
+            else None
+        )
+        windows = _partition_form_windows(
+            document_id, pages, page, line, last,
+            next_point=next_point, existing_lines=existing_lines,
+            format_pages=format_pages, page_edges=page_edges,
+        )
+        if not windows:
+            continue
+        seq += 1
+        while f'submission-{seq}' in existing_ids:
+            seq += 1
+        node_id = f'submission-{seq}'
+        existing_ids.add(node_id)
+        nodes.append({'node': {'id': node_id, 'parent_id': None, 'response_kind': 'form',
                                'name': entry['name'],
                                'heading': {'document_id': document_id, 'page': page, 'line': line},
                                'body_windows': windows},

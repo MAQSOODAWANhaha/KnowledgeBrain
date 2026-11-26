@@ -392,3 +392,110 @@ def test_bug340_decode_placements_normalizes_string_null():
         positions,
     )
     assert decoded == {"r1": None, "r2": None, "r3": "t1"}
+
+
+def test_bug350_same_page_outside_forms_partition_windows_and_compile_cleanly():
+    from docreader.tender.bid_format_outline import compile_bid_format_plan
+
+    pages = [
+        "\n".join([
+            "某项目招标文件",
+            "技术附表 G 技术条款偏差表",
+            "投标人必须填写本表，如无偏差填写无。",
+            "附表 G.1 结构性不响应偏差",
+            "序号 条目 简要内容",
+            "注：均应列入偏差表。",
+            "附表 G.2 实际不响应偏差",
+            "序号 条目 简要内容",
+            "62",
+        ]),
+        "\n".join([
+            "某项目招标文件",
+            "第六章 投标文件格式",
+            "一、投标书",
+            "致：采购人",
+            "63",
+        ]),
+    ]
+    documents = [{
+        "document_id": "tender",
+        "role": "main",
+        "pages": pages,
+        "line_units": [[] for _ in pages],
+        "layout_decoration": [[True] + [False] * 8, [True] + [False] * 4],
+    }]
+    base_plan = {
+        "nodes": [{
+            "id": "format-1",
+            "name": "投标书",
+            "parent_id": None,
+            "response_kind": "form",
+            "heading": {"document_id": "tender", "page": 1, "line": 2},
+            "body_windows": [{"document_id": "tender", "page": 1, "start_line": 2, "end_line": 3}],
+        }],
+        "composition": {
+            "priority_basis": [{"document_id": "tender", "page": 1, "start_line": 2, "end_line": 2}],
+            "entries": [{"name": {"document_id": "tender", "page": 1, "line": 2}}],
+        },
+        "scopes": [{"items": [{"node_id": "format-1", "entry": 0, "depth": "self",
+                               "presentation": "section", "clause": []}]}],
+        "excluded": [],
+        "source_only": [],
+    }
+    items = [
+        item(1, "submission_requirement", ["技术附表 G 技术条款偏差表", "附表 G.1 结构性不响应偏差", "附表 G.2 实际不响应偏差"], page=0),
+    ]
+    result, added_names = placement.add_submission_forms(base_plan, documents, items, {("tender", 1)})
+    assert added_names == ["技术附表 G 技术条款偏差表", "附表 G.1 结构性不响应偏差", "附表 G.2 实际不响应偏差"]
+    added = {node["name"]: node["body_windows"] for node in result["nodes"] if node["id"].startswith("submission-")}
+    assert added["技术附表 G 技术条款偏差表"] == [{"document_id": "tender", "page": 0, "start_line": 1, "end_line": 2}]
+    assert added["附表 G.1 结构性不响应偏差"] == [{"document_id": "tender", "page": 0, "start_line": 3, "end_line": 5}]
+    assert added["附表 G.2 实际不响应偏差"] == [{"document_id": "tender", "page": 0, "start_line": 6, "end_line": 7}]
+
+    compiled = compile_bid_format_plan(result, documents)
+    assert [ch["title"] for ch in compiled["chapters"]] == [
+        "投标书", "技术附表 G 技术条款偏差表", "附表 G.1 结构性不响应偏差", "附表 G.2 实际不响应偏差",
+    ]
+    assert not [iss for iss in compiled["issues"] if iss["code"] == "outline_directory_rejected"]
+
+
+def test_bug350_outside_forms_never_cross_format_pages_owned_lines_or_not_applicable():
+    pages = [
+        "技术附表 F 监造表（本次不适用）\n监造内容\n外置承诺函\n我方承诺如下\n",
+        "第六章 投标文件格式\n一、投标书\n致：采购人\n",
+        "外置承诺函\n后文再次提及外置承诺函\n",
+    ]
+    documents = [{"document_id": "tender", "role": "main", "pages": pages, "line_units": [[] for _ in pages]}]
+    base_plan = {
+        "nodes": [{
+            "id": "format-1",
+            "name": "投标书",
+            "parent_id": None,
+            "response_kind": "form",
+            "heading": {"document_id": "tender", "page": 1, "line": 1},
+            "body_windows": [{"document_id": "tender", "page": 1, "start_line": 1, "end_line": 2}],
+        }],
+        "composition": {
+            "priority_basis": [{"document_id": "tender", "page": 1, "start_line": 1, "end_line": 1}],
+            "entries": [{"name": {"document_id": "tender", "page": 1, "line": 1}}],
+        },
+        "scopes": [{"items": [{"node_id": "format-1", "entry": 0, "depth": "self",
+                               "presentation": "section", "clause": []}]}],
+        "excluded": [],
+        "source_only": [],
+    }
+    # Evidence spans page 0 AND page 2 across format page 1, plus a not-applicable form on page 0.
+    cross = item(1, "submission_requirement", ["外置承诺函"], page=0)
+    cross["evidence"].append({"document_id": "tender", "page": 2, "quote": "后文再次提及外置承诺函"})
+    na_item = item(2, "submission_requirement", ["技术附表 F 监造表（本次不适用）"], page=0)
+    # Candidate page-1 lookup from page 2 must also not match inside format_pages (page 1).
+    format_neighbor = item(3, "submission_requirement", ["一、投标书"], page=2)
+
+    result, added_names = placement.add_submission_forms(
+        base_plan, documents, [cross, na_item, format_neighbor], {("tender", 1)}
+    )
+    assert added_names == ["外置承诺函"]
+    added, = [node for node in result["nodes"] if node["id"].startswith("submission-")]
+    assert added["heading"] == {"document_id": "tender", "page": 0, "line": 2}
+    # Must stop before format_pages (page 1), never crossing into page 1 or swallowing format-1.
+    assert added["body_windows"] == [{"document_id": "tender", "page": 0, "start_line": 2, "end_line": 3}]
