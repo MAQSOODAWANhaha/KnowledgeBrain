@@ -253,7 +253,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `summary` | `score_passed` / `score_total`（`4`）、`machine_passed`（机器检查通过的项数）以及各状态计数（`pass`、`fail`、`needs_human_check`、`needs_onlyoffice_check`、`unknown`） |
 | `criteria.requirements_coverage` | 第 1 项（要求不漏）：以分析事项为分母统计已落位、已结案（约束/排除）、显式待补和静默漏项，`missing_items` 列出每条漏项的 `rule_ref`、`item_id`、位置与原因；缺底稿时为 `unknown`，缺人工抽查回执且机器无漏项时为 `needs_human_check` |
 | `criteria.original_tables` | 第 2 项（原式表正确）：核对大纲原式表在 Word 中的表格结构（列数、行数、表头、合并单元格）与固定文字/签章行保留，输出 `mismatches` 精确到 `chapter_id`、`chapter_title`、`target_id`、`table_index`、`kind`、`expected` 与 `actual`；无原件网格且无模板错误时保留 `unknown` |
-| `criteria.no_fabrication` | 第 3 项（缺口不被编造）：核对覆盖结算与缺口中的 `unsupported`、人工位自动填值、无依据正文写入与未复核正文，`violations` 列出具体 `chapter_id`、`target_id`、`coverage_id` 与 `code`；机器无违规且缺人工真实性核验时为 `needs_human_check` |
+| `criteria.no_fabrication` | 第 3 项（缺口不被编造）：核对未剔除的 `unsupported_content`、人工位自动填值（`manual_target_has_generated_content`）、无资料无来源正文写入（`content_without_material_or_source`）、未复核正文（`generated_content_unreviewed`）与导出编造/越界缺口，`violations` 列出具体违规项；已被 `_adopt_reviewed` 剔除的历史 `unsupported_content` 计入 `counts.removed_by_review`；覆盖结算中仅表示响应不足/待补资料的 `assessment == "unsupported"`（`coverage_unsupported`）单独记入 `counts.unmet_by_review` 与 `unmet_items`，不误判为编造违规 |
 | `criteria.file_usability` | 第 4 项（文件可用）：校验 DOCX 压缩包与 XML 完整性、大纲章节/目标书签覆盖，并结合 `版式核对.json` 或 `--onlyoffice-receipt` 核对同摘要 `docx_sha256` 的 ONLYOFFICE 保存与 PDF 导出；缺实测回执时为 `needs_onlyoffice_check` |
 | `execution_report`、`limits` | 透传的 `authoring-report` 摘要（含 `failures`、`outline_issues`、`document_gaps`）及离线评测局限说明 |
 

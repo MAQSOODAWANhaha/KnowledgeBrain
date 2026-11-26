@@ -1,6 +1,6 @@
 # 招投标活跃问题与修复记录
 
-本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-347**）。
+本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-348**）。
 已闭环的历史缺陷记录保存在 Git 历史，不在此长期堆积；跨模块高频防错规则沉淀在 [LESSONS.md](../../LESSONS.md)，动态运行状态只维护在 [交接](README.md#当前状态交接)。
 
 ## 维护约定
@@ -236,3 +236,11 @@
 - 根因：恢复视图只返回提示文本，没有失败命令的回执原因和模型调用错误；未取消的非失败状态与已取消共用一句提示；前端把所有 notice 都按错误渲染，并在恢复后照常显示 `not_failed` 提示。
 - 改法：`services/docreader/integrations/web_recovery.py` 返回 `failure_reason` 和 `failure_causes`（失败命令下 failed/uncertain 请求的错误类型、次数与类别，类别取自 `llm/failures.py`），`cancelled` 与 `not_failed` 分开提示；前端在「故障原因」中列出这些信息，理由框标为必填并说明，成功消息用成功样式，不再显示 `not_failed` 提示；进度区未确认回执提示区分执行中与失败，失败时指明右侧「继续失败的分析」。
 - 验证：`tests/workflow/test_web_recovery.py` 的错误类型与取消/未失败用例回退时失败；`analysis-status.spec.ts` 与更新后的 `task-progress.spec.ts` 通过。
+
+## BUG-347：acceptance_eval 将响应不足的 coverage_unsupported 误判为编造违规
+
+- 状态：已修，离线回归与 `phase1-step2-full-authoring` 全编制产物重评通过；待人工真实性核验与 ONLYOFFICE 回执。
+- 现象与影响：安服全编制实跑在 `acceptance_eval` 第 3 项（缺口不被编造）将两条仅因缺少客户现场/承诺函资料的 `coverage_unsupported` 判为 `violations`，导致 `no_fabrication` 报 `fail`。
+- 根因：`services/docreader/tender/prompts/authoring_review.md` 规定 `assessments[].result = "unsupported"` 表示要求响应尚不充分而非编造内容（真正无依据生成由 `findings[].code == "unsupported_content"` / `reject_content=true` 拒收），但 `services/docreader/tender/acceptance_eval.py` 的 `_evaluate_no_fabrication` 将 `assessment == "unsupported"` 与 `coverage_unsupported` 直接写入 `violations`。
+- 改法：`_evaluate_no_fabrication` 将 `coverage_unsupported` 单独归入 `unmet_items` 与 `counts.unmet_by_review` 审计，不再计入编造 `violations`；无企业资料/来源的正文写入（`content_without_material_or_source`）、人工位自动填值、未复核正文与未剔除 `unsupported_content` 仍严格判为编造违规。
+- 验证：`services/docreader/tests/unit/test_acceptance_eval.py` Red→Green 用例与 `phase1-step2-full-authoring` 真实产物重评均通过，机器检查 4/4 全过且 2 条响应不足项如实单列在 `unmet_items`。

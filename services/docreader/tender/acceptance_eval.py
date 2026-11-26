@@ -653,6 +653,7 @@ def _evaluate_no_fabrication(
             target_meta[target["target_id"]] = (cid, title, target)
 
     violations: list[dict[str, Any]] = []
+    unmet_items: list[dict[str, Any]] = []
     removed_task_ids, removed_locations = _removed_by_review_scopes(gaps)
     removed_by_review = 0
     entries = (coverage or {}).get("entries") if isinstance(coverage, dict) else None
@@ -668,7 +669,11 @@ def _evaluate_no_fabrication(
             }
             gap_codes = entry.get("gap_codes") or []
             if entry.get("assessment") == "unsupported" or "coverage_unsupported" in gap_codes:
-                violations.append({**base, "code": "coverage_unsupported", "detail": "复核判定内容无有效依据支撑。"})
+                unmet_items.append({
+                    **base,
+                    "code": "coverage_unsupported",
+                    "detail": "复核判定当前响应尚不足以满足该要求（需补资料或人工完善，非内容编造）。",
+                })
             if (entry.get("resolution") == "manual" or target.get("manual_fill")) and entry.get("content_refs"):
                 violations.append({
                     **base,
@@ -744,8 +749,10 @@ def _evaluate_no_fabrication(
             "coverage_entries": len(entries) if isinstance(entries, list) else None,
             "violations": len(violations),
             "removed_by_review": removed_by_review,
+            "unmet_by_review": len(unmet_items),
         },
         "violations": violations,
+        "unmet_items": unmet_items,
     }
 
 

@@ -246,10 +246,11 @@ def test_pinpoints_silent_missing_requirement_wrong_table_and_fabrication(tmp_pa
     broken_doc.save(docx_path)
     broken_bytes = docx_path.read_bytes()
 
-    # Inject fabrication / ungrounded violations in coverage.
+    # Inject fabrication / ungrounded violations in coverage alongside an unmet coverage_unsupported audit.
     coverage["entries"][0]["content_refs"] = [
         {"unit_ref": {"path": "u", "sha256": "1" * 64, "size": 1}, "content_id": "f1"}
     ]
+    coverage["entries"][1]["material_ids"] = []
     coverage["entries"][1]["assessment"] = "unsupported"
 
     score = evaluate_acceptance(
@@ -285,8 +286,9 @@ def test_pinpoints_silent_missing_requirement_wrong_table_and_fabrication(tmp_pa
     assert fab["status"] == "fail"
     assert {v["code"] for v in fab["violations"]} == {
         "manual_target_has_generated_content",
-        "coverage_unsupported",
+        "content_without_material_or_source",
     }
+    assert fab["counts"]["unmet_by_review"] == 1
 
     usability = score["criteria"]["file_usability"]
     assert usability["status"] == "fail"
@@ -423,4 +425,45 @@ def test_removed_unsupported_content_is_audited_separately_while_unremoved_still
     assert leaked["criteria"]["no_fabrication"]["machine_passed"] is False
     assert leaked["criteria"]["no_fabrication"]["status"] == "fail"
     assert leaked["criteria"]["no_fabrication"]["counts"]["removed_by_review"] == 0
+
+
+def test_coverage_unsupported_is_audited_as_unmet_not_fabrication_while_ungrounded_still_fails(tmp_path):
+    artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
+    docx_bytes = artifacts.read_bytes(exported["docx_ref"])
+
+    coverage["entries"][1]["assessment"] = "unsupported"
+    coverage["entries"][1]["gap_codes"] = ["coverage_unsupported"]
+    unmet = evaluate_acceptance(
+        outline=outline,
+        docx_bytes=docx_bytes,
+        requirements=requirements,
+        coverage=coverage,
+        gaps=exported["gaps"],
+        artifacts=artifacts,
+    )
+    fab = unmet["criteria"]["no_fabrication"]
+    assert fab["machine_passed"] is True
+    assert fab["status"] == "needs_human_check"
+    assert fab["counts"]["violations"] == 0
+    assert fab["counts"]["unmet_by_review"] == 1
+    assert len(fab["unmet_items"]) == 1
+    assert fab["unmet_items"][0]["code"] == "coverage_unsupported"
+    assert fab["unmet_items"][0]["coverage_id"] == "c-2"
+
+    # Clearing supporting materials/source excerpts while keeping generated content MUST fail no_fabrication.
+    coverage["entries"][1]["material_ids"] = []
+    coverage["entries"][1]["source_excerpts"] = []
+    ungrounded = evaluate_acceptance(
+        outline=outline,
+        docx_bytes=docx_bytes,
+        requirements=requirements,
+        coverage=coverage,
+        gaps=exported["gaps"],
+        artifacts=artifacts,
+    )
+    assert ungrounded["criteria"]["no_fabrication"]["machine_passed"] is False
+    assert ungrounded["criteria"]["no_fabrication"]["status"] == "fail"
+    assert {v["code"] for v in ungrounded["criteria"]["no_fabrication"]["violations"]} == {
+        "content_without_material_or_source",
+    }
 
