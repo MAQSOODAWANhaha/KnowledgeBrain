@@ -1,4 +1,4 @@
-<!-- reviewed-through: eac4de5 (2026-11-24) -->
+<!-- reviewed-through: c74bd51 (2026-11-26) -->
 # 活错题本（Lessons）
 
 开工改代码前必读。本页只保留**近期反复出现、跨模块高价值**的防错规则（上限 10 条 / 150 行）。
@@ -48,3 +48,13 @@
    - 原因：本机存在 `testdata/bid/` 和 `127.0.0.1:16379` Redis 会掩盖硬编码路径与 import 期绑定默认端口的 bug，推到干净 CI runner 立即失败；未跑 `cargo fmt/clippy`、`npm ci` 也会直接阻断下游全部 acceptance 与镜像发布 job。
    - 证据：2026-11-24 CI 连续红灯排查（`tender_routes.rs` fmt/clippy、`web/package-lock.json` 缺 `esbuild@0.28.2`、`test_directory_compile.py` 硬编码 `111.pdf`、`test_skeleton.py` Redis import 顺序、CI 缺 `poppler-utils`）。
    - Seen 1×（2026-11-24）。
+
+9. **新增 SQL 迁移必须同步更新隔离工作流测试库初始化并在隔离 PostgreSQL 上实跑 `tests/workflow`。**
+   - 原因：`WebBridge.setup()` 等启动探针校验完整表结构；若只加 `migrations/*.sql` 而漏更新 `services/docreader/tests/database.py` 的测试 schema 初始化，依赖 `runtime` 夹具的工作流测试在 CI 会全数因 `UndefinedTable` 失败。
+   - 证据：`BUG-343`（`eb9ec86`，新增 `tender_authoring_gap_dispositions` 后 `python` job 全红）。
+   - Seen 1×（2026-11-26）。
+
+10. **兼容网关下的结构化输出不可省略系统提示词 Schema，且互斥字段约束须在 Schema 与 Prompt 双端写透。**
+    - 原因：部分 OpenAI 兼容网关会忽略或降级 `response_format.json_schema`；若任务跳过 `schema_prompt()` 内嵌Schema，模型就看不到字段枚举与互斥约定，触发大量无效 `kind` 丢项与合同违例。
+    - 证据：`BUG-342`（`97a88a1`，统一 v2 `extract` 走 `json_object` + 系统提示词内嵌同源 Schema）。
+    - Seen 1×（2026-11-26）。
