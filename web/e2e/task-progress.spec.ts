@@ -47,7 +47,8 @@ test("analysis progress distinguishes accepted work, in flight requests and unkn
   await expect(panel).toContainText("当前阶段：关联要求（仅历史运行）");
   await expect(panel).toContainText("最近进展：核验事项");
   await expect(panel).toContainText("已接受 11 个工作单元，总量未知");
-  await expect(panel).toContainText("1 次请求回执待确认");
+  await expect(panel).toContainText("1 次模型请求结果未确认（可能已计费）。");
+  await expect(panel).toContainText("任务仍在执行，会按原请求继续。");
   await panel.getByText("阶段与请求回执").click();
   await expect(panel).toContainText("提取招标事项：已接受 3 个工作单元，计划 5 个");
   await expect(panel).toContainText("核验事项：已接受 8 个工作单元，计划数未知");

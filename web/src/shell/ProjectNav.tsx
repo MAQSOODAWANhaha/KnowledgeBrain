@@ -88,6 +88,7 @@ function stages(view: WorkbenchView | null): Record<AuthoringStep, Stage> {
     analysis: !analysis ? { pill: "未分析", tone: "neutral", done: false }
       : inProgress(analysis.status) ? { pill: "进行中", tone: "info", done: false }
       : analysis.confirmed ? { pill: `${analysis.items?.length ?? 0} 条`, done: true }
+      : analysis.status === "failed" ? { pill: "失败", tone: "error", done: false }
       : { pill: "待确认", tone: "warning", done: false },
     authoring: inProgress(view?.authoring?.status) ? { pill: "进行中", tone: "info", done: false }
       : !view?.current_docx ? { pill: "未生成", tone: "neutral", done: false }

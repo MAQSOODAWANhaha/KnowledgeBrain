@@ -146,12 +146,25 @@ async def test_payment_fence_matches_existing_domain_policy(runtime, payment):
 async def test_pending_and_cancelled_are_not_advertised_as_recoverable(runtime):
     run, command = await failure(runtime)
     await runtime.bridge.store.retry(run["run_id"], 1, 1, command["command_id"], "direct-retry", "Fixture")
-    assert not _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])["can_retry"]
+    pending = _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])
+    assert not pending["can_retry"] and pending["blocker"] == "not_failed" and "取消" not in pending["notice"]
+    assert pending["failure_causes"] == [] and pending["failure_reason"] is None
     await runtime.bridge.store.cancel(run["run_id"])
-    assert not _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])["can_retry"]
+    cancelled = _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])
+    assert not cancelled["can_retry"] and cancelled["blocker"] == "cancelled" and "已取消" in cancelled["notice"]
     with pytest.raises(WebError) as rejected:
         await retry_analysis(runtime.bridge, payload(runtime, **retry_body(run, command)))
     assert rejected.value.status == 409
+
+
+async def test_failed_recovery_names_the_recorded_model_errors_of_the_failed_command(runtime):
+    run, command = await failure(runtime, payment="current")
+    async with runtime.bridge.store.transaction() as conn:
+        await conn.execute("UPDATE tender_analysis_model_requests SET error=%s WHERE request_id='unknown-payment'",
+                           (Jsonb({"type": "provider_stream_error", "provider_error": {"type": "api_error"}}),))
+    view = _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])
+    assert view["can_retry"]
+    assert view["failure_causes"] == [{"error_type": "provider_stream_error", "category": "uncertain", "count": 1}]
 
 
 async def test_legacy_protocol_has_an_explicit_operator_exit(runtime):

@@ -254,6 +254,7 @@ class _OutlineContext:
                               *pack.get("scope_bindings", []), *pack.get("pending_scope_context", [])]:
                 source = index.materialize(reference)
                 bind(source, pack["source_index_ref"])
+        self.range_sources = ranges
 
         needed = set()
 

@@ -6,7 +6,8 @@ import type { ReviewIdentity } from "./analysisReview";
 import { downloadResponse, v2Blob, v2Request } from "./http";
 
 export type TenderIssue = { code: string; detail: string; issue_id?: string; chapter_id?: string | null; target_id?: string | null; rule_refs?: RuleRef[] };
-export type TenderEvidence = { range_id: string; quote: string };
+// page is the 1-based physical page; heading_path is used when the source has no pages.
+export type TenderEvidence = { range_id: string; quote: string; page?: number | null; heading_path?: string | null };
 export type TenderItem = {
   item_id?: string; kind?: string; text: string; evidence?: TenderEvidence[];
   domains?: string[] | null; subject?: string; scope?: string | null; conditions?: string[] | null; exceptions?: string[] | null;

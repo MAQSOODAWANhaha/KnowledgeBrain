@@ -11,6 +11,7 @@ import { TextArea } from "@astryxdesign/core/TextArea";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createMutationAttempt, type MutationAttempt } from "../api";
 import { analysisReviewApi, type AnalysisBusinessFields, type AnalysisConfirmation, type AnalysisCorrection, type AnalysisReviewView, type HumanVerdict } from "./api/analysisReview";
+import { inProgress } from "./executionStatus";
 import { ItemFacts, ItemFields, validFields } from "./AnalysisItemFields";
 
 type Decision = { verdict: HumanVerdict["verdict"] | ""; reason: string };
@@ -157,7 +158,8 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
           <TextArea label={`问题 ${index + 1} 判定理由`} htmlMaxLength={4000} isDisabled={locked} value={value.reason} onChange={reason => change({ reason })} />
         </VStack></Section>;
       })}
-      {!base.human_issue_ids.length && !base.correction?.items.length && <Text type="supporting">当前没有待核对的问题。</Text>}
+      {(inProgress(currentState?.status) || currentState?.status === "failed") ? <Text type="supporting">分析尚未完成，完成后才能人工确认。</Text>
+        : !base.human_issue_ids.length && !base.correction?.items.length && <Text type="supporting">当前没有待核对的问题。</Text>}
       {!!base.human_issue_ids.length && <Heading level={4}>待确认问题（{base.human_issue_ids.length}）</Heading>}
       {base.issues.filter(issue => !base.human_issue_ids.includes(issue.issue_id ?? "")).map((issue, index) => <Text key={index} type="supporting">{issue.detail}</Text>)}
       <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")} label={pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"} /></HStack>

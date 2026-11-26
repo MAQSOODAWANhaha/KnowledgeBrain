@@ -270,3 +270,25 @@ async def test_analysis_view_adds_projection_without_new_model_or_store_calls(mo
     view = await bridge.analysis_view(value)
     assert view["progress"]["accepted_units"] == 1
     read.assert_awaited_once_with(bridge.store, bridge.artifacts, **IDENTITY)
+
+
+async def test_analysis_view_names_the_physical_page_or_heading_of_each_evidence(monkeypatch):
+    from docreader.integrations import web
+
+    bridge = WebBridge.__new__(WebBridge)
+    cast(Any, bridge).store, cast(Any, bridge).artifacts = object(), object()
+    monkeypatch.setattr(web, "read_authoring_input", AsyncMock(return_value={"verification_ref": None, "confirmation_ref": None}))
+    item = {"item_id": "i1", "text": "fixture", "evidence": [
+        {"range_id": "pdf", "quote": "a"}, {"range_id": "docx", "quote": "b"}, {"range_id": "lost", "quote": "c"}]}
+    sources = {"pdf": {"locator": {"locator_kind": "page_table", "page_ordinal": 9},
+                       "physical_locator": {"locator_kind": "page", "page_ordinal": 4}, "heading_path": "第三章"},
+               "docx": {"locator": {"locator_kind": "document", "section_ordinal": 2}, "heading_path": "第一章 > 1.2"}}
+    monkeypatch.setattr("docreader.tender.authoring._OutlineContext", lambda *_args: SimpleNamespace(
+        payload={"rules": [{"rule_id": "rule-1", "item": item}], "issues": []},
+        rules={"rule-1": {"item_ref": {"item_id": "i1"}}}, rule_origin="extraction", range_sources=sources))
+    view = await bridge.analysis_view(run())
+    assert view["items"][0]["evidence"] == [
+        {"range_id": "pdf", "quote": "a", "page": 5, "heading_path": "第三章"},
+        {"range_id": "docx", "quote": "b", "page": None, "heading_path": "第一章 > 1.2"},
+        {"range_id": "lost", "quote": "c", "page": None, "heading_path": None}]
+    assert item["evidence"][0] == {"range_id": "pdf", "quote": "a"}

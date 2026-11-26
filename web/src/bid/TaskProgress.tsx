@@ -17,7 +17,9 @@ const phases: Record<string, string> = {
 };
 const phaseName = (phase: string) => phases[phase] ?? "处理任务";
 
-export function TaskProgress({ label, status, progress }: { label: string; status?: string; progress?: TaskProgressView }) {
+export function TaskProgress({ label, status, progress, recoveryEntry }: {
+  label: string; status?: string; progress?: TaskProgressView; recoveryEntry?: string;
+}) {
   if (!status) return null;
   const active = inProgress(status);
   const attention = active || status === "failed" || status === "blocked" || !!progress?.request_states.uncertain;
@@ -34,7 +36,8 @@ export function TaskProgress({ label, status, progress }: { label: string; statu
       </Text>
       {progress && <>
         <Text>已接受 {progress.accepted_units} 个工作单元{active ? "，总量未知：后续阶段的计划在前序阶段完成后才确定。" : "。"}</Text>
-        {!!progress.request_states.uncertain && <Banner status="warning" title={`${progress.request_states.uncertain} 次请求回执待确认，请沿当前任务恢复入口处理。`} />}
+        {!!progress.request_states.uncertain && <Banner status="warning" title={`${progress.request_states.uncertain} 次模型请求结果未确认（可能已计费）。`}
+          description={active ? "任务仍在执行，会按原请求继续。" : status === "failed" && recoveryEntry ? `请在${recoveryEntry}核对故障原因后继续原任务。` : "请沿当前任务的恢复入口处理。"} />}
         <Collapsible trigger="阶段与请求回执" defaultIsOpen={false}>
           <VStack gap={1}>
             {!version && <Text>依据身份尚未就绪，请等待任务状态更新。</Text>}

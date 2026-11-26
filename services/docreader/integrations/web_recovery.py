@@ -2,17 +2,39 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from uuid import UUID
 
 from docreader.integrations.store import Conflict, RequestReplayBlocked
 from docreader.integrations.web import WebError, _identity, _request_key
 from docreader.integrations.web_analysis import _owned_run, _positive
+from docreader.llm.failures import FAILURES
+from docreader.llm.request import ModelConfigurationError, ModelInfrastructureError, ModelSemanticError
+
+_CATEGORY = {error_type: ("infrastructure" if raised is ModelInfrastructureError else "configuration"
+                          if raised is ModelConfigurationError else "semantic" if raised is ModelSemanticError
+                          else "uncertain") for error_type, _, raised, _ in FAILURES}
+
+
+def _failure_causes(run, command):
+    """Recorded model-call errors of the failed command, so the operator can check them before retrying."""
+    if not command or run["status"] != "failed":
+        return []
+    counts = Counter((row.get("error") or {}).get("type") for row in run["usage"]
+                     if row["status"] in {"failed", "uncertain"}
+                     and (row.get("metadata") or {}).get("command_id") == str(command["command_id"]))
+    return [{"error_type": error_type, "category": _CATEGORY.get(error_type, "other"), "count": count}
+            for error_type, count in sorted(counts.items(), key=lambda pair: (-pair[1], str(pair[0])))
+            if isinstance(error_type, str)]
 
 
 def _view(run, command, blocker, notice):
     return {**_identity(run), "status": run["status"],
             "failed_command_id": str(command["command_id"]) if command else None,
             "can_retry": blocker is None, "blocker": blocker, "notice": notice,
+            "failure_reason": (((command or {}).get("receipt") or {}).get("metadata") or {}).get("reason")
+            if run["status"] == "failed" else None,
+            "failure_causes": _failure_causes(run, command),
             "saved_responses": sum(row["status"] == "succeeded" and row["response_ref"] is not None for row in run["usage"])}
 
 
@@ -24,8 +46,10 @@ async def analysis_recovery(bridge, payload):
     blocker, notice = None, "继续原任务的固定来源和分析版本，复用成功回执；未完成调用仍可能产生费用。"
     if run["domain_revision"] < 1:
         blocker, notice = "unsupported_revision", "此任务的历史版本不能通过当前页面恢复，请管理员核查原任务及已有回执。"
-    elif run["status"] != "failed" or run["cancel_requested"]:
-        blocker, notice = "not_failed", "当前分析无需失败恢复；已取消的任务不能继续。"
+    elif run["cancel_requested"]:
+        blocker, notice = "cancelled", "已取消的分析不能继续，请重新分析。"
+    elif run["status"] != "failed":
+        blocker, notice = "not_failed", "当前分析未失败，无需恢复。"
     elif run["lease_live"]:
         blocker, notice = "active_lease", "原执行仍持有任务，请等待其释放后刷新状态。"
     elif (not command or command["status"] != "completed" or (command.get("receipt") or {}).get("status") != "failed"):

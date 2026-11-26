@@ -135,6 +135,14 @@ def _authoring_request(payload, *, outline_only=False):
     return request
 
 
+def _evidence_location(evidence, sources):
+    """Readable source position for an evidence quote: 1-based physical page, else its heading path."""
+    source = sources.get(evidence.get("range_id")) or {}
+    page = next((locator["page_ordinal"] for locator in (source.get("physical_locator"), source.get("locator"))
+                 if isinstance(locator, dict) and isinstance(locator.get("page_ordinal"), int)), None)
+    return {**evidence, "page": None if page is None else page + 1, "heading_path": source.get("heading_path") or None}
+
+
 class WebBridge:
     def __init__(self, settings):
         self.settings = settings
@@ -603,6 +611,8 @@ class WebBridge:
             item = entry.get("item", entry.get("effective_rule", {}))
             reference = context.rules[entry["rule_id"]]
             items.append({**item, "item_id": item.get("item_id", reference["item_ref"]["item_id"]),
+                          "evidence": [_evidence_location(evidence, context.range_sources)
+                                       for evidence in item.get("evidence", [])],
                           "rule_id": entry["rule_id"], "rule_ref": reference})
         return {**_identity(run), "status": run["status"], "confirmed": snapshot["confirmation_ref"] is not None,
                 "sources_current": sources_current,

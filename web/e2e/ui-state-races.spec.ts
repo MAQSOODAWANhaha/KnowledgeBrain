@@ -168,14 +168,14 @@ for (const change of ["status", "hard_blocking"] as const) {
 
 test("same-command recovery blockers disable a new retry without dropping its reason", async ({ page }) => {
   await page.clock.install(); const f = await recoveryFixture(page);
-  await f.region.getByLabel("分析恢复理由", { exact: true }).fill("保留的恢复理由。");
+  await f.region.getByRole("textbox", { name: "分析恢复理由 必填", exact: true }).fill("保留的恢复理由。");
   const submit = f.region.getByRole("button", { name: "继续原分析任务", exact: true });
   await expect(submit).toBeEnabled();
   f.stateRecovery.recovery = { ...f.stateRecovery.recovery, can_retry: false, blocker: "active_lease", notice: "原执行仍持有任务，请等待其释放后刷新状态。" };
   await f.region.getByRole("button", { name: "刷新分析恢复状态", exact: true }).click();
   await expect(submit).toBeDisabled();
   await expect(f.region).toContainText("原执行仍持有任务");
-  await expect(f.region.getByLabel("分析恢复理由", { exact: true })).toHaveValue("保留的恢复理由。");
+  await expect(f.region.getByRole("textbox", { name: "分析恢复理由 必填", exact: true })).toHaveValue("保留的恢复理由。");
   expect(f.stateRecovery.calls).toEqual([]);
 });
 
@@ -232,7 +232,7 @@ test("ending a project still permits the exact unknown human confirmation receip
 
 test("ending a project still permits the exact unknown analysis recovery receipt", async ({ page }) => {
   await page.clock.install(); const f = await recoveryFixture(page); f.stateRecovery.lose = true;
-  await f.region.getByLabel("分析恢复理由", { exact: true }).fill("原恢复请求的理由。");
+  await f.region.getByRole("textbox", { name: "分析恢复理由 必填", exact: true }).fill("原恢复请求的理由。");
   await f.region.getByRole("button", { name: "继续原分析任务", exact: true }).click();
   const confirm = f.region.getByRole("button", { name: "确认同一次恢复请求", exact: true });
   await expect(confirm).toBeEnabled(); f.view.project.status = "ended"; await page.clock.runFor(5100);

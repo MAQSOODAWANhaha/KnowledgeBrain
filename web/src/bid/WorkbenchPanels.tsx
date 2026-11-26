@@ -18,7 +18,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { TreeList, type TreeListItemData } from "@astryxdesign/core/TreeList";
 import { VStack } from "@astryxdesign/core/VStack";
 import { useState } from "react";
-import { executionError, type TenderChapter, type TenderIssue, type TenderItem, type WorkbenchView } from "./api/workbench";
+import { executionError, type TenderChapter, type TenderEvidence, type TenderIssue, type TenderItem, type WorkbenchView } from "./api/workbench";
 import { authoringHref } from "./authoring/routes";
 import { inProgress } from "./executionStatus";
 import { TaskProgress } from "./TaskProgress";
@@ -85,7 +85,7 @@ function ItemContent({ item }: { item: TenderItem }) {
     {facts.map(fact => <Text key={fact} type="supporting">{fact}</Text>)}
     {!!details.length && <VStack gap={0.5}>{details.map((line, index) => <Text key={index}>{line}</Text>)}</VStack>}
     {!!item.evidence?.length && <Collapsible trigger="原文引文与位置" defaultIsOpen={false}><VStack gap={2}>
-      {item.evidence.map((evidence, index) => <Blockquote key={`${evidence.range_id}:${index}`} cite={`来源位置：${evidence.range_id}`}>{evidence.quote}</Blockquote>)}
+      {item.evidence.map((evidence, index) => <Blockquote key={`${evidence.range_id}:${index}`} cite={`来源位置：${evidenceLocation(evidence)}`}>{evidence.quote}</Blockquote>)}
     </VStack></Collapsible>}
   </VStack>;
 }
@@ -166,9 +166,13 @@ export function ChapterInspector({ chapter, view, draftId, contextMatches = true
 export const kindLabels: Record<string, string> = { obligation: "要求", requirement: "要求", scoring_rule: "评分", consequence_rule: "后果", submission_requirement: "提交要求", fact: "背景事实" };
 const kindOf = (item: TenderItem) => kindLabels[item.kind ?? ""] ?? item.kind ?? "未分类";
 const phasePrefix = /^(register|freeze|ocr|pack-plan|extract|analysis-review|analysis-locate|analysis-associate|analysis-joint|verify|confirm)\s+/;
-function groupedIssues(issues: { detail: string }[]) {
+export const evidenceLocation = (evidence?: TenderEvidence) =>
+  !evidence ? "—" : evidence.page ? `第 ${evidence.page} 页` : evidence.heading_path || "—";
+
+// Missing authoring inputs only restate that analysis or confirmation is unfinished, which the page already shows.
+function groupedIssues(issues: { code: string; detail: string }[]) {
   const counts = new Map<string, number>();
-  for (const issue of issues) {
+  for (const issue of issues.filter(value => value.code !== "authoring_input_missing")) {
     const text = issue.detail.replace(phasePrefix, "");
     counts.set(text, (counts.get(text) ?? 0) + 1);
   }
@@ -219,7 +223,7 @@ export function AnalysisPane({ analysis, placements, kind, selected, onSelect }:
   const issues = analysis ? groupedIssues(analysis.issues) : [];
   return <VStack gap={3} paddingInline={6} paddingBlock={4} role="region" aria-label="招标事项">
     {!analysis ? <Card><EmptyState title="尚无分析结果" description="上传文件后可开始分析，也可先编制可用稿件。" /></Card> : <>
-      {taskVisible && <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} />}
+      {taskVisible && <TaskProgress label="分析任务" status={analysis.status} progress={analysis.progress} recoveryEntry="右侧「继续失败的分析」" />}
       {analysis.sources_current === false && <Banner role="status" status="warning" title="招标资料已有更新，以下是旧资料的分析结果。" description="可重新分析，也可基于最新资料生成新稿。" />}
       {executionError(analysis.error) && <Banner role="alert" status="error" title={executionError(analysis.error)} />}
       <Card padding={0}><VStack gap={0}>
@@ -231,7 +235,7 @@ export function AnalysisPane({ analysis, placements, kind, selected, onSelect }:
           : <Table hasHover idKey="key" data={rows} columns={[
             { key: "item", header: "招标事项", renderCell: ({ item, key }) => <Link href={`#item-${key}`} aria-current={key === selected ? "true" : undefined} onClick={event => { event.preventDefault(); onSelect(key); }}>{item.text}</Link> },
             { key: "kind", header: "类型", width: pixel(100), renderCell: ({ item }) => <Badge variant="neutral" label={kindOf(item)} /> },
-            { key: "source", header: "原件位置", width: pixel(140), renderCell: ({ item }) => <Text type="supporting">{item.evidence?.[0]?.range_id ?? "—"}</Text> },
+            { key: "source", header: "原件位置", width: pixel(140), renderCell: ({ item }) => <Text type="supporting">{evidenceLocation(item.evidence?.[0])}</Text> },
             { key: "place", header: "标书位置", width: pixel(180), renderCell: ({ item }) => <Text>{placements.get(item.item_id ?? "")?.chapters.join("、") || "—"}</Text> },
             { key: "check", header: "核对", width: pixel(96), renderCell: ({ item }) => checkBadge(placements.get(item.item_id ?? "")) },
           ]} />}
@@ -249,7 +253,7 @@ export function ItemDetail({ item, placement }: { item: TenderItem; placement?: 
     <VStack gap={3} padding={4}>
       <MetadataList label={{ width: 72 }}>
         <MetadataListItem label="类型">{kindOf(item)}</MetadataListItem>
-        <MetadataListItem label="原件位置">{item.evidence?.[0]?.range_id ?? "—"}</MetadataListItem>
+        <MetadataListItem label="原件位置">{evidenceLocation(item.evidence?.[0])}</MetadataListItem>
         <MetadataListItem label="标书位置">{placement?.chapters.join("、") || "尚未安排到章节"}</MetadataListItem>
         <MetadataListItem label="核对">{checkBadge(placement)}</MetadataListItem>
       </MetadataList>

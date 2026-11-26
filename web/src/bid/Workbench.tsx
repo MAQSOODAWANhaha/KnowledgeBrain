@@ -44,7 +44,7 @@ import { ChapterRevision } from "./authoring/ChapterRevision";
 import { PendingQueue } from "./authoring/PendingQueue";
 import { SavedWordReview } from "./authoring/SavedWordReview";
 import { KnowledgeSelection, type KnowledgeSelection as KnowledgeChoice } from "./KnowledgeSelection";
-import { inProgress, executionStatus } from "./executionStatus";
+import { analysisBadge, inProgress, executionStatus } from "./executionStatus";
 import { ExecutionReport } from "./ExecutionReport";
 import { TaskProgress } from "./TaskProgress";
 
@@ -409,7 +409,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const authoringAttention = !!authoringStatus && (inProgress(authoringStatus) || authoringStatus === "failed" || authoringStatus === "blocked" || !!view?.authoring?.progress?.request_states.uncertain);
   const latestVersion = view?.versions.reduce<TenderDraft | null>((best, item) => !best || item.revision > best.revision ? item : best, null) ?? null;
   const headerStatus = !view ? undefined
-    : step === "analysis" ? (view.analysis ? <Badge variant={view.analysis.confirmed ? "success" : "warning"} label={view.analysis.confirmed ? "已确认" : "待人工确认"} /> : <Badge variant="neutral" label="尚未分析" />)
+    : step === "analysis" ? (({ label, tone }) => <Badge variant={tone} label={label} />)(analysisBadge(view.analysis))
     : step === "authoring" ? (view.current_docx ? <Badge variant="success" label={`已保存 v${view.current_docx.revision}`} /> : <Badge variant="neutral" label="尚无稿件" />)
     : step === "export" ? (latestVersion ? <Badge variant="success" label={`最新 v${latestVersion.revision}`} /> : <Badge variant="neutral" label="尚无稿件" />)
     : undefined;
