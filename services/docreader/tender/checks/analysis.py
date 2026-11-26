@@ -567,16 +567,47 @@ class _Analysis:
         # adjacent source together without assigning siblings a second review.
         expanded = self._expand_review_ranges(self.review_targets)
         for _, ranges in groupby(expanded, key=lambda range_id: self.sources[range_id]["document_id"]):
-            current = []
-            for range_id in ranges:
-                trial = self.review_payload([*current, range_id])
-                measured = self.budget.measure("verify", trial)
-                if current and self._over_review_target(measured):
-                    payloads.append(self.review_payload(current))
-                    current = []
-                current.append(range_id)
-            if current:
-                payloads.append(self.review_payload(current))
+            doc_ranges = list(ranges)
+            start, total = 0, len(doc_ranges)
+            while start < total:
+                cached: dict[int, dict] = {}
+
+                def probe(end: int) -> tuple[bool, dict]:
+                    trial = cached.get(end)
+                    if trial is None:
+                        trial = self.review_payload(doc_ranges[start:end])
+                        cached[end] = trial
+                    return not self._over_review_target(self.budget.measure("verify", trial)), trial
+
+                lo = start + 1
+                if lo >= total:
+                    payloads.append(self.review_payload(doc_ranges[start:lo]))
+                    start = lo
+                    continue
+                fits_first, first_payload = probe(lo)
+                if not fits_first:
+                    payloads.append(first_payload)
+                    start = lo
+                    continue
+                step, hi = 1, lo
+                while hi < total:
+                    candidate = min(total, lo + step)
+                    fits, _ = probe(candidate)
+                    if fits:
+                        lo = hi = candidate
+                        step *= 2
+                    else:
+                        hi = candidate
+                        break
+                while lo + 1 < hi:
+                    mid = (lo + hi) // 2
+                    fits, _ = probe(mid)
+                    if fits:
+                        lo = mid
+                    else:
+                        hi = mid
+                payloads.append(cached[lo])
+                start = lo
         return self._supplement_review_requests(payloads)
 
     def _over_review_target(self, measured):

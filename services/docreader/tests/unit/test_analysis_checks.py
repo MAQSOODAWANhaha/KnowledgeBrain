@@ -1199,6 +1199,33 @@ async def test_analysis_payloads_are_content_stable_across_host_revisions(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_review_requests_galloping_matches_linear_and_avoids_quadratic_probing(tmp_path):
+    facts = [(f"第{i}条 采购人要求投标人按第{i}条标准提供详细说明材料并保留书面记录。", "obligation")
+             for i in range(1, 41)]
+    artifacts, plan, items_index, _ = await scenario(tmp_path, documents=[("main", "main", facts)])
+    small = budget()
+    calls = 0
+    orig_measure = small.measure
+
+    def counted_measure(task, payload):
+        nonlocal calls
+        calls += 1
+        res = orig_measure(task, payload)
+        if len(payload.get("dispositions", [])) > 15:
+            return {**res, "fits": False}
+        return res
+
+    small.measure = counted_measure  # type: ignore[method-assign]
+    context = _Analysis(plan, items_index, artifacts, IDENTITY, small)
+    assert len(context.review_targets) == 40
+    batched = context.review_requests()
+    assert [len(p["dispositions"]) for p in batched] == [15, 15, 10]
+    # Galloping + binary search uses far fewer measure() calls than linear O(N) probing.
+    assert calls < 40
+
+
+
+@pytest.mark.asyncio
 async def test_analysis_validate_rejects_retired_locate_and_associate_operations(tmp_path):
     data = await scenario(tmp_path)
     context = _Analysis(data[1], data[2], data[0], IDENTITY, budget())
