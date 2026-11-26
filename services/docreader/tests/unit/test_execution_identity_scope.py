@@ -43,11 +43,11 @@ def test_body_execution_identity_ignores_outline_prompts_and_contracts():
                                              "AuthoringStructureResponse"}
 
 
-def test_legacy_outline_and_whole_executions_keep_their_task_sets():
-    legacy = set(document_execution.load_prompts()) - REQUIREMENT_CHAIN
+def test_fallback_outline_and_whole_executions_keep_their_task_sets():
+    fallback_outline = {"outline", "outline_assemble"}
     outline = set(document_execution.execution_prompt_names(outline_only=True, fixed_outline=False))
-    assert outline == legacy - BODY
-    assert set(document_execution.execution_prompt_names(outline_only=False, fixed_outline=False)) == legacy
+    assert outline == fallback_outline
+    assert set(document_execution.execution_prompt_names(outline_only=False, fixed_outline=False)) == fallback_outline | BODY
 
 
 def test_changing_a_verify_prompt_leaves_authoring_identity_unchanged():
@@ -66,7 +66,7 @@ def test_scoped_execution_rejects_a_prompt_outside_its_identity():
     prompts = {name: "p" for name in BODY}
     assert execution_prompt(prompts, "authoring_write") == "p"
     with pytest.raises(ModelConfigurationError):
-        execution_prompt(prompts, "directory_plan")
+        execution_prompt(prompts, "bid_format_outline")
 
 
 def test_unscoped_test_budget_still_reads_the_packaged_prompt():

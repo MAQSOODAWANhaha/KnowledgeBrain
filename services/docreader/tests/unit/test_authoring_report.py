@@ -19,13 +19,13 @@ def outline():
 
 def test_stages_count_logical_and_physical_requests_with_workflow_names():
     requests = [request("directory_plan", "a1"), request("directory_plan", "a2"),
-                request("directory_requirement", "b1", "failed"), request("directory_requirement", "b1")]
+                request("item_placement", "b1", "failed"), request("item_placement", "b1")]
     report = authoring_report({"execution_id": "web-outline-x", "status": "succeeded"}, requests, outline())
     assert report["kind"] == "outline" and report["requests"] == 4
-    assert report["stages"]["directory_plan"]["stage"] == "A 目录规划"
+    assert report["stages"]["directory_plan"]["stage"] == "格式章节选择"
     assert report["stages"]["directory_plan"]["logical_requests"] == 2
-    b = report["stages"]["directory_requirement"]
-    assert b["stage"] == "B 要求归属" and b["logical_requests"] == 1 and b["requests"] == 2
+    b = report["stages"]["item_placement"]
+    assert b["stage"] == "事项归属" and b["logical_requests"] == 1 and b["requests"] == 2
     assert b["statuses"] == {"failed": 1, "succeeded": 1}
     assert report["targets"] == {"total": 3, "knowledge_answers": 1, "with_rule_refs": 1}
     assert report["outline_issues"] == {"outline_directory_classification_rejected": 1, "outline_rule_unassigned": 2}

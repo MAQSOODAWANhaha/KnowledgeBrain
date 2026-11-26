@@ -16,7 +16,6 @@ from docreader.tender.directory_compile import (
 )
 
 from test_authoring_pipeline_boundaries import budget, snapshot
-from test_directory_explicit_body_integration import TemplateModel, point, window
 from test_directory_compile import docs, item, node, plan
 from test_directory_compile import window as source_window
 
@@ -28,19 +27,37 @@ def _required(value: _T | None) -> _T:
     return value
 
 
+def _point(page, line, document_id="document"):
+    return {"document_id": document_id, "page": page, "line": line}
+
+
+def _window(page, start_line, end_line, document_id="document"):
+    return {"document_id": document_id, "page": page, "start_line": start_line, "end_line": end_line}
+
 
 async def test_source_cover_fields_survive_real_word_before_directory_without_fake_data(tmp_path):
     artifacts = ArtifactStore(tmp_path)
     fixed = snapshot(artifacts, [{"text": "投标文件\n项目名称：________\n投标人：________（盖章）\n代表：________（签字）\n日期：________"},
         {"text": "投标函\n致招标人：本处保留完整规定原式及所有原文条件，不得另行编造。"}])
     value = {"nodes": [
-        {"id": "cover", "heading": point(0, 0), "response_kind": "form", "body_windows": [window(0, 0, 4)]},
-        {"id": "letter", "heading": point(1, 0), "response_kind": "form", "body_windows": [window(1, 0, 1)]}],
+        {"id": "cover", "heading": _point(0, 0), "response_kind": "form", "body_windows": [_window(0, 0, 4)]},
+        {"id": "letter", "heading": _point(1, 0), "response_kind": "form", "body_windows": [_window(1, 0, 1)]}],
         "scopes": [{"title": None, "items": [
             {"node_id": "cover", "depth": "self", "presentation": "cover"},
             {"node_id": "letter", "depth": "self", "presentation": "section"}]}]}
-    model = TemplateModel(lambda _slot: deepcopy(value))
-    outline = artifacts.read_json(await generate_document(artifacts, fixed, budget(), model, outline_only=True))
+    calls = []
+
+    async def model(task, _request, validate):
+        calls.append(task)
+        return validate({"findings": []})
+
+    from docreader.tender.directory_compile import documents_from_frozen
+    frozen = artifacts.read_json(fixed["frozen_ref"])
+    directory_documents = documents_from_frozen(artifacts, frozen)
+    outline = artifacts.read_json(await generate_document(
+        artifacts, fixed, budget(), model, outline_only=True,
+        directory_documents=directory_documents, directory_plans=[deepcopy(value)],
+    ))
     assert outline["chapters"][0]["presentation_role"] == "cover"
     result = artifacts.read_json(await generate_document(artifacts, fixed, budget(), model, outline=outline))
     doc = Document(BytesIO(artifacts.read_bytes(result["docx_ref"])))
@@ -50,7 +67,7 @@ async def test_source_cover_fields_survive_real_word_before_directory_without_fa
     assert texts.count("代表：________（签字）") == 1
     assert texts.count("日期：________") == 1
     assert [p.text for p in doc.paragraphs if _required(_required(p.style).name).startswith("Heading")] == ["投标函"]
-    assert not any(task.startswith("authoring_write") for task in model.calls)
+    assert not any(task.startswith("authoring_write") for task in calls)
 
 
 def test_source_cover_cannot_adopt_a_subtree():

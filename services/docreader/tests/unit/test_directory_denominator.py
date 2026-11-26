@@ -10,7 +10,7 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.directory_compile import compile_directory, documents_from_frozen, group_unread_images
 from docreader.tender.evidence import freeze_sources
 from test_directory_compile import item, node, plan
-from test_source_presentation import pdf_bytes
+from test_pdf_literal_freeze import pdf_bytes
 
 
 def _part(unit_id):

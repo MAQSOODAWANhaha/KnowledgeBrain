@@ -43,7 +43,8 @@ async def test_outline_only_preserves_local_failure_gaps_in_its_own_artifact(tmp
         raise ModelBudgetError("synthetic oversized indivisible source")
 
     reference = await pipeline.generate_document(
-        artifacts, snapshot(artifacts, [{"text": "投标函"}]), budget(), execute, outline_only=True)
+        artifacts, snapshot(artifacts, [{"text": "第六章 投标文件格式\n一、投标函\n致：招标人"}]),
+        budget(), execute, outline_only=True)
     outline = AuthoringOutline.model_validate(artifacts.read_json(reference))
     failed = [issue for issue in outline.issues if issue.code == "outline_directory_plan_failed"]
     assert failed and "ModelBudgetError" in failed[0].detail

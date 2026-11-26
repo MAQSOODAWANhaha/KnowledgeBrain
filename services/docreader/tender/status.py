@@ -7,11 +7,6 @@ class AuthoringTask(StrEnum):
 
     OUTLINE = "outline"
     DIRECTORY_PLAN = "directory_plan"
-    DIRECTORY_REQUIREMENT = "directory_requirement"
-    DIRECTORY_MATERIAL = "directory_material"
-    DIRECTORY_CLASSIFICATION = "directory_classification"
-    DIRECTORY_PARAMETER = "directory_parameter"
-    DIRECTORY_RESPONSE_FORM = "directory_response_form"
     BASIS = "authoring_basis"
     WRITE = "authoring_write"
     REVIEW = "authoring_review"
@@ -25,24 +20,7 @@ class AuthoringPrompt(StrEnum):
 
     OUTLINE = AuthoringTask.OUTLINE
     ASSEMBLE = "outline_assemble"
-    DIRECTORY_PLAN = AuthoringTask.DIRECTORY_PLAN
     BID_FORMAT_OUTLINE = "bid_format_outline"
-    DIRECTORY_REF_PLAN = "directory_ref_plan"
-    DIRECTORY_REF_PLAN_V2 = "directory_ref_plan_v2"
-    DIRECTORY_REQUIREMENT = AuthoringTask.DIRECTORY_REQUIREMENT
-    DIRECTORY_MATERIAL = AuthoringTask.DIRECTORY_MATERIAL
-    DIRECTORY_REQUIREMENT_NATIVE = "directory_requirement_native"
-    DIRECTORY_CLASSIFICATION_NATIVE = "directory_classification_native"
-    DIRECTORY_CLASSIFICATION_REVIEWED_FACTS = "directory_classification_reviewed_facts"
-    DIRECTORY_CLASSIFICATION = AuthoringTask.DIRECTORY_CLASSIFICATION
-    DIRECTORY_PARAMETER = AuthoringTask.DIRECTORY_PARAMETER
-    DIRECTORY_NATIVE_BODY = "directory_native_body"
-    DIRECTORY_MATERIAL_RESPONSE_FORMS = "directory_material_response_forms"
-    DIRECTORY_MATERIAL_SOURCE_GROUPS = "directory_material_source_groups"
-    DIRECTORY_MATERIAL_CLOSURE = "directory_material_closure"
-    DIRECTORY_RESPONSE_FORM = AuthoringTask.DIRECTORY_RESPONSE_FORM
-    DIRECTORY_RESPONSE_FORM_V2 = "directory_response_form_v2"
-    DIRECTORY_RESPONSE_FORM_V3 = "directory_response_form_v3"
     BASIS = AuthoringTask.BASIS
     WRITE = AuthoringTask.WRITE
     REVIEW = AuthoringTask.REVIEW

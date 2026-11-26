@@ -7,9 +7,6 @@ from docreader.tender.directory_compile import (
 )
 import pytest
 
-from docreader.tender.document_execution import load_prompts
-from test_authoring_pipeline_boundaries import payload as request_payload
-
 _T = TypeVar("_T")
 
 
@@ -616,31 +613,6 @@ def test_a_table_outside_the_adopted_chapters_is_still_kept():
     assert unplaced_tables(compiled, documents)[0]['page'] == 0
 
 
-async def test_unplaced_source_pages_do_not_trigger_parameter_calls(monkeypatch):
-    import docreader.tender.authoring_pipeline as pipeline
-    from docreader.tender.directory_compile import _chapter
-
-    source_pages = ['\n'.join(f'原文{index}' for index in range(30))]
-    adopted = _chapter('adopted', '技术要求', None, 'section', ('tender', 0, 0), None,
-                       '\n'.join(source_pages[0].splitlines()), '', None, None)
-    adopted['response_kind'] = 'narrative'
-    unplaced = _chapter('extra', '未归属', None, 'section', ('tender', 0, 0), None,
-                        '\n'.join(source_pages[0].splitlines()), '', None, None)
-    unplaced['unplaced'] = True
-    compiled = {'chapters': [adopted, unplaced], 'issues': []}
-    calls = []
-
-    async def ask(_execute, _budget, task, payload, validate):
-        calls.append((task, payload))
-        return validate({'directory_material': {'assignments': [], 'chapter_titles': fixture_titles(payload)}, 'directory_requirement': {'assignments': []},
-                         'directory_classification': {'items': []}, 'directory_parameter': {'chapters': []}}[str(task)])
-
-    monkeypatch.setattr(pipeline, '_ask', ask)
-    await pipeline._request_directory_details(compiled, docs(source_pages), None, None)
-    requested = [payload['chapter']['id'] for task, payload in calls if str(task) == 'directory_parameter']
-    assert requested == ['adopted']
-
-
 def test_a_table_between_two_chapters_stays_with_the_preceding_one():
     from docreader.tender.directory_compile import apply_materials
 
@@ -957,67 +929,6 @@ def test_frozen_documents_stay_separate_and_keep_registered_order(tmp_path):
     assert [(item['document_id'], item['role'], item['pages']) for item in documents] == [
         ('tender', 'main', ['第一页甲\n第一页乙', '第二页']),
         ('addendum', 'amendment', ['补遗清单'])]
-
-
-async def test_registered_documents_request_two_location_plans_and_do_not_organize(tmp_path):
-    pages = ['按本清单。\n投标函\n']
-    documents = docs(pages)
-    calls = []
-
-    async def execute(task, request, validate):
-        calls.append(task)
-        if task in {'directory_requirement', 'directory_material'}:
-            return validate({'assignments': [], **({'chapter_titles': fixture_titles(request_payload(request))}
-                                                   if task == 'directory_material' else {})})
-        if task == 'directory_classification':
-            return validate({'items': []})
-        assert '投标函' in request['messages'][1]['content'][0]['text']
-        return validate(plan([{**node('letter', 0, 1), 'body_windows': [window(0, 1)]}],
-                             [item('letter')], source_only=[]))
-
-    artifacts = ArtifactStore(tmp_path)
-    outline = artifacts.read_json(await generate_document(
-        artifacts, _snapshot(), RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384,
-                                              prompts={**load_prompts(), 'directory_plan': '只返回位置。'}),
-        execute, directory_documents=documents, outline_only=True))
-    assert calls[:3] == ['directory_plan', 'directory_plan', 'directory_material']
-    assert {'directory_requirement', 'directory_classification'} <= set(calls)
-    assert outline['chapters'][0]['title'] == '投标函'
-    assert outline['chapters'][0]['chapter_id'] == 'chapter-1'
-
-
-async def test_outline_from_frozen_sources_uses_directory_plans(tmp_path):
-    from test_structural_packing import source
-
-    artifacts = ArtifactStore(tmp_path)
-    main = source([{'text': '按本清单。\n投标函'}], document_id='tender')
-    amendment = source([{'text': '补遗未引用'}], document_id='addendum')
-    frozen_ref = artifacts.put_json({'documents': [
-        _freeze(artifacts, main, 'main'), _freeze(artifacts, amendment, 'amendment')]})
-    calls = []
-
-    async def execute(task, _request, validate):
-        calls.append(task)
-        if task == 'directory_requirement':
-            return validate({'assignments': [{'document_id': 'tender', 'page': 0, 'start_line': 1, 'end_line': 1,
-                                              'scope': 'chapter', 'chapter_ids': ['letter']}]})
-        if task == 'directory_material':
-            return validate({'assignments': [], 'chapter_titles': fixture_titles(request_payload(_request))})
-        if task == 'directory_classification':
-            return validate({'items': [{'kind': 'service', 'document_id': 'tender', 'page': 0,
-                                        'start_line': 0, 'end_line': 0}]})
-        return validate(plan([{**node('letter', 0, 1), 'body_windows': [window(0, 1)]}], [item('letter')]))
-
-    snapshot = {**_snapshot(), 'frozen_ref': frozen_ref}
-    outline = artifacts.read_json(await generate_document(
-        artifacts, snapshot, RequestBudget(model='fixture', context_tokens=131072, output_reserve=16384,
-                                           prompts={**load_prompts(), 'directory_plan': '只返回位置。'}),
-        execute, outline_only=True))
-    assert calls[:3] == ['directory_plan', 'directory_plan', 'directory_material']
-    assert {'directory_requirement', 'directory_classification'} <= set(calls)
-    assert outline['chapters'][0]['title'] == '投标函'
-    assert outline['chapters'][0]['targets'][-1]['purpose'] == '投标函'
-    assert any(issue['code'] == 'outline_directory_revision_unreviewed' for issue in outline['issues'])
 
 
 def test_materials_do_not_repeat_template_lines_and_classification_quotes_source():

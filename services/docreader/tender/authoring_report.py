@@ -8,16 +8,11 @@ from docreader.tender.authoring_execution import sent_request
 
 # Stage names follow workflow.md「编制实际模型调用」.
 STAGES = {
-    "directory_plan": "A 目录规划",
-    "directory_material": "M 章内材料",
-    "directory_requirement": "B 要求归属",
-    "directory_classification": "C 归属分类",
-    "directory_parameter": "P 长章展开 / 原文选择",
-    "directory_response_form": "F 响应原式",
-    "outline": "模型大纲（备用路径）",
-    "authoring_structure": "结构复核",
+    "directory_plan": "格式章节选择",
     "item_placement": "事项归属",
     "proposal_outline": "方案子大纲",
+    "outline": "模型大纲（备用路径）",
+    "authoring_structure": "结构复核",
     "authoring_basis": "依据",
     "authoring_write": "W 写作 / 改稿",
     "authoring_review": "正文复核 / 再核",

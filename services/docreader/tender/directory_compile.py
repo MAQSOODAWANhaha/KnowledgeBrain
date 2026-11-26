@@ -1463,20 +1463,12 @@ def _project_units(units, recognized=None):
 def outline_from_compiled(snapshot, compiled, *, artifacts=None):
     """Turn one compiled directory into an outline. Titles and template text stay verbatim."""
     from docreader.tender.schema import AuthoringOutline
-    from docreader.tender.directory_choices import decision_issues
-    from docreader.tender.directory_adjudication import requirement_decision_issues
 
     node_map = {}
     chapters = _assign_ids(_nest(compiled['chapters'], source_nodes=node_map))
     native_issues = (_bind_parameter_tables(compiled, node_map)
                      if compiled.get('_parameter_source_contract') == PARAMETER_SOURCE_CONTRACT else [])
-    from docreader.tender.directory_response_forms import RESPONSE_FORM_CONTRACTS, bind_response_form_targets
-    if compiled.get('_response_form_contract') in RESPONSE_FORM_CONTRACTS:
-        bind_response_form_targets(compiled, node_map)
-    from docreader.tender.native_requirement_flow import bind_native_targets
-    native_issues.extend(bind_native_targets(compiled, node_map, artifacts=artifacts, snapshot=snapshot))
-    source_issues = [*compiled['issues'], *native_issues, *decision_issues(compiled),
-                     *requirement_decision_issues(compiled)]
+    source_issues = [*compiled['issues'], *native_issues]
     compiled['_source_issue_cases'] = {index: issue['requirement_case_id']
         for index, issue in enumerate(source_issues) if issue.get('requirement_case_id')}
     outline = {'schema_version': 2, 'authoring_input': snapshot,
@@ -1938,14 +1930,6 @@ def apply_parameters(compiled, documents, chapters):
             except DirectoryPlanRejected as error:
                 compiled['issues'].append({'code': 'outline_directory_parameter_rejected', 'detail': error.detail})
         compiled['chapters'].extend(sorted(children, key=lambda child: source.position(*_heading(child))))
-        from docreader.tender.directory_titles import chapter_title_id, title_mapping_issue
-        for child in children:
-            if child.get('display_title'):
-                heading = child['heading']
-                compiled['issues'].append(title_mapping_issue({
-                    'title_id': chapter_title_id(child), 'kind': 'chapter', 'heading': heading,
-                    'source_title': source.line(heading['document_id'], heading['page'], heading['line'])},
-                    child['display_title']))
     return compiled
 
 
@@ -2672,19 +2656,13 @@ def compile_plans(plans, documents):
 
 
 def _note_conditions(compiled):
-    from docreader.tender.directory_choices import source_case_issue
-
+    seen_details = {value.get('detail') for value in compiled['issues'] if value.get('code') == 'outline_directory_applicability_unconfirmed'}
     for chapter in compiled['chapters']:
         if chapter.get('condition'):
-            issue = source_case_issue(
-                {'code': 'outline_directory_applicability_unconfirmed',
-                 'detail': f'适用性待人工核定：{chapter["title"]}；{chapter["condition"]}'},
-                'applicability', chapter, parents=compiled['chapters'])
-            known = {value.get('directory_case_id') for value in compiled['issues']}
-            resolved = {value['case_id'] for value in compiled.get('directory_decisions', [])
-                        if value['action'] != 'unresolved'}
-            if issue['directory_case_id'] not in known | resolved:
-                compiled['issues'].append(issue)
+            detail = f'适用性待人工核定：{chapter["title"]}；{chapter["condition"]}'
+            if detail not in seen_details:
+                compiled['issues'].append({'code': 'outline_directory_applicability_unconfirmed', 'detail': detail})
+                seen_details.add(detail)
     return compiled
 
 
@@ -2847,8 +2825,6 @@ def _comparison_body(chapter, source):
 
 
 def _choose(first, second, rejected, source):
-    from docreader.tender.directory_choices import source_case_issue
-
     by_a = {_heading(chapter): chapter for chapter in first['chapters']}
     by_b = {_heading(chapter): chapter for chapter in second['chapters']}
     ids_a = {chapter['id']: chapter for chapter in first['chapters']}
@@ -2903,10 +2879,8 @@ def _choose(first, second, rejected, source):
                     omitted[original] = owned, error.detail
                     break
         for key in sorted(conflicts):
-            issues.append(source_case_issue(
-                {'code': 'outline_directory_conflict',
-                 'detail': _conflict_detail(by_a[key], by_b[key], by_a, by_b, differences[key])},
-                'conflict', by_a[key], by_b[key], first['chapters'], second['chapters']))
+            issues.append({'code': 'outline_directory_conflict',
+                           'detail': _conflict_detail(by_a[key], by_b[key], by_a, by_b, differences[key])})
         for key in extra_keys:
             extra = {**by_b[key]}
             blocked = extra['id']
@@ -2921,11 +2895,9 @@ def _choose(first, second, rejected, source):
                     ranges = f'{heading["document_id"]} page {heading["page"]} line {heading["line"]}（仅标题）'
                 overlap = f'候选“{identified[blocked]["title"]}”与已承载章“{owned["title"]}”正文重叠'
                 parent = '；所属候选父章未并入，子章不推断改挂' if blocked != extra['id'] else ''
-                issues.append(source_case_issue(
-                    {'code': 'outline_directory_extra_unconfirmed',
-                     'detail': f'另一份计划“{extra["title"]}”未并入；{overlap}{parent}；'
-                               f'完整候选范围（如有独有部分也不裁剪）保留原计划：{ranges}；{reason}；待人工确认'},
-                    'extra', owned, extra, first['chapters'], second['chapters']))
+                issues.append({'code': 'outline_directory_extra_unconfirmed',
+                               'detail': f'另一份计划“{extra["title"]}”未并入；{overlap}{parent}；'
+                                         f'完整候选范围（如有独有部分也不裁剪）保留原计划：{ranges}；{reason}；待人工确认'})
                 continue
             extra['id'] = extra_ids[extra['id']]
             parent = identified.get(extra.get('parent_id'))
@@ -2940,17 +2912,13 @@ def _choose(first, second, rejected, source):
                                'detail': f'另一份计划多出“{extra["title"]}”，已挂在同一份计划的父章下'})
             else:
                 extra['parent_id'] = None
-                issues.append(source_case_issue(
-                    {'code': 'outline_directory_extra_unconfirmed',
-                     'detail': f'另一份计划多出“{extra["title"]}”，未并入已确定的父子关系，请人工确认'},
-                    'extra', extra, by_b[key], chapters, second['chapters']))
+                issues.append({'code': 'outline_directory_extra_unconfirmed',
+                               'detail': f'另一份计划多出“{extra["title"]}”，未并入已确定的父子关系，请人工确认'})
             chapters.append(extra)
         chosen = {'chapters': chapters, 'issues': issues}
     for key in sorted(text_diffs):
-        chosen['issues'].append(source_case_issue(
-            {'code': 'outline_directory_conflict',
-             'detail': _conflict_detail(by_a[key], by_b[key], by_a, by_b, differences[key])},
-            'conflict', by_a[key], by_b[key], first['chapters'], second['chapters']))
+        chosen['issues'].append({'code': 'outline_directory_conflict',
+                                 'detail': _conflict_detail(by_a[key], by_b[key], by_a, by_b, differences[key])})
     chosen['_directory_candidates'] = deepcopy([first['chapters'], second['chapters']])
     return chosen
 
@@ -3049,40 +3017,23 @@ def _adopt_item(item, parent_id, group, source, nodes, parents, composition, exc
         _adopt_clause(item, parent_id, group if root else None, source, composition, chapters, seen)
         return
     if node_id in seen:
-        from docreader.tender.directory_choices import source_case_issue
-
         chapter = next((chapter for chapter in chapters if chapter['id'] == node_id), {})
         condition = _condition(item, source)
         covered = {(ref['document_id'], ref['page'], ref['line']) for ref in chapter.get('lines', [])}
         clause_lines = []
         clause = _obligations(item, None, source, covered, source_lines=clause_lines)
-        alternative = deepcopy(chapter)
-        alternative.update(parent_id=parent_id, group=group if root else None)
-        if group_heading is not None:
-            alternative['group_heading'] = deepcopy(group_heading)
-        if item.get('entry') is not None:
-            alternative['entry'] = _point_dict(composition['entries'][item['entry']]['name'])
-        if condition:
-            alternative.update(condition=condition, condition_windows=[deepcopy(item['condition'])])
-        if clause:
-            alternative.update(obligations=clause, obligation_lines=clause_lines,
-                               clause_windows=deepcopy(item.get('clause', [])))
         title = nodes.get(node_id, {}).get('title') or node_id
         if condition:
             if chapter and not chapter.get('condition'):
                 chapter['condition'] = condition
                 chapter['condition_windows'] = [deepcopy(item['condition'])]
             elif condition != chapter.get('condition'):
-                issues.append(source_case_issue(
-                    {'code': 'outline_directory_conflict',
-                     'detail': f'来源节点“{title}”重复采用的适用条件待核；保留先值：'
-                               f'{chapter.get("condition") or "未选择"}；后选条件：{condition}'},
-                    'duplicate_condition', chapter, alternative, chapters, chapters))
+                issues.append({'code': 'outline_directory_conflict',
+                               'detail': f'来源节点“{title}”重复采用的适用条件待核；保留先值：'
+                                         f'{chapter.get("condition") or "未选择"}；后选条件：{condition}'})
         if clause and clause != chapter.get('obligations', ''):
-            issues.append(source_case_issue(
-                {'code': 'outline_directory_conflict',
-                 'detail': f'来源节点“{title}”重复采用的补充义务待核，未自动合并：{clause}'},
-                'duplicate_obligation', chapter, alternative, chapters, chapters))
+            issues.append({'code': 'outline_directory_conflict',
+                           'detail': f'来源节点“{title}”重复采用的补充义务待核，未自动合并：{clause}'})
         issues.append({'code': 'outline_directory_name',
                        'detail': f'来源节点“{nodes.get(node_id, {}).get("title") or node_id}”被重复采用，保留先出现的位置'})
         return
@@ -3873,8 +3824,7 @@ def _parameter_child(parent, source, item, index, *, source_contract=None):
     child.update(response_kind=parent.get('response_kind', 'form'), subjects=deepcopy(parent.get('subjects', [])),
                  parameter_parent_id=parent['id'], _source_body_rows=_source_rows(source, copied))
     if item.get('title') is not None:
-        from docreader.tender.directory_titles import business_title
-        child['display_title'] = business_title(item['title'])
+        child['display_title'] = str(item['title']).strip()
     return child
 
 
@@ -4212,8 +4162,17 @@ def _empty(detail):
     return {'chapters': [], 'issues': [{'code': 'outline_directory_rejected', 'detail': detail}]}
 
 
+def _group_identity(chapter):
+    heading = chapter.get('group_heading')
+    value = heading if heading is not None else {
+        'document_id': chapter['heading']['document_id'], 'source_name': chapter.get('group')}
+    return 'group-title-' + hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
+
+
 def _nest(chapters, *, source_nodes=None):
-    from docreader.tender.directory_titles import group_identity
+    group_identity = _group_identity
     parameter_parents = {chapter['parameter_parent_id'] for chapter in chapters
                          if chapter.get('parameter_parent_id')
                          and chapter['parameter_parent_id'] == chapter.get('parent_id')}

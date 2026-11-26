@@ -197,12 +197,6 @@ async def test_generate_document_compiles_a_directory_instead_of_organizing(monk
 
     async def execute(task, _request, validate):
         if task == "directory_plan":
-            return validate({"nodes": [], "scopes": []})
-        if task in {"directory_material", "directory_requirement"}:
-            return validate({"assignments": []})
-        if task == "directory_classification":
-            return validate({"items": []})
-        if task == "directory_parameter":
             return validate({"chapters": []})
         raise AssertionError(task)
 

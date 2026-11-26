@@ -126,7 +126,6 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
     )
 
     from docreader.tender.authoring_excerpts import load_source_excerpt, source_excerpt_key
-    from docreader.tender.directory_response_forms import RESPONSE_FORM_ROLE_RECORD, response_form_role_record
 
     if outline_phase:
         units = []
@@ -384,16 +383,6 @@ def _structure_payload(artifacts, outline, units, *, outline_phase=False, templa
     sections, supports = project_source_sections(supports)
     form_decisions = []
     for issue in outline.get('issues', []):
-        if issue['code'] == RESPONSE_FORM_ROLE_RECORD:
-            target = actual_targets.get(issue.get('target_id'))
-            record = response_form_role_record(issue, target) if target else None
-            if record is None or target is None:
-                gaps.append({'code': 'structure_response_form_role_unbound',
-                             'detail': '原式行责任未能绑定当前实际条款行，保留原表及职责人工核定。'})
-                continue
-            form_decisions.append({**record, 'target_id': targets[target['target_id']],
-                'row_roles': [{**entry, 'review_row_id': f"q{entry['row_ordinal']}"} for entry in record['row_roles']]})
-            continue
         if issue['code'] != 'outline_directory_response_form_decision':
             continue
         identity = targets.get(issue.get('target_id'))

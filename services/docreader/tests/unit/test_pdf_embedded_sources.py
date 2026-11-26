@@ -12,7 +12,7 @@ from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.directory_compile import compile_directory, documents_from_frozen, outline_from_compiled
 from docreader.tender.evidence import EvidenceRepository, freeze_sources
 from test_directory_compile import item, node, plan
-from test_source_presentation import pdf_bytes
+from test_pdf_literal_freeze import pdf_bytes
 
 _T = TypeVar("_T")
 

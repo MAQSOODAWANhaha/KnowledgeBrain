@@ -11,11 +11,10 @@ from docreader.integrations.artifacts import ArtifactStore
 from docreader.llm.budget import RequestBudget
 from docreader.llm.request import ModelWorkUnitExhausted
 from docreader.tender import document_execution
-from docreader.tender.directory_ref_plan import DIRECTORY_REF_CONTRACT
-from docreader.tender.document_execution import SourceOutlineUnavailable, execute_document
+from docreader.tender.document_execution import execute_document
 from docreader.tender.evidence.references import SourceIndex
 from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
-from docreader.tender.schema import AuthoringInput, AuthoringOutline
+from docreader.tender.schema import AuthoringInput
 
 
 MAIN = (
@@ -213,62 +212,7 @@ async def test_new_outline_defaults_to_per_document_bid_format_chain(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_saved_old_directory_contract_still_refuses_full_source_and_exports_blank(
-        tmp_path, monkeypatch):
-    artifacts = ArtifactStore(tmp_path)
-    record, _index = _frozen_document(artifacts, 'tender', 'main', '投标文件格式\n' + ('全文行\n' * 4000))
-    frozen_ref = artifacts.put_json({'documents': [record]})
-    snapshot = AuthoringInput.model_validate({'schema_version': 2, 'run_id': 'old-contract', 'source_version': 1, 'domain_revision': 1,
-                              'frozen_ref': frozen_ref}).model_dump()
-    sent = []
-    store = _memory_store()
-    _bind(monkeypatch, store)
-    monkeypatch.setattr(document_execution, 'OpenAIModel', _model(sent))
-
-    with pytest.raises(SourceOutlineUnavailable):
-        await _execute(artifacts, store, snapshot, execution_id='old-outline', outline_only=True,
-                       directory_planning_contract=DIRECTORY_REF_CONTRACT,
-                       context_tokens=8000, output_reserve=2048)
-    spec = store.rows['old-outline']['execution_spec']
-    assert spec['directory_planning_contract'] == DIRECTORY_REF_CONTRACT
-    assert 'requirement_chain_contract' not in spec
-    assert sent == []
-    unavailable = next(row for row in store.rows['old-outline']['receipts']
-                       if row['stage'] == 'directory-outline-unavailable')
-    failed = artifacts.read_json(unavailable['artifact_ref'])
-    assert [issue['code'] for issue in failed['issues'] if issue['code'] == 'outline_directory_plan_failed']
-    assert all('ModelBudgetError' in issue['detail'] for issue in failed['issues']
-               if issue['code'] == 'outline_directory_plan_failed')
-
-    store.rows['old-outline']['status'] = 'failed'
-    with pytest.raises(SourceOutlineUnavailable):
-        await _execute(artifacts, store, snapshot, execution_id='old-outline', outline_only=True,
-                       context_tokens=8000, output_reserve=2048)
-    assert sent == []
-    assert store.rows['old-outline']['execution_spec']['directory_planning_contract'] == DIRECTORY_REF_CONTRACT
-
-    outline = AuthoringOutline.model_validate({'schema_version': 2, 'authoring_input': snapshot, 'issues': [],
-        'chapters': [{'chapter_id': 'chapter-1', 'title': '技术方案', 'children': [], 'targets': [{
-            'target_id': 'response', 'kind': 'narrative', 'purpose': '企业应答留空',
-            'rule_refs': [], 'source_refs': [], 'manual_fill': True, 'support_origins': ['tender'],
-        }]}]}).model_dump()
-    outline_ref = artifacts.put_json(outline)
-    exported = await _execute(artifacts, store, snapshot, execution_id='old-export', outline_ref=outline_ref,
-                              context_tokens=8000, output_reserve=2048)
-    document = artifacts.read_json(exported)
-    from zipfile import ZipFile
-    from io import BytesIO
-    blob = artifacts.read_bytes(document['docx_ref'])
-    assert blob.startswith(b'PK')
-    with ZipFile(BytesIO(blob)) as archive:
-        text = archive.read('word/document.xml').decode()
-    assert '企业应答留空' in text
-    assert not document['unit_refs'] or all(
-        not artifacts.read_json(ref)['cell_fills'] for ref in document['unit_refs'])
-
-
-@pytest.mark.asyncio
-async def test_named_old_contract_is_not_replaced_by_a_chain_predecessor(tmp_path, monkeypatch):
+async def test_successor_outline_inherits_the_requirement_chain(tmp_path, monkeypatch):
     artifacts = ArtifactStore(tmp_path)
     record, _index = _frozen_document(artifacts, 'tender', 'main', MAIN)
     frozen_ref = artifacts.put_json({'documents': [record]})
@@ -280,21 +224,6 @@ async def test_named_old_contract_is_not_replaced_by_a_chain_predecessor(tmp_pat
     await _execute(artifacts, store, snapshot, execution_id='chain-prev', outline_only=True,
                    context_tokens=16000, output_reserve=2048)
     assert store.rows['chain-prev']['execution_spec']['requirement_chain_contract'] == REQUIREMENT_CHAIN_CONTRACT
-
-    huge, _index = _frozen_document(artifacts, 'tender', 'main', '投标文件格式\n' + ('全文行\n' * 4000))
-    huge_snapshot = AuthoringInput.model_validate({'schema_version': 2, 'run_id': 'inherit', 'source_version': 1, 'domain_revision': 1,
-                                   'frozen_ref': artifacts.put_json({'documents': [huge]})}).model_dump()
-    sent = []
-    monkeypatch.setattr(document_execution, 'OpenAIModel', _model(sent))
-    with pytest.raises(SourceOutlineUnavailable):
-        await _execute(artifacts, store, huge_snapshot, execution_id='named-old', outline_only=True,
-                       previous_execution_id='chain-prev',
-                       directory_planning_contract=DIRECTORY_REF_CONTRACT,
-                       context_tokens=8000, output_reserve=2048)
-    spec = store.rows['named-old']['execution_spec']
-    assert spec['directory_planning_contract'] == DIRECTORY_REF_CONTRACT
-    assert 'requirement_chain_contract' not in spec
-    assert sent == []
 
     followed = []
     monkeypatch.setattr(document_execution, 'OpenAIModel', _model(followed))

@@ -876,17 +876,12 @@ def _submission_notes(outline, requirements, gaps, artifacts, ledger):
     )
     separate = {'outline_directory_attachment_unconfirmed', 'outline_directory_image_unconfirmed',
                 *(code for code, _, _ in groups)}
-    placed_targets = {target['target_id']: target for chapter, _ in entries for target in chapter.get('targets', [])}
     for code, title, checkbox in groups:
         selected = [issue for issue in outline.get('issues', []) if issue.get('code') == code]
         if selected:
             lines.extend(['## ' + title, ''])
             for issue in selected:
                 detail = issue['detail']
-                if code == 'outline_directory_response_form_row_roles':
-                    from docreader.tender.directory_response_forms import response_form_role_guide
-
-                    detail = response_form_role_guide(issue, placed_targets.get(issue.get('target_id')))
                 lines.extend([('- [ ] ' if checkbox else '') + detail, ''])
     directory_issues = [issue for issue in outline.get("issues", [])
                         if str(issue.get("code", "")).startswith("outline_directory_")

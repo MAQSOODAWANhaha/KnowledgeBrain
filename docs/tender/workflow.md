@@ -79,7 +79,7 @@
 
 ## 编制目标设计：一条要求链
 
-实施路线见 [修复与改进路线 · W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)。新的自动大纲默认走 `single_requirement_chain_v1`，条件是：有冻结来源，没有旧原件复核事实，部署未设 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT`，调用方未点名旧目录合同 `source_refs_compact_plan_v12`，也不是已保存执行的续跑。调用方未点名任一合同时，后继沿用前任的合同；点名旧目录合同的大纲留在全文目录路径，即使前任是一条要求链也不改写。显式传入 `single_requirement_chain_v1` 仍然有效。旧目录合同只能用于有冻结来源的自动大纲，用在正文或固定大纲上直接拒绝。前任是一条要求链时，追加旧原件复核事实须同时点名旧目录合同，否则 Web 返回 409。Web 新建的大纲任务都带默认标记；切换默认前已入队、没有前任也没有点名一条要求链的任务没有标记，Worker 按旧目录合同执行。分析事项台账是唯一覆盖分母，原式表、固定文字、签章与有据首张原封面由宿主从冻结网格原样复制，标注“不适用”的编号式样为复制边界。
+实施路线见 [修复与改进路线 · W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)。有冻结来源的自动大纲统一走 `single_requirement_chain_v1`（`bid_format_source_outline_v1` + `item_placement` + `proposal_outline`）。分析事项台账是唯一覆盖分母，原式表、固定文字、签章与有据首张原封面由宿主从冻结网格原样复制，标注“不适用”的编号式样为复制边界。
 
 ### 新链格式补位与事项归属
 
@@ -103,28 +103,18 @@
 
 Web 端分大纲执行（`outline_only`）与正文执行（固定大纲）；保存 Word 后可单独复核。已保存版 [PDF 出件](workbench.md#pdf-与报告) 与常规组装新增模型调用为 0。下文均为逻辑请求数，每个逻辑请求各有合同纠正 2 次、传输重发 4 次的恢复额度；整次执行另受按阶段计划累计的运行级上限约束（见 [字段字典 · 调用、预算、恢复与修订](field-dictionary.md#调用预算恢复与修订) 第 7 条）。
 
-### 大纲执行（旧目录编译路径，保留的先前实现）
+### 大纲执行（一条要求链 `single_requirement_chain_v1`）
 
-不满足[一条要求链默认条件](#编制目标设计一条要求链)的自动大纲走下表：调用方点名 `source_refs_compact_plan_v12`，执行规格或前任执行记下该合同，带旧原件复核事实，部署设了 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT`，或是切换默认前已入队的无标记任务。已保存的旧稿仍按该快照打开、编辑和导出。删除旧链代码仍待真实对照之后。
-
-这条路径不设 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT` 时，B、C 走旧路径，原文选择走 `directory_native_body`。A、M 与旧路径 C 把文档集内全部文档的全部行拼进一个请求，不分片；超出准入预算即拒发，不降级为分片，也不提高单次准入上限。
+有冻结来源的自动大纲统一按一条要求链执行：
 
 | 阶段 | 任务 / Prompt | 次数 | 随什么增长 | 单次输入与超限去向 | 代码入口 |
 | --- | --- | --- | --- | --- | --- |
-| A 目录规划 | `directory_plan` / `directory_ref_plan` + `_v2`（新执行默认 `_v2`） | 固定 2 | 不增长 | 全部文档全文；两次均超限时大纲无章节，M、B、C、P、F 均不执行，只记 `outline_directory_plan_failed` | `_request_directory_plans` |
-| M 章内材料 | `directory_material` + 附加段 | 1 | 不增长 | 全部文档全文；超限记 `outline_directory_material_rejected`，其余继续 | `_request_directory_details` |
-| B 要求归属 | 旧路径 `directory_requirement`；原生 `_native` | 旧路径按行数打包（每块约 600 行，整页不拆）；原生按预算分包 | 随来源规模线性 | 旧路径单块超限记 `outline_directory_requirement_rejected`；原生受预算约束 | `requirements()` / `_request_native_requirements` |
-| C 归属分类 | 旧路径 `directory_classification`（可选 `_reviewed_facts`）；原生 `_native` | 旧路径固定 1；原生装得下 1 次，装不下 `G≤1 + S` | 旧路径不增长；原生随待核案例数 | 旧路径全部文档全文，超限整体记 `outline_directory_classification_rejected`；原生仍超限的案例留待核 | `_request_directory_details` / `_request_joint_classification` |
-| P 长章展开 | `directory_parameter` | 每个 ≥25 行叙述章 1 次 | 随长叙述章数 | 单章，超限记 `outline_directory_parameter_rejected` | `_request_directory_details` |
-| F 响应原式 | `directory_response_form` + `_v2`/`_v3` | M 选中的每个逐条响应原式 1 次 | 随选中原式数 | 单原式来源范围 | `_request_directory_details` |
-| 原文选择 | `directory_parameter` / `directory_native_body` | 按规划分包，每包 1 次 | 随目标原文量 | 受预算约束 | `resolve_native_bodies` |
+| 格式章节选择 | `directory_plan` / `bid_format_outline` | 每份含格式章节的文档 1 次（超限按原文顺序分片） | 格式章节数与分片数（通常 1） | 仅短标题行；单片超限或失败该片留待核并记 `outline_directory_plan_failed` | `select_bid_format_plan` |
+| 事项归属 | `item_placement` | 按预算分批（每批 ≤ 240 条、多条不超过半窗） | 有效事项数与位置目录规模 | 完整位置目录 + 本批事项；单条超限或未采纳留 `outline_item_placement_failed` 待核 | `place_items` |
+| 方案子大纲 | `proposal_outline` | 仅规则数 ≥ 6 条的开放方案章每章 1 次（超窗拆为 1 次仅树 + `item_placement` 分批归属） | 开放方案章数 | 本章规则摘要 + 原文小节标题清单；失败或拒收保留单目标位并记 `outline_proposal_structure_pending` | `expand_proposal_outlines` |
 
-- B/C 原生合同与原文选择由 `KNOWLEDGEBRAIN_TENDER_NATIVE_REQUIREMENT_CONTRACT` 互斥切换。部署设了该变量时，新的自动大纲也留在这条路径并使用原生合同。
-- 新链（`single_requirement_chain_v1`）的目录规划只发 `bid_format_source_outline_v1`，不发 M、B、C、P、F，共 `格式章节数与分片数（通常为 1）+ 归属批数` 次逻辑请求；单次输入边界与缺口见[新链格式补位与事项归属](#新链格式补位与事项归属)。
-
-#### F 原式的条款号
-
-原式依据支持逐条展开、重复区紧接「条款号」表头且该列在重复区内全空时，`sequence_column` 绑定该列；每行首个正文引用选入完整点分数字条款号，宿主复制条款号与所选正文，保留固定格、空行与签章表注。
+- 单次输入边界、跨片父引用与缺口规则见[新链格式补位与事项归属](#新链格式补位与事项归属)。
+- 非冻结来源或整稿回退路径使用 `outline` / `outline_assemble`。
 
 ### 正文执行（固定大纲）与保存后复核
 

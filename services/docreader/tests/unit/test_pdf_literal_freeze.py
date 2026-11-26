@@ -1,15 +1,32 @@
 """Tender source references consume original glyphs before Markdown rendering."""
 from copy import deepcopy
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 import pytest
 
 from docreader.integrations.artifacts import ArtifactIntegrityError, ArtifactStore
 from docreader.tender.evidence import EvidenceRepository, freeze_sources
 from docreader.tender.evidence.references import SourceIndex
-from docreader.tender.native_body_prose import NativeProseSources
-from test_source_presentation import pdf_bytes
+
+
+def pdf_bytes(lines):
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=600, height=840)
+    font = DictionaryObject({NameObject('/Type'): NameObject('/Font'),
+        NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')})
+    page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'):
+        DictionaryObject({NameObject('/F1'): writer._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(('\n'.join(f'BT /F1 12 Tf 70 {780-ordinal*100} Td ({text}) Tj ET'
+        for ordinal, text in enumerate(lines))).encode())
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 async def freeze_pdf(tmp_path, lines, *, prefix=b''):
@@ -57,33 +74,6 @@ async def test_literal_ranges_have_physical_glyph_mapping_and_materialize_exactl
         assert entry['physical_locator']['page_ordinal'] == mapping['page_ordinal']
         assert index.materialize(entry)['text'] == entry['text']
     assert artifacts.read_json(source['raw_ref']) == before
-
-
-@pytest.mark.asyncio
-async def test_legacy_prose_cannot_certify_one_pdf_literal_line_as_complete_body(tmp_path):
-    lines = ['Supply the following:', 'Include the signed original.']
-    artifacts, source, _, _ = await freeze_pdf(tmp_path, lines)
-    repository = EvidenceRepository(artifacts)
-    prose = NativeProseSources(repository, [source], {'literal': {'pages': ['\n'.join(lines)]}}, [])
-    assert prose.match(lines[0], {('literal', 0)}) is None
-    index = repository.source_index(source['source_index_ref'])
-    assert [item['text'] for item in index.ranges] == lines
-
-
-@pytest.mark.asyncio
-async def test_legacy_prose_does_not_interpret_original_hash_as_markdown(tmp_path, monkeypatch):
-    lines = ['# Sign here', 'Include the signed original.']
-    artifacts, source, _, _ = await freeze_pdf(tmp_path, lines)
-    repository = EvidenceRepository(artifacts)
-    prose = NativeProseSources(repository, [source], {'literal': {'pages': ['\n'.join(lines)]}}, [])
-
-    def fail(*args):
-        pytest.fail('original PDF glyphs reached the legacy syntax projection')
-
-    monkeypatch.setattr(prose, '_syntax_range', fail)
-    assert prose.match(lines[0], {('literal', 0)}) is None
-    index = repository.source_index(source['source_index_ref'])
-    assert index.ranges[0]['text'] == lines[0]
 
 
 @pytest.mark.asyncio

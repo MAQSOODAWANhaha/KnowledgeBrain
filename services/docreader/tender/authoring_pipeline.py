@@ -28,48 +28,9 @@ from docreader.tender.authoring_excerpts import (
 )
 from docreader.tender.status import AuthoringTask
 from docreader.tender.directory_compile import (
-    ClassificationPlan, DirectoryPlan, ReadingDirectoryPlan, DirectoryPlanRejected, MaterialPlan, NativeMaterialPlan, ParameterPlan, RequirementPlan,
-    PARAMETER_SOURCE_CONTRACT,
-    apply_classification, apply_materials, apply_parameters, apply_requirements, apply_table_headers, compile_directory, compile_plans,
-    documents_from_frozen, note_missing_requirements, outline_from_compiled, parameter_view, reading_payload,
-    requirement_blocks, soften_directory_plan, sparse_page_issues, table_header_catalog, unplaced_tables,
-    validate_requirement_windows, validate_table_headers,
+    DirectoryPlanRejected, compile_plans, documents_from_frozen, outline_from_compiled,
 )
 from docreader.tender.evidence.references import EvidenceRepository
-from docreader.tender.directory_adjudication import (
-    requirement_cases, validate_requirement_adjudications, apply_requirement_adjudications,
-)
-from docreader.tender.directory_choices import (
-    directory_cases, apply_directory_adjudications, reference_exclusions,
-    validate_reference_exclusions, validate_requirement_exclusions,
-)
-from docreader.tender.directory_titles import (
-    title_catalog, validate_chapter_titles, apply_chapter_titles, accept_parameter_titles,
-)
-from docreader.tender.directory_ref_plan import (
-    DIRECTORY_REF_CONTRACT, LEGACY_DIRECTORY_REF_CONTRACT, RefDirectoryPlan, RefDirectoryPlanV2, decode_plan,
-)
-from docreader.tender.directory_sources import SourceRefs
-from docreader.tender.directory_source_groups import (
-    SOURCE_GROUP_CONTRACT, SOURCE_GROUP_OPERATION, MaterialSourceGroupPlan,
-    apply_source_groups, source_group_candidates, validate_source_groups,
-)
-from docreader.tender.directory_material_closure import (
-    SOURCE_CARRIER_CONTRACT, SOURCE_CARRIER_OPERATION, MaterialClosurePlan,
-    apply_carrier_closure, candidate_carriers, native_parts, source_carrier_catalog,
-)
-from docreader.tender.directory_response_forms import (
-    RESPONSE_FORM_CONTRACTS, ResponseFormView, response_form_catalog, require_response_form_budget,
-    validate_response_form_selections, pending_response_form,
-)
-from docreader.tender.reviewed_source_facts import (
-    REVIEWED_CLASSIFICATION_OPERATION, REVIEWED_BODY_ENTRY_CONTRACT,
-    load_reviewed_facts, reviewed_material_summary, apply_reviewed_material_facts,
-    reviewed_body_summary, validate_reviewed_body_dispositions, apply_reviewed_body_dispositions, ReviewedClassificationPlan,
-    bind_reviewed_outline_facts, bind_reviewed_credential_slots,
-    bind_reviewed_carrier_results,
-    reviewed_classification_view, apply_reviewed_classification,
-)
 from docreader.integrations.store import Conflict
 from docreader.tender.prompts import execution_prompt
 from docreader.tender.authoring_coverage import (
@@ -94,154 +55,6 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
-def _accept_directory_plan(raw, documents=None, *, model=DirectoryPlan):
-    softened, skipped = soften_directory_plan(raw)
-    plan = _parse(model, softened)
-    if skipped:
-        plan['skipped_item_issues'] = skipped
-    if documents is not None:
-        try:
-            compile_directory(plan, documents)
-        except DirectoryPlanRejected as error:
-            raise ModelContractError([{'path': [], 'code': 'directory_source_invalid',
-                                       'detail': error.detail}]) from None
-    return plan
-
-
-def _accept_ref_directory_plan(raw, refs, documents, *, model=RefDirectoryPlan):
-    plan = decode_plan(raw, refs, model=model)
-    try:
-        return _accept_directory_plan(plan, documents,
-            model=ReadingDirectoryPlan if model is RefDirectoryPlanV2 else DirectoryPlan)
-    except ModelContractError as error:
-        errors = deepcopy(error.errors)
-        for entry in errors:
-            for node, selected in zip(plan['nodes'], raw.get('nodes', [])):
-                entry['detail'] = entry['detail'].replace(node['id'], f'heading_ref={selected["heading_ref"]}')
-        raise ModelContractError(errors) from None
-
-
-def _accept_parameter_plan(raw, compiled, documents, chapter_id):
-    plan = _parse(ParameterPlan, raw)
-    parents = [chapter['chapter_id'] for chapter in plan['chapters']]
-    if len(parents) != len(set(parents)) or any(identity != chapter_id for identity in parents):
-        raise ModelContractError([{'path': ['chapters'], 'code': 'directory_parameter_scope_invalid',
-                                   'detail': 'parameter plan must only select the requested parent once'}])
-    checked = deepcopy(compiled)
-    before = len(checked['issues'])
-    apply_parameters(checked, documents, plan['chapters'])
-    errors = [issue for issue in checked['issues'][before:]
-              if issue['code'] in {'outline_directory_parameter_rejected', 'outline_directory_parameter_short'}]
-    if errors:
-        raise ModelContractError([{'path': ['chapters'], 'code': 'directory_parameter_source_invalid',
-                                   'detail': issue['detail']} for issue in errors])
-    try:
-        accept_parameter_titles(plan)
-    except DirectoryPlanRejected as error:
-        raise ModelContractError([{'path': ['chapters'], 'code': 'directory_parameter_title_invalid',
-                                   'detail': error.detail}]) from None
-    return plan
-
-
-def _accept_requirement_plan(raw, documents, block, compiled=None):
-    plan = _parse(RequirementPlan, raw)
-    try:
-        validate_requirement_windows(documents, plan['assignments'], block)
-        if compiled is not None:
-            validate_requirement_exclusions(compiled, plan['assignments'])
-    except DirectoryPlanRejected as error:
-        raise ModelContractError([{'path': ['assignments'], 'code': 'directory_requirement_source_invalid',
-                                   'detail': error.detail}]) from None
-    return plan
-
-
-def _accept_material_plan(raw, catalog, compiled=None, documents=None, *, response_forms_catalog=None,
-                          source_group_contract=None, source_carrier_contract=None, reviewed_source_facts=()):
-    closed = source_carrier_contract == SOURCE_CARRIER_CONTRACT
-    grouped = closed or source_group_contract == SOURCE_GROUP_CONTRACT
-    model = (MaterialClosurePlan if closed else MaterialSourceGroupPlan if grouped
-             else NativeMaterialPlan if response_forms_catalog is not None else MaterialPlan)
-    plan = _parse(model, raw)
-    try:
-        validate_table_headers(catalog, plan['table_headers'])
-    except DirectoryPlanRejected as error:
-        raise ModelContractError([{'path': ['table_headers'], 'code': 'directory_table_header_invalid',
-                                   'detail': error.detail}]) from None
-    if compiled is not None:
-        try:
-            chosen = deepcopy(compiled)
-            apply_directory_adjudications(chosen, documents, plan['directory_adjudications'])
-        except DirectoryPlanRejected as error:
-            raise ModelContractError([{'path': ['directory_adjudications'],
-                'code': 'directory_adjudication_invalid', 'detail': error.detail}]) from None
-        try:
-            validate_chapter_titles(chosen, documents, plan['chapter_titles'], title_catalog(compiled, documents))
-        except DirectoryPlanRejected as error:
-            raise ModelContractError([{'path': ['chapter_titles'],
-                'code': 'directory_title_invalid', 'detail': error.detail}]) from None
-        before = len(chosen['issues'])
-        apply_materials(chosen, documents, plan['assignments'],
-                        **({'source_owner': True} if grouped else {}))
-        errors = [issue for issue in chosen['issues'][before:]
-                  if issue['code'] == 'outline_directory_material_rejected']
-        if errors:
-            raise ModelContractError([{'path': ['assignments'], 'code': 'directory_material_source_invalid',
-                                       'detail': issue['detail']} for issue in errors])
-        try:
-            validate_reference_exclusions(chosen)
-        except DirectoryPlanRejected as error:
-            raise ModelContractError([{'path': ['assignments'], 'code': 'directory_reference_exclusion_invalid',
-                                       'detail': error.detail}]) from None
-        if response_forms_catalog is not None:
-            validate_response_form_selections(chosen, documents, plan['response_forms'], supplied=response_forms_catalog)
-        if grouped:
-            if response_forms_catalog is None and plan['response_forms']:
-                raise ModelContractError([{'path': ['response_forms'], 'code': 'directory_response_form_invalid',
-                    'detail': 'Response forms must be selected only from a supplied native form catalog.'}])
-            try:
-                if closed:
-                    apply_source_groups(chosen, documents, plan['source_groups'])
-                else:
-                    validate_source_groups(chosen, documents, plan['source_groups'])
-            except DirectoryPlanRejected as error:
-                raise ModelContractError([{'path': ['source_groups'], 'code': 'directory_source_group_invalid',
-                    'detail': error.detail}]) from None
-        if reviewed_source_facts:
-            try:
-                apply_reviewed_material_facts(chosen, documents, reviewed_source_facts)
-            except DirectoryPlanRejected as error:
-                raise ModelContractError([{'path': [], 'code': 'reviewed_material_fact_invalid', 'detail': error.detail}]) from None
-        if closed:
-            apply_carrier_closure(chosen, documents, plan['carrier_dispositions'], candidate_carriers(compiled, documents))
-            if reviewed_source_facts:
-                bind_reviewed_carrier_results(chosen, reviewed_source_facts)
-    return plan
-
-
-def _accept_classification_plan(raw, compiled, documents, *, reviewed_source_facts=None):
-    plan = _parse(ReviewedClassificationPlan if reviewed_source_facts else ClassificationPlan, raw)
-    legacy = reviewed_classification_view(compiled, reviewed_source_facts)[0] if reviewed_source_facts else compiled
-    try:
-        validate_requirement_adjudications(legacy, documents, plan['requirement_adjudications'])
-    except DirectoryPlanRejected as error:
-        raise ModelContractError([{'path': ['requirement_adjudications'],
-            'code': 'directory_requirement_adjudication_invalid', 'detail': error.detail}]) from None
-    if reviewed_source_facts:
-        try:
-            validate_reviewed_body_dispositions(compiled, documents, plan['reviewed_body_dispositions'], reviewed_source_facts)
-        except DirectoryPlanRejected as error:
-            raise ModelContractError([{'path': ['reviewed_body_dispositions'], 'code': 'reviewed_body_fact_invalid', 'detail': error.detail}]) from None
-    checked = deepcopy(compiled)
-    before = len(checked['issues'])
-    apply_classification(checked, documents, plan['items'])
-    errors = [issue for issue in checked['issues'][before:]
-              if issue['code'] == 'outline_directory_classification_rejected']
-    if errors:
-        raise ModelContractError([{'path': ['items'], 'code': 'directory_classification_source_invalid',
-                                   'detail': issue['detail']} for issue in errors])
-    return plan
-
-
 def _parse(schema, value):
     try:
         return schema.model_validate(value).model_dump()
@@ -258,55 +71,7 @@ def _request(budget, task, payload):
     prompt_name = 'outline_assemble' if task == 'outline' and payload.get('operation') == 'assemble' else task
     if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') == 'select_bid_format_outline_v1':
         prompt_name = 'bid_format_outline'
-    elif task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') in {'select_directory_refs_v1', 'select_directory_refs_v2'}:
-        prompt_name = 'directory_ref_plan'
-    prompt = _prompt(budget, prompt_name)
-    if task == AuthoringTask.DIRECTORY_PLAN and payload.get('operation') == 'select_directory_refs_v2':
-        prompt += '\n\n' + _prompt(budget, 'directory_ref_plan_v2')
-    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('operation') == 'select_response_forms_v1':
-        prompt += '\n\n' + _prompt(budget, 'directory_material_response_forms')
-    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('operation') == SOURCE_GROUP_OPERATION:
-        prompt += '\n\n' + _prompt(budget, 'directory_material_source_groups')
-    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('operation') == SOURCE_CARRIER_OPERATION:
-        prompt += '\n\n' + _prompt(budget, 'directory_material_source_groups')
-        prompt += '\n\n' + _prompt(budget, 'directory_material_closure')
-    if task == AuthoringTask.DIRECTORY_MATERIAL and payload.get('identity_format') == 'material_short_ids_v3':
-        prompt += ('\n目录采用column_blocks_v1：blocks按原顺序展开，constant_values为每行共有字段，'
-                   'rows按columns逐值对应；全部来源和值均保留。输出仍按原Schema返回对象。')
-    if task == AuthoringTask.DIRECTORY_RESPONSE_FORM and payload.get('operation') in {'select_native_response_form_v2', 'select_native_response_form_v3'}:
-        prompt += '\n\n' + _prompt(budget, 'directory_response_form_v2')
-    if task == AuthoringTask.DIRECTORY_RESPONSE_FORM and payload.get('operation') == 'select_native_response_form_v3':
-        prompt += '\n\n' + _prompt(budget, 'directory_response_form_v3')
-    if task == AuthoringTask.DIRECTORY_REQUIREMENT and payload.get('operation') == 'select_native_requirement_sources_v1':
-        prompt += '\n\n' + _prompt(budget, 'directory_requirement_native')
-        if payload.get('reviewed_body_refs') or payload.get('reviewed_partial_refs') or any(
-                line.get('source_role') == 'reviewed_body' for page in payload.get('block', ()) for line in page['lines']):
-            prompt += ('\n核定正文由分类阶段独立裁定。source_role=reviewed_body 的原行只供阅读，'
-                       '不能进入assignments。reviewed_body_refs必须标为already_carried，'
-                       'reviewed_partial_refs必须标为reference（宿主保留整片待核）。'
-                       '两类引用均不得进入native_assignments，仍须逐个处置。')
-    if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == 'classify_with_native_requirement_cases_v1':
-        prompt += '\n\n' + _prompt(budget, 'directory_classification_native')
-        if payload.get('classification_scope') == 'cases_v1':
-            prompt += ('\n本次只裁定当前 requirement_cases，每个短 ID 恰出现一次。items 必须为空。'
-                       '所有章仍可选。依据只能引用本次显示的原文行，包含范围内每一行。'
-                       '需要合并范围之外的续段或缺少依据时，保留该事项独立未归属。')
-        elif payload.get('classification_scope') == 'document_v1':
-            prompt += ('\n本次只处理文件级 items 和本次提供的已核正文事实。'
-                       'requirement_adjudications 和 basis_groups 必须为空。')
-        if payload.get('reviewed_source_facts'):
-            if payload.get('classification_scope') != 'document_v1':
-                prompt += '\n同时裁定 reviewed_source_facts，保留原生 items、basis_groups 和 requirement_adjudications。'
-            prompt += ('reviewed_body_dispositions 每条事实恰出现一次，'
-                       '只返回 fact_id（短 fN）、scope 和 chapter_id（短 cN 或 null）。'
-                       'scope=chapter 时选一个真实职责、主体和提交实例相容的已有章节。'
-                       '无法确认时 scope=unassigned 且 chapter_id=null，保留具名待核。'
-                       'body 是核定正文权威，context 与原件坐标保留出处。'
-                       '独有续段不得删除；共享片段或相同 entry 的不同事实不得合并。'
-                       'manual_only 的案件须独立留待核，不可作为响应正文。不要誊写原文。')
-    if task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == REVIEWED_CLASSIFICATION_OPERATION:
-        prompt += '\n\n' + _prompt(budget, 'directory_classification_reviewed_facts')
-    return build_request(budget.model, prompt, payload, task=task,
+    return build_request(budget.model, _prompt(budget, prompt_name), payload, task=task,
                          reasoning_effort=budget.reasoning_effort)
 
 
@@ -318,487 +83,11 @@ def _fits(budget, task, payload, *, headroom_tokens=0):
     return measured['input_tokens'] + headroom_tokens <= measured['effective_input_budget_tokens']
 
 
-def _directory_chapters(compiled):
-    return [{'id': chapter['id'], 'title': chapter.get('display_title', chapter['title']), 'parent_id': chapter.get('parent_id'),
-                 'response_kind': chapter.get('response_kind', 'form'), 'subjects': chapter.get('subjects', [])}
-                for chapter in compiled['chapters'] if not chapter.get('unplaced')]
-
-
-def _directory_applicability(compiled):
-    value = {'excluded': [deepcopy(issue) for issue in compiled['issues'] if issue['code'] == 'outline_directory_excluded'],
-                     'conditions': [{'chapter_id': chapter['id'], 'text': chapter['condition']}
-                                    for chapter in compiled['chapters'] if chapter.get('condition')]}
-    exclusions = reference_exclusions(compiled)
-    if exclusions:
-        value['source_reference_exclusions'] = exclusions
-    return value
-
-
-def _full_source_reading(reading):
-    value = deepcopy(reading)
-    value['source_line_format'] = 'numbered_line_pairs_v1'
-    for document in value['documents']:
-        for page in document['pages']:
-            page['lines'] = [[entry['line'], entry['text']] for entry in page['lines']]
-    return value
-
-
-async def _request_directory_details(compiled, documents, budget, execute, identity=None, *, artifacts=None,
-                                     response_form_contract=None, parameter_source_contract=None, source_group_contract=None,
-                                     native_requirement_contract=None, source_carrier_contract=None,
-                                     reviewed_source_facts=(), on_source_closure=None, reviewed_body_entry_contract=None,
-                                     native_requirement_concurrency=2):
-    from docreader.tender.native_requirement_sources import CONTRACT as NATIVE_CONTRACT
-    if reviewed_body_entry_contract not in (None, REVIEWED_BODY_ENTRY_CONTRACT):
-        raise ModelConfigurationError('unsupported reviewed body entry contract')
-    entry_options = {'entry_contract': reviewed_body_entry_contract} if reviewed_body_entry_contract is not None else {}
-    if native_requirement_contract not in (None, NATIVE_CONTRACT):
-        raise ModelConfigurationError('unsupported native requirement source contract')
-    if source_group_contract not in (None, SOURCE_GROUP_CONTRACT):
-        raise ModelConfigurationError('unsupported directory source group contract')
-    if source_carrier_contract not in (None, SOURCE_CARRIER_CONTRACT):
-        raise ModelConfigurationError('unsupported directory source carrier contract')
-    if reviewed_source_facts and source_carrier_contract != SOURCE_CARRIER_CONTRACT:
-        raise ModelConfigurationError('reviewed source facts require source_carriers_closed_v1')
-    if reviewed_source_facts:
-        compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in reviewed_source_facts if f['kind'] == 'required_native')
-    reviewed_body_facts = tuple(f for f in reviewed_source_facts if f['kind'] == 'independent_body_response')
-    closed = source_carrier_contract == SOURCE_CARRIER_CONTRACT
-    grouped = closed or source_group_contract == SOURCE_GROUP_CONTRACT
-    if response_form_contract not in (None, *RESPONSE_FORM_CONTRACTS):
-        raise ModelConfigurationError('unsupported response form source contract')
-    if parameter_source_contract not in (None, PARAMETER_SOURCE_CONTRACT):
-        raise ModelConfigurationError('unsupported parameter source contract')
-    if parameter_source_contract == PARAMETER_SOURCE_CONTRACT:
-        compiled['_parameter_source_contract'] = parameter_source_contract
-    forms_catalog = None
-    if response_form_contract in RESPONSE_FORM_CONTRACTS:
-        compiled['_response_form_contract'] = response_form_contract
-        forms_catalog = response_form_catalog(compiled, documents)
-    compiled['issues'].extend(sparse_page_issues(documents))
-    chapters = _directory_chapters(compiled)
-    applicability = _directory_applicability(compiled)
-    reading = reading_payload(documents, identity)
-    catalog = table_header_catalog(compiled, documents)
-    choices = directory_cases(compiled, documents)
-    titles = title_catalog(compiled, documents)
-    material_options = ({'operation': 'select_response_forms_v1', 'response_form_catalog': forms_catalog}
-                        if forms_catalog is not None else {})
-    if grouped:
-        material_options.update(operation=SOURCE_GROUP_OPERATION, source_group_candidates=source_group_candidates(compiled))
-    carriers = candidate_carriers(compiled, documents) if closed else []
-    if closed:
-        material_options.update(operation=SOURCE_CARRIER_OPERATION, source_carrier_catalog=source_carrier_catalog(
-            carriers, required_native_ids=compiled.get('_reviewed_required_native_table_ids', [])))
-    material_facts = reviewed_material_summary(reviewed_source_facts)
-    if material_facts:
-        material_options['reviewed_source_facts'] = material_facts
-    materials = None
-    await _plan(execute, AuthoringTask.DIRECTORY_MATERIAL, 1, 'material')
-    try:
-        materials = await _ask(execute, budget, AuthoringTask.DIRECTORY_MATERIAL,
-                               {**_full_source_reading(reading), 'chapters': chapters, 'applicability': applicability,
-                                'unplaced_tables': unplaced_tables(compiled, documents), 'table_header_catalog': catalog,
-                                'chapter_title_catalog': titles,
-                                **({'directory_cases': choices} if choices else {}),
-                                **material_options},
-                               lambda raw: _accept_material_plan(raw, catalog, compiled, documents,
-                                    response_forms_catalog=forms_catalog, source_group_contract=source_group_contract,
-                                    source_carrier_contract=source_carrier_contract, reviewed_source_facts=reviewed_source_facts))
-    except _LOCAL_FAILURES:
-        compiled['issues'].append({'code': 'outline_directory_material_rejected', 'detail': '章内材料未完成，其余继续'})
-        if reviewed_source_facts:
-            apply_reviewed_material_facts(compiled, documents, reviewed_source_facts)
-        if closed:
-            present = {identity for chapter in compiled['chapters'] if not chapter.get('unplaced')
-                       for identity in native_parts(chapter)}
-            apply_carrier_closure(compiled, documents,
-                [{'table_id': item['table_id'], 'action': 'unresolved'} for item in carriers
-                 if item['table_id'] not in present], carriers)
-    else:
-        assert materials is not None
-        apply_directory_adjudications(compiled, documents, materials['directory_adjudications'])
-        apply_chapter_titles(compiled, documents, materials['chapter_titles'], titles)
-        apply_materials(compiled, documents, materials['assignments'],
-                        **({'source_owner': True} if grouped else {}))
-        if grouped:
-            apply_source_groups(compiled, documents, materials['source_groups'])
-        if reviewed_source_facts:
-            apply_reviewed_material_facts(compiled, documents, reviewed_source_facts)
-        if closed:
-            apply_carrier_closure(compiled, documents, materials['carrier_dispositions'], carriers)
-    if reviewed_source_facts and closed:
-        bind_reviewed_carrier_results(compiled, reviewed_source_facts)
-    if on_source_closure is not None and closed:
-        await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
-    apply_table_headers(compiled, documents, catalog, materials.get('table_headers', []) if materials else [],
-                        failure='材料请求未完成，请对照原件核定' if materials is None else None)
-    chapters = _directory_chapters(compiled)
-    applicability = _directory_applicability(compiled)
-
-    async def requirements():
-        requirement_chapters = deepcopy(chapters)
-        originals = {chapter['id']: chapter for chapter in compiled['chapters']}
-        for chapter in requirement_chapters:
-            original = originals[chapter['id']]
-            if chapter['response_kind'] in {'form', 'attachment'} and original.get('text', '').strip():
-                chapter['source_body'] = original['text']
-            if original.get('obligations', '').strip():
-                chapter['source_obligations'] = original['obligations']
-        blocks = list(enumerate(requirement_blocks(documents), start=1))
-        semaphore = asyncio.Semaphore(2)
-
-        async def one(block):
-            async with semaphore:
-                try:
-                    return await _ask(execute, budget, AuthoringTask.DIRECTORY_REQUIREMENT,
-                                      {'chapters': requirement_chapters, 'block': block, 'applicability': applicability, **(
-                                          {'source_version': identity.get('source_version'),
-                                           'domain_revision': identity.get('domain_revision')} if identity else {})},
-                                      lambda raw: _accept_requirement_plan(raw, documents, block, compiled))
-                except _LOCAL_FAILURES:
-                    return None
-
-        await _plan(execute, AuthoringTask.DIRECTORY_REQUIREMENT, len(blocks), 'requirement-blocks')
-        results = await asyncio.gather(*(one(block) for _, block in blocks))
-        for (index, _), plan in zip(blocks, results):
-            if plan is None:
-                compiled['issues'].append({'code': 'outline_directory_requirement_rejected',
-                                           'detail': f'要求分块{index}未完成，其余继续'})
-            else:
-                apply_requirements(compiled, documents, plan['assignments'])
-
-    if native_requirement_contract == NATIVE_CONTRACT:
-        await _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability,
-            reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract,
-            concurrency=native_requirement_concurrency)
-    else:
-        await requirements()
-    classification_view = reviewed_classification_view(compiled, reviewed_body_facts)[0] if reviewed_body_facts else compiled
-    cases = requirement_cases(classification_view, documents)
-    if native_requirement_contract != NATIVE_CONTRACT:
-        classification_payload = {**_full_source_reading(reading), **({'requirement_cases': cases, 'chapters': chapters,
-                                                 'applicability': applicability} if cases else {})}
-        if reviewed_body_facts:
-            classification_payload.update(operation=REVIEWED_CLASSIFICATION_OPERATION,
-                chapters=chapters, applicability=applicability,
-                reviewed_source_facts=reviewed_body_summary(reviewed_body_facts))
-        await _plan(execute, AuthoringTask.DIRECTORY_CLASSIFICATION, 1, 'classification')
-        try:
-            classification_plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_CLASSIFICATION,
-                classification_payload, lambda raw: _accept_classification_plan(raw, compiled, documents, reviewed_source_facts=reviewed_body_facts))
-        except _LOCAL_FAILURES:
-            classification_plan = None
-        if classification_plan is None:
-            compiled['issues'].append({'code': 'outline_directory_classification_rejected', 'detail': '分类未完成，其余继续'})
-        else:
-            if reviewed_body_facts:
-                apply_reviewed_classification(compiled, documents, classification_plan, reviewed_body_facts, **entry_options)
-            else:
-                apply_classification(compiled, documents, classification_plan['items'])
-                apply_requirement_adjudications(compiled, documents, classification_plan['requirement_adjudications'])
-        if reviewed_body_facts:
-            if classification_plan is None:
-                if reviewed_body_entry_contract == REVIEWED_BODY_ENTRY_CONTRACT:
-                    apply_reviewed_classification(compiled, documents, None, reviewed_body_facts, **entry_options)
-                else:
-                    apply_reviewed_body_dispositions(compiled, documents, [
-                        {'fact_id': f['fact_id'], 'scope': 'unassigned', 'chapter_id': None}
-                        for f in reviewed_body_facts], reviewed_body_facts, **entry_options)
-    long_chapters = [chapter for chapter in compiled['chapters']
-                   if not chapter.get('unplaced')
-                   and chapter.get('response_kind', 'form') == 'narrative'
-                   and len([line for line in chapter.get('text', '').splitlines() if line.strip()]) >= 25]
-    await _plan(execute, AuthoringTask.DIRECTORY_PARAMETER, len(long_chapters), 'long-chapters')
-    for chapter in long_chapters:
-        try:
-            plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_PARAMETER,
-                              {'chapter': {'id': chapter['id'], 'title': chapter.get('display_title', chapter['title']),
-                                           'lines': parameter_view(chapter, documents)}},
-                              lambda raw: _accept_parameter_plan(raw, compiled, documents, chapter['id']))
-        except _LOCAL_FAILURES:
-            compiled['issues'].append({'code': 'outline_directory_parameter_rejected',
-                                       'detail': f'“{chapter["title"]}”的参数展开未完成，原章保留'})
-            continue
-        assert plan is not None
-        apply_parameters(compiled, documents, plan['chapters'])
-    await _plan(execute, AuthoringTask.DIRECTORY_RESPONSE_FORM,
-                len((materials or {}).get('response_forms', [])), 'response-forms')
-    for selection in (materials or {}).get('response_forms', []):
-        try:
-            if artifacts is None or identity is None:
-                raise ValueError('native response form sources are unavailable')
-            pending = pending_response_form(artifacts, compiled, documents, selection, identity)
-            compiled.setdefault('_response_form_pending', []).append(pending)
-            view = ResponseFormView(artifacts, compiled, documents, selection, identity, contract=response_form_contract)
-        except (ModelContractError, OSError, ValueError, KeyError):
-            compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
-                'detail': '逐条响应原式的完整来源范围暂不能核定，原表及已选来源保留，请核定后展开。'})
-            continue
-        try:
-            form_plan = await _ask(execute, budget, AuthoringTask.DIRECTORY_RESPONSE_FORM, view.payload, view.accept)
-        except _LOCAL_FAILURES:
-            compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
-                'detail': '逐条响应原式尚未完成有界来源选择，原表保留；请按其完整来源范围人工列条款或修订后重试。'})
-            continue
-        compiled.setdefault('_response_form_plans', []).append(form_plan)
-        assert form_plan is not None
-        if not form_plan['complete']:
-            pending['pending']['reason'] = 'selection_incomplete'
-            compiled['issues'].append({'code': 'outline_directory_response_form_unconfirmed',
-                'detail': '逐条响应原式仍有未决来源或布局，未把部分条款写成完整表；原表保留，须核定完整范围后展开。'})
-    return note_missing_requirements(compiled)
-
-
-async def _request_native_requirements(compiled, documents, budget, execute, identity, artifacts, chapters, applicability,
-                                       *, reviewed_body_facts=(), reviewed_body_entry_contract=None, concurrency=2):
-    if concurrency < 1:
-        raise ValueError('native requirement concurrency must be positive')
-    from docreader.tender.native_requirement_sources import SourceLedger, plan_native_packs, require_native_budget
-    from docreader.tender.native_requirement_flow import JointRequirements, JointClassification
-    requirement_chapters = deepcopy(chapters)
-    originals = {chapter['id']: chapter for chapter in compiled['chapters']}
-    for chapter in requirement_chapters:
-        original = originals[chapter['id']]
-        if chapter['response_kind'] in {'form', 'attachment'} and original.get('text', '').strip():
-            chapter['source_body'] = original['text']
-        if original.get('obligations', '').strip():
-            chapter['source_obligations'] = original['obligations']
-    try:
-        if artifacts is None or not identity or not identity.get('frozen_ref'):
-            raise ValueError('Frozen native requirement sources are unavailable.')
-
-        def build_joint():
-            frozen = artifacts.read_json(identity['frozen_ref'])
-            ledger = SourceLedger(artifacts, frozen['documents'], chapters=requirement_chapters)
-            from docreader.tender.directory_compile import _used_lines
-            joint = JointRequirements(ledger, documents, applicability, identity, carried_points=_used_lines(compiled),
-                                      reviewed_body_facts=reviewed_body_facts)
-            return ledger, joint
-
-        ledger, joint = await asyncio.to_thread(build_joint)
-    except (OSError, ValueError, KeyError, ModelContractError) as error:
-        compiled['issues'].append({'code': 'outline_directory_native_source_unavailable',
-            'detail': '完整原生要求来源暂不可核定；原件保留，请在Word对照完整原件人工核定正文及归属。' + type(error).__name__})
-        if reviewed_body_facts:
-            apply_reviewed_classification(compiled, documents, None, reviewed_body_facts,
-                                          entry_contract=reviewed_body_entry_contract)
-        return
-    task = AuthoringTask.DIRECTORY_REQUIREMENT
-    packs = await asyncio.to_thread(plan_native_packs, ledger, budget, joint.payload,
-        _prompt(budget, task) + '\n\n' + _prompt(budget, 'directory_requirement_native'),
-        request_factory=lambda view, payload: _request(budget, task, payload))
-    for pending in packs['pending_ranges']:
-        joint.pending(compiled, pending['range_ordinals'], pending['reason'])
-    async def request_native_pack(view):
-        payload = joint.payload(view)
-        try:
-            require_native_budget(budget, view, payload, '', request=_request(budget, task, payload))
-            return await _ask(execute, budget, task, payload, lambda raw: joint.accept(view, raw, compiled))
-        except _LOCAL_FAILURES:
-            return None
-
-    views = packs['views']
-    await _plan(execute, task, len(views), 'native-packs')
-    for offset in range(0, len(views), concurrency):
-        batch = views[offset:offset + concurrency]
-        tasks = [asyncio.create_task(request_native_pack(view)) for view in batch]
-        try:
-            results = await asyncio.gather(*tasks)
-        except BaseException:
-            for pending_task in tasks:
-                pending_task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-        # Validation only reads the directory guards. Apply in inventory order,
-        # because assigning a range can change which later ranges are already used.
-        for view, prepared in zip(batch, results, strict=True):
-            if prepared is None:
-                joint.pending(compiled, view.range_ordinals, 'joint_B_unfinished')
-            else:
-                joint.apply(compiled, prepared)
-
-    def build_classification():
-        joint.unknown_geometry(compiled)
-        joint.reviewed_partial_geometry(compiled)
-        return JointClassification(ledger, compiled, documents, proof=joint.proof,
-            reviewed_body_facts=reviewed_body_facts, reviewed_body_entry_contract=reviewed_body_entry_contract)
-
-    classification = await asyncio.to_thread(build_classification)
-    await _request_joint_classification(compiled, classification, budget, execute,
-                                        {'applicability': applicability, **joint.identity})
-
-
-async def _request_joint_classification(compiled, classification, budget, execute, context):
-    from docreader.tender.native_requirement_flow import require_classification_budget
-
-    task = AuthoringTask.DIRECTORY_CLASSIFICATION
-
-    def admit(payload):
-        payload = {**payload, **context}
-        measured = require_classification_budget(budget, _request(budget, task, payload), payload)
-        return payload, {key: value for key, value in measured.items() if key != 'request'}
-
-    try:
-        payload, measured = await asyncio.to_thread(admit, classification.payload)
-    except ModelBudgetError:
-        pass
-    else:
-        compiled['_native_classification_budget'] = measured
-        await _plan(execute, task, 1, 'joint-classification')
-        try:
-            prepared = await _ask(execute, budget, task, payload, classification.accept)
-        except _LOCAL_FAILURES:
-            compiled['issues'].append({'code': 'outline_directory_classification_rejected',
-                'detail': '完整联合分类未完成或超出完整输入/输出预算；全部精确来源保留，请核定具名未决来源后修订。'})
-            await asyncio.to_thread(classification.fallback, compiled)
-        else:
-            await asyncio.to_thread(classification.apply, compiled, prepared)
-        return
-
-    scopes, budgets = [], []
-    held = 0
-    document_completed = False
-
-    async def request_scope(payload, measured):
-        budgets.append(measured)
-        try:
-            prepared = await _ask(execute, budget, task, payload,
-                                  lambda raw: classification.accept_scope(payload, raw))
-        except _LOCAL_FAILURES:
-            return False
-        scopes.append(prepared)
-        return True
-
-    try:
-        document = await asyncio.to_thread(lambda: admit(classification.scope_payload()))
-    except ModelBudgetError:
-        pass
-    else:
-        await _plan(execute, task, 1, 'classification-document-scope')
-        document_completed = await request_scope(*document)
-
-    def admit_cases(groups):
-        aliases = [alias for group in groups for alias in group]
-        try:
-            return admit(classification.scope_payload(aliases))
-        except ModelBudgetError:
-            return None
-
-    groups = await asyncio.to_thread(classification.scoped_groups)
-    await _plan(execute, task, len(groups), 'classification-scopes')
-    start = 0
-    while start < len(groups):
-        def next_scope(offset):
-            admitted = admit_cases(groups[offset:offset + 1])
-            if admitted is None:
-                return None, 1
-            size, rejected = 1, None
-            remaining = len(groups) - offset
-            while size < remaining:
-                probe = min(size * 2, remaining)
-                candidate = admit_cases(groups[offset:offset + probe])
-                if candidate is None:
-                    rejected = probe
-                    break
-                size, admitted = probe, candidate
-            while rejected is not None and rejected - size > 1:
-                probe = (size + rejected) // 2
-                candidate = admit_cases(groups[offset:offset + probe])
-                if candidate is None:
-                    rejected = probe
-                else:
-                    size, admitted = probe, candidate
-            return admitted, size
-
-        admitted, size = await asyncio.to_thread(next_scope, start)
-        if admitted is None:
-            held += len(groups[start])
-            start += 1
-            continue
-        if not await request_scope(*admitted):
-            held += len(admitted[0]['requirement_cases'])
-        start += size
-
-    compiled['_native_classification_budget'] = {'mode': 'scoped_v1', 'scopes': budgets,
-        'document_completed': document_completed, 'held_case_count': held}
-    if scopes:
-        try:
-            prepared = await asyncio.to_thread(classification.merge_scopes, scopes)
-        except ModelContractError:
-            scopes.clear()
-        else:
-            await asyncio.to_thread(classification.apply, compiled, prepared)
-    if not scopes:
-        await asyncio.to_thread(classification.fallback, compiled)
-    if not scopes or held or not document_completed:
-        compiled['issues'].append({'code': 'outline_directory_classification_rejected',
-            'detail': '部分来源分类待核。请根据具名未决事项核对完整原文、适用性和所属章节。'})
-
-
-async def _request_directory_plans(documents, budget, execute, identity=None, *, contract=None):
-    if contract not in (None, 'source_closure_business_titles_v10', LEGACY_DIRECTORY_REF_CONTRACT, DIRECTORY_REF_CONTRACT):
-        raise ModelConfigurationError('unsupported directory planning contract')
-    refs = None
-    if contract in {LEGACY_DIRECTORY_REF_CONTRACT, DIRECTORY_REF_CONTRACT}:
-        refs = SourceRefs(documents, identity)
-        payload = {**refs.reading(), 'operation': ('select_directory_refs_v2' if contract == DIRECTORY_REF_CONTRACT
-                                                 else 'select_directory_refs_v1')}
-    else:
-        payload = _full_source_reading(reading_payload(documents, identity))
-
-    def accept(raw):
-        return (_accept_ref_directory_plan(raw, refs, documents,
-                    model=RefDirectoryPlanV2 if contract == DIRECTORY_REF_CONTRACT else RefDirectoryPlan) if refs is not None
-                else _accept_directory_plan(raw, documents))
-
-    plans, failures = [], []
-    await _plan(execute, AuthoringTask.DIRECTORY_PLAN, 2, 'directory-plans')
-    for slot in (1, 2):
-        try:
-            if contract == DIRECTORY_REF_CONTRACT:
-                # A valid v1 response is a strict subset of the new reading-ref
-                # contract. Reuse only its exact original request and revalidate;
-                # rejected or merely similar old replies never become successes.
-                legacy = {**payload, 'operation': 'select_directory_refs_v1', 'plan_slot': slot}
-                hit, value = await _replay(execute, AuthoringTask.DIRECTORY_PLAN,
-                    _request(budget, AuthoringTask.DIRECTORY_PLAN, legacy),
-                    lambda raw: _accept_ref_directory_plan(raw, refs, documents))
-                if hit:
-                    plans.append(value)
-                    continue
-            plans.append(await _ask(execute, budget, AuthoringTask.DIRECTORY_PLAN,
-                                    {**payload, 'plan_slot': slot}, accept))
-        except _LOCAL_FAILURES as error:
-            failures.append(f'{type(error).__name__}: {error}')
-    return plans, failures
-
-
 async def _ask(execute, budget, task, payload, validate):
     request = _request(budget, task, payload)
     hit, value = await _replay(execute, task, request, validate)
     if hit:
         return value
-    if (task == AuthoringTask.DIRECTORY_MATERIAL or
-            (task == AuthoringTask.DIRECTORY_CLASSIFICATION and payload.get('operation') == REVIEWED_CLASSIFICATION_OPERATION)):
-        from docreader.tender.directory_material_ids import MATERIAL_IDENTITY_CONTRACT, MaterialIds
-
-        source_validate = validate
-        identities = MaterialIds(payload)
-        request = _request(budget, task, identities.payload)
-        validate = identities.accept(validate)
-        hit, value = await _replay(execute, task, request, validate)
-        if hit:
-            return value
-        if (task == AuthoringTask.DIRECTORY_MATERIAL
-                and (getattr(execute, 'spec', None) or {}).get('directory_material_identity_contract') == MATERIAL_IDENTITY_CONTRACT
-                and not await asyncio.to_thread(_fits, budget, task, identities.payload)):
-            identities = MaterialIds(payload, contract=MATERIAL_IDENTITY_CONTRACT)
-            request = _request(budget, task, identities.payload)
-            validate = identities.accept(source_validate)
-            hit, value = await _replay(execute, task, request, validate)
-            if hit:
-                return value
     if (task == 'outline' and payload.get('operation') == 'assemble'
             and payload.get('assembly_view') != 'compact_v1'):
         if not await asyncio.to_thread(_fits, budget, task, payload):
@@ -808,8 +97,6 @@ async def _ask(execute, budget, task, payload, validate):
             hit, value = await _replay(execute, task, request, validate)
             if hit:
                 return value
-    if task == AuthoringTask.DIRECTORY_RESPONSE_FORM:
-        require_response_form_budget(budget, request, payload)
     budget.admit_request(request, task)
     return await execute(task, request, validate)
 
@@ -2512,21 +1799,13 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                             concurrency=2, review_request=None, submission_sources=(), on_outline=None,
                             outline=None, outline_only=False, saved_units=(), on_unit=None,
                             saved_plan=None, on_plan=None, directory_plans=None, directory_documents=None,
-                            directory_contract=None, response_form_contract=None, parameter_source_contract=None,
-                            source_group_contract=None, native_requirement_contract=None, source_carrier_contract=None,
-                            reviewed_source_facts_ref=None, on_source_closure=None, on_reviewed_facts=None,
-                            render_pdf=None, on_layout=None, saved_layout_exports=None, reviewed_body_entry_contract=None,
-                            native_body_contract=None, on_source_bodies=None, requirement_chain_contract=None):
+                            directory_contract=None, render_pdf=None, on_layout=None, saved_layout_exports=None,
+                            requirement_chain_contract=None):
     """Plan an outline or compile its fixed tree; the executor supplies document usage."""
     if directory_plans is not None and directory_documents is None:
         raise ValueError('directory plans require registered documents')
-    if reviewed_body_entry_contract not in (None, REVIEWED_BODY_ENTRY_CONTRACT):
-        raise ModelConfigurationError('unsupported reviewed body entry contract')
-    from docreader.tender.native_body_selection import CONTRACT as NATIVE_BODY_CONTRACT
-    if native_body_contract not in (None, NATIVE_BODY_CONTRACT):
-        raise ModelConfigurationError('unsupported final source body contract')
-    if native_body_contract is not None and (outline is not None or not outline_only):
-        raise ModelConfigurationError('final source resolution requires automatic directory outline generation')
+    if directory_contract not in (None, 'bid_format_source_outline_v1'):
+        raise ModelConfigurationError('unsupported directory planning contract')
     from docreader.tender.item_placement import REQUIREMENT_CHAIN_CONTRACT
     if requirement_chain_contract not in (None, REQUIREMENT_CHAIN_CONTRACT):
         raise ModelConfigurationError('unsupported requirement chain contract')
@@ -2534,7 +1813,6 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             outline is not None or not outline_only or directory_contract != 'bid_format_source_outline_v1'):
         raise ModelConfigurationError('the requirement chain builds an automatic bid-format outline')
     chain_items = chain_added = None
-    source_body_result = None
     snapshot = AuthoringInput.model_validate(snapshot).model_dump()
     if outline is None and directory_documents is None and directory_plans is None and outline_only:
         loaded = None
@@ -2550,26 +1828,19 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             directory_documents = loaded
         else:
             directory_documents, directory_plans = [], []
-    reviewed_source_facts = ()
-    reviewed_fact_records = None
-    if reviewed_source_facts_ref is not None and outline is None:
-        if directory_documents is None:
-            raise ModelConfigurationError('reviewed source facts require the frozen directory outline flow')
-        if source_carrier_contract != SOURCE_CARRIER_CONTRACT:
-            raise ModelConfigurationError('reviewed source facts require source_carriers_closed_v1')
-        if directory_plans is not None:
-            raise ModelConfigurationError('reviewed source facts require the model directory and material outline flow')
-        reviewed_source_facts = await asyncio.to_thread(
-            load_reviewed_facts, artifacts, snapshot, directory_documents, reviewed_source_facts_ref)
     if directory_documents is not None:
         if outline is not None:
             raise ValueError('directory compilation replaces a model outline')
-        directory_facts = tuple(f for f in reviewed_source_facts if f['kind'] != 'credential_slot')
+        plan_failures: list[str] = []
         if directory_plans is None and directory_contract == 'bid_format_source_outline_v1':
             if execute is None:
                 raise ModelConfigurationError('bid-format semantic selection requires a model')
             from docreader.tender.bid_format_outline import select_bid_format_plan
-            selected = await select_bid_format_plan(directory_documents, budget, execute, snapshot)
+            try:
+                selected = await select_bid_format_plan(directory_documents, budget, execute, snapshot)
+            except _LOCAL_FAILURES as error:
+                selected = None
+                plan_failures.append(f'{type(error).__name__}: {error}')
             if selected and requirement_chain_contract is not None:
                 from docreader.tender.directory_compile import bid_format_sections
                 from docreader.tender.item_placement import _items, add_submission_forms
@@ -2583,56 +1854,20 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             from docreader.tender.directory_compile import bid_format_plan
             host = bid_format_plan(directory_documents)
             directory_plans = [host] if host else []
-        fetch_details = directory_plans is None and bool(directory_documents)
-        if directory_plans is None:
-            directory_plans, plan_failures = ([], [])
-            if directory_documents:
-                directory_plans, plan_failures = await _request_directory_plans(
-                    directory_documents, budget, execute, snapshot, contract=directory_contract)
-        else:
-            plan_failures = []
+        elif directory_plans is None:
+            from docreader.tender.bid_format_outline import select_bid_format_plan
+            try:
+                selected = await select_bid_format_plan(directory_documents, budget, execute, snapshot)
+            except _LOCAL_FAILURES as error:
+                selected = None
+                plan_failures.append(f'{type(error).__name__}: {error}')
+            directory_plans = [selected] if selected else []
         if directory_contract == 'bid_format_source_outline_v1' and len(directory_plans) == 1:
             from docreader.tender.bid_format_outline import compile_bid_format_plan
             compiled = compile_bid_format_plan(directory_plans[0], directory_documents)
         else:
             compiled = compile_plans(directory_plans, directory_documents)
         compiled['issues'].extend({'code': 'outline_directory_plan_failed', 'detail': detail} for detail in plan_failures)
-        if fetch_details and compiled['chapters']:
-            source_options = {}
-            if directory_facts:
-                source_options['reviewed_source_facts'] = directory_facts
-            if reviewed_body_entry_contract is not None:
-                source_options['reviewed_body_entry_contract'] = reviewed_body_entry_contract
-            if on_source_closure is not None:
-                source_options['on_source_closure'] = on_source_closure
-            if response_form_contract is not None:
-                source_options['response_form_contract'] = response_form_contract
-            if parameter_source_contract is not None:
-                source_options['parameter_source_contract'] = parameter_source_contract
-            if source_group_contract is not None:
-                source_options['source_group_contract'] = source_group_contract
-            if source_carrier_contract is not None:
-                source_options['source_carrier_contract'] = source_carrier_contract
-            if native_requirement_contract is not None:
-                source_options['native_requirement_contract'] = native_requirement_contract
-                source_options['native_requirement_concurrency'] = concurrency
-            if source_options:
-                source_options['artifacts'] = artifacts
-            compiled = await _request_directory_details(
-                compiled, directory_documents, budget, execute, snapshot, **source_options)
-        elif directory_facts:
-            # A failed to supply a usable directory. Preserve every reviewed fact
-            # as named pending work without manufacturing a material or C owner.
-            compiled['_reviewed_required_native_table_ids'] = sorted(f['_table_id'] for f in directory_facts if f['kind'] == 'required_native')
-            apply_reviewed_material_facts(compiled, directory_documents, directory_facts)
-            apply_carrier_closure(compiled, directory_documents, [], [])
-            bind_reviewed_carrier_results(compiled, directory_facts)
-            apply_reviewed_body_dispositions(compiled, directory_documents, [
-                {'fact_id': f['fact_id'], 'scope': 'unassigned', 'chapter_id': None}
-                for f in directory_facts if f['kind'] == 'independent_body_response'], directory_facts,
-                **({'entry_contract': reviewed_body_entry_contract} if reviewed_body_entry_contract is not None else {}))
-            if on_source_closure is not None:
-                await on_source_closure(deepcopy(compiled.get('_source_carrier_closure', [])))
         outline = await asyncio.to_thread(outline_from_compiled, snapshot, compiled, artifacts=artifacts)
         if chain_items is not None:
             from docreader.tender.item_placement import place_items
@@ -2648,18 +1883,6 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
                 lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload),
             )
             await asyncio.to_thread(attach_opening_project_name, artifacts, outline)
-        if directory_facts:
-            await asyncio.to_thread(bind_reviewed_outline_facts, outline, compiled, directory_facts)
-        if native_body_contract is not None:
-            from docreader.tender.native_body_scope import NativeBodyScope
-            from docreader.tender.native_body_flow import resolve_native_bodies
-            scope = await asyncio.to_thread(NativeBodyScope, artifacts, snapshot, directory_documents, compiled, outline)
-            outline, source_body_result = await resolve_native_bodies(artifacts, snapshot, outline, scope, budget, execute)
-        if reviewed_source_facts_ref is not None:
-            await asyncio.to_thread(bind_reviewed_credential_slots, outline, compiled, reviewed_source_facts)
-            reviewed_fact_records = deepcopy(compiled.get('_reviewed_source_fact_applications', []))
-    elif native_body_contract is not None:
-        raise ModelConfigurationError('final source resolution requires the registered directory source flow')
     supplied_outline = outline is not None
     if supplied_outline:
         parsed = AuthoringOutline.model_validate(outline)
@@ -2705,16 +1928,6 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
     from docreader.tender.source_body import validate_outline_source_bodies
     await asyncio.to_thread(validate_outline_source_bodies, artifacts, outline)
     outline_ref = artifacts.put_json(outline)
-    if on_reviewed_facts is not None and reviewed_fact_records is not None:
-        await on_reviewed_facts(outline_ref, reviewed_fact_records)
-    if source_body_result is not None:
-        body_receipt_ref = artifacts.put_json({**source_body_result, 'authoring_input': snapshot,
-            'outline_ref': outline_ref, 'reviewed_source_facts_ref': reviewed_source_facts_ref})
-        if on_source_bodies is not None:
-            await on_source_bodies(body_receipt_ref)
-        if not source_body_result['complete']:
-            from docreader.tender.native_body_flow import SourceBodyResolutionPending
-            raise SourceBodyResolutionPending('Final source bodies require named source review; diagnostic receipt retained.')
     if on_outline is not None:
         await on_outline(outline_ref)
     if outline_only:

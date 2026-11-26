@@ -231,7 +231,7 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | 字段 | 定义 |
 | --- | --- |
 | `execution_id`、`status`、`kind` | 执行身份、状态；`kind` 为 `outline`（大纲执行）或 `document`（正文执行） |
-| `stages` | 按请求 task 分组，`stage` 为[编制实际模型调用](workflow.md#编制实际模型调用)里的阶段名。各组含 `logical_requests`（按逻辑请求摘要去重）、`requests`（实际持久请求条数，含重试）、`statuses`、`reported_tokens`、`completion`、`context`，后四项与 `budget_observation` 同义。`directory_parameter` 同时承载 P 长章展开和原文选择，不再细分 |
+| `stages` | 按请求 task 分组，`stage` 为[编制实际模型调用](workflow.md#编制实际模型调用)里的阶段名。各组含 `logical_requests`（按逻辑请求摘要去重）、`requests`（实际持久请求条数，含重试）、`statuses`、`reported_tokens`、`completion`、`context`，后四项与 `budget_observation` 同义 |
 | `requests` | 本执行全部持久请求条数 |
 | `targets` | 大纲响应位置总数 `total`、知识应答位置 `knowledge_answers`、带分析规则引用的位置 `with_rule_refs` |
 | `outline_issues` | 大纲 issues 按 code 计数，含预算拒收、待核和未安排的分析规则（`outline_rule_unassigned`） |
@@ -564,7 +564,7 @@ reference标签忽略有效功能资料；事实/证明/授权声明仍须对应
 6. 执行身份只含本执行会调用的任务（BUG-259）。分析执行的规格和预算只含 `extract`、`verify`、`ocr`
    的 Prompt 及这三个任务的输出契约。`single_requirement_chain_v1` 大纲执行只登记
    `bid_format_outline`、`item_placement` 和 `proposal_outline`，分别绑定 `BidFormatOutline`、`ItemPlacementResponse` 与 `ProposalOutlineResponse`/`ProposalTreeOnlyResponse`。
-   旧大纲和未固定大纲的整稿执行取各自的旧任务集合；固定 `outline_ref` 的正文执行只含
+   非冻结大纲执行登记 `outline`、`outline_assemble`；未固定大纲的整稿执行登记 `outline`、`outline_assemble` 及四个正文任务；固定 `outline_ref` 的正文执行只含
    `authoring_basis`、`authoring_write`、`authoring_review`、`authoring_structure`。输出契约按同一任务集合计入。
    执行调用了身份外的 Prompt 时宿主报配置错误，不从文件补读。改某任务的 Prompt 或契约，只改变
    包含该任务的执行身份；身份变了的在途执行仍按原规则拒绝续跑，需新建执行。
@@ -613,7 +613,7 @@ compact 视图可在顶层携带 `text_pool: string[]`，仅共享完全相同�
 
 | 结构 | 字段与含义 |
 | --- | --- |
-| 大纲合同 | `POST /api/v3/tender-projects/{project}/outline/generate` 可传 `requirement_chain_contract: "single_requirement_chain_v1"` 或 `directory_planning_contract: "source_refs_compact_plan_v12"`，二者互斥，只用于有冻结来源的自动大纲。同一请求键绑定同一选项，任务保存选项和默认标记 `outline_default_contract`；恢复使用已登记的执行合同。未传时的默认、继承与旧原件复核事实的限制见[编制目标设计：一条要求链](workflow.md#编制目标设计一条要求链)。 |
+| 大纲合同 | `POST /api/v3/tender-projects/{project}/outline/generate` 可选传 `requirement_chain_contract: "single_requirement_chain_v1"`，只用于有冻结来源的自动大纲；有冻结来源的自动大纲统一按 `single_requirement_chain_v1` 执行。同一请求键绑定同一选项；恢复使用已登记的执行合同。 |
 | 方案上下文 | 在大纲保存 `chapters[].source_additions[]` 指定本章已有或选入的 `target_id` 及 `project_context_excerpts`，随响应位置保存。精确引用列表替换背景，空列表清除，省略沿用原选择。位置须为非手填、仅允许 `knowledge` 的叙述位置，且无原式表或原文正文绑定。宿主从固定快照读取非空、不重叠的范围，不接受客户端传入文字。现有原文正文的 `source_context_excerpts` 仍须由原文正文绑定校验。两种上下文在模型输入使用 `source_context_support_ids`，企业应答的依据仍由 `support_ids` 和位置权限决定。 |
 | 格式选择 `BidFormatChapter` | `{heading_refs:int[], name, label?, parent_heading_ref?:int|null, body?:[int,int]|null}`。`label` 可选，须为所引 `heading_refs` 原文连续子串、包含 `name` 且不以 `附件`/`附录`/`附表` 开头，用于保留原件序号与大小写；`parent_heading_ref` 指向本节先出现的上级章 `heading_refs[0]`（根章为 `null`）。分片超限时输入可附只读 `parent_context:[[ref,text]]` 供跨片父引用 |
 | 归属请求 `item_placement` | `{operation:"place_items_v1", positions:[{id,title_path:str[],kind,opening,origin?}], requirements:[{id,kind,subject?,scope?,text,conditions?,exceptions?,submission?,consequence?,scoring?,evidence:[{page,quote}]}]}`。`id` 为本批短 ID（位置 `t*`，事项 `r*`），`opening` 为位置原文开头，最长 120 字；`origin:"outside_format"` 标出格式章节外的候选原式 |
