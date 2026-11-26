@@ -1,6 +1,6 @@
 # 招投标活跃问题与修复记录
 
-本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-343**）。
+本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-344**）。
 已闭环的历史缺陷记录保存在 Git 历史，不在此长期堆积；跨模块高频防错规则沉淀在 [LESSONS.md](../../LESSONS.md)，动态运行状态只维护在 [交接](README.md#当前状态交接)。
 
 ## 维护约定
@@ -204,3 +204,11 @@
 - 根因：`services/docreader/llm/request.py` 对 v2 `extract` 仅在 `response_format.json_schema` 发送非全必填 `strict: True` Schema 而跳过 `schema_prompt()`；当 OpenAI 兼容网关忽略或降级 `response_format.json_schema` 时，模型完全看不到 JSON Schema；同时 `TenderItem` 字段描述与 `extract.md` 未把 `kind` 枚举边界、字段互斥（如评分项附带证明材料应拆项或省略 `submission`）和已引范围禁写 `disposition` 写透。
 - 改法：`build_request` 取消 v2 `extract` 独有的非严格 `response_format.json_schema` 特例，与其他任务统一为 `response_format={"type": "json_object"}` + 系统提示词内嵌单份同源 Schema（`extract_response_format` 记为 `json_object`，避免双份 Schema 挤占输入预算）；在 `TenderItem` Schema 字段描述与 `extract.md` 明确 `kind` 四值边界、`scoring`/`consequence`/`submission` 严格互斥及已引范围禁发 `disposition`。
 - 验证：`test_generated_output_requests.py`、`test_analysis_packing.py`、`test_analysis_extraction.py` 回归通过；安服受影响 3 个分包前后实测对比中合同阻断项由 33 条降至 13 条（`pack-961a9cbe` 7→0、`pack-446dc741` 13→2 且项目经理/技术负责人不再丢项、`pack-96443e84` 评分项 `submission` 违例 11→0）。
+
+## BUG-343：Python 工作流测试缺少 `tender_authoring_gap_dispositions` 表，CI 的 python job 全红
+
+- 状态：已修待 CI 复验。
+- 现象与影响：`d9812dc` 起 `WebBridge.setup()` 检查该表，隔离测试库只按基线 SQL 建表，所有依赖 `runtime` 夹具的工作流测试在 setup 报 `UndefinedTable`，`main` 上 python job 失败。
+- 根因：新表只写在迁移 `migrations/20261125000001_tender_gap_dispositions.sql`，测试初始化 `services/docreader/tests/database.py` 只读基线文件。
+- 改法：初始化 `web` 分区时同时执行该迁移；隔离库没有平台用户表，只去掉指向 `platform_users` 的外键，其余约束保留。
+- 验证：本机隔离 PostgreSQL 上 `tests/workflow/test_web_recovery.py` 由 setup 错误变为通过；以 CI 结果为准。

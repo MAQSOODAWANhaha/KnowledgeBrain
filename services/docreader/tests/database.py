@@ -12,3 +12,7 @@ async def initialize_schema(dsn, sections=("analysis", "authoring")):
         for section in sections:
             statement = source.split(f"-- BEGIN {section}\n", 1)[1].split(f"-- END {section}", 1)[0]
             await conn.execute(cast(Any, statement))
+        if "web" in sections:
+            # Isolated schemas have no platform users table; keep every other constraint of the migration.
+            later = baseline.with_name("20261125000001_tender_gap_dispositions.sql").read_text()
+            await conn.execute(cast(Any, later.replace(" REFERENCES platform_users(id)", "")))
