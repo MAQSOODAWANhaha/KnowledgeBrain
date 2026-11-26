@@ -244,7 +244,8 @@ async def test_complete_host_rejection_uses_the_correction_allowance(runtime):
     plan = output(artifacts, current, 'analysis-review-plan')
     planned_units = {entry['work_unit_id'] for entry in plan['requests'] if entry['budget']['fits'] is not False}
     units = set(replies)
-    assert units <= planned_units and 1 <= len(units) <= 2
+    # Units already in flight when one exhausts its allowance also finish; at most one per concurrency slot.
+    assert units <= planned_units and 1 <= len(units) <= TenderNodes.DEFAULT_CONCURRENCY
     assert Counter(value['work_unit_id'] for value in reviews) == Counter({unit: 3 for unit in units})
     for unit in units:
         attempts = [value for value in reviews if value['work_unit_id'] == unit]

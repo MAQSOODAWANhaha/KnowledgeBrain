@@ -1,6 +1,6 @@
 # 招投标活跃问题与修复记录
 
-本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-348**）。
+本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-350**）。
 已闭环的历史缺陷记录保存在 Git 历史，不在此长期堆积；跨模块高频防错规则沉淀在 [LESSONS.md](../../LESSONS.md)，动态运行状态只维护在 [交接](README.md#当前状态交接)。
 
 ## 维护约定
@@ -205,13 +205,16 @@
 - 改法：`build_request` 取消 v2 `extract` 独有的非严格 `response_format.json_schema` 特例，与其他任务统一为 `response_format={"type": "json_object"}` + 系统提示词内嵌单份同源 Schema（`extract_response_format` 记为 `json_object`，避免双份 Schema 挤占输入预算）；在 `TenderItem` Schema 字段描述与 `extract.md` 明确 `kind` 四值边界、`scoring`/`consequence`/`submission` 严格互斥及已引范围禁发 `disposition`。
 - 验证：`test_generated_output_requests.py`、`test_analysis_packing.py`、`test_analysis_extraction.py` 回归通过；安服受影响 3 个分包前后实测对比中合同阻断项由 33 条降至 13 条（`pack-961a9cbe` 7→0、`pack-446dc741` 13→2 且项目经理/技术负责人不再丢项、`pack-96443e84` 评分项 `submission` 违例 11→0）。
 
-## BUG-343：Python 工作流测试缺少 `tender_authoring_gap_dispositions` 表，CI 的 python job 全红
+## BUG-343：CI 的 python job 持续失败：测试库缺新表、Excel 跨语言夹具过期、重试测试写死并发 2
 
 - 状态：已修待 CI 复验。
-- 现象与影响：`d9812dc` 起 `WebBridge.setup()` 检查该表，隔离测试库只按基线 SQL 建表，所有依赖 `runtime` 夹具的工作流测试在 setup 报 `UndefinedTable`，`main` 上 python job 失败。
-- 根因：新表只写在迁移 `migrations/20261125000001_tender_gap_dispositions.sql`，测试初始化 `services/docreader/tests/database.py` 只读基线文件。
-- 改法：初始化 `web` 分区时同时执行该迁移；隔离库没有平台用户表，只去掉指向 `platform_users` 的外键，其余约束保留。
-- 验证：本机隔离 PostgreSQL 上 `tests/workflow/test_web_recovery.py` 由 setup 错误变为通过；以 CI 结果为准。
+- 现象与影响：`main` 自 `bcc1ded` 起 python job 连续失败，后续提交的回归都被掩盖。
+- 根因：
+  1. `d9812dc` 新增的 `tender_authoring_gap_dispositions` 只写在迁移 `migrations/20261125000001_tender_gap_dispositions.sql`，`services/docreader/tests/database.py` 只按基线建表；`WebBridge.setup()` 和 CLI 编制报表读这张表，依赖它们的工作流与验收测试报 `UndefinedTable`。
+  2. `40d80ae` 修改 `services/docreader/parser/pdf_parser.py`，未重生成 `crates/docparser/tests/fixtures/python-excel-wire.pb`，解析器版本哈希失配（LESSONS 第 7 条）。
+  3. `c74bd51` 把工作流默认并发从 2 改为 6，`tests/acceptance/test_analysis_retry.py` 仍断言用尽额度时最多 2 个工作单元在途。
+- 改法：测试初始化 `web` 分区时执行该迁移，只去掉隔离库无法满足的 `platform_users` 外键；没有 `web` 分区的分析验收夹具用 `initialize_gap_dispositions` 建无外键的同名表，基线 `authoring` 分区的表清单不变。重生成 Excel 跨语言夹具。重试测试的在途上限改为 `TenderNodes.DEFAULT_CONCURRENCY`。
+- 验证：本机隔离 PostgreSQL 与 Redis 上按 CI 路径跑 `tests/`；以 CI 结果为准。
 
 ## BUG-344：招标解读页把分析中、分析失败显示为「待人工确认」，并显示内部输入缺失提示
 
@@ -244,3 +247,19 @@
 - 根因：`services/docreader/tender/prompts/authoring_review.md` 规定 `assessments[].result = "unsupported"` 表示要求响应尚不充分而非编造内容（真正无依据生成由 `findings[].code == "unsupported_content"` / `reject_content=true` 拒收），但 `services/docreader/tender/acceptance_eval.py` 的 `_evaluate_no_fabrication` 将 `assessment == "unsupported"` 与 `coverage_unsupported` 直接写入 `violations`。
 - 改法：`_evaluate_no_fabrication` 将 `coverage_unsupported` 单独归入 `unmet_items` 与 `counts.unmet_by_review` 审计，不再计入编造 `violations`；无企业资料/来源的正文写入（`content_without_material_or_source`）、人工位自动填值、未复核正文与未剔除 `unsupported_content` 仍严格判为编造违规。
 - 验证：`services/docreader/tests/unit/test_acceptance_eval.py` Red→Green 用例与 `phase1-step2-full-authoring` 真实产物重评均通过，机器检查 4/4 全过且 2 条响应不足项如实单列在 `unmet_items`。
+
+## BUG-348：发布改动提示词后，等待人工确认的分析无法确认
+
+- 状态：待设计。
+- 现象与影响：BiddingFile 实跑中分析完成、361 条问题已逐条判定后，重建并发布了包含 `extract.md`、`verify.md` 修改的镜像；提交人工确认后，确认命令连续 4 次 `Conflict: execution configuration changed within a domain revision`，分析变为「执行失败」，恢复区只显示「已用尽重试」。人工判定白做，只能重新分析并重新付费。
+- 根因：每个分析修订固定执行规格（工作流协议、模型端点、全部提示词哈希，见 `services/docreader/llm/client.py` 的 `execution_spec`）；确认节点不调用模型，但续跑同样比对完整规格，任何提示词变化都会拒绝。
+- 改法：待定。需要决定确认等不调用模型的阶段是否只比对它实际依赖的规格，或在发布前阻止/提示存在待确认分析；同时失败原因需在恢复区写明是「执行配置已变化」。
+- 验证：未开始。
+
+## BUG-349：一份 118 页招标文件产生 361 条人工待确认问题，多数是分包视野造成的噪声
+
+- 状态：待设计。
+- 现象与影响：BiddingFile 分析产生 361 条问题且全部进入 `human_issue_ids`，确认前必须逐条选择判定并填写理由，没有批量处理；表单每改一处整列表重渲染，填到第 250 条时单条操作已需数秒。按类型：`unresolved_cross_reference` 137、`unresolved_source_range` 26、`evidence_quote_mismatch` 21、`missing_referenced_text` 17、`extraction_disposition_unresolved` 10，其余 30 余类各 1–11 条。约 165 条的说明是「本视图/本工作单元未给出被引用条款」，而被引用的招标公告、须知条款就在同一份上传文件里；17 条是财务报表表头被拆成「负债」「流动」等孤立碎片。
+- 根因：待查。已知事实：抽取按分包工作，模型只看到本包视图，跨包引用被记成待人工问题；宿主没有用全文件目录先行消解跨包引用，也没有按问题类型分级；碎片来自财务表格的版式解析。
+- 改法：待定，属于分析链路与 Prompt 变更，需先答变更五问。方向：宿主用整份文件消解跨包引用后只把真正找不到的交人工；引文定位失败与处置缺失属宿主核验问题，不应要求人工逐条判定；人工复核界面提供按类型批量判定并虚拟化长列表。
+- 验证：未开始。

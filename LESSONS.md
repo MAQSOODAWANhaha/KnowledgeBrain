@@ -42,7 +42,7 @@
 7. **修改 `services/docreader/parser/*.py`（哪怕只改注释）会改变 `parser_version()` 原始字节哈希，必须同步刷新跨语言 fixture 并跑回归。**
    - 原因：`source_contract.py` 对 9 个解析文件的原始字节做 SHA-256；只改注释不跑 `generate_excel_wire_fixture.py` 与 `pytest tests/test_excel_wire_fixture.py` 会直接打红 CI。
    - 证据：`84d1fe4` 更新 `pdf_parser.py` 注释导致 `crates/docparser/tests/fixtures/python-excel-wire.pb` 指纹失配。
-   - Seen 1×（2026-11-24）。
+   - Seen 2×（2026-11-24，2026-11-26：`40d80ae` 再次漏刷 `python-excel-wire.pb`，见 BUG-343）。
 
 8. **测试严禁硬编码本机路径或依赖模块 import 期的本机默认端口，且合入 `main` 前必须跑齐对应栈的 L0/L1 检查。**
    - 原因：本机存在 `testdata/bid/` 和 `127.0.0.1:16379` Redis 会掩盖硬编码路径与 import 期绑定默认端口的 bug，推到干净 CI runner 立即失败；未跑 `cargo fmt/clippy`、`npm ci` 也会直接阻断下游全部 acceptance 与镜像发布 job。

@@ -13,7 +13,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 import pytest
 
-from docreader.tests.database import initialize_schema
+from docreader.tests.database import initialize_gap_dispositions, initialize_schema
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.authoring import read_authoring_input
@@ -121,6 +121,7 @@ async def analysis_runtime(tmp_path):
     settings = Settings(dsn, os.environ.get("TENDER_TEST_REDIS_URL", "redis://127.0.0.1:16379/1"), tmp_path / "artifacts")
     store, artifacts = Store(dsn), ArtifactStore(settings.artifact_root)
     await initialize_schema(store.dsn)
+    await initialize_gap_dispositions(store.dsn)
     await store.setup()
     await initialize_checkpoints(dsn)
     documents = []
