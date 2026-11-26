@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Any, cast
-from ctypes import byref, c_double
+from ctypes import byref, c_double, c_float, c_int
 from io import BytesIO
 import json
 from math import hypot, isfinite
@@ -519,6 +519,117 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
                 'padding': min([5.4, *insets])}
     except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError):
         return None
+
+
+_BORDER_SIDES = ('top', 'left', 'bottom', 'right', 'insideH', 'insideV')
+
+
+def _pdf_table_borders(artifacts, source, locator) -> dict[str, int] | None:
+    """Measure PDF rule stroke/fill thickness in OOXML eighths-of-a-point per table border side."""
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    from docreader.parser.pdf_parser import _PDFIUM_LOCK
+
+    try:
+        page_ordinal = locator.get('page_ordinal')
+        bounds = [locator.get(key) for key in ('left', 'bottom', 'right', 'top')]
+        if type(page_ordinal) is not int or any(not isinstance(value, (int, float)) for value in bounds):
+            return None
+        left, bottom, right, top = bounds
+        data = artifacts.read_bytes(source['original_ref'])
+        if not data.startswith(b'%PDF'):
+            return None
+        buckets: dict[str, list[float]] = {side: [] for side in _BORDER_SIDES}
+        all_pts: list[float] = []
+        with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
+            page = pdf[page_ordinal]
+            for obj in page.get_objects():
+                if obj.type != raw.FPDF_PAGEOBJ_PATH:
+                    continue
+                try:
+                    ox0, oy0, ox1, oy1 = obj.get_bounds()
+                except Exception:
+                    continue
+                x0, x1 = (ox0, ox1) if ox0 <= ox1 else (ox1, ox0)
+                y0, y1 = (oy0, oy1) if oy0 <= oy1 else (oy1, oy0)
+                w, h = x1 - x0, y1 - y0
+                fill, stroke = c_int(), c_int()
+                raw.FPDFPath_GetDrawMode(obj, byref(fill), byref(stroke))
+                if not fill.value and not stroke.value:
+                    continue
+                sw = c_float()
+                raw.FPDFPageObj_GetStrokeWidth(obj, byref(sw))
+                if w >= 4 and h <= 6.0 and w >= h * 3:
+                    y_mid = (y0 + y1) / 2
+                    if not (bottom - 3.5 <= y_mid <= top + 3.5 and x1 >= left - 3.5 and x0 <= right + 3.5):
+                        continue
+                    if stroke.value and not fill.value:
+                        pt = float(sw.value)
+                    elif fill.value and not stroke.value:
+                        pt = float(h)
+                    else:
+                        pt = float(sw.value) if (sw.value > 0 and h <= 2.2 * sw.value) else float(h)
+                    if not 0 < pt <= 4.0:
+                        continue
+                    all_pts.append(pt)
+                    if abs(y_mid - top) <= 3.5:
+                        buckets['top'].append(pt)
+                    elif abs(y_mid - bottom) <= 3.5:
+                        buckets['bottom'].append(pt)
+                    elif bottom + 3.5 < y_mid < top - 3.5:
+                        buckets['insideH'].append(pt)
+                elif h >= 4 and w <= 6.0 and h >= w * 3:
+                    x_mid = (x0 + x1) / 2
+                    if not (left - 3.5 <= x_mid <= right + 3.5 and y1 >= bottom - 3.5 and y0 <= top + 3.5):
+                        continue
+                    if stroke.value and not fill.value:
+                        pt = float(sw.value)
+                    elif fill.value and not stroke.value:
+                        pt = float(w)
+                    else:
+                        pt = float(sw.value) if (sw.value > 0 and w <= 2.2 * sw.value) else float(w)
+                    if not 0 < pt <= 4.0:
+                        continue
+                    all_pts.append(pt)
+                    if abs(x_mid - left) <= 3.5:
+                        buckets['left'].append(pt)
+                    elif abs(x_mid - right) <= 3.5:
+                        buckets['right'].append(pt)
+                    elif left + 3.5 < x_mid < right - 3.5:
+                        buckets['insideV'].append(pt)
+        if not all_pts:
+            return None
+        fallback = float(median(all_pts))
+        return {
+            side: max(4, min(24, round((float(median(buckets[side])) if buckets[side] else fallback) * 8)))
+            for side in _BORDER_SIDES
+        }
+    except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError):
+        return None
+
+
+def _apply_table_borders(table, borders: dict[str, int] | None):
+    if not borders:
+        return
+    tbl_pr = table._tbl.tblPr
+    existing = tbl_pr.find(qn('w:tblBorders'))
+    if existing is not None:
+        tbl_pr.remove(existing)
+    tbl_borders = OxmlElement('w:tblBorders')
+    for side in _BORDER_SIDES:
+        if side not in borders:
+            continue
+        edge = OxmlElement(f'w:{side}')
+        edge.set(qn('w:val'), 'single')
+        edge.set(qn('w:sz'), str(borders[side]))
+        edge.set(qn('w:space'), '0')
+        edge.set(qn('w:color'), 'auto')
+        tbl_borders.append(edge)
+    tbl_look = tbl_pr.find(qn('w:tblLook'))
+    if tbl_look is not None:
+        tbl_pr.insert(list(tbl_pr).index(tbl_look), tbl_borders)
+    else:
+        tbl_pr.append(tbl_borders)
 
 
 def _display_paths(entries):
@@ -1345,8 +1456,10 @@ class _Assembler:
                     centered = _single_cell_centering(self.artifacts, loaded['document'], locator)
                 typography = (_pdf_table_typography(self.artifacts, loaded['document'], locator, grid, heights)
                               if locator.get('locator_kind') == 'page_table' else None)
+                borders = (_pdf_table_borders(self.artifacts, loaded['document'], locator)
+                           if locator.get('locator_kind') == 'page_table' else None)
                 self.table(document, grid, fills, chapter_id, target_id, header_count=count,
-                           row_heights=heights, centered=centered, typography=typography)
+                           row_heights=heights, centered=centered, typography=typography, borders=borders)
             elif loaded.get("image_ref"):
                 _image(document, self.artifacts.read_bytes(loaded["image_ref"]))
                 self.gap("export_template_not_editable", "该原格式以真实图片保留，填写位置仍待补。",
@@ -1374,9 +1487,10 @@ class _Assembler:
             self.gap("export_source_unavailable", f"原格式暂不可用：{type(exc).__name__}。", chapter_id, target_id)
 
     def table(self, document, grid, fills, chapter_id, target_id, *, header_count=0, row_heights=None,
-              centered=(False, False), typography=None):
+              centered=(False, False), typography=None, borders=None):
         table = document.add_table(rows=grid["row_count"], cols=grid["column_count"])
         table.style = "Table Grid"
+        _apply_table_borders(table, borders)
         if row_heights is not None and len(row_heights) == grid['row_count']:
             section = document.sections[-1]
             available = (section.page_height - section.top_margin - section.bottom_margin) / 12700
@@ -1530,6 +1644,8 @@ class _Assembler:
                    if locator.get('locator_kind') == 'page_table' else None)
         typography = (_pdf_table_typography(self.artifacts, loaded['document'], locator, original, heights)
                       if locator.get('locator_kind') == 'page_table' else None)
+        borders = (_pdf_table_borders(self.artifacts, loaded['document'], locator)
+                   if locator.get('locator_kind') == 'page_table' else None)
         expanded_heights = ([heights[row] for row in plan['row_origins']]
                             if heights is not None and len(heights) == original['row_count'] else None)
         count = part.get('header_row_count')
@@ -1542,7 +1658,7 @@ class _Assembler:
                   'text': self._row_answer(choices, row_id, chapter_id, target['target_id'])}
                  for row_id, row in plan['row_positions'].items()]
         self.table(document, plan['grid'], fills, chapter_id, target['target_id'], header_count=count,
-                   row_heights=expanded_heights, typography=typography)
+                   row_heights=expanded_heights, typography=typography, borders=borders)
         self.gap("export_template_layout_unverified", "已保留原表列、固定文字及来源条款；新增行的分页仍需核对。",
                  chapter_id, target['target_id'])
 

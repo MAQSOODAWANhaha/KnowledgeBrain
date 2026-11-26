@@ -539,3 +539,70 @@ def test_manual_quote_blanks_preserve_source_numbers_and_same_chapter_technical_
     assert doc.tables[0].cell(1, 1).text == "" and doc.tables[0].cell(2, 1).text == ""
     assert "技术实施按项目接口要求逐项联调。" in [paragraph.text for paragraph in doc.paragraphs]
     assert any("人工填写" in gap["detail"] for gap in result["gaps"])
+
+
+def test_pdf_table_export_preserves_measured_border_widths(tmp_path):
+    from ctypes import c_float
+    from docx.oxml.ns import qn
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+
+    pdf = pdfium.PdfDocument.new()
+    page = pdf.new_page(595, 842)
+    for x0, y0, x1, y1 in [(50, 700, 350, 700), (50, 600, 350, 600), (50, 600, 50, 700), (350, 600, 350, 700)]:
+        path = raw.FPDFPageObj_CreateNewPath(x0, y0)
+        raw.FPDFPath_LineTo(path, x1, y1)
+        raw.FPDFPageObj_SetStrokeWidth(path, c_float(1.5))
+        raw.FPDFPath_SetDrawMode(path, 0, 1)
+        raw.FPDFPage_InsertObject(page, path)
+    # Inner borders as 0.75pt filled thin rectangles (common in Word/WPS PDF exports).
+    for rx, ry, rw, rh in [(50, 650, 300, 0.75), (200, 600, 0.75, 100)]:
+        rect = raw.FPDFPageObj_CreateNewRect(rx, ry, rw, rh)
+        raw.FPDFPath_SetDrawMode(rect, 1, 0)
+        raw.FPDFPage_InsertObject(page, rect)
+    raw.FPDFPage_GenerateContent(page)
+    pdf_buf = BytesIO()
+    pdf.save(pdf_buf)
+    pdf_bytes = pdf_buf.getvalue()
+
+    artifacts = ArtifactStore(tmp_path)
+    pdf_ref = artifacts.put_bytes(pdf_bytes, "application/pdf")
+    locator = {"locator_kind": "page_table", "page_ordinal": 0, "table_ordinal": 0,
+               "left": 50.0, "bottom": 600.0, "right": 350.0, "top": 700.0}
+
+    table_grid = {
+        "row_count": 2, "column_count": 2, "widths_mm": [50, 50],
+        "cells": [
+            {"row": r, "column": c, "row_span": 1, "col_span": 1, "text": f"C{r}{c}"}
+            for r in range(2) for c in range(2)
+        ],
+    }
+    unit = {"unit_id": "unit:0", "kind": "table_region", "ordinal": 0, "text": "",
+            "grid": table_grid, "locator": locator}
+    raw_doc = {"schema_version": 2, "units": [unit], "images": {}, "ocr": {},
+               "source_contract": {"page_manifest": [], "units": [{
+                   "unit_id": "unit:0", "section_id": "section:0", "parent_section_id": None,
+                   "heading_path": "报价表", "physical_locator": locator}]}}
+    index = SourceIndex({"document_id": "quote", "document_version": "1", "original_ref": pdf_ref}, raw_doc)
+    index_ref = artifacts.put_json(index.descriptor(artifacts.put_json(index.raw)))
+    part_ref = {"source_index_ref": index_ref, "unit_id": "unit:0"}
+    position = target("quote", "form", [part_ref], templates=[part_ref])
+    result = export_authoring_document(artifacts, {"chapters": [chapter("a", "报价表", [position])]}, [])
+    tbl_borders = document(artifacts, result).tables[0]._tbl.tblPr.find(qn("w:tblBorders"))
+    assert tbl_borders is not None
+    assert {side: tbl_borders.find(qn(f"w:{side}")).get(qn("w:sz"))
+            for side in ("top", "left", "bottom", "right", "insideH", "insideV")} == {
+        "top": "12", "left": "12", "bottom": "12", "right": "12", "insideH": "6", "insideV": "6",
+    }
+
+    from docreader.tender.authoring_export import _pdf_table_borders
+
+    assert _pdf_table_borders(artifacts, {"original_ref": pdf_ref}, locator) == {
+        "top": 12, "bottom": 12, "left": 12, "right": 12, "insideH": 6, "insideV": 6,
+    }
+
+    # Non-PDF sources leave default style borders untouched.
+    non_pdf_ref = source_ref(artifacts, grid=table_grid)
+    non_pdf_pos = target("plain", "form", [non_pdf_ref], templates=[non_pdf_ref])
+    non_pdf_result = export_authoring_document(artifacts, {"chapters": [chapter("b", "普通表", [non_pdf_pos])]}, [])
+    assert document(artifacts, non_pdf_result).tables[0]._tbl.tblPr.find(qn("w:tblBorders")) is None

@@ -266,6 +266,9 @@ def test_native_expansion_reuses_pdf_row_heights_typography_widths_and_header(tm
     target, _, _ = case(artifacts)
     monkeypatch.setattr(export, '_pdf_row_heights', lambda *_: [11, 21, 22, 23, 24, 25, 31])
     monkeypatch.setattr(export, '_pdf_table_typography', lambda *_: {'font_size': 12, 'padding': 2, 'line_spacing': 14})
+    monkeypatch.setattr(export, '_pdf_table_borders', lambda *_: {
+        'top': 12, 'left': 12, 'bottom': 12, 'right': 12, 'insideH': 6, 'insideV': 6,
+    })
     doc, _ = render(artifacts, target)
     table = doc.tables[0]
     assert [_required(row.height).pt for row in table.rows] == [11, 21, 22, 23, 24, 25, 25, 25, 25, 31]
@@ -273,6 +276,8 @@ def test_native_expansion_reuses_pdf_row_heights_typography_widths_and_header(tm
     assert all(_required(run.font.size).pt == 12 for row in table.rows for cell in row.cells for run in cell.paragraphs[0].runs)
     assert [round(_required(column.width).mm) for column in table.columns] == [15, 50, 55, 35]
     assert table.rows[0]._tr.find('./' + qn('w:trPr') + '/' + qn('w:tblHeader')) is not None
+    borders = table._tbl.tblPr.find(qn('w:tblBorders'))
+    assert borders is not None and borders.find(qn('w:top')).get(qn('w:sz')) == '12' and borders.find(qn('w:insideH')).get(qn('w:sz')) == '6'
 
 
 @pytest.mark.parametrize('changed', ['source', 'context', 'join', 'layout'])
