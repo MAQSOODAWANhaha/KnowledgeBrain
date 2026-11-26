@@ -273,12 +273,74 @@ _SOURCE_NUMBERED = re.compile(
     r"|\d+(?:\.\d+)+\s+"
     r"|第[一二三四五六七八九十百千0-9]+[章节部分编册])"
 )
-_CN_ORDINAL_PREFIX = re.compile(r"^([一二三四五六七八九十百千]+)\s*[、．.]")
+_LEADING_SUB_NUMBER = re.compile(
+    r"^(?:"
+    r"[（(]\s*[一二三四五六七八九十百千0-9０-９]+\s*[）)]\s*"
+    r"|[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+\s*"
+    r"|\d+(?:\.\d+)+\s+"
+    r"|\d+\s*[.．、]\s*"
+    r"|[一二三四五六七八九十百千]+\s*[、．.]\s*"
+    r")"
+)
+_CN_ORDINAL_PREFIX = re.compile(r"^([一二三四五六七八九十百千]+)\s*[、．.]\s*")
+_CHAPTER_ORDINAL_PREFIX = re.compile(r"^第([一二三四五六七八九十百千0-9]+)[章节部分编册]\s*")
+_ARABIC_L1_PREFIX = re.compile(r"^(\d+)(?:\s*[、．.]\s*|\s+)(?!\d)")
 _SUBFORM_OR_MINOR_PREFIX = re.compile(
     r"^(?:[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+(?:\s+|$)"
     r"|[（(][一二三四五六七八九十百千]+[）)]"
     r"|\d+(?:\.\d+)+\s+)"
 )
+
+
+def _strip_sub_number(text):
+    raw = (text or "").strip()
+    stripped = _LEADING_SUB_NUMBER.sub("", raw, count=1).strip()
+    return stripped or raw
+
+
+def _normalize_l1_label(text):
+    raw = (text or "").strip()
+    if _CN_ORDINAL_PREFIX.match(raw):
+        return _CN_ORDINAL_PREFIX.sub(r"\1、", raw, count=1)
+    return raw
+
+
+def _parse_cn_number(text):
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text == "十":
+        return 10
+    if "百" in text:
+        head, _, tail = text.partition("百")
+        hundreds = digits.get(head) if head else 1
+        if hundreds is None:
+            return None
+        if not tail:
+            return hundreds * 100
+        rest = _parse_cn_number(tail.lstrip("零")) if tail.lstrip("零") else 0
+        return None if rest is None else hundreds * 100 + rest
+    if "十" in text:
+        head, _, tail = text.partition("十")
+        tens = digits.get(head) if head else 1
+        ones = digits.get(tail) if tail else 0
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+    return digits.get(text)
+
+
+def _extract_l1_ordinal(title):
+    raw = (title or "").strip()
+    if match := _CN_ORDINAL_PREFIX.match(raw):
+        return _parse_cn_number(match.group(1)), "cn"
+    if match := _CHAPTER_ORDINAL_PREFIX.match(raw):
+        return _parse_cn_number(match.group(1)), "cn"
+    if match := _ARABIC_L1_PREFIX.match(raw):
+        return int(match.group(1)), "arabic"
+    return None, None
 
 
 def _compact_heading(text):
@@ -292,8 +354,8 @@ def _is_duplicate_heading_line(heading_text, first_line):
         return False
     if f_compact == h_compact:
         return True
-    h_core = _compact_heading(_SOURCE_NUMBERED.sub("", h_strip, count=1))
-    f_core = _compact_heading(_SOURCE_NUMBERED.sub("", f_strip, count=1))
+    h_core = _compact_heading(_strip_sub_number(h_strip))
+    f_core = _compact_heading(_strip_sub_number(f_strip))
     if f_core and h_core and f_core == h_core:
         return True
     if len(f_strip) <= 60:
@@ -545,7 +607,7 @@ _CATALOG_LEADER = re.compile(r"[.．…]{3,}|…{2,}")
 
 
 def _catalog_label(line, mark):
-    """The tender catalog entry, including its Chinese numeral and the space the source uses."""
+    """The tender catalog entry with normalized delimiter spacing."""
     token = f"{mark}、"
     start = line.find(token)
     if start < 0:
@@ -555,7 +617,7 @@ def _catalog_label(line, mark):
     if leader is None:
         return None
     label = rest[:leader.start()].strip()
-    return label if label.startswith(token) else None
+    return _normalize_l1_label(label) if label.startswith(token) else None
 
 
 def _catalog_labels(pages):
@@ -651,8 +713,144 @@ def _uses_source_numbering(entries, catalog_titles):
     )
 
 
-def _toc(document, entries, display_paths, catalog_rows=(), catalog_titles=None, use_source_numbering=False):
-    catalog_titles = catalog_titles or {}
+def _build_source_numbering_plan(entries, catalog_rows):
+    """Build consistent L1 (tender format) + multi-level Arabic sub-chapter (N.1 / N.1.1) plan."""
+    normalized_catalog = [(_normalize_l1_label(label), chapter) for label, chapter in catalog_rows]
+    visible_entries = [
+        (chapter, path) for chapter, path in entries
+        if chapter.get("presentation_role", "body") not in {"cover", "content", "submission_note"}
+    ]
+    visible_roots = [(chapter, path) for chapter, path in visible_entries if len(path) == 1]
+    children_by_path = defaultdict(list)
+    for chapter, path in visible_entries:
+        if len(path) >= 2:
+            children_by_path[path[:-1]].append((chapter, path))
+
+    catalog_index = {
+        chapter["chapter_id"]: idx
+        for idx, (_label, chapter) in enumerate(normalized_catalog)
+        if chapter is not None
+    }
+    l1_style = "cn" if normalized_catalog else "arabic"
+    if not normalized_catalog:
+        for chapter, _path in visible_roots:
+            _num, style = _extract_l1_ordinal(chapter.get("title") or "")
+            if style is not None:
+                l1_style = style
+                break
+
+    def _is_flat_minor(chapter):
+        first_line = _source_first_line(chapter)
+        return bool(
+            _SUBFORM_OR_MINOR_PREFIX.match(first_line)
+            or _SUBFORM_OR_MINOR_PREFIX.match((chapter.get("title") or "").strip())
+        )
+
+    last_numbered_root_pos = max(
+        (
+            idx for idx, (ch, _p) in enumerate(visible_roots)
+            if ch["chapter_id"] in catalog_index or _extract_l1_ordinal(ch.get("title") or "")[0] is not None
+        ),
+        default=-1,
+    )
+
+    rendered_titles = {}
+    rendered_levels = {}
+    toc_listed = []
+    # Track child counters per root so sandwiched unnumbered chapters append cleanly after existing children.
+    root_child_counts = {}
+    current_root_id = None
+    current_root_num = 0
+    cursor = 0
+
+    def _emit_catalog_before(limit_idx):
+        nonlocal cursor, current_root_num
+        while cursor < limit_idx:
+            c_label, c_chapter = normalized_catalog[cursor]
+            c_num, _ = _extract_l1_ordinal(c_label)
+            if c_num is not None:
+                current_root_num = max(current_root_num, c_num)
+            if c_chapter is None:
+                toc_listed.append((c_label, None, 1))
+            cursor += 1
+
+    def _assign_descendants(parent_path, prefix, level, *, start_index=1):
+        idx = start_index
+        for child, child_path in children_by_path.get(parent_path, ()):
+            num_prefix = f"{prefix}.{idx}"
+            label = f"{num_prefix} {_strip_sub_number(_display_title(child['title']))}"
+            cid = child["chapter_id"]
+            rendered_titles[cid] = label
+            rendered_levels[cid] = level
+            toc_listed.append((label, child, level))
+            _assign_descendants(child_path, num_prefix, level + 1)
+            idx += 1
+        return idx - 1
+
+    for root_pos, (chapter, path) in enumerate(visible_roots):
+        cid = chapter["chapter_id"]
+        raw_title = _display_title(chapter["title"])
+        if cid in catalog_index:
+            target_idx = catalog_index[cid]
+            _emit_catalog_before(target_idx)
+            c_label, _ = normalized_catalog[target_idx]
+            l1_num, _ = _extract_l1_ordinal(c_label)
+            if l1_num is None:
+                l1_num = current_root_num + 1
+            current_root_num = max(current_root_num, l1_num)
+            rendered_titles[cid] = c_label
+            rendered_levels[cid] = 1
+            toc_listed.append((c_label, chapter, 1))
+            root_child_counts[cid] = _assign_descendants(path, str(l1_num), 2)
+            current_root_id = cid
+            cursor = max(cursor, target_idx + 1)
+            continue
+
+        if normalized_catalog and _is_flat_minor(chapter):
+            rendered_titles[cid] = _normalize_l1_label(raw_title)
+            rendered_levels[cid] = 1
+            continue
+
+        explicit_num, _ = _extract_l1_ordinal(raw_title)
+        if explicit_num is not None:
+            l1_label = _normalize_l1_label(raw_title)
+            current_root_num = max(current_root_num, explicit_num)
+            rendered_titles[cid] = l1_label
+            rendered_levels[cid] = 1
+            toc_listed.append((l1_label, chapter, 1))
+            root_child_counts[cid] = _assign_descendants(path, str(explicit_num), 2)
+            current_root_id = cid
+            continue
+
+        if current_root_id is not None and root_pos < last_numbered_root_pos:
+            next_idx = root_child_counts.get(current_root_id, 0) + 1
+            root_child_counts[current_root_id] = next_idx
+            num_prefix = f"{current_root_num}.{next_idx}"
+            label = f"{num_prefix} {_strip_sub_number(raw_title)}"
+            rendered_titles[cid] = label
+            rendered_levels[cid] = 2
+            toc_listed.append((label, chapter, 2))
+            _assign_descendants(path, num_prefix, 3)
+            continue
+
+        if normalized_catalog and root_pos > last_numbered_root_pos:
+            _emit_catalog_before(len(normalized_catalog))
+        l1_num = current_root_num + 1
+        current_root_num = l1_num
+        clean = _strip_sub_number(raw_title)
+        l1_label = f"{_cn_ordinal(l1_num)}、{clean}" if l1_style == "cn" else f"{l1_num} {clean}"
+        rendered_titles[cid] = l1_label
+        rendered_levels[cid] = 1
+        toc_listed.append((l1_label, chapter, 1))
+        root_child_counts[cid] = _assign_descendants(path, str(l1_num), 2)
+        current_root_id = cid
+
+    if normalized_catalog:
+        _emit_catalog_before(len(normalized_catalog))
+    return rendered_titles, rendered_levels, toc_listed
+
+
+def _toc(document, entries, display_paths, toc_listed=None):
     document.add_paragraph("目录", style="Title")
     paragraph = document.add_paragraph()
     for kind in ("begin", "instruction", "separate", "end"):
@@ -667,81 +865,19 @@ def _toc(document, entries, display_paths, catalog_rows=(), catalog_titles=None,
         paragraph.add_run()._r.append(element)
         if kind == "separate":
             first = True
-            if catalog_rows:
-                root_of = {}
-                descendants = defaultdict(list)
-                visible_roots = []
-                for chapter, path in entries:
-                    if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
-                        continue
-                    if len(path) == 1:
-                        root_of[path] = chapter['chapter_id']
-                        visible_roots.append((chapter, path))
-                    else:
-                        owner_id = root_of.get(path[:1])
-                        if owner_id is not None:
-                            descendants[owner_id].append((chapter, path))
-                catalog_index = {
-                    chapter['chapter_id']: idx
-                    for idx, (_label, chapter) in enumerate(catalog_rows)
-                    if chapter is not None
-                }
-                listed = []
-                cursor = 0
-                last_catalog_pos = max(
-                    (idx for idx, (ch, _p) in enumerate(visible_roots) if ch['chapter_id'] in catalog_index),
-                    default=-1,
-                )
-                for root_pos, (chapter, path) in enumerate(visible_roots):
-                    cid = chapter['chapter_id']
-                    if cid in catalog_index:
-                        target_idx = catalog_index[cid]
-                        while cursor < target_idx:
-                            c_label, c_chapter = catalog_rows[cursor]
-                            if c_chapter is None:
-                                listed.append((c_label, None, (0,)))
-                            cursor += 1
-                        c_label, _c_chapter = catalog_rows[target_idx]
-                        listed.append((c_label, chapter, (0,)))
-                        for child, child_path in descendants.get(cid, ()):
-                            listed.append((catalog_titles.get(child['chapter_id']) or _display_title(child['title']),
-                                           child, child_path))
-                        cursor = max(cursor, target_idx + 1)
-                    else:
-                        if root_pos > last_catalog_pos:
-                            while cursor < len(catalog_rows):
-                                c_label, c_chapter = catalog_rows[cursor]
-                                if c_chapter is None:
-                                    listed.append((c_label, None, (0,)))
-                                cursor += 1
-                        first_line = _source_first_line(chapter)
-                        if _SUBFORM_OR_MINOR_PREFIX.match(first_line) or _SUBFORM_OR_MINOR_PREFIX.match((chapter.get('title') or '').strip()):
-                            continue
-                        listed.append((_display_title(chapter['title']), chapter, path))
-                        for child, child_path in descendants.get(cid, ()):
-                            listed.append((_display_title(child['title']), child, child_path))
-                while cursor < len(catalog_rows):
-                    c_label, c_chapter = catalog_rows[cursor]
-                    if c_chapter is None:
-                        listed.append((c_label, None, (0,)))
-                    cursor += 1
-            elif use_source_numbering:
-                listed = []
-                for chapter, path in entries:
-                    if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
-                        continue
-                    listed.append((_display_title(chapter['title']), chapter, path))
+            if toc_listed is not None:
+                listed = toc_listed
             else:
                 listed = []
                 for chapter, path in entries:
                     if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
                         continue
                     number = '.'.join(map(str, display_paths[chapter['chapter_id']]))
-                    listed.append((number + ' ' + _display_title(chapter['title']), chapter, path))
-            for label, chapter, path in listed:
+                    listed.append((number + ' ' + _display_title(chapter['title']), chapter, len(path)))
+            for label, chapter, level in listed:
                 entry = paragraph if first else document.add_paragraph()
                 first = False
-                entry.paragraph_format.left_indent = Mm(4 * max(0, len(path) - 1))
+                entry.paragraph_format.left_indent = Mm(4 * max(0, level - 1))
                 run, text = OxmlElement('w:r'), OxmlElement('w:t')
                 text.text = xml_text(label)
                 if chapter is None:
@@ -1004,6 +1140,7 @@ class _Assembler:
         self.repository = EvidenceRepository(artifacts)
         self.display_paths = _display_paths(entries)
         self.catalog_titles = {}
+        self.rendered_levels = {}
         self.locations = {target["target_id"]: chapter["title"]
             for chapter, _ in _body_entries(entries) for target in chapter.get("targets", [])}
 
@@ -1595,7 +1732,8 @@ class _Assembler:
         if heading:
             path = self.display_paths.get(chapter_id, path)
             rendered_heading = self.catalog_titles.get(chapter_id) or _display_title(chapter['title'])
-            paragraph = document.add_heading(rendered_heading, level=min(max(len(path), 1), 9))
+            heading_level = self.rendered_levels.get(chapter_id, len(path))
+            paragraph = document.add_heading(rendered_heading, level=min(max(heading_level, 1), 9))
             if numbering_id is not None and chapter_id not in self.catalog_titles and not _SOURCE_NUMBERED.match(rendered_heading.strip()):
                 # Word has nine native levels; a private list preserves a deeper host label without advancing level nine.
                 if len(path) > 9:
@@ -1798,9 +1936,13 @@ class _Assembler:
         else:
             document.add_heading(title, 0)
         catalog = _catalog_rows(entries, _catalog_labels(_literal_pages(self.artifacts, self.authoring_input)))
-        self.catalog_titles = {chapter["chapter_id"]: label for label, chapter in catalog if chapter is not None}
-        use_source_numbering = _uses_source_numbering(entries, self.catalog_titles)
-        _toc(document, entries, self.display_paths, catalog, self.catalog_titles, use_source_numbering)
+        base_catalog_titles = {chapter["chapter_id"]: label for label, chapter in catalog if chapter is not None}
+        use_source_numbering = _uses_source_numbering(entries, base_catalog_titles)
+        if use_source_numbering:
+            self.catalog_titles, self.rendered_levels, toc_listed = _build_source_numbering_plan(entries, catalog)
+        else:
+            self.catalog_titles, self.rendered_levels, toc_listed = {}, {}, None
+        _toc(document, entries, self.display_paths, toc_listed)
         starting_path = next((self.display_paths[chapter['chapter_id']] for chapter, _ in entries
                               if chapter['chapter_id'] in self.display_paths), ())
         numbering_id = None if use_source_numbering else _heading_numbering(document, starting_path)

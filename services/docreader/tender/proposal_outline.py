@@ -21,7 +21,7 @@ from docreader.tender.status import AuthoringTask
 PROPOSAL_OUTLINE_OPERATION = "plan_proposal_outline_v1"
 PROPOSAL_TREE_OPERATION = "plan_proposal_tree_v1"
 PROPOSAL_MIN_RULES = 6
-PROPOSAL_MAX_DEPTH = 2
+PROPOSAL_MAX_DEPTH = 5
 PROPOSAL_INPUT_FRACTION = 0.5
 PROPOSAL_PENDING_CODE = "outline_proposal_structure_pending"
 
@@ -275,12 +275,17 @@ def _materialize_sections(
     for section in sections:
         children_by_parent.setdefault(section["parent_id"], []).append(section)
 
+    prune_empty = any(by_section.values())
+
     def build(parent_sid: str | None, id_prefix: str, depth: int) -> list[dict[str, Any]]:
         built: list[dict[str, Any]] = []
-        for idx, section in enumerate(children_by_parent.get(parent_sid, []), start=1):
-            chapter_id = f"{id_prefix}-p{idx}" if depth == 1 else f"{id_prefix}.{idx}"
+        for section in children_by_parent.get(parent_sid, []):
+            next_idx = len(built) + 1
+            chapter_id = f"{id_prefix}-p{next_idx}" if depth == 1 else f"{id_prefix}.{next_idx}"
             sub_chapters = build(section["id"], chapter_id, depth + 1)
             direct_rules = by_section.get(section["id"], [])
+            if prune_empty and not direct_rules and not sub_chapters:
+                continue
             targets: list[dict[str, Any]] = []
             if direct_rules or not sub_chapters:
                 targets.append({
@@ -446,7 +451,7 @@ async def expand_proposal_outlines(
         if new_children is None:
             outline.setdefault("issues", []).append({
                 "code": PROPOSAL_PENDING_CODE,
-                "detail": f"「{chapter['title']}」未能生成二级/三级方案子目录（请求未采纳或超出预算），保留单目标应答位待人工编排。",
+                "detail": f"「{chapter['title']}」未能生成多级方案子目录（请求未采纳或超出预算），保留单目标应答位待人工编排。",
                 "rule_refs": [],
             })
             continue

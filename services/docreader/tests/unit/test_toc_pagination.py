@@ -84,24 +84,24 @@ def test_first_level_toc_copies_the_tender_catalog_numerals_and_wording(tmp_path
         if not seen_heading and style == "Normal" and paragraph.text.strip():
             toc.append(paragraph.text.split("\t")[0])
     assert toc == [
-        "一、 投标书",
-        "二、 开标一览表",
-        "三、 投标分项报价表",
-        "四、 商务条款响应/偏离表",
-        "五、 投标保证金证明及退款申请函",
-        "六、 单位负责人身份证明书",
-        "七、 单位负责人授权委托书",
-        "八、 资格证明文件",
-        "九、 投标人根据评标办法需要提供的其他商务文件",
-        "十、 技术条款响应/偏离表",
-        "十一、 项目服务方案",
-        "十二、 实施团队人员情况",
-        "十三、 投标人根据评标办法需要提供的其他商务及技术文件",
+        "一、投标书",
+        "二、开标一览表",
+        "三、投标分项报价表",
+        "四、商务条款响应/偏离表",
+        "五、投标保证金证明及退款申请函",
+        "六、单位负责人身份证明书",
+        "七、单位负责人授权委托书",
+        "八、资格证明文件",
+        "九、投标人根据评标办法需要提供的其他商务文件",
+        "十、技术条款响应/偏离表",
+        "十一、项目服务方案",
+        "十二、实施团队人员情况",
+        "十三、投标人根据评标办法需要提供的其他商务及技术文件",
     ]
     headings = [paragraph.text for paragraph in document.paragraphs if paragraph.style and str(paragraph.style.name).startswith("Heading")]
-    assert headings[0] == "一、 投标书"
-    assert "五、 投标保证金证明及退款申请函" in headings
-    assert "十三、 投标人根据评标办法需要提供的其他商务及技术文件" in headings
+    assert headings[0] == "一、投标书"
+    assert "五、投标保证金证明及退款申请函" in headings
+    assert "十三、投标人根据评标办法需要提供的其他商务及技术文件" in headings
     assert "5-2 投标保证金采用汇款形式" not in toc
     assert not any(item[:2].isdigit() for item in toc)
 
@@ -121,10 +121,12 @@ def test_bug338_multilevel_toc_headings_preserve_source_numbering_and_dedup_body
             ]),
             chapter("ch11", "十一、项目服务方案", targets=[_source("十一、项目服务方案\n编制指引")], children=[
                 chapter("ch11.1", "1.2 工作要求", children=[
-                    chapter("ch11.1.1", "1.2.1.2 常态化驻场安全服务", targets=[{
-                        "target_id": "t-svc", "kind": "narrative", "purpose": "驻场安全方案",
-                        "rule_refs": [], "source_refs": [], "manual_fill": False, "support_origins": ["knowledge"],
-                    }]),
+                    chapter("ch11.1.1", "1.2.1.2 常态化驻场安全服务", children=[
+                        chapter("ch11.1.1.1", "（一）7x24小时应急响应", targets=[{
+                            "target_id": "t-svc", "kind": "narrative", "purpose": "驻场安全方案",
+                            "rule_refs": [], "source_refs": [], "manual_fill": False, "support_origins": ["knowledge"],
+                        }]),
+                    ]),
                 ]),
             ]),
             chapter("ch12", "十二、实施团队人员情况", targets=[_source("十二、实施团队人员情况")], children=[
@@ -144,35 +146,40 @@ def test_bug338_multilevel_toc_headings_preserve_source_numbering_and_dedup_body
             indent = paragraph.paragraph_format.left_indent
             toc_rows.append((paragraph.text.split("\t")[0], round(indent.mm) if indent else 0))
 
-    assert ("一、 投标书", 0) in toc_rows
-    assert ("廉洁投标承诺书", 4) in toc_rows
-    assert ("独立承诺", 0) in toc_rows
-    assert toc_rows.index(("一、 投标书", 0)) < toc_rows.index(("独立承诺", 0)) < toc_rows.index(("五、 投标保证金证明及退款申请函", 0))
-    assert ("五、 投标保证金证明及退款申请函", 0) in toc_rows
-    assert ("5-1 投标保证金采用电子保函形式（通宝函）", 4) in toc_rows
-    assert ("十一、 项目服务方案", 0) in toc_rows
-    assert ("1.2 工作要求", 4) in toc_rows
-    assert ("1.2.1.2 常态化驻场安全服务", 8) in toc_rows
-    assert ("十二、 实施团队人员情况", 0) in toc_rows
-    assert ("（一）实施团队人员情况表", 4) in toc_rows
-    assert toc_rows[-1] == ("无关联关系承诺函", 0)
+    assert ("一、投标书", 0) in toc_rows
+    assert ("1.1 廉洁投标承诺书", 4) in toc_rows
+    assert ("1.2 独立承诺", 4) in toc_rows
+    assert toc_rows.index(("一、投标书", 0)) < toc_rows.index(("1.2 独立承诺", 4)) < toc_rows.index(("五、投标保证金证明及退款申请函", 0))
+    assert ("五、投标保证金证明及退款申请函", 0) in toc_rows
+    assert ("5.1 投标保证金采用电子保函形式（通宝函）", 4) in toc_rows
+    assert ("十一、项目服务方案", 0) in toc_rows
+    assert ("11.1 工作要求", 4) in toc_rows
+    assert ("11.1.1 常态化驻场安全服务", 8) in toc_rows
+    assert ("11.1.1.1 7x24小时应急响应", 12) in toc_rows
+    assert ("十二、实施团队人员情况", 0) in toc_rows
+    assert ("12.1 实施团队人员情况表", 4) in toc_rows
+    assert toc_rows[-1] == ("十四、无关联关系承诺函", 0)
 
     headings = [
         (paragraph.style.name, paragraph.text, paragraph._p.find(f"{qn('w:pPr')}/{qn('w:numPr')}") is not None)
         for paragraph in document.paragraphs
         if paragraph.style is not None and str(paragraph.style.name).startswith("Heading")
     ]
-    assert ("Heading 1", "一、 投标书", False) in headings
-    assert ("Heading 2", "廉洁投标承诺书", False) in headings
-    assert ("Heading 2", "5-1 投标保证金采用电子保函形式（通宝函）", False) in headings
-    assert ("Heading 2", "1.2 工作要求", False) in headings
-    assert ("Heading 3", "1.2.1.2 常态化驻场安全服务", False) in headings
-    assert ("Heading 2", "（一）实施团队人员情况表", False) in headings
-    # No duplicate heading line right after any Heading, and no bogus "（原格式待补）" under containers.
+    assert ("Heading 1", "一、投标书", False) in headings
+    assert ("Heading 2", "1.1 廉洁投标承诺书", False) in headings
+    assert ("Heading 2", "1.2 独立承诺", False) in headings
+    assert ("Heading 2", "5.1 投标保证金采用电子保函形式（通宝函）", False) in headings
+    assert ("Heading 2", "11.1 工作要求", False) in headings
+    assert ("Heading 3", "11.1.1 常态化驻场安全服务", False) in headings
+    assert ("Heading 4", "11.1.1.1 7x24小时应急响应", False) in headings
+    assert ("Heading 2", "12.1 实施团队人员情况表", False) in headings
+    assert ("Heading 1", "十四、无关联关系承诺函", False) in headings
+    # No duplicate heading line right after any Heading (even when old 5-1 / （一） prefix differs), and no bogus placeholder.
     texts = [paragraph.text.strip() for paragraph in document.paragraphs]
     assert "五、投标保证金证明" not in texts
-    assert "5-1 投标保证金采用电子保函形式（通宝函）" in texts
-    assert texts.count("5-1 投标保证金采用电子保函形式（通宝函）") == 2  # once in TOC, once in Heading 2
+    assert "5-1 投标保证金采用电子保函形式（通宝函）" not in texts
+    assert "（一）实施团队人员情况表" not in texts
+    assert texts.count("5.1 投标保证金采用电子保函形式（通宝函）") == 2  # once in TOC, once in Heading 2
     assert "（原格式待补）" not in texts
 
 

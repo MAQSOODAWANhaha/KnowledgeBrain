@@ -105,7 +105,10 @@ def _collect_rule_ids(chapters):
             "sections": [
                 {"id": "s1", "title": "二级"},
                 {"id": "s2", "parent_id": "s1", "title": "三级"},
-                {"id": "s3", "parent_id": "s2", "title": "四级超限"},
+                {"id": "s3", "parent_id": "s2", "title": "四级"},
+                {"id": "s4", "parent_id": "s3", "title": "五级"},
+                {"id": "s5", "parent_id": "s4", "title": "六级"},
+                {"id": "s6", "parent_id": "s5", "title": "七级超限"},
             ]
         },
     ],
@@ -113,6 +116,18 @@ def _collect_rule_ids(chapters):
 def test_decode_proposal_sections_rejects_invalid_trees(raw):
     with pytest.raises(ModelContractError):
         decode_proposal_sections(raw)
+
+
+def test_decode_proposal_sections_supports_four_or_more_levels():
+    sections = decode_proposal_sections({
+        "sections": [
+            {"id": "s1", "parent_id": None, "title": "11.1 安全运维服务"},
+            {"id": "s1_1", "parent_id": "s1", "title": "11.1.1 驻场安全运维"},
+            {"id": "s1_1_1", "parent_id": "s1_1", "title": "11.1.1.1 7x24应急响应"},
+            {"id": "s1_1_1_1", "parent_id": "s1_1_1", "title": "11.1.1.1.1 处置流程"},
+        ]
+    })
+    assert [section["id"] for section in sections] == ["s1", "s1_1", "s1_1_1", "s1_1_1_1"]
 
 
 def test_decode_proposal_outline_validates_assignments_and_normalizes_string_null():
@@ -391,3 +406,27 @@ async def test_expand_proposal_outlines_runs_multiple_candidates_concurrently_in
     assert max_in_flight == 2
     assert [c["title"] for c in result["chapters"][0]["children"]] == ["1.1 总体安排", "1.2 质量保障", "承诺"]
     assert [c["title"] for c in result["chapters"][1]["children"]] == ["2.1 总体安排", "2.2 质量保障", "承诺"]
+
+
+async def test_expand_proposal_outlines_prunes_empty_generated_leaf_sections(tmp_path):
+    artifacts, outline = _proposal_fixture(tmp_path, rule_count=6)
+
+    async def execute(_task, request, validate):
+        body = json.loads(request["messages"][1]["content"][0]["text"])
+        return validate({
+            "sections": [
+                {"id": "s1", "parent_id": None, "title": "11.1 总体方案"},
+                {"id": "s2", "parent_id": None, "title": "11.2 兜底空节"},
+            ],
+            "assignments": [[row["id"], "s1"] for row in body["requirements"]],
+        })
+
+    budget = RequestBudget(model="unused")
+    result = await expand_proposal_outlines(
+        outline, artifacts, budget, execute, authoring_pipeline._ask,
+        lambda p: authoring_pipeline._fits(budget, AuthoringTask.PROPOSAL_OUTLINE, p),
+        lambda p: authoring_pipeline._fits(budget, AuthoringTask.ITEM_PLACEMENT, p),
+    )
+    proposal = result["chapters"][0]
+    assert [c["title"] for c in proposal["children"]] == ["11.1 总体方案", "承诺"]
+    assert sorted(_collect_rule_ids([proposal])) == [f"i{n}" for n in range(1, 7)]
