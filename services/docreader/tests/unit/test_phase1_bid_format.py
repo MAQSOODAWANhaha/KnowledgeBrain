@@ -786,6 +786,30 @@ def test_bid_format_outline_accepts_split_two_line_numbered_label_and_form_name(
     assert plan['nodes'][1]['parent_id'] == plan['nodes'][0]['id']
 
 
+def test_bid_format_outline_allows_blank_lines_between_wrapped_heading_refs_but_rejects_text_gaps():
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    pages = [
+        '第六章 投标文件格式\n五、投标保证金证明\n5-2 投标保证金采用汇款形式\n\n\n\n银行汇款回单扫描件\n正文行\n六、其他\n',
+    ]
+    prepared = _Prepared([{'document_id': 'tender', 'role': 'main', 'pages': pages}], _snapshot())
+    refs = {text.strip(): ref for ref, text in prepared.sections[0]['payload']['lines']}
+    plan = decode_bid_format_outline({'chapters': [
+        {'heading_refs': [refs['五、投标保证金证明']], 'label': '五、投标保证金证明', 'name': '投标保证金证明'},
+        {'heading_refs': [refs['5-2 投标保证金采用汇款形式'], refs['银行汇款回单扫描件']],
+         'label': '5-2 投标保证金采用汇款形式', 'name': '银行汇款回单扫描件',
+         'parent_heading_ref': refs['五、投标保证金证明']},
+    ]}, prepared)
+    assert plan['nodes'][1]['name'] == '5-2 投标保证金采用汇款形式'
+
+    with pytest.raises(ModelContractError):
+        decode_bid_format_outline({'chapters': [
+            {'heading_refs': [refs['5-2 投标保证金采用汇款形式'], refs['六、其他']],
+             'label': '5-2 投标保证金采用汇款形式', 'name': '其他'},
+        ]}, prepared)
+
+
 async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tmp_path):
     import json
     import re

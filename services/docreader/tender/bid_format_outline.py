@@ -255,7 +255,14 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         if heads != sorted(heads) or any(reference not in prepared.visible for reference in heads) or (
                 any(reference in key for key in seen_heads for reference in heads) and not shared):
             raise ModelContractError([_issue('heading refs must be unused section lines in order', [*path, 'heading_refs'])])
-        if any(heads[offset] + 1 != heads[offset + 1] for offset in range(len(heads) - 1)):
+        if any(
+            heads[offset] >= heads[offset + 1]
+            or any(
+                mid not in prepared.visible or (mid not in prepared.page_edges and prepared.refs.text(mid).strip())
+                for mid in range(heads[offset] + 1, heads[offset + 1])
+            )
+            for offset in range(len(heads) - 1)
+        ):
             raise ModelContractError([_issue('a wrapped title must be consecutive source lines', [*path, 'heading_refs'])])
         if any(start <= head < end for head in heads for start, end in skipped):
             raise ModelContractError([_issue('标题属于原文明示不适用的式样', [*path, 'heading_refs'])])
