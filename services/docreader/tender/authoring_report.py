@@ -16,6 +16,8 @@ STAGES = {
     "directory_response_form": "F 响应原式",
     "outline": "模型大纲（备用路径）",
     "authoring_structure": "结构复核",
+    "item_placement": "事项归属",
+    "proposal_outline": "方案子大纲",
     "authoring_basis": "依据",
     "authoring_write": "W 写作 / 改稿",
     "authoring_review": "正文复核 / 再核",

@@ -12,7 +12,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
-from docreader.tender.directory_compile import _REVISIONS, _ROLE_LABEL
+from docreader.tender.directory_compile import _FORMAT_ITEM, _REVISIONS, _ROLE_LABEL
 from docreader.tender.schema import Contract, Text
 from docreader.tender.status import AuthoringTask
 
@@ -79,7 +79,13 @@ def submission_form_nodes(documents, plan, items, format_pages):
 
     BUG-332: an amendment or clarification that restates a form already in the outline is added too, as a conflict.
     """
-    named = {_compact(node.get('name')): node for node in plan.get('nodes', [])}
+    named = {}
+    for node in plan.get('nodes', []):
+        raw_name = node.get('name') or ''
+        named[_compact(raw_name)] = node
+        stripped = _FORMAT_ITEM.sub('', raw_name.strip(), count=1).strip()
+        if stripped:
+            named.setdefault(_compact(stripped), node)
     roles = {document['document_id']: document.get('role') or 'main' for document in documents}
     wanted = {}
     for row in items:
@@ -139,16 +145,18 @@ def add_submission_forms(plan, documents, items, format_pages):
     plan = deepcopy(plan)
     entries = plan['composition']['entries']
     items_in_scope = plan['scopes'][0]['items']
-    for added in extra:
-        position = sum(1 for entry in entries if (entry['name']['document_id'], entry['name']['page'],
-                                                  entry['name']['line']) < added['point'])
-        for item in items_in_scope:
-            if item['entry'] >= position:
-                item['entry'] += 1
-        entries.insert(position, {'name': deepcopy(added['node']['heading'])})
+    for added in sorted(extra, key=lambda item: item['point']):
+        # BUG-339: keep outside-format submissions after the bid-format chapter rather than
+        # jumping ahead of the cover and first tender chapter by raw PDF page number.
         plan['nodes'].append(added['node'])
-        items_in_scope.append({'node_id': added['node']['id'], 'entry': position, 'depth': 'self',
-                               'presentation': 'section', 'clause': []})
+        if added['conflict'] is not None:
+            position = len(entries)
+            entries.insert(position, {'name': deepcopy(added['node']['heading'])})
+            items_in_scope.append({'node_id': added['node']['id'], 'entry': position, 'depth': 'self',
+                                   'presentation': 'section', 'clause': []})
+        else:
+            items_in_scope.append({'node_id': added['node']['id'], 'entry': None, 'depth': 'self',
+                                   'presentation': 'section', 'clause': []})
         original = added['conflict']
         if original is not None:
             point, heading = original['heading'], added['node']['heading']
@@ -241,6 +249,8 @@ def decode_placements(raw, ids, positions):
     for identity, value in parsed['placements']:
         if identity not in ids or identity in seen:
             reject('每个本批事项 ID 恰好出现一次，不能有本批以外的 ID。')
+        if isinstance(value, str) and value.strip().lower() == 'null':
+            value = None
         if value is not None and value not in positions and value not in NOT_REQUIRED:
             reject('右值只能是本批位置 ID、规定的理由代码或 null。')
         seen[identity] = value

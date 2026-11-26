@@ -238,6 +238,7 @@ def test_tokenized_authoring_spec_records_full_tasks_without_changing_analysis(
         "directory_response_form",
         "item_placement",
         "outline",
+        "proposal_outline",
         "verify",
     ]
     assert enabled.spec() == expected

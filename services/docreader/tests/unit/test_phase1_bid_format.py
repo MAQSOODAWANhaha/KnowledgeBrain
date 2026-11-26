@@ -665,3 +665,184 @@ async def test_bug332_a_format_section_only_in_an_attachment_is_used(tmp_path):
     assert len(sent) == 1
     assert [chapter['title'] for chapter in outline['chapters']] == ['投标函', '报价表']
     assert not [issue for issue in outline['issues'] if issue['code'].startswith('outline_directory_format_')]
+
+
+async def test_bug337_bid_format_outline_builds_multi_level_hierarchy_and_filters_non_format_literal_pending(tmp_path):
+    import json
+
+    pages = [
+        '第三章 评标办法\n评分表重复行\n',
+        (
+            '第六章 投标文件格式\n'
+            '一、投标书\n致：招标人\n'
+            '廉洁投标承诺书\n我方廉洁承诺\n'
+            '五、投标保证金证明\n'
+            '5-1 投标保证金采用电子保函形式（通宝函）\n保函正文\n'
+            '5-2 投标保证金采用汇款形式\n汇款回单\n'
+            '十二、实施团队人员情况\n'
+            '（一）实施团队人员情况表\n人员表正文\n'
+            '（二）人员简历表\n简历表正文\n'
+        ),
+    ]
+    documents = [{
+        'document_id': 'tender', 'role': 'main', 'pages': pages,
+        'line_units': [[] for _ in pages], 'unread_pages': [],
+        'ocr_issues': [
+            {'code': 'outline_directory_literal_pending', 'detail': '第1页第2行的重复原字无法按来源位置对应，正文保留版式行并待核。'},
+            {'code': 'outline_directory_literal_pending', 'detail': '第2页第3行的重复原字无法按来源位置对应，正文保留版式行并待核。'},
+        ],
+    }]
+
+    async def execute(_task, request, validate):
+        found = {text.strip(): ref for ref, text in json.loads(request['messages'][1]['content'][0]['text'])['lines']}
+        return validate({'chapters': [
+            {'heading_refs': [found['一、投标书']], 'label': '一、投标书', 'name': '投标书'},
+            {'heading_refs': [found['廉洁投标承诺书']], 'parent_heading_ref': found['一、投标书'], 'name': '廉洁投标承诺书'},
+            {'heading_refs': [found['五、投标保证金证明']], 'label': '五、投标保证金证明', 'name': '投标保证金证明'},
+            {'heading_refs': [found['5-1 投标保证金采用电子保函形式（通宝函）']],
+             'label': '5-1 投标保证金采用电子保函形式（通宝函）',
+             'parent_heading_ref': found['五、投标保证金证明'], 'name': '投标保证金采用电子保函形式（通宝函）'},
+            {'heading_refs': [found['5-2 投标保证金采用汇款形式']],
+             'label': '5-2 投标保证金采用汇款形式',
+             'parent_heading_ref': found['五、投标保证金证明'], 'name': '投标保证金采用汇款形式'},
+            {'heading_refs': [found['十二、实施团队人员情况']], 'label': '十二、实施团队人员情况', 'name': '实施团队人员情况'},
+            {'heading_refs': [found['（一）实施团队人员情况表']], 'label': '（一）实施团队人员情况表',
+             'parent_heading_ref': found['十二、实施团队人员情况'], 'name': '实施团队人员情况表'},
+            {'heading_refs': [found['（二）人员简历表']], 'label': '（二）人员简历表',
+             'parent_heading_ref': found['十二、实施团队人员情况'], 'name': '人员简历表'},
+        ]})
+
+    _artifacts, outline = await _outline(
+        tmp_path, documents=documents, execute=execute, directory_contract='bid_format_source_outline_v1')
+    assert _children(outline) == [
+        ('一、投标书', ['廉洁投标承诺书']),
+        ('五、投标保证金证明', ['5-1 投标保证金采用电子保函形式（通宝函）', '5-2 投标保证金采用汇款形式']),
+        ('十二、实施团队人员情况', ['（一）实施团队人员情况表', '（二）人员简历表']),
+    ]
+    literal_issues = [issue['detail'] for issue in outline['issues'] if issue['code'] == 'outline_directory_literal_pending']
+    assert literal_issues == ['第2页第3行的重复原字无法按来源位置对应，正文保留版式行并待核。']
+
+
+@pytest.mark.parametrize('case', ['invented_label', 'annex_label', 'forward_parent', 'unknown_parent', 'cover_parent'])
+def test_bug337_bid_format_outline_rejects_invalid_label_and_parent_heading_ref(case):
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    if case == 'cover_parent':
+        pages = [
+            '第六章 投标文件格式\n投标文件\n招标编号：A\n投标人名称：（盖章）\n日期：年 月 日\n',
+            '一、投标书\n致：招标人\n',
+        ]
+        documents = [{
+            'document_id': 'tender', 'role': 'main', 'pages': pages,
+            'line_units': [[None, None, 'cover-grid', 'cover-grid', 'cover-grid'], [None, None]],
+            'template_parts': {'cover-grid': {'selectors': []}},
+        }]
+        prepared = _Prepared(documents, _snapshot())
+        refs = {text.strip(): ref for ref, text in prepared.sections[0]['payload']['lines']}
+        chapters = [
+            {'heading_refs': [refs['投标文件']], 'name': '投标文件'},
+            {'heading_refs': [refs['一、投标书']], 'label': '一、投标书',
+             'parent_heading_ref': refs['投标文件'], 'name': '投标书'},
+        ]
+    else:
+        pages = [
+            '第六章 投标文件格式\n附件1 一、投标书\n致：招标人\n5-1 保函\n保函正文\n二、报价表\n总价\n',
+        ]
+        prepared = _Prepared([{'document_id': 'tender', 'role': 'main', 'pages': pages}], _snapshot())
+        refs = {text.strip(): ref for ref, text in prepared.sections[0]['payload']['lines']}
+        if case == 'invented_label':
+            chapters = [{'heading_refs': [refs['附件1 一、投标书']], 'label': '九、投标书', 'name': '投标书'}]
+        elif case == 'annex_label':
+            chapters = [{'heading_refs': [refs['附件1 一、投标书']], 'label': '附件1 一、投标书', 'name': '投标书'}]
+        elif case == 'forward_parent':
+            chapters = [
+                {'heading_refs': [refs['附件1 一、投标书']], 'parent_heading_ref': refs['二、报价表'], 'name': '投标书'},
+                {'heading_refs': [refs['二、报价表']], 'name': '报价表'},
+            ]
+        else:
+            chapters = [
+                {'heading_refs': [refs['5-1 保函']], 'parent_heading_ref': refs['附件1 一、投标书'], 'name': '保函'},
+            ]
+    with pytest.raises(ModelContractError):
+        decode_bid_format_outline({'chapters': chapters}, prepared)
+
+
+async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tmp_path):
+    import json
+    import re
+
+    from docreader.llm.request import ModelWorkUnitExhausted
+
+    # Build a section large enough to split across slices at context_tokens=22000, with a parent at the end of slice 1
+    # and a child inside slice 2 referencing that parent via parent_context.
+    body_lines = ['第六章 投标文件格式']
+    for idx in range(1, 35):
+        body_lines.append(f'附件{idx} 第{idx}号声明')
+        body_lines.append('致：招标人，特此声明。')
+    body_lines.append('五、投标保证金证明')
+    body_lines.append('5-1 电子保函格式')
+    body_lines.append('保函正文。')
+    for idx in range(36, 65):
+        body_lines.append(f'附件{idx} 第{idx}号承诺')
+        body_lines.append('致：招标人，特此承诺。')
+    documents = [{'document_id': 'tender', 'role': 'main', 'pages': ['\n'.join(body_lines) + '\n'],
+                  'line_units': [[]], 'unread_pages': [], 'ocr_issues': []}]
+
+    sent_payloads = []
+
+    async def execute(_task, request, validate):
+        payload = json.loads(request['messages'][1]['content'][0]['text'])
+        sent_payloads.append(payload)
+        lines = payload['lines']
+        parent_ctx = {text.strip(): ref for ref, text in payload.get('parent_context') or []}
+        in_slice = {text.strip(): ref for ref, text in lines}
+        chapters = []
+        for ref, text in lines:
+            stripped = text.strip()
+            if (m := re.fullmatch(r'附件\d+ (.+)', stripped)):
+                chapters.append({'heading_refs': [ref], 'name': m[1]})
+            elif stripped == '五、投标保证金证明':
+                chapters.append({'heading_refs': [ref], 'label': '五、投标保证金证明', 'name': '投标保证金证明'})
+            elif stripped == '5-1 电子保函格式':
+                parent_ref = in_slice.get('五、投标保证金证明') or parent_ctx.get('五、投标保证金证明')
+                chapters.append({'heading_refs': [ref], 'label': '5-1 电子保函格式', 'name': '电子保函格式',
+                                 **({'parent_heading_ref': parent_ref} if parent_ref is not None else {})})
+        return validate({'chapters': chapters})
+
+    artifacts = ArtifactStore(tmp_path / 'ok')
+    ref = await generate_document(
+        artifacts, _snapshot(), RequestBudget(context_tokens=22000, model='unused'), execute,
+        directory_documents=documents, outline_only=True, directory_contract='bid_format_source_outline_v1')
+    outline = artifacts.read_json(ref)
+    assert len(sent_payloads) > 1
+    assert any(payload.get('parent_context') for payload in sent_payloads[1:])
+    guarantee = next(ch for ch in outline['chapters'] if ch['title'] == '五、投标保证金证明')
+    assert [child['title'] for child in guarantee['children']] == ['5-1 电子保函格式']
+
+    # If the slice owning the parent fails, the child in a later slice degrades cleanly to top-level.
+    parent_slice_idx = next(
+        idx for idx, payload in enumerate(sent_payloads)
+        if any(text.strip() == '五、投标保证金证明' for _ref, text in payload['lines'])
+    )
+    child_slice_idx = next(
+        idx for idx, payload in enumerate(sent_payloads)
+        if any(text.strip() == '5-1 电子保函格式' for _ref, text in payload['lines'])
+    )
+    if parent_slice_idx != child_slice_idx:
+        calls = 0
+
+        async def execute_fail_parent(task, request, validate):
+            nonlocal calls
+            current = calls
+            calls += 1
+            if current == parent_slice_idx:
+                raise ModelWorkUnitExhausted(task)
+            return await execute(task, request, validate)
+
+        artifacts_fail = ArtifactStore(tmp_path / 'fail')
+        ref_fail = await generate_document(
+            artifacts_fail, _snapshot(), RequestBudget(context_tokens=22000, model='unused'), execute_fail_parent,
+            directory_documents=documents, outline_only=True, directory_contract='bid_format_source_outline_v1')
+        outline_fail = artifacts_fail.read_json(ref_fail)
+        assert any(ch['title'] == '5-1 电子保函格式' for ch in outline_fail['chapters'])

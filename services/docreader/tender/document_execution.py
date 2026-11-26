@@ -79,6 +79,7 @@ _PROMPT_FILES: dict[str, str] = {
     AuthoringPrompt.DIRECTORY_PLAN: "directory_plan.md",
     AuthoringPrompt.BID_FORMAT_OUTLINE: "bid_format_outline.md",
     AuthoringPrompt.ITEM_PLACEMENT: "item_placement.md",
+    AuthoringPrompt.PROPOSAL_OUTLINE: "proposal_outline.md",
     AuthoringPrompt.DIRECTORY_REF_PLAN: "directory_ref_plan.md",
     AuthoringPrompt.DIRECTORY_REF_PLAN_V2: "directory_ref_plan_v2.md",
     AuthoringPrompt.DIRECTORY_REQUIREMENT: "directory_requirement.md",
@@ -109,7 +110,11 @@ def load_prompts():
 
 
 _BODY_PROMPTS = (AuthoringPrompt.BASIS, AuthoringPrompt.WRITE, AuthoringPrompt.REVIEW, AuthoringPrompt.STRUCTURE)
-_REQUIREMENT_CHAIN_PROMPTS = (AuthoringPrompt.BID_FORMAT_OUTLINE, AuthoringPrompt.ITEM_PLACEMENT)
+_REQUIREMENT_CHAIN_PROMPTS = (
+    AuthoringPrompt.BID_FORMAT_OUTLINE,
+    AuthoringPrompt.ITEM_PLACEMENT,
+    AuthoringPrompt.PROPOSAL_OUTLINE,
+)
 _LEGACY_PROMPTS = tuple(name for name in _PROMPTS if name not in _REQUIREMENT_CHAIN_PROMPTS)
 
 

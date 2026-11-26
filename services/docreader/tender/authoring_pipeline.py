@@ -2637,10 +2637,16 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
         if chain_items is not None:
             from docreader.tender.item_placement import place_items
             from docreader.tender.opening_project_name import attach_opening_project_name
+            from docreader.tender.proposal_outline import expand_proposal_outlines
             outline, _placement = await place_items(
                 outline, chain_items, budget, execute, _ask,
                 lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload), outside_format=chain_added or ())
             attach_w2_proposal_answers(outline)
+            outline = await expand_proposal_outlines(
+                outline, artifacts, budget, execute, _ask,
+                lambda payload: _fits(budget, AuthoringTask.PROPOSAL_OUTLINE, payload),
+                lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload),
+            )
             await asyncio.to_thread(attach_opening_project_name, artifacts, outline)
         if directory_facts:
             await asyncio.to_thread(bind_reviewed_outline_facts, outline, compiled, directory_facts)

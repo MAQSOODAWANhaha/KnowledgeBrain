@@ -10,7 +10,7 @@ from docreader.tender.prompts import ANALYSIS_PROMPT_TASKS, execution_prompt, ge
 ANALYSIS_CONTRACTS = {"ExtractionOutput", "Extraction", "LocateResult", "AssociationResult",
                       "AnalysisReviewResponse", "Verification", "OCRResponse"}
 BODY = {"authoring_basis", "authoring_write", "authoring_review", "authoring_structure"}
-REQUIREMENT_CHAIN = {"bid_format_outline", "item_placement"}
+REQUIREMENT_CHAIN = {"bid_format_outline", "item_placement", "proposal_outline"}
 
 
 def analysis_spec(prompts=None):
@@ -88,4 +88,6 @@ def test_legacy_outline_execution_cannot_send_w2_prompts():
     for prompt in REQUIREMENT_CHAIN:
         with pytest.raises(ModelConfigurationError):
             execution_prompt(prompts, prompt)
-    assert {"BidFormatOutline", "ItemPlacementResponse"}.isdisjoint(authoring_spec(outline)["output_contracts"])
+    assert {"BidFormatOutline", "ItemPlacementResponse", "ProposalOutlineResponse", "ProposalTreeOnlyResponse"}.isdisjoint(
+        authoring_spec(outline)["output_contracts"]
+    )

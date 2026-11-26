@@ -40,6 +40,9 @@ def test_decode_accepts_one_value_per_item_and_rejects_everything_else():
     ids = ["r1", "r2", "r3"]
     good = {"placements": [["r1", "t2"], ["r2", "evaluation"], ["r3", None]]}
     assert placement.decode_placements(good, ids, positions) == {"r1": "t2", "r2": "evaluation", "r3": None}
+    # BUG-340: quoted string "null" is normalized to None rather than rejecting the whole batch.
+    quoted_null = {"placements": [["r1", "t2"], ["r2", "evaluation"], ["r3", "null"]]}
+    assert placement.decode_placements(quoted_null, ids, positions) == {"r1": "t2", "r2": "evaluation", "r3": None}
     for bad in (
         {"placements": good["placements"][:2]},
         {"placements": [*good["placements"], ["r1", "t1"]]},
@@ -122,7 +125,7 @@ def plan():
             "excluded": [], "source_only": []}
 
 
-def test_named_submission_form_outside_the_format_chapter_becomes_a_chapter_in_source_order():
+def test_named_submission_form_outside_the_format_chapter_stays_after_bid_format_chapters():
     items = [item(1, "submission_requirement", ["无关联关系承诺函"], page=0),
              item(2, "submission_requirement", ["投标书"], page=0)]
     result, added_names = placement.add_submission_forms(plan(), DOCUMENTS, items, {("tender", 1)})
@@ -131,9 +134,10 @@ def test_named_submission_form_outside_the_format_chapter_becomes_a_chapter_in_s
     assert added["name"] == "无关联关系承诺函"
     assert added["heading"] == {"document_id": "tender", "page": 0, "line": 1}
     assert added["body_windows"] == [{"document_id": "tender", "page": 0, "start_line": 1, "end_line": 4}]
-    assert result["composition"]["entries"][0]["name"] == added["heading"]
-    order = {entry["node_id"]: entry["entry"] for entry in result["scopes"][0]["items"]}
-    assert order == {"submission-1": 0, "format-1": 1}
+    # BUG-339: outside-format forms are appended after bid-format entries with entry=None so
+    # they never jump ahead of the cover or Chapter 1 when their PDF page number is smaller.
+    assert [entry["node_id"] for entry in result["scopes"][0]["items"]] == ["format-1", "submission-1"]
+    assert result["scopes"][0]["items"][1]["entry"] is None
 
 
 def test_submission_form_without_a_title_line_is_not_invented():
@@ -280,7 +284,7 @@ async def test_generate_document_runs_the_requirement_chain(tmp_path, monkeypatc
             return validate({"chapters": [{"heading_refs": [found["一、投标书"]], "name": "投标书"},
                                           {"heading_refs": [found["二、开标一览表"]], "name": "开标一览表"}]})
         ids = {row["title_path"][0]: row["id"] for row in body["positions"]}
-        assert [row.get("origin") for row in body["positions"]][0] == "outside_format"
+        assert [row.get("origin") for row in body["positions"]][-1] == "outside_format"
         return validate({"placements": [["r1", ids["无关联关系承诺函"]], ["r2", ids["开标一览表"]],
                                         ["r3", "evaluation"], ["r4", None]]})
 
@@ -295,7 +299,7 @@ async def test_generate_document_runs_the_requirement_chain(tmp_path, monkeypatc
         requirement_chain_contract=placement.REQUIREMENT_CHAIN_CONTRACT)
     outline = artifacts.read_json(reference)
     assert sent == ["directory_plan", "item_placement"]
-    assert [chapter["title"] for chapter in outline["chapters"]] == ["无关联关系承诺函", "投标书", "开标一览表"]
+    assert [chapter["title"] for chapter in outline["chapters"]] == ["投标书", "开标一览表", "无关联关系承诺函"]
     resolution = {row["rule_ref"]["item_ref"]["item_id"]: row["resolution"]
                   for row in build_ledger(outline, {"rules": [{"rule_ref": row["rule_ref"]} for row in ledger]})
                   if row["rule_ref"]}
@@ -354,3 +358,13 @@ async def test_bug332_the_requirement_chain_keeps_an_inline_amendment_form_besid
     codes = [issue["code"] for issue in outline["issues"]]
     assert "outline_directory_format_conflict" in codes
     assert "outline_directory_revision_unreviewed" not in codes and "outline_directory_rejected" not in codes
+
+
+def test_bug340_decode_placements_normalizes_string_null():
+    positions = {"t1": {"title_path": ["投标书"]}}
+    decoded = placement.decode_placements(
+        {"placements": [["r1", "null"], ["r2", " NULL "], ["r3", "t1"]]},
+        ["r1", "r2", "r3"],
+        positions,
+    )
+    assert decoded == {"r1": None, "r2": None, "r3": "t1"}

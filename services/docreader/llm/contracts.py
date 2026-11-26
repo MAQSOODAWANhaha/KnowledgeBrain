@@ -12,6 +12,9 @@ from docreader.tender.directory_compile import (
 )
 from docreader.tender.directory_response_forms import response_form_model
 from docreader.tender.item_placement import ItemPlacementResponse
+from docreader.tender.proposal_outline import (
+    PROPOSAL_TREE_OPERATION, ProposalOutlineResponse, ProposalTreeOnlyResponse,
+)
 from docreader.tender.directory_ref_plan import RefDirectoryPlan, RefDirectoryPlanV2
 from docreader.tender.directory_source_groups import MaterialSourceGroupPlan, SOURCE_GROUP_OPERATION
 from docreader.tender.directory_material_closure import MaterialClosurePlan, SOURCE_CARRIER_OPERATION
@@ -81,6 +84,8 @@ def response_model(task, payload):
         return ParameterPlan
     if task == AuthoringTask.ITEM_PLACEMENT:
         return ItemPlacementResponse
+    if task == AuthoringTask.PROPOSAL_OUTLINE:
+        return ProposalTreeOnlyResponse if payload.get('operation') == PROPOSAL_TREE_OPERATION else ProposalOutlineResponse
     if task == AuthoringTask.DIRECTORY_RESPONSE_FORM:
         return response_form_model(payload)
     if task == 'outline':
@@ -141,6 +146,7 @@ def _contracts_by_prompt():
         'authoring_review': {AuthoringContentReviewResponse, AuthoringReviewResponse},
         'authoring_structure': {AuthoringStructureResponse},
         'item_placement': {ItemPlacementResponse},
+        'proposal_outline': {ProposalOutlineResponse, ProposalTreeOnlyResponse},
     }
 
 

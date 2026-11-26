@@ -2734,8 +2734,20 @@ def compile_directory(plan, documents):
     _place_wrapped_grids(adopted['chapters'], source, adopted['issues'])
     _segment_template_content(adopted['chapters'], source)
     binding_issues = _apply_format_bindings(plan, source, adopted['chapters'])
-    source_issues = [issue for document in source.documents for key in ('ocr_issues', 'source_review_issues')
-                     for issue in document[key]]
+    used_pages = {
+        (ref['document_id'], ref['page'])
+        for chapter in adopted['chapters']
+        for ref in chapter.get('lines') or ()
+    }
+    source_issues = []
+    for document in source.documents:
+        for key in ('ocr_issues', 'source_review_issues'):
+            for issue in document[key]:
+                if issue.get('code') == 'outline_directory_literal_pending' and used_pages:
+                    match = re.search(r'第(\d+)页', issue.get('detail', ''))
+                    if match and (document['document_id'], int(match.group(1)) - 1) not in used_pages:
+                        continue
+                source_issues.append(issue)
     compiled = {'chapters': adopted['chapters'],
             'issues': [*adopted['issues'], *excluded['issues'], *binding_issues, *skipped,
                        *_revision_issues(source, nodes, composition), *source_issues]}
@@ -3149,7 +3161,10 @@ def _push_chapter(item, node, parent_id, group, text, lines, source, composition
             if _compact(title) in _compact(listed):
                 pass
             elif _compact(listed) in _compact(title):
-                title = listed
+                stripped = _FORMAT_ITEM.sub('', title.strip(), count=1).strip()
+                stripped = re.sub(r'^[（(][一二三四五六七八九十百千]+[）)]\s*', '', stripped).strip()
+                if _compact(stripped) != _compact(listed):
+                    title = listed
             else:
                 issues.append({'code': 'outline_directory_name',
                                'detail': f'章节名称与组成清单不一致，请人工确认：采用原式标题“{title}”，投标文件组成写作“{listed}”'})

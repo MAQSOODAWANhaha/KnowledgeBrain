@@ -391,8 +391,9 @@ def attach_w2_proposal_answers(outline):
         for child in chapter["children"]:
             attach(child)
         title = "".join(chapter["title"].split())
+        bare_title = _FORMAT_ITEM.sub("", title, count=1)
         targets = chapter["targets"]
-        if chapter.get("presentation_role", "body") != "body" or not title.endswith("方案") or len(targets) != 1:
+        if chapter.get("presentation_role", "body") != "body" or not bare_title.endswith("方案") or len(targets) != 1:
             return
         form, = targets
         if (form["kind"] != "form" or not form.get("manual_fill") or form.get("support_origins") != ["tender"]
@@ -400,7 +401,7 @@ def attach_w2_proposal_answers(outline):
                     "template_refs", "response_table", "response_form_pending"))):
             return
         lines = ["".join(line.split()) for line in form["purpose"].splitlines() if line.strip()]
-        if (len(lines) >= 2 and _FORMAT_ITEM.sub("", lines[0], count=1) == title
+        if (len(lines) >= 2 and _FORMAT_ITEM.sub("", lines[0], count=1) == bare_title
                 and _PROPOSAL_INSTRUCTION.fullmatch("".join(lines[1:]))):
             targets.append(_knowledge_answer(form, form["rule_refs"]))
             form["rule_refs"] = []

@@ -227,8 +227,10 @@ async def test_w2_outline_dispatches_only_its_pinned_contracts(frozen_runtime, m
     assert spec['directory_planning_contract'] == options['directory_contract'] == BID_FORMAT_OUTLINE_CONTRACT
     assert {'directory_native_body_contract', 'native_requirement_contract'}.isdisjoint(spec)
     assert {'native_body_contract', 'native_requirement_contract', 'on_source_bodies'}.isdisjoint(options)
-    assert set(spec['prompts']) == {'bid_format_outline', 'item_placement'}
-    assert set(spec['budget']['output_contracts']) == {'BidFormatOutline', 'ItemPlacementResponse'}
+    assert set(spec['prompts']) == {'bid_format_outline', 'item_placement', 'proposal_outline'}
+    assert set(spec['budget']['output_contracts']) == {
+        'BidFormatOutline', 'ItemPlacementResponse', 'ProposalOutlineResponse', 'ProposalTreeOnlyResponse',
+    }
 
 
 async def test_resumed_w2_outline_uses_stored_chain_without_opt_in(frozen_runtime, monkeypatch):

@@ -266,12 +266,62 @@ def _carried_source(target):
     return ""
 
 
-def _write_carried_source(document, target, *, keep_with_next=False):
+_SOURCE_NUMBERED = re.compile(
+    r"^(?:[一二三四五六七八九十百千]+\s*[、．.]"
+    r"|[（(][一二三四五六七八九十百千]+[）)]"
+    r"|[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+(?:\s+|$)"
+    r"|\d+(?:\.\d+)+\s+"
+    r"|第[一二三四五六七八九十百千0-9]+[章节部分编册])"
+)
+_CN_ORDINAL_PREFIX = re.compile(r"^([一二三四五六七八九十百千]+)\s*[、．.]")
+_SUBFORM_OR_MINOR_PREFIX = re.compile(
+    r"^(?:[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+(?:\s+|$)"
+    r"|[（(][一二三四五六七八九十百千]+[）)]"
+    r"|\d+(?:\.\d+)+\s+)"
+)
+
+
+def _compact_heading(text):
+    return re.sub(r"\s+", "", text or "")
+
+
+def _is_duplicate_heading_line(heading_text, first_line):
+    h_strip, f_strip = (heading_text or "").strip(), (first_line or "").strip()
+    h_compact, f_compact = _compact_heading(h_strip), _compact_heading(f_strip)
+    if not h_compact or not f_compact:
+        return False
+    if f_compact == h_compact:
+        return True
+    h_core = _compact_heading(_SOURCE_NUMBERED.sub("", h_strip, count=1))
+    f_core = _compact_heading(_SOURCE_NUMBERED.sub("", f_strip, count=1))
+    if f_core and h_core and f_core == h_core:
+        return True
+    if len(f_strip) <= 60:
+        hm = _CN_ORDINAL_PREFIX.match(h_strip)
+        fm = _CN_ORDINAL_PREFIX.match(f_strip)
+        if hm and fm and hm.group(1) == fm.group(1):
+            return True
+    return False
+
+
+def _write_carried_source(document, target, *, keep_with_next=False, heading_text=None):
     text = _carried_source(target)
     if not text.strip():
         return False
     exact = target.get('source_body_contract') == SOURCE_BODY_CONTRACT
-    for paragraph in text.split("\n"):
+    lines = text.split("\n")
+    if heading_text and not exact:
+        first_nonempty = next((idx for idx, line in enumerate(lines) if line.strip()), None)
+        if first_nonempty is not None:
+            raw_core = _SOURCE_NUMBERED.sub("", lines[first_nonempty].strip(), count=1)
+            if not re.search(r" {3,}|\t", raw_core):
+                for span in range(1, min(4, len(lines) - first_nonempty) + 1):
+                    joined = "".join(line.strip() for line in lines[first_nonempty:first_nonempty + span])
+                    if _is_duplicate_heading_line(heading_text, joined):
+                        lines = lines[first_nonempty + span:]
+                        break
+    wrote = False
+    for paragraph in lines:
         if not exact:
             if not paragraph.strip():
                 continue
@@ -279,7 +329,8 @@ def _write_carried_source(document, target, *, keep_with_next=False):
         added = document.add_paragraph(paragraph)
         if keep_with_next:
             added.paragraph_format.keep_with_next = True
-    return True
+        wrote = True
+    return wrote
 
 
 def _pdf_row_heights(artifacts, source, locator, row_count):
@@ -480,7 +531,128 @@ def _heading_numbering(document, starting_path):
     return instance.numId
 
 
-def _toc(document, entries, display_paths):
+def _cn_ordinal(number):
+    digits = "零一二三四五六七八九"
+    if number <= 10:
+        return "十" if number == 10 else digits[number]
+    if number < 20:
+        return "十" + digits[number - 10]
+    tens, ones = divmod(number, 10)
+    return digits[tens] + "十" + (digits[ones] if ones else "")
+
+
+_CATALOG_LEADER = re.compile(r"[.．…]{3,}|…{2,}")
+
+
+def _catalog_label(line, mark):
+    """The tender catalog entry, including its Chinese numeral and the space the source uses."""
+    token = f"{mark}、"
+    start = line.find(token)
+    if start < 0:
+        return None
+    rest = line[start:]
+    leader = _CATALOG_LEADER.search(rest)
+    if leader is None:
+        return None
+    label = rest[:leader.start()].strip()
+    return label if label.startswith(token) else None
+
+
+def _catalog_labels(pages):
+    lines = [line for page in pages for line in str(page).splitlines()]
+    for index, line in enumerate(lines):
+        if "投标文件格式" not in line.replace(" ", "").replace("\u3000", ""):
+            continue
+        labels, cursor, number = [], index, 1
+        while cursor < len(lines) and number <= 40:
+            label = _catalog_label(lines[cursor], _cn_ordinal(number))
+            if label is None:
+                if cursor == index:
+                    cursor += 1
+                    continue
+                break
+            labels.append(label)
+            number += 1
+            cursor += 1
+        if len(labels) >= 2 and labels[0].startswith("一、"):
+            return labels
+    return []
+
+
+def _literal_pages(artifacts, authoring_input):
+    frozen_ref = (authoring_input or {}).get("frozen_ref")
+    if not frozen_ref:
+        return []
+    try:
+        frozen = artifacts.read_json(frozen_ref)
+    except Exception:
+        return []
+    if not isinstance(frozen, dict):
+        return []
+    pages = []
+    for document in frozen.get("documents") or []:
+        if not isinstance(document, dict):
+            continue
+        raw_ref = document.get("raw_ref")
+        if not raw_ref:
+            continue
+        try:
+            raw = artifacts.read_json(raw_ref)
+            literal_ref = raw.get("literal_source_ref") if isinstance(raw, dict) else None
+            literal = artifacts.read_json(literal_ref) if literal_ref else None
+        except Exception:
+            continue
+        if not isinstance(literal, dict):
+            continue
+        for page in literal.get("pages") or []:
+            stream = page.get("text_stream") if isinstance(page, dict) else None
+            if isinstance(stream, str):
+                pages.append(stream)
+    return pages
+
+
+def _source_first_line(chapter):
+    for target in chapter.get("targets") or []:
+        text = _carried_source(target)
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if first:
+            return first
+    return ""
+
+
+def _source_mark(chapter):
+    match = re.match(r"([一二三四五六七八九十百千]+)\s*[、．.]", (chapter.get("title") or "").strip())
+    if match:
+        return match.group(1)
+    first = _source_first_line(chapter)
+    match = re.match(r"([一二三四五六七八九十百千]+)\s*[、．.]", first)
+    return match.group(1) if match else None
+
+
+def _catalog_rows(entries, labels):
+    by_mark = {}
+    for chapter, path in entries:
+        if len(path) != 1 or chapter.get("presentation_role", "body") in {"cover", "content", "submission_note"}:
+            continue
+        mark = _source_mark(chapter)
+        if mark and mark not in by_mark:
+            by_mark[mark] = chapter
+    return [(label, by_mark.get(label.split("、", 1)[0])) for label in labels]
+
+
+def _uses_source_numbering(entries, catalog_titles):
+    if catalog_titles:
+        return True
+    return any(
+        len(path) == 1
+        and chapter.get("presentation_role", "body") not in {"cover", "content", "submission_note"}
+        and bool(_SOURCE_NUMBERED.match((chapter.get("title") or "").strip()))
+        for chapter, path in entries
+    )
+
+
+def _toc(document, entries, display_paths, catalog_rows=(), catalog_titles=None, use_source_numbering=False):
+    catalog_titles = catalog_titles or {}
     document.add_paragraph("目录", style="Title")
     paragraph = document.add_paragraph()
     for kind in ("begin", "instruction", "separate", "end"):
@@ -495,18 +667,64 @@ def _toc(document, entries, display_paths):
         paragraph.add_run()._r.append(element)
         if kind == "separate":
             first = True
-            for chapter, path in entries:
-                if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
-                    continue
+            if catalog_rows:
+                root_of = {}
+                descendants = defaultdict(list)
+                visible_roots = []
+                for chapter, path in entries:
+                    if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
+                        continue
+                    if len(path) == 1:
+                        root_of[path] = chapter['chapter_id']
+                        visible_roots.append((chapter, path))
+                    else:
+                        owner_id = root_of.get(path[:1])
+                        if owner_id is not None:
+                            descendants[owner_id].append((chapter, path))
+                matched_ids = {chapter['chapter_id'] for _label, chapter in catalog_rows if chapter is not None}
+                listed = []
+                for label, chapter in catalog_rows:
+                    listed.append((label, chapter, (0,)))
+                    if chapter is not None:
+                        for child, child_path in descendants.get(chapter['chapter_id'], ()):
+                            listed.append((catalog_titles.get(child['chapter_id']) or _display_title(child['title']),
+                                           child, child_path))
+                for chapter, path in visible_roots:
+                    if chapter['chapter_id'] in matched_ids:
+                        continue
+                    first_line = _source_first_line(chapter)
+                    if _SUBFORM_OR_MINOR_PREFIX.match(first_line) or _SUBFORM_OR_MINOR_PREFIX.match((chapter.get('title') or '').strip()):
+                        continue
+                    listed.append((_display_title(chapter['title']), chapter, path))
+                    for child, child_path in descendants.get(chapter['chapter_id'], ()):
+                        listed.append((_display_title(child['title']), child, child_path))
+            elif use_source_numbering:
+                listed = []
+                for chapter, path in entries:
+                    if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
+                        continue
+                    listed.append((_display_title(chapter['title']), chapter, path))
+            else:
+                listed = []
+                for chapter, path in entries:
+                    if chapter.get('presentation_role', 'body') in {'cover', 'content', 'submission_note'}:
+                        continue
+                    number = '.'.join(map(str, display_paths[chapter['chapter_id']]))
+                    listed.append((number + ' ' + _display_title(chapter['title']), chapter, path))
+            for label, chapter, path in listed:
                 entry = paragraph if first else document.add_paragraph()
                 first = False
                 entry.paragraph_format.left_indent = Mm(4 * max(0, len(path) - 1))
+                run, text = OxmlElement('w:r'), OxmlElement('w:t')
+                text.text = xml_text(label)
+                if chapter is None:
+                    run.append(text)
+                    entry._p.append(run)
+                    paragraph = entry
+                    continue
                 link = OxmlElement('w:hyperlink')
                 link.set(qn('w:anchor'), bookmark_name(chapter['chapter_id']))
                 link.set(qn('w:history'), '1')
-                run, text = OxmlElement('w:r'), OxmlElement('w:t')
-                number = '.'.join(map(str, display_paths[chapter['chapter_id']]))
-                text.text = xml_text(number + ' ' + _display_title(chapter['title']))
                 run.append(text)
                 link.append(run)
                 entry._p.append(link)
@@ -763,6 +981,7 @@ class _Assembler:
         self.template_parts = {}
         self.repository = EvidenceRepository(artifacts)
         self.display_paths = _display_paths(entries)
+        self.catalog_titles = {}
         self.locations = {target["target_id"]: chapter["title"]
             for chapter, _ in _body_entries(entries) for target in chapter.get("targets", [])}
 
@@ -1350,10 +1569,12 @@ class _Assembler:
     def chapter(self, document, chapter, path, *, heading=True, numbering_id=None):
         chapter_id = chapter["chapter_id"]
         chapter_start = len(document.element.body) - 1
+        rendered_heading = None
         if heading:
             path = self.display_paths.get(chapter_id, path)
-            paragraph = document.add_heading(_display_title(chapter['title']), level=min(max(len(path), 1), 9))
-            if numbering_id is not None:
+            rendered_heading = self.catalog_titles.get(chapter_id) or _display_title(chapter['title'])
+            paragraph = document.add_heading(rendered_heading, level=min(max(len(path), 1), 9))
+            if numbering_id is not None and chapter_id not in self.catalog_titles and not _SOURCE_NUMBERED.match(rendered_heading.strip()):
                 # Word has nine native levels; a private list preserves a deeper host label without advancing level nine.
                 if len(path) > 9:
                     numbering_id = _heading_numbering(document, path)
@@ -1444,8 +1665,12 @@ class _Assembler:
                 keep_source = (target["kind"] == "form" and not forms[target_id]
                                and target_index + 1 < len(targets)
                                and targets[target_index + 1]["target_id"] in grid_forms & form_ids)
-                wrote = (_write_carried_source(document, target, keep_with_next=keep_source)
+                carried_before = bool(_carried_source(target).strip())
+                wrote = (_write_carried_source(
+                             document, target, keep_with_next=keep_source,
+                             heading_text=rendered_heading if target_index == 0 else None)
                          if not forms[target_id] or _carried_source(target) != chapter['title'] else False)
+                heading_only = carried_before and not wrote and bool(rendered_heading and target_index == 0)
                 for part in forms[target_id].values():
                     key = _source_key(part['source_ref'])
                     fills = [fill for _, unit in linked for fill in unit.get('cell_fills', [])
@@ -1472,13 +1697,13 @@ class _Assembler:
                     self.template(document, part, fills, chapter_id, target_id)
                 if target.get('response_form_pending'):
                     document.add_paragraph('本原式的逐条条款尚未完整展开，须按编制指南核定来源后填写。')
-                if wrote or forms[target_id]:
+                if wrote or heading_only or forms[target_id]:
                     shown_requirements.add(target_id)
                 if target["kind"] == "form" and not forms[target_id] and (target_id not in response_tables or native_requested):
-                    if not wrote:
+                    if not wrote and not heading_only:
                         document.add_paragraph("（原格式待补）")
                         self.gap("export_template_missing", "该填写位置尚无可用原格式。", chapter_id, target_id)
-                    else:
+                    elif wrote:
                         self.gap("export_template_layout_unverified", "已按原文行写出原式，字体和分页仍需核对。", chapter_id, target_id)
             elif _write_carried_source(document, target):
                 shown_requirements.add(target_id)
@@ -1550,10 +1775,13 @@ class _Assembler:
             render_covers(scope)
         else:
             document.add_heading(title, 0)
-        _toc(document, entries, self.display_paths)
+        catalog = _catalog_rows(entries, _catalog_labels(_literal_pages(self.artifacts, self.authoring_input)))
+        self.catalog_titles = {chapter["chapter_id"]: label for label, chapter in catalog if chapter is not None}
+        use_source_numbering = _uses_source_numbering(entries, self.catalog_titles)
+        _toc(document, entries, self.display_paths, catalog, self.catalog_titles, use_source_numbering)
         starting_path = next((self.display_paths[chapter['chapter_id']] for chapter, _ in entries
                               if chapter['chapter_id'] in self.display_paths), ())
-        numbering_id = _heading_numbering(document, starting_path)
+        numbering_id = None if use_source_numbering else _heading_numbering(document, starting_path)
         body_start = len(document.element.body) - 1
         for chapter, path in entries:
             if chapter.get("presentation_role", "body") == "cover":
