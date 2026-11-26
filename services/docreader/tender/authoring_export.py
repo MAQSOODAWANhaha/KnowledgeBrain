@@ -681,23 +681,50 @@ def _toc(document, entries, display_paths, catalog_rows=(), catalog_titles=None,
                         owner_id = root_of.get(path[:1])
                         if owner_id is not None:
                             descendants[owner_id].append((chapter, path))
-                matched_ids = {chapter['chapter_id'] for _label, chapter in catalog_rows if chapter is not None}
+                catalog_index = {
+                    chapter['chapter_id']: idx
+                    for idx, (_label, chapter) in enumerate(catalog_rows)
+                    if chapter is not None
+                }
                 listed = []
-                for label, chapter in catalog_rows:
-                    listed.append((label, chapter, (0,)))
-                    if chapter is not None:
-                        for child, child_path in descendants.get(chapter['chapter_id'], ()):
+                cursor = 0
+                last_catalog_pos = max(
+                    (idx for idx, (ch, _p) in enumerate(visible_roots) if ch['chapter_id'] in catalog_index),
+                    default=-1,
+                )
+                for root_pos, (chapter, path) in enumerate(visible_roots):
+                    cid = chapter['chapter_id']
+                    if cid in catalog_index:
+                        target_idx = catalog_index[cid]
+                        while cursor < target_idx:
+                            c_label, c_chapter = catalog_rows[cursor]
+                            if c_chapter is None:
+                                listed.append((c_label, None, (0,)))
+                            cursor += 1
+                        c_label, _c_chapter = catalog_rows[target_idx]
+                        listed.append((c_label, chapter, (0,)))
+                        for child, child_path in descendants.get(cid, ()):
                             listed.append((catalog_titles.get(child['chapter_id']) or _display_title(child['title']),
                                            child, child_path))
-                for chapter, path in visible_roots:
-                    if chapter['chapter_id'] in matched_ids:
-                        continue
-                    first_line = _source_first_line(chapter)
-                    if _SUBFORM_OR_MINOR_PREFIX.match(first_line) or _SUBFORM_OR_MINOR_PREFIX.match((chapter.get('title') or '').strip()):
-                        continue
-                    listed.append((_display_title(chapter['title']), chapter, path))
-                    for child, child_path in descendants.get(chapter['chapter_id'], ()):
-                        listed.append((_display_title(child['title']), child, child_path))
+                        cursor = max(cursor, target_idx + 1)
+                    else:
+                        if root_pos > last_catalog_pos:
+                            while cursor < len(catalog_rows):
+                                c_label, c_chapter = catalog_rows[cursor]
+                                if c_chapter is None:
+                                    listed.append((c_label, None, (0,)))
+                                cursor += 1
+                        first_line = _source_first_line(chapter)
+                        if _SUBFORM_OR_MINOR_PREFIX.match(first_line) or _SUBFORM_OR_MINOR_PREFIX.match((chapter.get('title') or '').strip()):
+                            continue
+                        listed.append((_display_title(chapter['title']), chapter, path))
+                        for child, child_path in descendants.get(cid, ()):
+                            listed.append((_display_title(child['title']), child, child_path))
+                while cursor < len(catalog_rows):
+                    c_label, c_chapter = catalog_rows[cursor]
+                    if c_chapter is None:
+                        listed.append((c_label, None, (0,)))
+                    cursor += 1
             elif use_source_numbering:
                 listed = []
                 for chapter, path in entries:

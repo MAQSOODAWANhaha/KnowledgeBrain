@@ -114,6 +114,7 @@ def test_bug338_multilevel_toc_headings_preserve_source_numbering_and_dedup_body
             chapter("ch1", "一、投标书", targets=[_source("一、投标书\n致：招标人")], children=[
                 chapter("ch1.1", "廉洁投标承诺书", targets=[_source("廉洁投标承诺书\n我方承诺")]),
             ]),
+            chapter("pledge", "独立承诺", targets=[_source("独立承诺\n郑重承诺")]),
             chapter("ch5", "五、投标保证金证明", targets=[_source("五、投标保证金证明")], children=[
                 chapter("ch5.1", "5-1 投标保证金采用电子保函形式（通宝函）",
                         targets=[_source("5-1 投标保证金采用电子保函形式（通宝函）\n保函正文")]),
@@ -145,6 +146,8 @@ def test_bug338_multilevel_toc_headings_preserve_source_numbering_and_dedup_body
 
     assert ("一、 投标书", 0) in toc_rows
     assert ("廉洁投标承诺书", 4) in toc_rows
+    assert ("独立承诺", 0) in toc_rows
+    assert toc_rows.index(("一、 投标书", 0)) < toc_rows.index(("独立承诺", 0)) < toc_rows.index(("五、 投标保证金证明及退款申请函", 0))
     assert ("五、 投标保证金证明及退款申请函", 0) in toc_rows
     assert ("5-1 投标保证金采用电子保函形式（通宝函）", 4) in toc_rows
     assert ("十一、 项目服务方案", 0) in toc_rows
