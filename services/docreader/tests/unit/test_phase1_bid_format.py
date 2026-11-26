@@ -888,3 +888,86 @@ async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tm
             directory_documents=documents, outline_only=True, directory_contract='bid_format_source_outline_v1')
         outline_fail = artifacts_fail.read_json(ref_fail)
         assert any(ch['title'] == '5-1 电子保函格式' for ch in outline_fail['chapters'])
+
+
+async def test_bug298_host_plan_preserves_wrapped_headings_and_dedups_word_body(tmp_path):
+    """BUG-298: host bid_format_plan joins wrapped titles, passes heading_lines, and rejects wrapped prose."""
+    from docreader.tender.directory_compile import bid_format_plan
+
+    pages = [
+        '第六章 投标文件格式\n'
+        '一、投标函\n'
+        '一、投标人如在本次招标中存在以下情形之一\n'
+        '甲方有权取消其中标资格\n'
+        '投标函正文。\n'
+        '八、投标人根据评标办法需要提供的其他商务\n'
+        '及技术文件\n'
+        '其他文件说明。\n'
+        '九、省级以上监狱管理局(含新疆生产建设兵团)出具的属于监狱\n'
+        '企业的证明文件\n'
+        '证明文件正文。\n'
+        '关于投标人符合中小企业政策要求的\n'
+        '声明函（8A）\n'
+        '中小企业声明正文。\n'
+        '十、跨页说明（测试\n',
+        '跨页尾行）\n'
+        '跨页正文。\n',
+    ]
+    documents = [{'document_id': 'tender', 'role': 'main', 'pages': pages,
+                  'line_units': [[] for _ in pages], 'unread_pages': [], 'ocr_issues': []}]
+
+    host_plan = bid_format_plan(documents)
+    assert host_plan is not None
+    by_name = {node['name']: node for node in host_plan['nodes']}
+    assert by_name['投标人根据评标办法需要提供的其他商务及技术文件']['heading_lines'] == 2
+    assert by_name['省级以上监狱管理局(含新疆生产建设兵团)出具的属于监狱企业的证明文件']['heading_lines'] == 2
+    assert by_name['关于投标人符合中小企业政策要求的声明函']['heading_lines'] == 2
+    assert not any(node['heading']['page'] == 0 and node['heading']['line'] == 14 and node.get('heading_lines', 1) > 1
+                   for node in host_plan['nodes'])
+
+    artifacts, outline = await _outline(tmp_path, documents=documents)
+    titles = _forms(outline)
+    assert '投标函' in titles
+    assert '投标人根据评标办法需要提供的其他商务及技术文件' in titles
+    assert '省级以上监狱管理局(含新疆生产建设兵团)出具的属于监狱企业的证明文件' in titles
+    assert '关于投标人符合中小企业政策要求的声明函' in titles
+    assert not any('存在以下情形之一' in title for title in titles)
+
+    exported = export_authoring_document(artifacts, outline, [])
+    document = Document(BytesIO(artifacts.read_bytes(exported['docx_ref'])))
+    texts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    heading_texts = [
+        paragraph.text.strip() for paragraph in document.paragraphs
+        if paragraph.style is not None and str(paragraph.style.name).startswith('Heading')
+    ]
+    assert any('省级以上监狱管理局(含新疆生产建设兵团)出具的属于监狱企业的证明文件' in text for text in heading_texts)
+    assert any('投标人根据评标办法需要提供的其他商务及技术文件' in text for text in heading_texts)
+    assert '企业的证明文件' not in texts
+    assert '及技术文件' not in texts
+    assert '声明函（8A）' not in texts
+
+
+def test_bug298_host_plan_wrapped_list_heading_keeps_full_window():
+    """BUG-298: a wrapped list-entry heading retains all its lines in body_windows."""
+    from docreader.tender.directory_compile import bid_format_plan, compile_directory
+
+    pages = [
+        '第六章 投标文件格式\n'
+        '一、投标人根据评标办法需要提供的其他商务\n'
+        '及技术文件\n'
+        '二、投标函\n'
+        '投标函正文。\n',
+    ]
+    documents = [{'document_id': 'tender', 'role': 'main', 'pages': pages,
+                  'line_units': [[] for _ in pages], 'unread_pages': [], 'ocr_issues': []}]
+    host_plan = bid_format_plan(documents)
+    assert host_plan is not None
+    wrapped = next(node for node in host_plan['nodes'] if node['name'] == '投标人根据评标办法需要提供的其他商务及技术文件')
+    assert wrapped['heading_lines'] == 2
+    assert wrapped['body_windows'] == [{'document_id': 'tender', 'page': 0, 'start_line': 1, 'end_line': 2}]
+    compiled = compile_directory(host_plan, documents)
+    form_titles = [chapter['title'] for chapter in compiled['chapters'] if chapter['title'] not in ('商务文件', '技术文件', '报价文件')]
+    assert form_titles == [
+        '投标人根据评标办法需要提供的其他商务及技术文件',
+        '投标函',
+    ]

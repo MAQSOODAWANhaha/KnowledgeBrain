@@ -2024,24 +2024,49 @@ _METRIC = re.compile(r'万元|％|%')
 
 
 def _join_wrapped_heading(rows, index):
-    """Join a layout wrap. Stop once the line is already one file label."""
+    """Join a layout wrap. Stop once the line is already one complete file label."""
     parts = [rows[index][4]]
-    if _single_form_title(parts[0]) or _ANNEX_ONLY.match(parts[0]):
+    if _ANNEX_ONLY.match(parts[0]):
+        return parts[0], 1
+    first_title = _single_form_title(parts[0])
+    if first_title and not _unfinished_label(rows, index, first_title):
         return parts[0], 1
     step = 1
-    while index + step < len(rows):
-        nxt = rows[index + step][4]
-        if (not nxt or _chapter_boundary(nxt) or _format_heading(nxt)
-                or _FORMAT_ITEM.match(nxt) or nxt.startswith('附件') or _single_form_title(nxt)):
+    while index + step < len(rows) and step < 4:
+        if (rows[index + step][0] != rows[index][0]
+                or rows[index + step][1] != rows[index][1]
+                or rows[index + step][2] != rows[index][2] + step):
             break
+        nxt = rows[index + step][4]
         prev = ''.join(parts)
-        if _single_form_title(prev) or prev.endswith(('。', '；')) or (_title_closed(prev) and not _unclosed(prev)):
+        subcode_tail = (
+            _SUBCODE_TITLE.match(nxt) is not None
+            and not _FORMAT_ITEM.match(nxt)
+            and not nxt.startswith('附件')
+            and not _title_closed(prev)
+            and not any(mark in prev for mark in '。；，：、')
+            and not prev[:1].isdigit()
+            and prev[:1] not in '（('
+            and not _FORMAT_ITEM.match(prev)
+            and len(prev) <= 24
+            and _single_form_title(prev + nxt) is not None
+        )
+        if (not nxt or _chapter_boundary(nxt) or _format_heading(nxt)
+                or _FORMAT_ITEM.match(nxt) or nxt.startswith('附件')
+                or nxt[:1] in '0123456789（(注致' or '：' in nxt[:6]
+                or (_single_form_title(nxt) and not subcode_tail)):
+            break
+        prev_title = _single_form_title(prev)
+        if prev_title and not _unfinished_label(rows, index + step - 1, prev_title):
+            break
+        if prev.endswith(('。', '；')) or (_title_closed(prev) and not _unclosed(prev)):
             break
         if len(nxt) > 24 and not _unclosed(prev):
             break
         parts.append(nxt)
         step += 1
-        if _single_form_title(''.join(parts)):
+        joined_title = _single_form_title(''.join(parts))
+        if joined_title and not _unfinished_label(rows, index + step - 1, joined_title):
             break
     return ''.join(parts), step
 
@@ -2070,7 +2095,8 @@ def _single_form_title(text):
         inner = rest[1:-1].strip()
         return inner if inner and '、' not in inner and '。' not in inner and len(inner) <= 30 else None
     core = _LABEL_NOTE.sub('', rest).strip()
-    if not core or '、' in core or _METRIC.search(core) or not 1 < len(core) <= 30:
+    max_len = 45 if core.endswith(_COMPLETE_END) else 30
+    if not core or '、' in core or _METRIC.search(core) or not 1 < len(core) <= max_len:
         return None
     return rest
 
@@ -2410,27 +2436,36 @@ def bid_format_plan(documents):
     if found is None:
         return None
     _anchor, section = found
-    forms, index, number_slot = [], 0, {}
+    forms, index, number_slot, slot_heading_lines = [], 0, {}, {}
     while index < len(section):
         text, step = _join_wrapped_heading(section, index)
         code = _line_code(section[index][4]) or _line_code(text)
         if code:
-            number_slot.setdefault(code[0], (section[index][0], section[index][1], section[index][2]))
+            slot = (section[index][0], section[index][1], section[index][2])
+            if code[0] not in number_slot:
+                number_slot[code[0]] = slot
+                slot_heading_lines[slot] = step
         if _annex_without_file_name(section[index][4]):
             resolved = _resolve_annex_title(section, index, code)
             if resolved:
                 name, name_at = resolved
                 forms.append(_form(name, code, section[name_at], index, number_slot,
-                                   list_item=False, body_from=(section[index][0], section[index][1], section[index][2])))
+                                   list_item=False, body_from=(section[index][0], section[index][1], section[index][2]),
+                                   slot_heading_lines=slot_heading_lines))
                 index = _next_annex(section, index + 1)
                 continue
         title = _single_form_title(text)
-        if title and (_in_metric_run(section, index) or _unfinished_label(section, index, title)):
+        if title and (_in_metric_run(section, index) or _unfinished_label(section, index + step - 1, title)):
             title = None
+        if title and step > 1 and _FORMAT_ITEM.match(text) and not _unclosed(section[index][4]):
+            if not _LABEL_NOTE.sub('', title).strip().endswith(_COMPLETE_END):
+                title = None
         row = section[index]
         if title:
             forms.append(_form(title, code, row, index, number_slot,
-                               list_item=_list_heading(section, index + step)))
+                               list_item=_list_heading(section, index + step),
+                               heading_lines=step, source_text=text,
+                               slot_heading_lines=slot_heading_lines))
         index += step
     if not forms:
         return None
@@ -2479,10 +2514,15 @@ def bid_format_plan(documents):
         if number:
             number_ids[number] = identity
         node = {'id': identity, 'heading': point, 'parent_id': parent, 'response_kind': 'form', 'name': form['name']}
+        if form.get('heading_lines', 1) > 1:
+            node['heading_lines'] = form['heading_lines']
         node['body_windows'] = form['fixed_windows'] if form.get('fixed_windows') is not None else _form_windows(section, form, stops.get(id(form)))
         nodes.append(node)
         order_id, order_page, order_line = form['order_point']
-        entries.append({'name': {'document_id': order_id, 'page': order_page, 'line': order_line}})
+        entry = {'name': {'document_id': order_id, 'page': order_page, 'line': order_line}}
+        if form.get('order_heading_lines', 1) > 1:
+            entry['heading_lines'] = form['order_heading_lines']
+        entries.append(entry)
         adopted.append({'node_id': identity, 'entry': len(entries) - 1, 'depth': 'self', 'presentation': 'section', 'clause': []})
     first = chosen[order[0]]['point']
     return {'nodes': nodes,
@@ -2497,10 +2537,11 @@ def _form_start(form):
 
 
 def _form_windows(section, form, stop):
-    """Copy this form until the next form. A format-list line stays one line."""
+    """Copy this form until the next form. A format-list line stays one heading."""
     document_id, page, line = form['point']
     if form['list']:
-        return [{'document_id': document_id, 'page': page, 'start_line': line, 'end_line': line}]
+        return [{'document_id': document_id, 'page': page,
+                 'start_line': line, 'end_line': line + form.get('heading_lines', 1) - 1}]
     start = _form_start(form)
     windows, begun = [], False
     for doc, number, index, _raw, _text in section:
@@ -2523,14 +2564,18 @@ def _enum_mark(text):
     return match.group('label') if match is not None and match.group('label') else None
 
 
-def _form(name, code, row, index, number_slot, *, list_item, body_from=None):
+def _form(name, code, row, index, number_slot, *, list_item, body_from=None,
+          heading_lines=1, source_text=None, slot_heading_lines=None):
     key = code if code else ('name', _label_key(name))
     point = (row[0], row[1], row[2])
     # The first time this annex number appears fixes the outline order. Subforms stay with it.
     slot = number_slot.get(code[0], point) if code else point
+    order_heading_lines = (slot_heading_lines or {}).get(slot, heading_lines) if slot != point else heading_lines
     return {'name': name, 'key': key, 'point': point, 'order_point': slot, 'list': list_item,
             'slot': slot, 'letter': code[1] if code else '', 'index': index,
-            'mark': _enum_mark(row[4]), 'source': row[4], 'body_from': body_from or point}
+            'mark': _enum_mark(row[4]), 'source': source_text if source_text is not None else row[4],
+            'body_from': body_from or point,
+            'heading_lines': heading_lines, 'order_heading_lines': order_heading_lines}
 
 
 def _same_listed_form(old, new):
@@ -2554,6 +2599,7 @@ def _prefer_form(old, new):
     earlier = old if old['index'] <= new['index'] else new
     name = _shorter_listed_name(old, new, chosen)
     return {**chosen, 'name': name, 'order_point': earlier['order_point'],
+            'order_heading_lines': earlier.get('order_heading_lines', 1),
             'slot': earlier['slot'], 'index': earlier['index']}
 
 

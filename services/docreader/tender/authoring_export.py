@@ -290,6 +290,7 @@ _SUBFORM_OR_MINOR_PREFIX = re.compile(
     r"|[（(][一二三四五六七八九十百千]+[）)]"
     r"|\d+(?:\.\d+)+\s+)"
 )
+_TRAILING_SUBCODE = re.compile(r"(?:的?格式)?\s*[（(]\s*[0-9０-９]+\s*[A-Za-z]?\s*[）)]\s*$")
 
 
 def _strip_sub_number(text):
@@ -354,8 +355,8 @@ def _is_duplicate_heading_line(heading_text, first_line):
         return False
     if f_compact == h_compact:
         return True
-    h_core = _compact_heading(_strip_sub_number(h_strip))
-    f_core = _compact_heading(_strip_sub_number(f_strip))
+    h_core = _compact_heading(_TRAILING_SUBCODE.sub("", _strip_sub_number(h_strip)))
+    f_core = _compact_heading(_TRAILING_SUBCODE.sub("", _strip_sub_number(f_strip)))
     if f_core and h_core and f_core == h_core:
         return True
     if len(f_strip) <= 60:
