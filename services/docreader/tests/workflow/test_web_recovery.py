@@ -207,3 +207,21 @@ async def test_recovery_actions_reach_authenticated_dispatch(runtime, monkeypatc
     assert view["recovery"]["can_retry"] and blob == b""
     accepted, _ = await handle_command(payload(runtime, "analysis.retry", **retry_body(run, command)))
     assert accepted["analysis"]["run_id"] == run["run_id"]
+
+
+async def test_execution_config_drift_failure_surfaces_specific_reason_and_notice(runtime):
+    await upload(runtime)
+    started = await runtime.bridge.start_analysis(payload(runtime, request_key="config-drift-fixture"))
+    run = await runtime.bridge.store.get_run(started["analysis"]["run_id"])
+    command = run["commands"][-1]
+    lease = await runtime.bridge.store.acquire(run["run_id"], command["command_id"], 1)
+    assert lease is not None
+    await runtime.bridge.store.pin_execution_spec(lease, {"workflow_protocol": WORKFLOW_PROTOCOL})
+    await runtime.bridge.store.release(
+        lease, "failed", error="Conflict", metadata={"reason": "execution_config_changed"},
+    )
+    view = _required((await analysis_recovery(runtime.bridge, payload(runtime)))["recovery"])
+    assert view["can_retry"]
+    assert view["failure_reason"] == "execution_config_changed"
+    assert "执行配置" in view["notice"]
+    assert "已用尽重试" not in view["notice"]

@@ -42,7 +42,7 @@ class AnalysisModel:
         self.calls, self.options = calls, options
 
     def execution_spec(self):
-        return {"test_fixture": "analysis-v2"}
+        return {"test_fixture": "analysis-v2", **self.options.get("spec_override", {})}
 
     def request_budget(self):
         return self.options.get("request_budget") or RequestBudget()
@@ -399,10 +399,26 @@ async def test_correction_revalidates_all_packs_and_invalidates_old_confirmation
 
     await store.confirm(run["run_id"], 1, revised["checklist_digest"], "new-confirmation", domain_revision=2)
     before_confirm = len(calls)
+    confirm_command = (await store.get_run(run["run_id"]))["commands"][-1]
+    lease = await store.acquire(run["run_id"], confirm_command["command_id"], 1)
+    assert lease is not None
+    # Non-confirm preparation still strictly enforces pinned request_budget and execution_spec.
     with pytest.raises(Conflict, match="request budget changed within an immutable domain revision"):
-        await execute_analysis(analysis_runtime)
-    assert (await execute_analysis(analysis_runtime, request_budget=revision_budget))["status"] == "analysis-ready"
+        await TenderNodes(store, artifacts, lease, AnalysisModel(store, artifacts, lease, calls, {})).prepare()
+    with pytest.raises(Conflict, match="execution configuration changed"):
+        await TenderNodes(store, artifacts, lease, AnalysisModel(
+            store, artifacts, lease, calls, {"request_budget": revision_budget, "spec_override": {"prompts": {"extract": "deployed-prompt"}}}
+        )).prepare()
+    await store.release(lease, "retry")
+
+    # Resuming the non-LLM confirm interrupt succeeds even when both budget and prompts changed across deploys.
+    ready = await execute_analysis(
+        analysis_runtime,
+        spec_override={"prompts": {"extract": "deployed-prompt"}},
+    )
+    assert ready["status"] == "analysis-ready"
     assert len(calls) == before_confirm
+    assert ready["revision"]["execution_spec"] == revised["revision"]["execution_spec"]
 
 
 async def test_cancel_and_real_source_revision_do_not_reuse_old_confirmation(analysis_runtime):
@@ -482,3 +498,34 @@ async def test_status_projects_current_items_from_verified_refs(analysis_runtime
     assert {p["phase"] for p in observation["plans"]} == {"extract", "review"}
     assert observation["plans"][0]["planned_requests"] == len(status["results"]["pack-plan"]["packs"])
     assert observation["calibration_status"] == "observations_only"
+
+
+async def test_bug348_mid_analysis_config_drift_fails_fast_with_execution_config_changed(analysis_runtime, monkeypatch):
+    store, _, _, run, _ = analysis_runtime
+    original, tripped = Store.commit_artifact, []
+
+    async def fail_extract_commit(self, lease, stage, *args, **kwargs):
+        if stage == "extract-pack" and not tripped:
+            tripped.append(stage)
+            raise ConnectionError("simulated mid-extract worker interruption")
+        return await original(self, lease, stage, *args, **kwargs)
+
+    monkeypatch.setattr(Store, "commit_artifact", fail_extract_commit)
+    with pytest.raises(ConnectionError, match="simulated mid-extract worker interruption"):
+        await execute_analysis(analysis_runtime)
+
+    mid_run = await store.get_run(run["run_id"])
+    assert mid_run["status"] == "pending"
+    assert mid_run["revision"]["execution_spec"] is not None
+
+    with pytest.raises(Conflict, match="execution configuration changed"):
+        await execute_analysis(analysis_runtime, spec_override={"prompts": {"extract": "changed-prompt"}})
+
+    failed = await store.get_run(run["run_id"])
+    assert failed["status"] == "failed"
+    assert failed["commands"][-1]["infrastructure_failures"] == 1
+    assert failed["commands"][-1]["receipt"] == {
+        "status": "failed",
+        "epoch": failed["epoch"],
+        "metadata": {"reason": "execution_config_changed"},
+    }

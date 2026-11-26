@@ -250,16 +250,16 @@
 
 ## BUG-348：发布改动提示词后，等待人工确认的分析无法确认
 
-- 状态：待设计。
+- 状态：已修，待真实部署与工作台复验。
 - 现象与影响：BiddingFile 实跑中分析完成、361 条问题已逐条判定后，重建并发布了包含 `extract.md`、`verify.md` 修改的镜像；提交人工确认后，确认命令连续 4 次 `Conflict: execution configuration changed within a domain revision`，分析变为「执行失败」，恢复区只显示「已用尽重试」。人工判定白做，只能重新分析并重新付费。
-- 根因：每个分析修订固定执行规格（工作流协议、模型端点、全部提示词哈希，见 `services/docreader/llm/client.py` 的 `execution_spec`）；确认节点不调用模型，但续跑同样比对完整规格，任何提示词变化都会拒绝。
-- 改法：待定。需要决定确认等不调用模型的阶段是否只比对它实际依赖的规格，或在发布前阻止/提示存在待确认分析；同时失败原因需在恢复区写明是「执行配置已变化」。
-- 验证：未开始。
+- 根因：每个分析修订固定执行规格（工作流协议、模型端点、全部提示词哈希，见 `services/docreader/llm/client.py` 的 `execution_spec`）；确认节点不调用模型，但 `execute_command` 在任意续跑前统一调用 `prepare()` 比对完整 `execution_spec`/`source_spec`/`request_budget`，且外层对所有 `Conflict` 均计入 4 次重试兜底而不是立即明确失败原因。
+- 改法：`workflow/runner.py` 在执行前读取检查点状态，当命令为 `resume` 且正处于 `confirm` 人工中断恢复时仅传入 `resuming_confirmation=True`，`TenderNodes.prepare` 保留 `workflow_protocol` 只读兼容检查并跳过模型提示词、解析器与预算比对（仍保留修订原 `execution_spec` 与 `checklist_digest`/`issue_resolutions` 校验）；未到 `confirm` 阶段的模型配置/预算/输入冲突在 `runner.py` 立即以 `failed` 结束并写入 `metadata.reason = "execution_config_changed"`；`web_recovery.py` 与前端 `AnalysisRecovery.tsx` 按该原因给出明确说明，与重试用尽区分。
+- 验证：`tests/unit/test_bug348_confirm_execution_spec.py`、`tests/acceptance/test_analysis.py`、`tests/workflow/test_web_recovery.py` 与 Playwright `analysis-status.spec.ts` 均覆盖通过；待真实部署窗口期复验。
 
 ## BUG-349：一份 118 页招标文件产生 361 条人工待确认问题，多数是分包视野造成的噪声
 
-- 状态：待设计。
+- 状态：前端已修，后端降噪待设计。
 - 现象与影响：BiddingFile 分析产生 361 条问题且全部进入 `human_issue_ids`，确认前必须逐条选择判定并填写理由，没有批量处理；表单每改一处整列表重渲染，填到第 250 条时单条操作已需数秒。按类型：`unresolved_cross_reference` 137、`unresolved_source_range` 26、`evidence_quote_mismatch` 21、`missing_referenced_text` 17、`extraction_disposition_unresolved` 10，其余 30 余类各 1–11 条。约 165 条的说明是「本视图/本工作单元未给出被引用条款」，而被引用的招标公告、须知条款就在同一份上传文件里；17 条是财务报表表头被拆成「负债」「流动」等孤立碎片。
-- 根因：待查。已知事实：抽取按分包工作，模型只看到本包视图，跨包引用被记成待人工问题；宿主没有用全文件目录先行消解跨包引用，也没有按问题类型分级；碎片来自财务表格的版式解析。
-- 改法：待定，属于分析链路与 Prompt 变更，需先答变更五问。方向：宿主用整份文件消解跨包引用后只把真正找不到的交人工；引文定位失败与处置缺失属宿主核验问题，不应要求人工逐条判定；人工复核界面提供按类型批量判定并虚拟化长列表。
-- 验证：未开始。
+- 根因：前端工作台每次按键重渲染全量表单并全量序列化 `working.base` 进 `sessionStorage`；后端抽取按分包工作、模型只看到本包视图，跨包引用被记成待人工问题，宿主尚未用全文件目录先行消解跨包引用或按问题类型分级，财务表格版式解析产生孤立表头碎片。
+- 改法：前端 `web/src/bid/AnalysisReview.tsx` 与 `analysisReviewHelpers.ts` 已改为 `React.memo` 行组件、`Map`/`Set` $O(N)$ 索引、预序列化不可变基线与防抖草稿缓存、20 项分页及按问题类型/状态筛选与批量人工判定（保留已有手动判定）。后端全文件跨包引用消解与非语义问题分级属于分析链路与 Prompt 变更，待按变更五问完成设计。
+- 验证：前端单元测试 `analysisReviewHelpers.test.ts` 与 Playwright `analysis-review.spec.ts`（含分组批量判定与 250 条分页批量确认）已通过；后端降噪待设计与实跑复验。

@@ -68,6 +68,8 @@ async def analysis_recovery(bridge, payload):
             reason = ((command.get("receipt") or {}).get("metadata") or {}).get("reason")
             if reason in {"infrastructure_retries_exhausted", "model_work_unit_retries_exhausted"}:
                 notice = "本次执行已用尽重试。请先核对故障原因，再继续原任务；成功回执保留，未完成调用仍可能产生费用。"
+            elif reason == "execution_config_changed":
+                notice = "执行配置（提示词、模型或预算）在当前分析修订中已变化，无法以新配置继续未完成的模型阶段；请恢复原部署配置后再继续原任务，或重新提交分析。"
     return {"recovery": _view(run, command, blocker, notice)}
 
 

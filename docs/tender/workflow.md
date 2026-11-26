@@ -39,7 +39,7 @@
 ### 状态、修订与恢复
 
 - 运行状态：`pending` / `running` / `blocked`（硬阻断）/ `waiting-confirmation`（待人工裁决语义疑点）/ `failed` / `cancelled` / `analysis-ready`。
-- 版本隔离：来源变更升 `source_version`；同源纠错升 `domain_revision` 并使旧确认失效；协议格式由 `schema_version` 隔离；问题决议按 `issue_id` 与版本绑定，不按 code 批量清除；必要缺件经 `revise` 的 `expected_document_ids` 声明。
+- 版本隔离：来源变更升 `source_version`；同源纠错升 `domain_revision` 并使旧确认失效；协议格式由 `schema_version` 隔离；问题决议按 `issue_id` 与版本绑定，不按 code 批量清除；必要缺件经 `revise` 的 `expected_document_ids` 声明；`confirm` 阶段不调用模型或解析器，从人工确认中断点续跑时只核对 `workflow_protocol` 兼容性与确认摘要/决议并保留该修订原固定的 `execution_spec`，允许跨越提示词、解析器或请求预算部署完成确认；仍在模型/解析阶段的续跑继续严格校验 `execution_spec`、`source_spec` 与 `request_budget`，配置变化时立即以 `execution_config_changed` 失败。
 - 恢复边界见 [字段字典 · 失败执行的显式恢复](field-dictionary.md#失败执行的显式恢复)；在途 `sent` 禁止并发重发，改提示/重分包不重置已有额度。
 
 ---

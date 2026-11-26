@@ -1,6 +1,7 @@
 """A queue task owns one fenced graph invocation, ending at persistent interrupt."""
 import asyncio
 from contextlib import suppress
+import inspect
 from typing import Any, cast
 
 import psycopg
@@ -10,11 +11,26 @@ from psycopg import AsyncConnection
 from psycopg.rows import AsyncRowFactory, TupleRow, dict_row
 
 from docreader.integrations.artifacts import ArtifactStore
-from docreader.integrations.store import Cancelled, StaleExecution, Store
+from docreader.integrations.store import Cancelled, Conflict, StaleExecution, Store
 from docreader.llm.request import ModelWorkUnitExhausted
+from docreader.tender.status import RunStatus
 from docreader.workflow.graph import build_graph
 from docreader.workflow.persistence import FencedPostgresSaver
-from docreader.tender.status import RunStatus
+
+_CONFIG_CONFLICT_MARKERS = (
+    "execution configuration changed",
+    "request budget changed",
+    "execution protocol changed",
+    "artifact inputs changed",
+)
+
+
+def _config_conflict_reason(error: Conflict) -> str | None:
+    """Classify deterministic config/spec drift so operators see the real blocker instead of retry exhaustion."""
+    message = str(error).lower()
+    if any(marker in message for marker in _CONFIG_CONFLICT_MARKERS):
+        return "execution_config_changed"
+    return None
 
 
 async def execute_command(run_id, command_id, source_version, settings, node_factory):
@@ -33,13 +49,24 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
         ) as conn:
             saver = FencedPostgresSaver(conn, store, lease)
             nodes = node_factory(store, artifacts, lease)
-            if hasattr(nodes, "prepare"):
-                await nodes.prepare()
-            graph = build_graph(nodes, saver)
             config: RunnableConfig = {"configurable": {"thread_id": f"{run_id}:{source_version}:{lease.domain_revision}"}}
-            previous = await graph.aget_state(config)
             cmd = await store.get_command(command_id)
-            if cmd["kind"] == "resume" and any(task.interrupts for task in previous.tasks):
+            graph = None
+            previous = None
+            resuming_confirmation = False
+            if cmd is not None and cmd["kind"] == "resume":
+                graph = build_graph(nodes, saver)
+                previous = await graph.aget_state(config)
+                resuming_confirmation = any(task.name == "confirm" and task.interrupts for task in previous.tasks)
+            if hasattr(nodes, "prepare"):
+                if resuming_confirmation and "resuming_confirmation" in inspect.signature(nodes.prepare).parameters:
+                    await nodes.prepare(resuming_confirmation=True)
+                else:
+                    await nodes.prepare()
+            if graph is None or previous is None:
+                graph = build_graph(nodes, saver)
+                previous = await graph.aget_state(config)
+            if cmd is not None and cmd["kind"] == "resume" and any(task.interrupts for task in previous.tasks):
                 value = Command(resume={key: value for key, value in cmd["payload"].items() if key != "retry"})
             elif previous.values:
                 value = None
@@ -79,6 +106,15 @@ async def execute_command(run_id, command_id, source_version, settings, node_fac
         with suppress(StaleExecution, psycopg.Error):
             await store.release(lease, cast(RunStatus, RunStatus.FAILED), error=type(error).__name__,
                                 metadata={"reason": "model_work_unit_retries_exhausted"})
+        raise
+    except Conflict as error:
+        reason = _config_conflict_reason(error)
+        with suppress(StaleExecution, psycopg.Error):
+            if reason is not None:
+                await store.release(lease, cast(RunStatus, RunStatus.FAILED), error=type(error).__name__,
+                                    metadata={"reason": reason})
+            else:
+                await store.release(lease, "retry", error=type(error).__name__)
         raise
     except Exception as error:
         with suppress(StaleExecution, psycopg.Error):

@@ -18,6 +18,7 @@ const CATEGORY: Record<FailureCategory, string> = {
 const REASON: Record<string, string> = {
   model_work_unit_retries_exhausted: "同一工作单元已用尽重试。",
   infrastructure_retries_exhausted: "执行环境（发布、数据库或执行器）故障已用尽重试。",
+  execution_config_changed: "执行配置（提示词、模型或预算）已变化，无法以新配置继续原分析修订。",
 };
 const identity = (value: AnalysisRecoveryView | null) => value && `${value.run_id}:${value.source_version}:${value.domain_revision}:${value.failed_command_id}`;
 

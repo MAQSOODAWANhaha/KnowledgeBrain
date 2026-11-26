@@ -103,7 +103,7 @@ class TenderNodes:
             return spec
         await self._save("source-spec", produce, inputs=spec)
 
-    async def prepare(self):
+    async def prepare(self, *, resuming_confirmation: bool = False):
         # A completed checkpoint can skip every node, so recovery guards belong here too.
         revision = await self.store.get_revision(self.lease)
         row = await self.store.get_run(self.lease.run_id)
@@ -116,6 +116,8 @@ class TenderNodes:
         if ((spec is not None and spec.get("workflow_protocol") != WORKFLOW_PROTOCOL)
                 or (spec is None and row["artifacts"] and not inherited_analysis)):
             raise Conflict("execution protocol changed; prior revisions are read-only, submit a new analysis run")
+        if resuming_confirmation:
+            return
         await self._execution_spec()
         await self._pin_source_spec()
         # Plan capacity is revision-owned, while native parser identity is shared.

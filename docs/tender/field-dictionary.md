@@ -346,10 +346,7 @@ issue_id集合必须恰好等于`human_issue_ids`，没有待处理问题时省�
 持久计次。逻辑摘要移除顶层contract_feedback，保留其余完整请求身份；完整request_digest仍用于
 缓存和付费围栏。Store在转sent的同一事务按完整request_digest核对已发送意图：不同完整摘要
 不超过3个，同一完整摘要的重发合计不超过4次；缓存复用不计次，重启不重置。发送前错误也
-受同一上限约束。单元耗尽明确failed，
-队列不再叠加模型重试；成功子产物不重做。发布、数据库、普通代码异常和执行器丢失保留
-同命令四次外层兜底，历史SQL字段`infrastructure_failures`仅用于该执行计数，不新增状态、
-配置项或计数表。过期执行由接管方结算一次失租失败；重复投递不重复计数。
+受同一上限约束。模型工作单元耗尽明确 failed 并记录 `metadata.reason = "model_work_unit_retries_exhausted"`，队列不再叠加模型重试；成功子产物不重做。在模型阶段遇到执行配置冲突（`execution configuration changed`、`request budget changed`、`execution protocol changed` 或 `artifact inputs changed`）时立即以 `failed` 结束并记录 `metadata.reason = "execution_config_changed"`，不消耗 4 次基础设施重试额度；从 `confirm` 中断点恢复时仅校验 `workflow_protocol` 兼容性，不因提示词、解析器或请求预算变化阻断已完成的分析确认。发布、数据库、普通代码异常和执行器丢失保留同命令四次外层兜底，耗尽时记录 `metadata.reason = "infrastructure_retries_exhausted"`；历史 SQL 字段 `infrastructure_failures` 仅用于该执行计数，不新增状态、配置项或计数表。过期执行由接管方结算一次失租失败；重复投递不重复计数。
 旧Worker取消/版本或租约失效后停止执行；并发兄弟中取消或失租优先传播，其次是单元
 额度耗尽，不能被另一个可重试错误掩盖。业务blocked不是执行异常，继续走独立核验与现有裁决入口。
 

@@ -71,3 +71,21 @@ test("a failed analysis names its failure cause, requires a reason, and reports 
   await expect(region).not.toContainText("已取消");
   await expect(region).not.toContainText("无需恢复");
 });
+
+test("an analysis halted by deployment config drift names execution_config_changed instead of retry exhaustion", async ({ page }) => {
+  const f = await fixture(page);
+  Object.assign(f.view.analysis!, { status: "failed", progress: progress("failed") });
+  const recovery: AnalysisRecoveryView = {
+    run_id: "analysis", source_version: 1, domain_revision: 1, status: "failed",
+    failed_command_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", can_retry: true, blocker: null, saved_responses: 12,
+    notice: "执行配置（提示词、模型或预算）在当前分析修订中已变化，无法以新配置继续未完成的模型阶段；请恢复原部署配置后再继续原任务，或重新提交分析。",
+    failure_reason: "execution_config_changed",
+    failure_causes: [],
+  };
+  await page.route("**/analysis/recovery", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ recovery }) }));
+  await page.goto(`/#/bids/${project}/analysis`);
+  const region = page.getByRole("region", { name: "分析任务恢复", exact: true });
+  const cause = region.getByRole("group", { name: "故障原因", exact: true });
+  await expect(cause).toContainText("执行配置（提示词、模型或预算）已变化，无法以新配置继续原分析修订。");
+  await expect(region).toContainText("无法以新配置继续未完成的模型阶段");
+});
