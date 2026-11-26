@@ -113,24 +113,19 @@ class ModelConfig:
 
 
 def _outline(values: Mapping[str, str], chat: ModelEndpoint) -> ModelEndpoint | None:
-    url = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_BASE_URL")
-    key = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_API_KEY", secret=True)
     model = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_MODEL")
-    raw_context = _setting(values, "KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS")
     effort = normalize_reasoning_effort(_setting(values, "KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT") or None)
-    if not any((url, key.strip(), model, raw_context)):
-        if effort is None:
-            return None
-        return ModelEndpoint(chat.base_url, chat.api_key, chat.model, chat.context_tokens, reasoning_effort=effort)
-    if not _valid_url(url) or not key.strip() or not model or model == "stub-chat":
-        raise ModelConfigurationError("valid OUTLINE base URL, API key and model are required")
-    try:
-        context = int(raw_context)
-    except ValueError:
-        context = 0
-    if not raw_context.isascii() or not raw_context.isdecimal() or not 1 <= context <= 4_194_304:
-        raise ModelConfigurationError("KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS must be an integer between 1 and 4194304")
-    return ModelEndpoint(url, key, model, context, reasoning_effort=effort)
+    if not model and effort is None:
+        return None
+    if model == "stub-chat":
+        raise ModelConfigurationError("valid OUTLINE model is required")
+    return ModelEndpoint(
+        chat.base_url,
+        chat.api_key,
+        model or chat.model,
+        chat.context_tokens,
+        reasoning_effort=effort,
+    )
 
 
 def _vision(values: Mapping[str, str], chat: ModelEndpoint) -> ModelEndpoint:

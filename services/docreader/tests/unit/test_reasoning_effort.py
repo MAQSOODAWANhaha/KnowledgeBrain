@@ -38,11 +38,23 @@ async def test_explicit_environment_option_reaches_real_analysis_body_and_execut
     assert 'max_tokens' not in sent[0] and 'max_completion_tokens' not in sent[0]
 
 
-@pytest.mark.parametrize('value', ['unsupported-secret-value', 'xhigh', 'none'])
+@pytest.mark.parametrize('value', ['unsupported-secret-value', 'turbo', 'ultra'])
 def test_invalid_explicit_option_is_a_configuration_error_without_echoing_value(value):
     with pytest.raises(ModelConfigurationError) as error:
         ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT=value))
     assert value not in str(error.value)
+
+
+@pytest.mark.parametrize('value', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+def test_all_standard_reasoning_effort_values_are_accepted_for_chat_and_outline(value):
+    cfg = ModelConfig.from_env(environment(
+        KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT=f' {value.upper()} ',
+        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT=f' {value} ',
+    ))
+    assert cfg.chat.reasoning_effort == value
+    assert cfg.for_outline().chat.reasoning_effort == value
+    req = build_request(cfg.chat.model, 'Return JSON.', {'fixture': True}, reasoning_effort=value)
+    assert req['reasoning_effort'] == value
 
 
 @pytest.mark.parametrize('value', [None, '', '   '])
@@ -306,35 +318,36 @@ async def test_document_option_mismatch_is_rejected_before_any_input_or_cached_e
                                run_id='fixture-run', source_version=1, domain_revision=1)
 
 
-def test_outline_model_tiering_supports_effort_override_and_dedicated_fast_endpoint():
+def test_outline_model_tiering_reuses_chat_endpoint_with_optional_model_and_effort():
     plain = ModelConfig.from_env(environment(KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high'))
     assert plain.outline is None and plain.for_outline() is plain
 
     lighter = ModelConfig.from_env(environment(
         KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high',
-        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='low',
+        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='none',
     ))
     assert lighter.chat.reasoning_effort == 'high'
     outline_only = lighter.for_outline()
     assert outline_only.chat.model == lighter.chat.model
     assert outline_only.chat.base_url == lighter.chat.base_url
-    assert outline_only.chat.reasoning_effort == 'low'
+    assert outline_only.chat.api_key == lighter.chat.api_key
+    assert outline_only.chat.context_tokens == lighter.chat.context_tokens
+    assert outline_only.chat.reasoning_effort == 'none'
 
     dedicated = ModelConfig.from_env(environment(
         KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high',
-        KNOWLEDGEBRAIN_OUTLINE_BASE_URL='https://fast.invalid/v1',
-        KNOWLEDGEBRAIN_OUTLINE_API_KEY='synthetic-outline-secret',
         KNOWLEDGEBRAIN_OUTLINE_MODEL='fast-outline-model',
-        KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS='65536',
     ))
     fast_cfg = dedicated.for_outline()
     assert fast_cfg.chat.model == 'fast-outline-model'
-    assert fast_cfg.chat.context_tokens == 65536
+    assert fast_cfg.chat.base_url == dedicated.chat.base_url
+    assert fast_cfg.chat.api_key == dedicated.chat.api_key
+    assert fast_cfg.chat.context_tokens == dedicated.chat.context_tokens
     assert fast_cfg.chat.reasoning_effort is None  # Never silently inherits chat.reasoning_effort.
     assert dedicated.chat.model == 'gpt-4o' and dedicated.chat.reasoning_effort == 'high'
 
     with pytest.raises(ModelConfigurationError):
-        ModelConfig.from_env(environment(KNOWLEDGEBRAIN_OUTLINE_MODEL='fast-only'))
+        ModelConfig.from_env(environment(KNOWLEDGEBRAIN_OUTLINE_MODEL='stub-chat'))
 
     with pytest.raises(ModelConfigurationError) as bad:
         ModelConfig.from_env(environment(KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='secret-bad-effort'))
@@ -342,7 +355,7 @@ def test_outline_model_tiering_supports_effort_override_and_dedicated_fast_endpo
 
 
 @pytest.mark.parametrize('operation,expected_model,expected_effort', [
-    ('outline', 'fast-outline-model', 'low'),
+    ('outline', 'fast-outline-model', 'none'),
     ('document', 'gpt-4o', 'high'),
 ])
 async def test_web_job_routes_only_outline_operation_to_configured_outline_tier(
@@ -353,11 +366,8 @@ async def test_web_job_routes_only_outline_operation_to_configured_outline_tier(
 
     config = ModelConfig.from_env(environment(
         KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT='high',
-        KNOWLEDGEBRAIN_OUTLINE_BASE_URL='https://fast.invalid/v1',
-        KNOWLEDGEBRAIN_OUTLINE_API_KEY='synthetic-outline-secret',
         KNOWLEDGEBRAIN_OUTLINE_MODEL='fast-outline-model',
-        KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS='65536',
-        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='low',
+        KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT='none',
     ))
     monkeypatch.setattr(ModelConfig, 'from_env', classmethod(lambda _: config))
     job = {'status': 'pending', 'project_id': 'fixture-project', 'payload': {'owner_user_id': 'fixture-owner',

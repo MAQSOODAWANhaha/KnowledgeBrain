@@ -21,7 +21,7 @@ Neo4j（`knowledge` profile）与 OnlyOffice（`editing` profile）不随招标�
 - `KNOWLEDGEBRAIN_CHAT_BASE_URL/API_KEY/MODEL` 和整数 `KNOWLEDGEBRAIN_CHAT_MAX_CONTEXT_TOKENS`。
 
 上下文 `131072` 是用户当前选择，而非永久代码上限。其余预算、超时、并发使用默认；
-无需 `KB_TENDER_AGENT_LIMITS` 或 tokenizer calibration JSON。Python 图片处理独立读取 `KNOWLEDGEBRAIN_VLM_BASE_URL/API_KEY/MODEL`，三项均需配置，不自动复用 Chat 配置或按模型名猜测能力。大纲生成可选配置 `KNOWLEDGEBRAIN_OUTLINE_*`（仅填 `KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT` 时复用 Chat 端点并覆盖思考档位；配置独立快模型时须同时提供 `BASE_URL/API_KEY/MODEL/MAX_CONTEXT_TOKENS`，不继承 Chat 凭据；全空时沿用 Chat）。
+无需 `KB_TENDER_AGENT_LIMITS` 或 tokenizer calibration JSON。Python 图片处理独立读取 `KNOWLEDGEBRAIN_VLM_BASE_URL/API_KEY/MODEL`，三项均需配置，不自动复用 Chat 配置或按模型名猜测能力。思考档位环境变量 `KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT` 与 `KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT` 支持标准值 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`（留空则请求不带 `reasoning_effort`）。大纲生成直接复用 `KNOWLEDGEBRAIN_CHAT_BASE_URL`/`API_KEY`/`MAX_CONTEXT_TOKENS`，仅按需提供 `KNOWLEDGEBRAIN_OUTLINE_MODEL` 与 `KNOWLEDGEBRAIN_OUTLINE_REASONING_EFFORT` 覆盖模型名或思考档位（全空时沿用 Chat）。
 招标模式 `KNOWLEDGEBRAIN_KNOWLEDGE_ENABLED=false`，不以空 Embedding 地址伪装就绪。
 
 配置优先级为进程环境、显式 env 文件、程序默认。Compose `.env` 仅提供插值，支持的覆盖

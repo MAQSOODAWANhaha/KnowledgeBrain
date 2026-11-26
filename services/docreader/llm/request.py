@@ -18,7 +18,8 @@ MODEL_TRANSPORT_RETRIES = 4
 # per-task stage plans and per-request plans (first-send input + output).
 RUN_LIMIT_POLICY = "planned_task_budget_v1"
 RUN_LIMIT_MULTIPLIER = 2
-ReasoningEffort = Literal["low", "medium", "high"]
+REASONING_EFFORT_VALUES = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
 
 class ModelConfigurationError(ValueError):
@@ -29,12 +30,12 @@ def normalize_reasoning_effort(value: str | None) -> ReasoningEffort | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ModelConfigurationError("reasoning effort must be low, medium or high")
+        raise ModelConfigurationError("reasoning effort must be none, minimal, low, medium, high or xhigh")
     value = value.strip().lower()
     if not value:
         return None
-    if value not in {"low", "medium", "high"}:
-        raise ModelConfigurationError("reasoning effort must be low, medium or high")
+    if value not in REASONING_EFFORT_VALUES:
+        raise ModelConfigurationError("reasoning effort must be none, minimal, low, medium, high or xhigh")
     return cast(ReasoningEffort, value)
 
 

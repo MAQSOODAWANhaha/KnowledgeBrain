@@ -172,7 +172,9 @@ class DeploymentConfiguration(unittest.TestCase):
             env = service.get("environment", {})
             for key in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "EMBEDDING_BASE_URL",
                         "EMBEDDING_API_KEY", "EMBEDDING_MODEL", "KNOWLEDGEBRAIN_SHARED_CONCURRENCY",
-                        "KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES"):
+                        "KNOWLEDGEBRAIN_CHAT_SUPPORTS_IMAGES",
+                        "KNOWLEDGEBRAIN_OUTLINE_BASE_URL", "KNOWLEDGEBRAIN_OUTLINE_API_KEY",
+                        "KNOWLEDGEBRAIN_OUTLINE_MAX_CONTEXT_TOKENS"):
                 self.assertNotIn(key, env)
             if name not in ("api", "onlyoffice"):
                 for key in ("JWT_SECRET", "KB_ADMIN_PASSWORD", "KB_ONLYOFFICE_CAPABILITY_SECRET"):
@@ -180,7 +182,6 @@ class DeploymentConfiguration(unittest.TestCase):
         for name in ("retention", "python-tender-init", "python-tender-dispatcher"):
             self.assertNotIn("KNOWLEDGEBRAIN_CHAT_API_KEY", services[name]["environment"])
             self.assertNotIn("KNOWLEDGEBRAIN_VLM_API_KEY", services[name]["environment"])
-            self.assertNotIn("KNOWLEDGEBRAIN_OUTLINE_API_KEY", services[name]["environment"])
         self.assertNotIn("REDIS_URL", services["python-tender-init"]["environment"])
 
 
