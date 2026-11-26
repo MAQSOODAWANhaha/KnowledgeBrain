@@ -236,7 +236,14 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 | `targets` | 大纲响应位置总数 `total`、知识应答位置 `knowledge_answers`、带分析规则引用的位置 `with_rule_refs` |
 | `outline_issues` | 大纲 issues 按 code 计数，含预算拒收、待核和未安排的分析规则（`outline_rule_unassigned`） |
 | `document_gaps` | 仅正文执行：缺口按 code 计数 |
+| `pending_queue` | 仅正文执行：待核人工队列汇总，含 `total`、`pending`、`handled`、`by_status`（`pending`/`resolved`/`need_material`/`accepted_gap`）及 `handling_duration_ms`（`observations`、`avg`、`max`、`p95`，无已处理样本时统计值为 `null`） |
 | `failures` | 失败聚合表，每行一个「阶段 × 类别 × code」：`stage`、`task`、`kind`、`code`、`count`、`reported_tokens`（供应商回报的 total_tokens 之和）、`unknown_usage`（无回报用量的条数）。`kind=send` 来自状态为 failed 或 uncertain 的请求行，code 取 `error.type`；`kind=contract` 来自 `model-rejection` 回执，每条回执计一次，code 取首条错误的 code，Token 取产生该回包的请求行（按回执里的请求重建实际发送的请求摘要匹配），匹配不到记入 `unknown_usage`。contract 行的 count 之和等于回执条数。按 reported_tokens、count 降序排列，回答「哪类失败最多」 |
+
+#### 编制待核人工队列（`pending_queue`）
+
+- 枚举 `AuthoringGapStatus`（`services/docreader/tender/status.py`）：`pending`（未处理）、`resolved`（已处理）、`need_material`（补资料）、`accepted_gap`（接受空缺）。
+- 每条缺口由宿主按 `(chapter_id, target_id, code, detail, occurrence_index)` 派生稳定 24 位十六进制 `gap_id`（不回写编制产物，不改变执行身份），在工作台投影 `pending_queue` 中按大纲响应位置（章节顺序、目标顺序、原顺序）稳定排序，每项含 `gap_id`、`code`、`detail`、`chapter_id`、`chapter_title`、`target_id`、`target_purpose`、`bookmark`、`status`、`note`、`created_at`、`handled_at`、`handling_duration_ms`。
+- 处置接口 `PUT /api/v3/tender-projects/{project}/executions/{execution}/pending/{gap_id}` 接收 `{ status, note? }`，持久化至 `tender_authoring_gap_dispositions` 并返回 `{ item, summary }`；重置为 `pending` 时清空 `first_handled_at` 与 `handled_at`。处理时长按编制执行入队列基准时间至 `handled_at` 的毫秒数计算。
 
 `acceptance-eval` 是最低验收线离线评测脚本（`python -m docreader.tender.acceptance_eval`，见[验收与语义评测](acceptance.md#离线最低验收线评测脚本)）的只读打分输出：
 

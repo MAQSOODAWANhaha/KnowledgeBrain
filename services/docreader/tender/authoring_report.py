@@ -5,6 +5,7 @@ from collections import Counter
 from docreader.llm.request import request_digest
 from docreader.llm.usage import budget_observation, reported_usage
 from docreader.tender.authoring_execution import sent_request
+from docreader.tender.authoring_pending import pending_queue_summary
 
 # Stage names follow workflow.md「编制实际模型调用」.
 STAGES = {
@@ -62,7 +63,7 @@ def failure_table(requests, rejections, endpoint):
         -group["reported_tokens"], -group["count"], group["task"], group["kind"], group["code"]))
 
 
-def authoring_report(execution, requests, outline, document=None, rejections=()):
+def authoring_report(execution, requests, outline, document=None, rejections=(), gap_dispositions=()):
     observed = budget_observation(requests)["tasks"]
     stages = {}
     for task, summary in observed.items():
@@ -83,10 +84,12 @@ def authoring_report(execution, requests, outline, document=None, rejections=())
     }
     if document is not None:
         report["document_gaps"] = _counts(document.get("gaps", []))
+        created_at = execution.get("updated_at") or execution.get("created_at")
+        report["pending_queue"] = pending_queue_summary(document.get("gaps", []), gap_dispositions, created_at=created_at)
     return report
 
 
-async def read_authoring_report(artifacts, execution):
+async def read_authoring_report(artifacts, execution, gap_dispositions=()):
     """Load the result and rejection artifacts one execution's report needs."""
     result = (await asyncio.to_thread(artifacts.read_json, execution["result_ref"])
               if execution.get("result_ref") else {"chapters": [], "issues": []})
@@ -98,4 +101,4 @@ async def read_authoring_report(artifacts, execution):
             rejection = await asyncio.to_thread(artifacts.read_json, receipt["artifact_ref"])
             rejection["payload"] = await asyncio.to_thread(artifacts.read_json, rejection["request_ref"])
             rejections.append(rejection)
-    return authoring_report(execution, execution["requests"], outline, document, rejections)
+    return authoring_report(execution, execution["requests"], outline, document, rejections, gap_dispositions=gap_dispositions)

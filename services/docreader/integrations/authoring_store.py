@@ -35,6 +35,7 @@ from docreader.tender.schema import ArtifactRef, AuthoringInput
 from docreader.tender.status import (
     AUTHORING_MODEL_TASKS,
     AuthoringExecutionStatus,
+    AuthoringGapStatus,
     ModelRequestStatus,
     RunStatus,
     status_row,
@@ -615,3 +616,13 @@ class AuthoringStore:
                     request_id,
                 ),
             )
+
+    async def list_gap_dispositions(self, execution_id: str) -> list[dict[str, Any]]:
+        async with self.transaction() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT * FROM tender_authoring_gap_dispositions WHERE execution_id = %s ORDER BY created_at, gap_id",
+                    (execution_id,),
+                )
+            ).fetchall()
+        return [row for row in (status_row(entry, AuthoringGapStatus) for entry in rows) if row is not None]

@@ -127,9 +127,11 @@ async def run(args) -> dict[str, Any]:
         from docreader.integrations.authoring_store import AuthoringStore
         from docreader.tender.authoring_report import read_authoring_report
 
-        execution = await AuthoringStore(settings.dsn).get_execution(args.execution_id)
+        authoring = AuthoringStore(settings.dsn)
+        execution = await authoring.get_execution(args.execution_id)
         assert execution is not None  # missing_ok=False raises for an unknown execution
-        return await read_authoring_report(artifacts, execution)
+        dispositions = await authoring.list_gap_dispositions(args.execution_id) if hasattr(authoring, "list_gap_dispositions") else ()
+        return await read_authoring_report(artifacts, execution, gap_dispositions=dispositions)
     if args.command == "cancel":
         row = await store.cancel(args.run_id)
         return {"run_id": row["run_id"], "status": row["status"]}

@@ -35,12 +35,13 @@
 
 ### SQLx 版本迁移
 
-`migrations/` 是业务 DDL 的唯一来源，使用 UTC 时间戳加业务说明按版本递增执行。三份初始基线涵盖 56 张业务表（平台 10、知识库 26、招标 20）：
+`migrations/` 是业务 DDL 的唯一来源，使用 UTC 时间戳加业务说明按版本递增执行。当前覆盖 57 张业务表（平台 10、知识库 26、招标 21）：
 
 ```text
-migrations/20261028000001_shared_platform.sql   # 10 张表 + platform_available_objects 视图
-migrations/20261028000002_knowledge_base.sql    # 26 张表
-migrations/20261028000003_tender.sql            # 20 张表（含 tender_outline_revisions）
+migrations/20261028000001_shared_platform.sql         # 10 张表 + platform_available_objects 视图
+migrations/20261028000002_knowledge_base.sql          # 26 张表
+migrations/20261028000003_tender.sql                  # 20 张表（含 tender_outline_revisions）
+migrations/20261125000001_tender_gap_dispositions.sql # 1 张表（tender_authoring_gap_dispositions）
 ```
 
 SQLx 的 `_sqlx_migrations`、LangGraph 自维护的 checkpoint 表及 PostgreSQL/pgvector 扩展对象不属于业务表清单。
@@ -60,11 +61,11 @@ SQLx 的 `_sqlx_migrations`、LangGraph 自维护的 checkpoint 表及 PostgreSQ
 
 数据库内部统一 `platform_`、`knowledge_`、`tender_` 三个小写 `snake_case` 前缀，保持 `public` schema，不建兼容视图或双写；外部 HTTP / gRPC / LLM / 队列 / CAS 字段合同通过读写适配稳定保留。
 
-### 业务表分布（56 张）
+### 业务表分布（57 张）
 
 - **共享平台（10）**：`platform_users`、`platform_api_keys`、`platform_models`、`platform_audit_events`、`platform_maintenance_state`、`platform_objects`、`platform_object_references`、`platform_object_uploads`、`platform_object_deletion_requests`、`platform_object_deletion_receipts`（加视图 `platform_available_objects` 及内容 DOMAIN `kb_sha256`、`kb_object_ref`）。
 - **知识库（26）**：`knowledge_workspaces`、`knowledge_products`、`knowledge_product_versions`、`knowledge_documents`、`knowledge_tags`、`knowledge_document_tags`、`knowledge_document_processing_spans`、`knowledge_chunks`、`knowledge_image_artifact_revisions`、`knowledge_image_chunk_links`、`knowledge_chunk_embeddings`、`knowledge_embedding_revisions`、`knowledge_rerank_revisions`、`knowledge_retrieval_policies`、`knowledge_product_version_embedding_bindings`、`knowledge_chunk_keyword_indexes`、`knowledge_product_version_vector_generations`、`knowledge_product_version_keyword_generations`、`knowledge_semantic_index_intents`、`knowledge_chunk_vector_indexes`、`knowledge_graph_nodes`、`knowledge_graph_relations`、`knowledge_wiki_folders`、`knowledge_wiki_pages`、`knowledge_job_outbox`、`knowledge_job_receipts`。
-- **招标（20）**：`tender_projects`、`tender_documents`、`tender_document_sources`、`tender_project_analyses`、`tender_analysis_runs`、`tender_analysis_source_versions`、`tender_analysis_revisions`、`tender_analysis_commands`、`tender_analysis_artifacts`、`tender_analysis_confirmations`、`tender_analysis_model_requests`、`tender_authoring_jobs`、`tender_authoring_executions`、`tender_authoring_model_requests`、`tender_outline_revisions`、`tender_draft_versions`、`tender_editor_sessions`、`tender_draft_state`、`tender_draft_saves`、`tender_draft_recoveries`。
+- **招标（21）**：`tender_projects`、`tender_documents`、`tender_document_sources`、`tender_project_analyses`、`tender_analysis_runs`、`tender_analysis_source_versions`、`tender_analysis_revisions`、`tender_analysis_commands`、`tender_analysis_artifacts`、`tender_analysis_confirmations`、`tender_analysis_model_requests`、`tender_authoring_jobs`、`tender_authoring_executions`、`tender_authoring_model_requests`、`tender_outline_revisions`、`tender_draft_versions`、`tender_editor_sessions`、`tender_draft_state`、`tender_draft_saves`、`tender_draft_recoveries`、`tender_authoring_gap_dispositions`。
 
 ### 命名与类型规则
 

@@ -38,6 +38,7 @@ _CORE_QUERIES = (
     "SELECT project_id,version_id,session_id,pending_save_id,editor_error FROM tender_draft_state LIMIT 0",
     "SELECT id,project_id,session_id,parent_version_id,parent_sha256,state,result_version_id,callback_sha256 FROM tender_draft_saves LIMIT 0",
     "SELECT session_id,callback_sha256,version_id FROM tender_draft_recoveries LIMIT 0",
+    "SELECT execution_id,project_id,gap_id,status,handled_at FROM tender_authoring_gap_dispositions LIMIT 0",
     "SELECT thread_id,checkpoint_ns,checkpoint_id,checkpoint FROM checkpoints LIMIT 0",
     "SELECT thread_id,checkpoint_ns,channel,version,blob FROM checkpoint_blobs LIMIT 0",
     "SELECT thread_id,checkpoint_ns,checkpoint_id,task_id,idx,channel,blob FROM checkpoint_writes LIMIT 0",

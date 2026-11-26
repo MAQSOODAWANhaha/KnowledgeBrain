@@ -20,7 +20,10 @@ from docreader.integrations.authoring import read_authoring_input
 from docreader.integrations.authoring_store import AuthoringStore
 from docreader.integrations.store import Cancelled, Conflict, InvalidConfirmation, Store
 from docreader.jobs.settings import Settings
-from docreader.tender.status import AuthoringExecutionStatus, AuthoringJobStatus, ProjectStatus, RunStatus, status_row
+from docreader.tender.authoring_pending import build_pending_queue, pending_queue_summary
+from docreader.tender.status import (
+    AuthoringExecutionStatus, AuthoringGapStatus, AuthoringJobStatus, ProjectStatus, RunStatus, status_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +154,7 @@ class WebBridge:
             await conn.execute("SELECT run_id FROM tender_project_analyses LIMIT 0")
             await conn.execute("SELECT execution_id FROM tender_authoring_jobs LIMIT 0")
             await conn.execute("SELECT revision_id FROM tender_outline_revisions LIMIT 0")
+            await conn.execute("SELECT gap_id FROM tender_authoring_gap_dispositions LIMIT 0")
         _INITIALIZED.add(self.settings.dsn)
 
     async def authorize(self, payload, *, write=False):
@@ -647,7 +651,7 @@ class WebBridge:
                  "documents": [{"id": str(row["document_id"]), "document_id": str(row["document_id"]),
                                 "status": "uploaded"}
                                for row in await self.documents(project_id)],
-                 "outline": None, "requirements": None, "units": [], "gaps": [], "materials": [],
+                 "outline": None, "requirements": None, "units": [], "gaps": [], "pending_queue": [], "materials": [],
                  "coverage": {"state": "unknown", "pending": None, "unreviewed": None, "headline": "覆盖未知"},
                  "artifacts": {"docx_available": False, "package_available": False}}
         if completed:
@@ -658,9 +662,14 @@ class WebBridge:
             materials = [{**material, "text": self.artifacts.read_bytes(material["content_ref"]).decode("utf-8")
                           if material.get("content_ref") else material["text"]}
                          for material in basis.get("materials", [])]
-            value.update(outline=self.artifacts.read_json(document["outline_ref"]),
+            outline_data = self.artifacts.read_json(document["outline_ref"])
+            execution = await self.authoring.get_execution(context_id, missing_ok=True)
+            dispositions = await self.authoring.list_gap_dispositions(context_id)
+            created_at = (execution.get("updated_at") or execution.get("created_at")) if execution else None
+            value.update(outline=outline_data,
                          requirements=self.artifacts.read_json(document["requirements_ref"]) if document.get("requirements_ref") else None,
                          units=[self.artifacts.read_json(ref) for ref in document["unit_refs"]], gaps=document["gaps"],
+                         pending_queue=build_pending_queue(outline_data, document["gaps"], dispositions, created_at=created_at),
                          materials=materials)
             from docreader.tender.authoring_coverage import coverage_headline
             stored_coverage = None
@@ -678,6 +687,61 @@ class WebBridge:
             if len(outlines) == 1:
                 value["outline"] = await asyncio.to_thread(self.artifacts.read_json, outlines[0]["artifact_ref"])
         return value
+
+    async def update_pending_item(self, payload):
+        execution_id = payload.get("execution_id")
+        gap_id = payload.get("gap_id")
+        if not isinstance(execution_id, str) or not execution_id.strip() or not isinstance(gap_id, str) or not gap_id.strip():
+            raise WebError("INVALID_PENDING_ITEM", "请指定要处置的编制执行与待核项。", 400)
+        try:
+            status = AuthoringGapStatus(payload.get("status"))
+        except ValueError:
+            raise WebError("INVALID_PENDING_STATUS", "不支持的待核处置状态。", 400) from None
+        raw_note = payload.get("note", "")
+        if not isinstance(raw_note, str):
+            raise WebError("INVALID_PENDING_NOTE", "处置备注必须为文本。", 400)
+        note = raw_note.strip()
+        if len(note) > 500:
+            raise WebError("INVALID_PENDING_NOTE", "处置备注不能超过 500 字。", 400)
+
+        document = await self.result(payload["project_id"], execution_id)
+        outline = await asyncio.to_thread(self.artifacts.read_json, document["outline_ref"])
+        execution = await self.authoring.get_execution(execution_id, missing_ok=True)
+        created_at = (execution.get("updated_at") or execution.get("created_at")) if execution else None
+        existing_queue = build_pending_queue(outline, document["gaps"], created_at=created_at)
+        if not any(item["gap_id"] == gap_id for item in existing_queue):
+            raise WebError("PENDING_ITEM_NOT_FOUND", "此编制成果中不存在该待核事项。", 404)
+
+        async with self.store.transaction() as conn:
+            if not await self.lock_project(conn, payload):
+                raise WebError("PROJECT_ENDED", "项目已结束，仍可读取已有文件。", 409)
+            if status == AuthoringGapStatus.PENDING:
+                await conn.execute(
+                    "INSERT INTO tender_authoring_gap_dispositions "
+                    "(execution_id, project_id, gap_id, status, note, updated_by_user_id, first_handled_at, handled_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL) "
+                    "ON CONFLICT (execution_id, gap_id) DO UPDATE SET "
+                    "status = EXCLUDED.status, note = EXCLUDED.note, updated_by_user_id = EXCLUDED.updated_by_user_id, "
+                    "first_handled_at = NULL, handled_at = NULL, updated_at = clock_timestamp()",
+                    (execution_id, payload["project_id"], gap_id, status.value, note, payload["owner_user_id"]),
+                )
+            else:
+                await conn.execute(
+                    "INSERT INTO tender_authoring_gap_dispositions "
+                    "(execution_id, project_id, gap_id, status, note, updated_by_user_id, first_handled_at, handled_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, clock_timestamp(), clock_timestamp()) "
+                    "ON CONFLICT (execution_id, gap_id) DO UPDATE SET "
+                    "status = EXCLUDED.status, note = EXCLUDED.note, updated_by_user_id = EXCLUDED.updated_by_user_id, "
+                    "first_handled_at = COALESCE(tender_authoring_gap_dispositions.first_handled_at, clock_timestamp()), "
+                    "handled_at = clock_timestamp(), updated_at = clock_timestamp()",
+                    (execution_id, payload["project_id"], gap_id, status.value, note, payload["owner_user_id"]),
+                )
+
+        dispositions = await self.authoring.list_gap_dispositions(execution_id)
+        queue = build_pending_queue(outline, document["gaps"], dispositions, created_at=created_at)
+        updated_item = next(item for item in queue if item["gap_id"] == gap_id)
+        summary = pending_queue_summary(document["gaps"], dispositions, created_at=created_at)
+        return {"item": updated_item, "summary": summary}
 
 
 def _usage(requests):
@@ -697,7 +761,7 @@ async def handle_command(payload, blob=b""):
     action = payload.get("action")
     try:
         project_id = await bridge.authorize(payload, write=action in {
-            "document.put", "analysis.start", "analysis.confirm", "analysis.correct", "analysis.retry", "authoring.start", "authoring.resume", "outline.start", "outline.save", "docx.review.start"})
+            "document.put", "analysis.start", "analysis.confirm", "analysis.correct", "analysis.retry", "authoring.start", "authoring.resume", "authoring.pending.update", "outline.start", "outline.save", "docx.review.start"})
     except WebError as error:
         if error.code != "PROJECT_ENDED":
             raise
@@ -761,7 +825,10 @@ async def handle_command(payload, blob=b""):
 
         await bridge.job(project_id, payload.get("execution_id"))  # project ownership
         execution = await bridge.authoring.get_execution(payload["execution_id"], missing_ok=True)
-        return {"report": await read_authoring_report(bridge.artifacts, execution) if execution else None}, b""
+        dispositions = await bridge.authoring.list_gap_dispositions(payload["execution_id"]) if execution else ()
+        return {"report": await read_authoring_report(bridge.artifacts, execution, gap_dispositions=dispositions) if execution else None}, b""
+    if action == "authoring.pending.update":
+        return await bridge.update_pending_item(payload), b""
     if action == "artifact.get":
         kind = payload.get("kind")
         if kind not in {"docx", "package"}:

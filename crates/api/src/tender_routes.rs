@@ -6,7 +6,7 @@ use crate::tender_state::ProjectStatus;
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -243,6 +243,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/api/v3/tender-projects/{project}/executions/{execution}/report",
             get(execution_report),
+        )
+        .route(
+            "/api/v3/tender-projects/{project}/executions/{execution}/pending/{gap_id}",
+            put(update_pending_item),
         )
         .route(
             "/api/v3/tender-projects/{project}/executions/{execution}/materials/{material}/original",
@@ -975,6 +979,25 @@ async fn execution_report(
         .0,
     ))
 }
+
+async fn update_pending_item(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path((id, execution, gap_id)): Path<(Uuid, String, String)>,
+    Json(mut body): Json<Value>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, owner) = require_project(&h, &s, id).await?;
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| validation("body must be an object"))?;
+    object.insert("execution_id".into(), json!(execution));
+    object.insert("gap_id".into(), json!(gap_id));
+    Ok(Json(
+        bridge(id, owner, "authoring.pending.update", body, vec![])
+            .await?
+            .0,
+    ))
+}
 async fn package(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -1056,6 +1079,32 @@ mod tests {
                 axum::http::Request::builder()
                     .uri(uri)
                     .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn pending_item_update_requires_project_authentication() {
+        use tower::ServiceExt;
+        let state = AppState {
+            jwt_secret: "synthetic-pending-secret".into(),
+            bootstrap_key: String::new(),
+        };
+        let uri = format!(
+            "/api/v3/tender-projects/{}/executions/web-document-a/pending/gap-1",
+            Uuid::new_v4()
+        );
+        let response = router()
+            .with_state(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(r#"{"status":"resolved"}"#))
                     .unwrap(),
             )
             .await

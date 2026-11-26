@@ -90,6 +90,13 @@ class ProjectStatus(StrEnum):
     ENDED = "ended"
 
 
+class AuthoringGapStatus(StrEnum):
+    PENDING = "pending"
+    RESOLVED = "resolved"
+    NEED_MATERIAL = "need_material"
+    ACCEPTED_GAP = "accepted_gap"
+
+
 def status_row(row, status_type):
     """Validate at the storage boundary, including rows returned to callers."""
     if row is not None:

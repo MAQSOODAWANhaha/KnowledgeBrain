@@ -97,8 +97,12 @@ def test_database_probe_reads_every_unified_baseline_table_in_read_only_mode(mon
         return database
     monkeypatch.setattr(healthcheck.psycopg, "connect", connect)
     healthcheck._check_database("fixture")
-    baseline = Path(__file__).resolve().parents[4] / "migrations" / "20261028000003_tender.sql"
-    expected = set(re.findall(r"CREATE TABLE (\w+)", baseline.read_text()))
+    migrations_dir = Path(__file__).resolve().parents[4] / "migrations"
+    expected = {
+        table
+        for sql_file in sorted(migrations_dir.glob("*tender*.sql"))
+        for table in re.findall(r"CREATE TABLE (\w+)", sql_file.read_text())
+    }
     queried = {_required(re.search(r"FROM (\w+)", query))[1] for query in database.queries if query.startswith("SELECT ")}
     assert expected | {"checkpoints", "checkpoint_blobs", "checkpoint_writes"} <= queried
     assert database.read_only and 0 < options["connect_timeout"] <= 2

@@ -49,17 +49,25 @@ async fn migrator_tracks_python_and_word_tables_and_preserves_data() {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(versions, [20261028000001, 20261028000002, 20261028000003]);
+        assert_eq!(
+            versions,
+            [
+                20261028000001,
+                20261028000002,
+                20261028000003,
+                20261125000001
+            ]
+        );
         let tables: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r'
              AND relname=ANY(ARRAY['tender_projects','tender_documents','tender_analysis_runs','tender_analysis_source_versions',
               'tender_analysis_revisions','tender_analysis_commands','tender_analysis_artifacts','tender_analysis_confirmations','tender_analysis_model_requests',
               'tender_authoring_executions','tender_authoring_model_requests','tender_document_sources',
               'tender_project_analyses','tender_authoring_jobs','tender_outline_revisions','tender_draft_versions','tender_editor_sessions',
-              'tender_draft_state','tender_draft_saves','tender_draft_recoveries'])",
+              'tender_draft_state','tender_draft_saves','tender_draft_recoveries','tender_authoring_gap_dispositions'])",
         ).fetch_one(&pool).await.unwrap();
         assert_eq!(
-            tables, 20,
+            tables, 21,
             "all Python and Word business tables must come from the migrator"
         );
         if attempt == 0 {
