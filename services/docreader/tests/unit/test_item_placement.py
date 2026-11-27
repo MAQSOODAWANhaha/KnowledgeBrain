@@ -381,7 +381,8 @@ async def test_bug332_the_requirement_chain_keeps_an_inline_amendment_form_besid
     assert [chapter["title"] for chapter in outline["chapters"]] == ["投标书", "开标一览表", "投标书"]
     codes = [issue["code"] for issue in outline["issues"]]
     assert "outline_directory_format_conflict" in codes
-    assert "outline_directory_revision_unreviewed" not in codes and "outline_directory_rejected" not in codes
+    assert codes.count("outline_directory_revision_unreviewed") == 1
+    assert "outline_directory_rejected" not in codes
 
 
 def test_bug340_decode_placements_normalizes_string_null():

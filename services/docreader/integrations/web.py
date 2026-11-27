@@ -64,12 +64,6 @@ def _operation(job):
     return job["payload"].get("operation", "document")
 
 
-def _source_identities(documents):
-    return sorted(_digest({key: document.get(key) for key in
-                           ("document_id", "document_version", "role", "original_ref")})
-                  for document in documents)
-
-
 def _native_source_profile():
     from docreader.parser.source_contract import parser_version
     from docreader.tender.evidence.references import literal_source_profile
@@ -159,6 +153,7 @@ class WebBridge:
             await self.store.setup()
             await self.authoring.setup()
             await conn.execute("SELECT document_id FROM tender_document_sources LIMIT 0")
+            await conn.execute("SELECT project_id,revision,settings FROM tender_project_source_settings LIMIT 0")
             await conn.execute("SELECT run_id FROM tender_project_analyses LIMIT 0")
             await conn.execute("SELECT execution_id FROM tender_authoring_jobs LIMIT 0")
             await conn.execute("SELECT revision_id FROM tender_outline_revisions LIMIT 0")
@@ -227,17 +222,61 @@ class WebBridge:
                 raise Conflict("document already identifies different project content")
         return {"document": {"document_id": document_id, "file_name": row["file_name"]}}
 
-    async def manifest(self, project_id):
-        from docreader.tender.evidence import register_manifest
+    async def source_settings(self, project_id):
+        from docreader.integrations.web_sources import project_sources, settings_view
 
-        documents = await self.documents(project_id)
-        if not documents:
+        return settings_view(*await project_sources(self, project_id))
+
+    async def save_source_settings(self, payload):
+        from docreader.integrations.web_sources import project_sources, settings_view, submitted_settings
+
+        project = payload["project_id"]
+        async with self.store.transaction() as conn:
+            if not await self.lock_project(conn, payload):
+                raise WebError("PROJECT_ENDED", "项目已结束，仅可查看来源设置。", 409)
+            rows, previous, revision = await project_sources(self, project, connection=conn)
+            current = settings_view(rows, previous, revision)
+            current_version = current["source_settings"]["version"]
+            stale = payload.get("expected_version") != current_version
+            conflict = WebError("SOURCE_SETTINGS_CONFLICT", "项目来源已更新，请重新读取后核对保存。", 409)
+            try:
+                settings = submitted_settings(payload, rows)
+            except WebError:
+                if stale:
+                    raise conflict from None
+                raise
+            if previous == settings:
+                return current
+            if stale:
+                raise conflict
+            await conn.execute(
+                "INSERT INTO tender_project_source_settings(project_id,settings) VALUES(%s,%s) "
+                "ON CONFLICT (project_id) DO UPDATE SET settings=EXCLUDED.settings, "
+                "revision=tender_project_source_settings.revision + 1",
+                (project, Jsonb(settings)),
+            )
+        return settings_view(rows, settings, revision + 1)
+
+    async def manifest(self, project_id, *, connection=None):
+        from docreader.integrations.web_sources import configured_documents, project_sources
+        from docreader.tender.evidence import register_manifest
+        from docreader.tender.evidence.registration import issue
+
+        rows, settings, _ = await project_sources(self, project_id, connection=connection)
+        if not rows:
             raise WebError("TENDER_DOCUMENT_REQUIRED", "请先上传招标文件，再开始分析或编制。", 409)
-        registered = await asyncio.to_thread(register_manifest, {"documents": [
-            {"document_id": str(row["document_id"]), "document_version": row["original_ref"]["sha256"],
-             "file_name": row["file_name"], "original_ref": row["original_ref"]}
-            for row in documents]}, self.artifacts)
-        return registered
+        known = {document["document_id"] for document in settings["documents"]}
+        issues = [issue("source_roles_unconfirmed", str(row["document_id"]),
+                        "项目尚未确认此文件的来源角色。")
+                  for row in rows if len(rows) > 1 and str(row["document_id"]) not in known]
+        return await asyncio.to_thread(register_manifest, {
+            "documents": configured_documents(rows, settings),
+            "expected_document_ids": settings["expected_document_ids"],
+            "issues": issues,
+        }, self.artifacts)
+
+    async def manifest_matches(self, reference, registered):
+        return await asyncio.to_thread(self.artifacts.read_json, reference) == registered
 
     async def latest_run(self, project_id, *, source_only=False):
         async with self.store.transaction() as conn:
@@ -252,12 +291,15 @@ class WebBridge:
         from docreader.integrations.web_replay import replay_ended
 
         _analysis_request(payload)
-        reference = await asyncio.to_thread(self.artifacts.put_json, await self.manifest(payload["project_id"]))
         key = _request_key(payload)
         await initialize_checkpoints(self.settings.dsn)
         async with self.store.transaction() as conn:
             if not await self.lock_project(conn, payload):
                 return await replay_ended(self, payload)
+            registered = await self.manifest(payload["project_id"], connection=conn)
+            if any(problem["code"] == "source_roles_unconfirmed" for problem in registered["issues"]):
+                raise WebError("SOURCE_ROLES_REQUIRED", "请在项目文件页核对并保存全部文件的来源角色后开始分析。", 409)
+            reference = await asyncio.to_thread(self.artifacts.put_json, registered)
             row = await self.store.submit(reference, f"web-analysis:{key}", connection=conn)
             await conn.execute(
                 "INSERT INTO tender_project_analyses(run_id,project_id,request_key) VALUES(%s,%s,%s) "
@@ -270,12 +312,12 @@ class WebBridge:
                   and entry["source_version"] == run["source_version"] and entry["domain_revision"] == 0]
         if len(frozen) != 1:
             return False
-        source = await asyncio.to_thread(self.artifacts.read_json, frozen[0]["artifact_ref"])
-        if _source_identities(source["documents"]) != _source_identities(registered["documents"]):
+        if not await self.manifest_matches(run["manifest_ref"], registered):
             return False
         if require_current_pdf:
             from docreader.tender.evidence.references import literal_source_profile
 
+            source = await asyncio.to_thread(self.artifacts.read_json, frozen[0]["artifact_ref"])
             pdfs = [document for document in source["documents"] if document["file_name"].lower().endswith(".pdf")]
             if pdfs:
                 profile = await asyncio.to_thread(literal_source_profile)
@@ -343,12 +385,12 @@ class WebBridge:
         return row
 
     async def outline_sources_current(self, project_id, outline, *, registered=None):
-        reference = outline["authoring_input"].get("frozen_ref")
-        if reference is None:
+        source = outline["authoring_input"]
+        if source.get("frozen_ref") is None:
             return False
-        frozen = await asyncio.to_thread(self.artifacts.read_json, reference)
+        reference = await self.store.get_manifest(source["run_id"], source["source_version"])
         current = registered if registered is not None else await self.manifest(project_id)
-        return _source_identities(frozen["documents"]) == _source_identities(current["documents"])
+        return await self.manifest_matches(reference, current)
 
     async def newer_outline_analysis(self, project_id, pinned, registered):
         run = await self.latest_run(project_id)
@@ -518,7 +560,7 @@ class WebBridge:
                 raise WebError("OUTLINE_IDENTITY_MISMATCH", "大纲修订与校验值不一致，请重新读取已保存的大纲。", 409)
             outline_ref = revision["outline_ref"]
             outline = await asyncio.to_thread(self.artifacts.read_json, outline_ref)
-            if not await self.outline_sources_current(payload["project_id"], outline):
+            if not await self.outline_sources_current(payload["project_id"], outline, registered=registered):
                 raise WebError("SOURCE_CHANGED_REQUIRES_NEW_OUTLINE", "招标资料已更新，请重新生成并保存大纲后生成正文；原稿仍保留。", 409)
             identity = _identity(outline["authoring_input"])
             run = await self.store.get_run(identity["run_id"])
@@ -567,6 +609,8 @@ class WebBridge:
         async with self.store.transaction() as conn:
             if not await self.lock_project(conn, payload):
                 return await replay_ended(self, payload)
+            if registered != await self.manifest(payload["project_id"], connection=conn):
+                raise WebError("AUTHORING_SOURCE_CHANGED", "项目来源已更新，请重新提交编制。", 409)
             await conn.execute(
                 "INSERT INTO tender_authoring_jobs(execution_id,project_id,run_id,payload) "
                 "VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING",
@@ -616,9 +660,8 @@ class WebBridge:
         verified = self.artifacts.read_json(snapshot["verification_ref"]) if snapshot["verification_ref"] else {}
         sources_current = None
         if project_id:
-            submitted = await asyncio.to_thread(self.artifacts.read_json, run["manifest_ref"])
             current = await self.manifest(project_id)
-            sources_current = _source_identities(submitted["documents"]) == _source_identities(current["documents"])
+            sources_current = await self.manifest_matches(run["manifest_ref"], current)
         plan_receipt = next((row for row in run["artifacts"] if row["stage"] == "pack-plan" and not row["scope"]
                              and row["domain_revision"] == run["domain_revision"]), None)
         pack_plan = (await asyncio.to_thread(self.artifacts.read_json, plan_receipt["artifact_ref"])
@@ -788,7 +831,8 @@ async def handle_command(payload, blob=b""):
     action = payload.get("action")
     try:
         project_id = await bridge.authorize(payload, write=action in {
-            "document.put", "analysis.start", "analysis.confirm", "analysis.correct", "analysis.retry", "authoring.start", "authoring.resume", "authoring.pending.update", "outline.start", "outline.save", "docx.review.start"})
+            "document.put", "sources.save", "analysis.start", "analysis.confirm", "analysis.correct", "analysis.retry",
+            "authoring.start", "authoring.resume", "authoring.pending.update", "outline.start", "outline.save", "docx.review.start"})
     except WebError as error:
         if error.code != "PROJECT_ENDED":
             raise
@@ -801,6 +845,10 @@ async def handle_command(payload, blob=b""):
     payload = {**payload, "project_id": project_id, "owner_user_id": _uuid(payload["owner_user_id"])}
     if action == "document.put":
         return await bridge.put_document(payload, blob), b""
+    if action == "sources.status":
+        return await bridge.source_settings(project_id), b""
+    if action == "sources.save":
+        return await bridge.save_source_settings(payload), b""
     if action == "workbench":
         return await bridge.workbench(project_id, payload.get("execution_id")), b""
     if action in {"analysis.start", "analysis.status"}:

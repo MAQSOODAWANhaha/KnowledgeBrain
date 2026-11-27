@@ -2,6 +2,10 @@
 
 本页是招标分析与编制（`services/docreader`）字段名称、类型、可选性、枚举与身份语义的唯一规范。处理顺序与调用公式见 [业务工作流](workflow.md#当前发送边界) 与 [编制实际模型调用](workflow.md#编制实际模型调用)，数据库内部表名与外键规则见 [共享平台与数据库](../platform/README.md#数据库命名状态与约束约定)，动态部署与验证事实见 [招投标入口 · 当前状态](README.md#当前状态交接)。
 
+## Web 项目来源设置
+
+`GET /api/v3/tender-projects/{project}/sources` 返回 `source_settings`，包含保存令牌 `version`、已声明的 `expected_document_ids` 和逐文件的 `document_id`、`file_name`、`role`、`replaces`、`modification_scope`。同路径 PUT 接收 `expected_version`、`expected_document_ids` 与完整 `documents`，逐文件提交 ID、角色、替代文件与适用范围。角色为 `main`、`attachment`、`clarification`、`amendment`。替代文件可空，非空时指向同项目的其他已上传原件。适用范围作为登记元数据随原件冻结，效力由文件实际条款确定。
+
 - 单次输入不超过 94208 token（`o200k_base` 校准边界，详见下文）；输出只含判断、问题或填空，不回写宿主已索引原文范围。
 - 硬阻断只阻止把该版本确认成 `analysis-ready`，不拒绝未确认快照的读取、保存、预览或导出。
 

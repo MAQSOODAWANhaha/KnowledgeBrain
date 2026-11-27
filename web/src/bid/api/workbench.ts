@@ -67,6 +67,17 @@ export type TenderDocument = {
   id: string; file_name: string; media_type: string; byte_length: number;
   parse_status?: string; content_sha256?: string; download_url?: string;
 };
+export type TenderSourceRole = "main" | "attachment" | "clarification" | "amendment";
+export type TenderSourceDocument = {
+  document_id: string; file_name: string; role: TenderSourceRole;
+  replaces: string | null; modification_scope: string | null;
+};
+export type TenderSourceSettings = {
+  version: string; documents: TenderSourceDocument[]; expected_document_ids: string[];
+};
+export type TenderSourceSettingsSave = {
+  expected_version: string; documents: Omit<TenderSourceDocument, "file_name">[]; expected_document_ids: string[];
+};
 export type SavedWordOutline = { chapters: TenderChapter[]; bookmarks?: string[]; missing_chapter_ids?: string[] };
 export type TenderDraft = {
   id: string; sha256: string; revision: number; source: "generated" | "manual" | "recovered";
@@ -159,6 +170,13 @@ export const tenderApi = {
     const body = new FormData();
     body.append("file", file);
     return (await v2Request<TenderDocument>(`${projectPath(id)}/documents`, { method: "POST", body }, { attempt })).data;
+  },
+  async sourceSettings(id: string, signal?: AbortSignal): Promise<TenderSourceSettings> {
+    return (await v2Request<{ source_settings: TenderSourceSettings }>(`${projectPath(id)}/sources`, { signal })).data.source_settings;
+  },
+  async saveSourceSettings(id: string, body: TenderSourceSettingsSave, attempt: MutationAttempt): Promise<TenderSourceSettings> {
+    return (await v2Request<{ source_settings: TenderSourceSettings }>(`${projectPath(id)}/sources`,
+      { method: "PUT", body: JSON.stringify(body) }, { attempt })).data.source_settings;
   },
   async start(id: string, kind: "analysis" | "authoring", attempt: MutationAttempt, body: DocumentStart | Record<string, never> = {}): Promise<void> {
     await v2Request(`${projectPath(id)}/${kind}`, { method: "POST", body: JSON.stringify(body) }, { attempt });

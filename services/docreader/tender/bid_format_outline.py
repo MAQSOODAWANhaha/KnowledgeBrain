@@ -356,11 +356,8 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         presentation = 'cover' if is_cover else 'section'
         adopted.append({'node_id': identity, 'entry': number - 1, 'depth': 'self',
                         'presentation': presentation, 'clause': []})
-    first = nodes[0]['heading']
     result = {'nodes': nodes,
-              'composition': {'priority_basis': [{'document_id': first['document_id'], 'page': first['page'],
-                                                   'start_line': first['line'], 'end_line': first['line']}],
-                              'entries': entries},
+              'composition': {'entries': entries},
               'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
     issues = _source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])
     if cover_pending:
@@ -509,8 +506,8 @@ def _slices(payload, fits):
 def compile_bid_format_plan(plan, documents):
     """BUG-332: a compile list stays inside one document, so a plan spanning documents compiles per document.
 
-    Parts keep registered document order; host issues repeated by every part are kept once, and a revision
-    document that one part cites is not reported unreviewed by another.
+    Parts keep registered document order and carry the same explicit priority windows.
+    Each source diagnostic is reported once.
     """
     import json
 
@@ -518,23 +515,22 @@ def compile_bid_format_plan(plan, documents):
 
     order = [document['document_id'] for document in documents]
     entries = plan['composition']['entries']
+    basis = plan['composition'].get('priority_basis', [])
     cited = sorted(
         {entry['name']['document_id'] for entry in entries}
         | {node['heading']['document_id'] for node in plan['nodes']},
         key=order.index,
     )
     if len(cited) <= 1:
-        return compile_plans([plan], documents)
+        return compile_plans([plan], documents, format_candidates=True)
     compiled, seen = {'chapters': [], 'issues': []}, set()
     for index, document_id in enumerate(cited):
         own = [number for number, entry in enumerate(entries) if entry['name']['document_id'] == document_id]
         renumber = {number: position for position, number in enumerate(own)}
         own_nodes = [node for node in plan['nodes'] if node['heading']['document_id'] == document_id]
         own_node_ids = {node['id'] for node in own_nodes}
-        first = entries[own[0]]['name'] if own else own_nodes[0]['heading']
         part = {'nodes': own_nodes,
-                'composition': {'priority_basis': [{'document_id': document_id, 'page': first['page'],
-                                                    'start_line': first['line'], 'end_line': first['line']}],
+                'composition': {'priority_basis': basis,
                                 'entries': [entries[number] for number in own]},
                 'scopes': [{'items': [{**item, 'entry': renumber[item['entry']] if item.get('entry') in renumber else None}
                                       for item in plan['scopes'][0]['items']
@@ -542,12 +538,11 @@ def compile_bid_format_plan(plan, documents):
                 'excluded': [], 'source_only': []}
         if index == 0 and plan.get('skipped_item_issues'):
             part['skipped_item_issues'] = plan['skipped_item_issues']
-        value = compile_plans([part], documents)
+        value = compile_plans([part], documents, format_candidates=True)
         compiled['chapters'].extend(value['chapters'])
         for issue in value['issues']:
             key = json.dumps(issue, ensure_ascii=False, sort_keys=True)
-            if key in seen or (issue['code'] == 'outline_directory_revision_unreviewed'
-                               and any(issue['detail'].startswith(f'{cited_id}是') for cited_id in cited)):
+            if key in seen:
                 continue
             seen.add(key)
             compiled['issues'].append(issue)

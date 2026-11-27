@@ -9,7 +9,7 @@ from typing import Any, Literal, overload
 
 from docreader.integrations.cli import _correction_ref
 from docreader.integrations.store import Conflict, InvalidConfirmation
-from docreader.integrations.web import WebError, _identity, _request_key, _source_identities
+from docreader.integrations.web import WebError, _identity, _request_key
 from docreader.tender.schema import validate_issue_resolutions
 
 
@@ -92,15 +92,27 @@ def _baseline(artifacts, run, source_version, revision, digest=None):
     return receipt["artifact_ref"]["sha256"], packs
 
 
-async def _sources_current(bridge, project, run):
-    submitted = await asyncio.to_thread(bridge.artifacts.read_json, run["manifest_ref"])
+async def _sources_current(bridge, project, run, *, connection=None):
     try:
-        current = await bridge.manifest(project)
+        current = await bridge.manifest(project, connection=connection)
     except WebError as error:
         if error.code == "TENDER_DOCUMENT_REQUIRED":
             return False
         raise
-    return _source_identities(submitted["documents"]) == _source_identities(current["documents"])
+    return await bridge.manifest_matches(run["manifest_ref"], current)
+
+
+async def _replay_if_sources_changed(bridge, payload, run, *, connection):
+    if await _sources_current(bridge, payload["project_id"], run, connection=connection):
+        return None
+    from docreader.integrations.web_replay import replay_ended
+
+    try:
+        return await replay_ended(bridge, payload)
+    except WebError as error:
+        if error.code != "PROJECT_ENDED":
+            raise
+        raise WebError("ANALYSIS_SOURCE_CHANGED", "项目来源已更新，请重新分析后再提交人工处理。", 409) from None
 
 
 async def analysis_review(bridge, payload):
@@ -147,6 +159,8 @@ async def confirm_analysis(bridge, payload):
         async with bridge.store.transaction() as conn:
             if not await bridge.lock_project(conn, payload):
                 return await replay_ended(bridge, payload)
+            if replayed := await _replay_if_sources_changed(bridge, payload, run, connection=conn):
+                return replayed
             command = await bridge.store.confirm(run["run_id"], source, digest, _request_key(payload),
                                                  domain_revision=revision, issue_resolutions=resolutions,
                                                  connection=conn)
@@ -218,15 +232,17 @@ async def correct_analysis(bridge, payload):
             raise
         return await replay_ended(bridge, payload)
     source, revision, digest, key, reason, changes = correction_request(payload)
-    try:
-        reference = await asyncio.to_thread(_corrected_ref, bridge.artifacts, run, source, revision, digest, changes)
-    except (WebError, Conflict):
-        raise
-    except ValueError:
-        raise WebError("INVALID_CORRECTION", "纠正事项未通过现有分析校验，请核对类型、字段和数值原文片段。") from None
     async with bridge.store.transaction() as conn:
         if not await bridge.lock_project(conn, payload):
             return await replay_ended(bridge, payload)
+        if replayed := await _replay_if_sources_changed(bridge, payload, run, connection=conn):
+            return replayed
+        try:
+            reference = await asyncio.to_thread(_corrected_ref, bridge.artifacts, run, source, revision, digest, changes)
+        except (WebError, Conflict):
+            raise
+        except ValueError:
+            raise WebError("INVALID_CORRECTION", "纠正事项未通过现有分析校验，请核对类型、字段和数值原文片段。") from None
         submitted = await bridge.store.correct(run["run_id"], source, revision, digest, reference, key, reason,
                                                 connection=conn)
     return {"analysis": {**_identity(submitted), "status": submitted["status"]},

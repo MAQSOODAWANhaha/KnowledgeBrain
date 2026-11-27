@@ -2524,11 +2524,8 @@ def bid_format_plan(documents):
             entry['heading_lines'] = form['order_heading_lines']
         entries.append(entry)
         adopted.append({'node_id': identity, 'entry': len(entries) - 1, 'depth': 'self', 'presentation': 'section', 'clause': []})
-    first = chosen[order[0]]['point']
     return {'nodes': nodes,
-            'composition': {'priority_basis': [{'document_id': first[0], 'page': first[1],
-                                                 'start_line': first[2], 'end_line': first[2]}],
-                            'entries': entries},
+            'composition': {'entries': entries},
             'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
 
 
@@ -2671,7 +2668,7 @@ def _list_heading(section, index):
     return index < len(section) and _single_form_title(section[index][4]) is not None
 
 
-def compile_plans(plans, documents):
+def compile_plans(plans, documents, *, format_candidates=False):
     """Compile at most two plans. An illegal plan yields no directory."""
     if len(plans) > 2:
         return _empty('目录对照只接受两份计划，多出的计划不会参与表决')
@@ -2680,7 +2677,7 @@ def compile_plans(plans, documents):
     compiled, rejected = [], []
     for index, plan in enumerate(plans, start=1):
         try:
-            compiled.append(compile_directory(plan, documents))
+            compiled.append(compile_directory(plan, documents, format_candidates=format_candidates))
         except DirectoryPlanRejected as error:
             rejected.append({'code': 'outline_directory_rejected', 'detail': f'计划{index}：{error.detail}'})
     if not compiled:
@@ -2740,14 +2737,14 @@ def soften_directory_plan(plan):
     return plan, issues
 
 
-def compile_directory(plan, documents):
+def compile_directory(plan, documents, *, format_candidates=False):
     plan, skipped = soften_directory_plan(plan)
     skipped = [*plan.pop('skipped_item_issues', []), *skipped]
     _keys(plan, _PLAN, 'directory plan')
     source = _Source(documents)
     nodes = _nodes(plan, source)
     reading = _reading_references(plan, source, nodes)
-    composition = _composition(plan, source)
+    composition = _composition(plan, source, format_candidates=format_candidates)
     parents = _parents(nodes, source)
     excluded = _excluded(plan, nodes, parents, source, composition)
     adopted = _adopt(plan, source, nodes, parents, composition, excluded)
@@ -2774,7 +2771,7 @@ def compile_directory(plan, documents):
                 source_issues.append(issue)
     compiled = {'chapters': adopted['chapters'],
             'issues': [*adopted['issues'], *excluded['issues'], *binding_issues, *skipped,
-                       *_revision_issues(source, nodes, composition), *source_issues]}
+                       *_revision_issues(source, composition['priority_basis']), *source_issues]}
     if 'reading_only_sources' in plan:
         compiled['_reading_references'] = reading
     return _note_conditions(compiled)
@@ -3404,7 +3401,7 @@ def _nodes(plan, source):
     return nodes
 
 
-def _composition(plan, source):
+def _composition(plan, source, *, format_candidates):
     raw = plan.get('composition', {'priority_basis': [], 'entries': []})
     _keys(raw, _COMPOSITION, 'composition')
     entries = []
@@ -3420,17 +3417,15 @@ def _composition(plan, source):
     if len(documents) > 1:
         raise DirectoryPlanRejected('a composition list must stay inside one document')
     basis = [_window(window, source, 'priority basis') for window in raw.get('priority_basis', [])]
-    if documents:
+    if documents and not format_candidates:
         identity = next(iter(documents))
         if source.by_id[identity]['role'] in _REVISIONS and not any(window[0] == identity for window in basis):
             raise DirectoryPlanRejected('a revision composition requires a priority basis in that document')
     return {'entries': entries, 'priority_basis': basis}
 
 
-def _revision_issues(source, nodes, composition):
-    cited = {node['heading'][0] for node in nodes.values()}
-    cited.update(entry['name'][0] for entry in composition['entries'])
-    cited.update(window[0] for window in composition['priority_basis'])
+def _revision_issues(source, priority_basis):
+    cited = {window[0] for window in priority_basis}
     issues = []
     for document in source.documents:
         if document['role'] in _REVISIONS and document['document_id'] not in cited:

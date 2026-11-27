@@ -55,7 +55,8 @@ async fn migrator_tracks_python_and_word_tables_and_preserves_data() {
                 20261028000001,
                 20261028000002,
                 20261028000003,
-                20261125000001
+                20261125000001,
+                20261127000001
             ]
         );
         let tables: i64 = sqlx::query_scalar(
@@ -64,10 +65,11 @@ async fn migrator_tracks_python_and_word_tables_and_preserves_data() {
               'tender_analysis_revisions','tender_analysis_commands','tender_analysis_artifacts','tender_analysis_confirmations','tender_analysis_model_requests',
               'tender_authoring_executions','tender_authoring_model_requests','tender_document_sources',
               'tender_project_analyses','tender_authoring_jobs','tender_outline_revisions','tender_draft_versions','tender_editor_sessions',
-              'tender_draft_state','tender_draft_saves','tender_draft_recoveries','tender_authoring_gap_dispositions'])",
+              'tender_draft_state','tender_draft_saves','tender_draft_recoveries','tender_authoring_gap_dispositions',
+              'tender_project_source_settings'])",
         ).fetch_one(&pool).await.unwrap();
         assert_eq!(
-            tables, 21,
+            tables, 22,
             "all Python and Word business tables must come from the migrator"
         );
         if attempt == 0 {

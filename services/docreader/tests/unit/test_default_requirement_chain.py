@@ -201,7 +201,21 @@ async def test_new_outline_defaults_to_per_document_bid_format_chain(tmp_path, m
     assert 'outline_directory_plan_failed' in codes
     assert 'outline_directory_format_conflict' in codes
     assert 'outline_item_placement_failed' in codes
-    assert 'outline_directory_revision_unreviewed' not in codes
+    revisions = [issue['detail'] for issue in outline['issues']
+                 if issue['code'] == 'outline_directory_revision_unreviewed']
+    assert [detail.split('是', 1)[0] for detail in revisions] == ['addendum', 'answers']
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    from docx import Document
+    from docreader.tender.authoring_export import export_authoring_document
+
+    export = export_authoring_document(artifacts, outline, [])
+    word = Document(BytesIO(artifacts.read_bytes(export['docx_ref'])))
+    with ZipFile(BytesIO(artifacts.read_bytes(export['package_ref']))) as package:
+        notes = package.read('提交要求与待办.md').decode()
+        assert all(detail in notes for detail in revisions)
+    assert all(any(detail in paragraph.text for paragraph in word.paragraphs) for detail in revisions)
 
     def windows(chapters):
         for chapter in chapters:

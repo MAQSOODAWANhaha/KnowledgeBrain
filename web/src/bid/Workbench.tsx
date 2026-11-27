@@ -47,6 +47,7 @@ import { KnowledgeSelection, type KnowledgeSelection as KnowledgeChoice } from "
 import { analysisBadge, inProgress, executionStatus } from "./executionStatus";
 import { ExecutionReport } from "./ExecutionReport";
 import { TaskProgress } from "./TaskProgress";
+import { SourceSettings } from "./SourceSettings";
 
 const fileKind = (document: TenderDocument) => {
   const name = document.file_name.toLowerCase();
@@ -60,9 +61,9 @@ const readStatus = (document: TenderDocument) => document.parse_status
   ? <Badge variant={/fail|error/.test(document.parse_status) ? "error" : /ready|complete|succeed/.test(document.parse_status) ? "success" : "neutral"} label={document.parse_status} />
   : <Badge variant="info" label="已上传，执行时读取" />;
 
-function ProjectFiles({ documents, selectedId, onSelect }: { documents: TenderDocument[]; selectedId?: string; onSelect(id: string): void }) {
+function ProjectFiles({ documents, projectId, selectedId, onSelect }: { documents: TenderDocument[]; projectId: string; selectedId?: string; onSelect(id: string): void }) {
   return <Table hasHover idKey="id" data={documents} columns={[
-    { key: "file_name", header: "文件", renderCell: (document) => <Link href={`#select-${document.id}`} aria-current={document.id === selectedId ? "true" : undefined}
+    { key: "file_name", header: "文件", renderCell: (document) => <Link href={`#${authoringHref(projectId, "files")}`} aria-current={document.id === selectedId ? "true" : undefined}
       onClick={(event) => { event.preventDefault(); onSelect(document.id); }}>{document.file_name}</Link> },
     { key: "media_type", header: "类型", width: pixel(96), renderCell: (document) => <Badge variant="neutral" label={fileKind(document)} /> },
     { key: "byte_length", header: "大小", width: pixel(110), renderCell: (document) => <Text hasTabularNumbers>{fileSize(document.byte_length)}</Text> },
@@ -144,6 +145,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   const [wordUnsafe, setWordUnsafe] = useState(false);
   const [outlineUnsafe, setOutlineUnsafe] = useState(false);
   const [analysisUnsafe, setAnalysisUnsafe] = useState(false);
+  const [sourceUnsafe, setSourceUnsafe] = useState(false);
   const [recoveryUnsafe, setRecoveryUnsafe] = useState(false);
   const [revisionUnsafe, setRevisionUnsafe] = useState(false);
   const [savedReviewUnsafe, setSavedReviewUnsafe] = useState(false);
@@ -153,7 +155,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     const item = (view?.pending_queue ?? []).find(entry => entry.gap_id === gapId);
     return item !== undefined && draft !== item.note;
   });
-  const unsafe = wordUnsafe || outlineUnsafe || analysisUnsafe || recoveryUnsafe || revisionUnsafe || savedReviewUnsafe || pendingQueueUnsafe || pendingNotesDirty;
+  const unsafe = wordUnsafe || outlineUnsafe || analysisUnsafe || sourceUnsafe || recoveryUnsafe || revisionUnsafe || savedReviewUnsafe || pendingQueueUnsafe || pendingNotesDirty;
   const knowledgeKey = `kb.tender-knowledge:${projectId}`;
   const [knowledgeSelections, setKnowledgeSelections] = useState<KnowledgeChoice[]>(() => {
     try { const value: unknown = JSON.parse(sessionStorage.getItem(knowledgeKey) ?? "[]"); return Array.isArray(value) ? value.filter(item => item && typeof item.product_id === "string" && typeof item.version_id === "string") : []; }
@@ -243,10 +245,12 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   }, [reload, retry]);
   useEffect(() => {
     const hasPendingDirty = pendingQueueUnsafe || pendingNotesDirty;
-    if (!outlineUnsafe && !analysisUnsafe && !recoveryUnsafe && !revisionUnsafe && !savedReviewUnsafe && !hasPendingDirty) return;
+    if (!outlineUnsafe && !analysisUnsafe && !sourceUnsafe && !recoveryUnsafe && !revisionUnsafe && !savedReviewUnsafe && !hasPendingDirty) return;
     const originalHash = window.location.hash;
     const warn = () => setNotice(
-      analysisUnsafe || recoveryUnsafe
+      sourceUnsafe
+        ? "请先保存或放弃来源设置修改，再离开项目。"
+        : analysisUnsafe || recoveryUnsafe
         ? "请先提交或放弃分析修改，再离开项目。"
         : revisionUnsafe || savedReviewUnsafe
           ? "请先提交或放弃复核修改，再离开项目。"
@@ -267,7 +271,7 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
     });
     window.addEventListener("beforeunload", unload); document.addEventListener("click", click, true);
     return () => { window.removeEventListener("beforeunload", unload); document.removeEventListener("click", click, true); unguard(); };
-  }, [outlineUnsafe, analysisUnsafe, recoveryUnsafe, revisionUnsafe, savedReviewUnsafe, pendingQueueUnsafe, pendingNotesDirty, projectId, step]);
+  }, [outlineUnsafe, analysisUnsafe, sourceUnsafe, recoveryUnsafe, revisionUnsafe, savedReviewUnsafe, pendingQueueUnsafe, pendingNotesDirty, projectId, step]);
   const onCurrentChange = useCallback((current: DocxCurrent | null) => setPinned(current as TenderDocxCurrent | null), []);
   const onNavigationResult = useCallback((result: WordNavigationResult) => {
     setNavigationNotice(result.ok ? "已定位 Word 中的书签位置。" : result.reason ?? "位置需要重新关联，请在 Word 中核对。");
@@ -278,6 +282,9 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
   }, [reload]);
   async function start(kind: PendingAction["kind"], body: DocumentStart | Record<string, never> = {}) {
     if (busy || view?.project.status === "ended" && !pending || pending && pending.kind !== kind) return false;
+    if (!pending && sourceUnsafe) {
+      setNotice("请回到项目资料保存或放弃来源设置修改，再开始任务。"); return false;
+    }
     const requestBody = kind === "authoring" && knowledgeSelections.length ? { ...body, knowledge_selections: knowledgeSelections } : body;
     const action = pending ?? { kind, attempt: createMutationAttempt(), body: requestBody };
     try { sessionStorage.setItem(actionKey, JSON.stringify(action)); }
@@ -435,25 +442,28 @@ function ProjectWorkbench({ email, projectId, step }: { email: string; projectId
         {view && step === "authoring" && view.authoring && <TaskProgress label={view.authoring.operation === "outline" ? "大纲任务" : "正文任务"} status={view.authoring.status} progress={view.authoring.progress} />}
       </VStack>}
       {view && <>
-        {step === "files" && (() => {
+        <Panel isShown={step === "files"} fill>{(() => {
           const selectedFile = view.documents.find(document => document.id === selectedFileId) ?? view.documents[0];
           const main = <Card padding={0}><VStack gap={0}>
             <Toolbar label="项目文件" dividers={["bottom"]} startContent={<Text weight="semibold">项目文件</Text>} endContent={<Text type="supporting" hasTabularNumbers>共 {view.documents.length} 份</Text>} />
-            {view.documents.length ? <ProjectFiles documents={view.documents} selectedId={selectedFile?.id} onSelect={setSelectedFileId} /> : <EmptyState isCompact title="尚未上传项目文件" description="上传招标文件后即可分析招标事项。" />}
+            {view.documents.length ? <ProjectFiles documents={view.documents} projectId={projectId} selectedId={selectedFile?.id} onSelect={setSelectedFileId} /> : <EmptyState isCompact title="尚未上传项目文件" description="上传招标文件后即可分析招标事项。" />}
             {!ended && <VStack gap={2} padding={4}>
               <FileInput label="选择项目文件" isLabelHidden mode="dropzone" description="拖入招标文件、附件、补遗或澄清，或点击选择文件" isMultiple accept={TENDER_INPUT_ACCEPT} value={null} isDisabled={busy} isLoading={uploading.length > 0} onChange={(files) => { const list = Array.isArray(files) ? files : files ? [files] : []; if (list.length) void upload(list); }} />
-              <Text type="supporting">招标文件、附件、补遗和澄清都放在这里。分析会自行读取结构和内容，新资料用于后续编制快照，已有稿件保留。</Text>
+              <Text type="supporting">上传后在来源设置中核对文件角色。新资料用于后续编制快照，已有稿件保留。</Text>
               {uploading.map(name => <Text key={name} role="status">正在上传：{name}</Text>)}
             </VStack>}
           </VStack></Card>;
           const side = <VStack gap={4} width={stacked ? undefined : 340}>
             {selectedFile && <FileDetail document={selectedFile} download={download} />}
+            <SourceSettings projectId={projectId} active={step === "files"} readOnly={ended} disabled={busy || !!pending}
+              filesVersion={JSON.stringify(view.documents.map(document => document.id))} selectedFileId={selectedFile?.id}
+              onChanged={() => void reload()} onUnsafeChange={setSourceUnsafe} />
             <Card><KnowledgeSelection value={knowledgeSelections} onChange={changeKnowledge} disabled={!!ended || busy || !!pending} /></Card>
           </VStack>;
           return <VStack isScrollable height="100%" paddingInline={6} paddingBlock={4} role="region" aria-label="项目资料">
             {stacked ? <VStack gap={4}>{main}{side}</VStack> : <HStack gap={4} vAlign="start"><VStack style={{ flex: 1, minWidth: 0 }}>{main}</VStack>{side}</HStack>}
           </VStack>;
-        })()}
+        })()}</Panel>
         <Panel isShown={step === "analysis"} fill>
           {stacked
             ? <VStack isScrollable height="100%" gap={4}><AnalysisPane analysis={view.analysis} placements={placements} kind={analysisKind} selected={selectedItem} onSelect={setSelectedItem} /><VStack padding={4} role="complementary" aria-label="分析处理"><VStack gap={4}>

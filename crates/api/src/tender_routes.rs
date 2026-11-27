@@ -185,6 +185,10 @@ pub(crate) fn router() -> Router<AppState> {
             get(download_document),
         )
         .route(
+            "/api/v3/tender-projects/{project}/sources",
+            get(sources_status).put(sources_save),
+        )
+        .route(
             "/api/v3/tender-projects/{project}/analysis",
             get(analysis_status).post(analysis_start),
         )
@@ -785,6 +789,21 @@ async fn start(
         Json(bridge(id, owner, action, body, vec![]).await?.0),
     ))
 }
+async fn sources_status(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiErr> {
+    status(s, h, id, "sources.status").await
+}
+async fn sources_save(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, ApiErr> {
+    Ok(start(s, h, id, "sources.save", b).await?.1)
+}
 async fn analysis_status(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -1197,12 +1216,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outline_mutations_authenticate_before_bridge_access() {
+    async fn tender_project_workflow_routes_authenticate_before_bridge_access() {
         let state = AppState {
             jwt_secret: "tender-test-secret".into(),
             bootstrap_key: String::new(),
         };
         for (method, suffix) in [
+            ("GET", "sources"),
+            ("PUT", "sources"),
             ("POST", "outline/generate"),
             ("PUT", "outline"),
             ("GET", "outline/revisions"),

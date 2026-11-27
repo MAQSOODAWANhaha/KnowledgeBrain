@@ -89,7 +89,8 @@ async fn fresh_database_initializes_current_business_without_database_authorizat
             20261028000001,
             20261028000002,
             20261028000003,
-            20261125000001
+            20261125000001,
+            20261127000001
         ]
     );
     assert!(migrations.iter().all(|migration| !migration.no_tx));
@@ -253,7 +254,7 @@ async fn fresh_database_initializes_current_business_without_database_authorizat
         vec![
             ("knowledge".into(), 26),
             ("platform".into(), 10),
-            ("tender".into(), 21)
+            ("tender".into(), 22)
         ]
     );
     for (table, column) in [
@@ -281,6 +282,7 @@ async fn fresh_database_initializes_current_business_without_database_authorizat
         "tender_draft_saves",
         "tender_draft_recoveries",
         "tender_authoring_gap_dispositions",
+        "tender_project_source_settings",
     ] {
         let present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
             .bind(format!("public.{table}"))

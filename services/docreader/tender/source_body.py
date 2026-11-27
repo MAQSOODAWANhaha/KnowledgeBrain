@@ -51,11 +51,14 @@ def _input(snapshot):
     return AuthoringInput.model_validate(snapshot).model_dump(exclude_none=True)
 
 
-def _documents(artifacts, snapshot):
+def _documents(artifacts, snapshot, *, project_context=False):
     frozen = snapshot.get('frozen_ref')
     if not frozen:
         raise ArtifactIntegrityError('exact body requires its frozen source documents')
-    documents = artifacts.read_json(frozen)['documents']
+    value = artifacts.read_json(frozen)
+    if project_context and (reason := project_context_blocker(value)):
+        raise ArtifactIntegrityError(reason)
+    documents = value['documents']
     by_id = {d['document_id']: d for d in documents}
     if len(by_id) != len(documents):
         raise ArtifactIntegrityError('duplicate frozen document identity')
@@ -227,6 +230,15 @@ def load_source_body(artifacts, snapshot, target, *, repository=None, cache=None
         raise ArtifactIntegrityError('exact source body binding is unavailable or invalid') from error
 
 
+def project_context_blocker(frozen):
+    if any(issue.get('code') == 'source_roles_unconfirmed' for issue in frozen.get('issues', [])):
+        return '请先核对项目文件的来源角色，再绑定方案背景。'
+    if any(source.get('role') in (DocumentRole.AMENDMENT, DocumentRole.CLARIFICATION)
+           for source in frozen.get('documents', [])):
+        return '主件有补遗或澄清，请核对适用范围后再绑定方案背景。'
+    return None
+
+
 def load_source_context(artifacts, snapshot, target, *, repository=None):
     """Use the accepted joins without turning context into response body."""
     repository = repository or EvidenceRepository(artifacts)
@@ -235,9 +247,7 @@ def load_source_context(artifacts, snapshot, target, *, repository=None):
             value = ResponseTarget.model_validate(target).model_dump(exclude_unset=True)
         except ValueError as error:
             raise ArtifactIntegrityError('方案背景没有对应的可写响应位置。') from error
-        documents = _documents(artifacts, snapshot)
-        if any(source['role'] in (DocumentRole.AMENDMENT, DocumentRole.CLARIFICATION) for source in documents.values()):
-            raise ArtifactIntegrityError('主件有补遗或澄清，请核对适用范围后再绑定方案背景。')
+        documents = _documents(artifacts, snapshot, project_context=True)
         main = {identity: source for identity, source in documents.items() if source['role'] == DocumentRole.MAIN}
         excerpts = value['project_context_excerpts']
         index_refs = [source['source_index_ref'] for source in main.values()]

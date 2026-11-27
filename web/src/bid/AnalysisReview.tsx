@@ -191,7 +191,8 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
 
   const newer = !!base && baseKey !== identity(remote);
   const currentState = base && baseKey === identity(remote) ? remote : base;
-  const locked = disabled || saving || !!pending;
+  const staleSources = currentState?.sources_current === false;
+  const locked = disabled || saving || !!pending || staleSources;
 
   const corrections = useMemo(() => base?.correction?.items.flatMap(entry => {
     const patch = patchOf(working?.edits[itemKey(entry.pack_id, entry.item.item_id)]);
@@ -275,7 +276,7 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
     const base = working.base;
     let flight = pending;
     if (!flight) {
-      if (newer || conflict) return;
+      if (newer || conflict || staleSources) return;
       if (kind === "confirm") {
         if (!canConfirm || !base.checklist_digest) return;
         flight = { kind, attempt: createMutationAttempt(), body: { run_id: base.run_id, source_version: base.source_version,
@@ -324,7 +325,7 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
     {!loading && !base && <Text type="supporting">完成招标分析后，可在这里处理待确认问题、纠正事项业务字段。</Text>}
     {base && working && <>
       <Text type="supporting">当前核对：来源版本 {base.source_version}，分析修订 {base.domain_revision}。{dirty ? "当前输入尚未提交。" : ""}</Text>
-      {!(baseKey === identity(remote) ? remote?.sources_current : base.sources_current) && <Banner status="warning" title="项目来源已变化，以下仍是旧资料的分析。可确认该固定版本，或使用当前上传文件重新分析。" />}
+      {staleSources && <Banner status="warning" title="项目来源已变化。下方保留旧分析和已填写的意见，请按当前来源重新分析后再提交。" />}
       {(newer || conflict) && <Banner role="alert" status="warning" collapsible={false} title="分析状态或版本已有变化，当前输入仍保留。请刷新核对最新结果后再处理。"
         description={remote ? `最新来源版本 ${remote.source_version}，分析修订 ${remote.domain_revision}；待确认问题 ${remote.human_issue_ids.length} 项。` : undefined}
         endContent={<Button size="sm" isDisabled={saving || !!pending || !remote} onClick={() => {
@@ -391,7 +392,7 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
         : !base.human_issue_ids.length && !base.correction?.items.length && <Text type="supporting">当前没有待核对的问题。</Text>}
       {!!base.human_issue_ids.length && <Heading level={4}>待确认问题（{base.human_issue_ids.length}）</Heading>}
       {nonHumanIssues.map((issue, index) => <Text key={index} type="supporting">{issue.detail}</Text>)}
-      <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict)} onClick={() => void submit("confirm")} label={pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"} /></HStack>
+      <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "confirm" : !canConfirm || newer || conflict || staleSources)} onClick={() => void submit("confirm")} label={pending?.kind === "confirm" ? "确认同一次人工确认请求" : "提交人工确认"} /></HStack>
       {!!corrections.length && <Text type="supporting">已修改事项字段，请先提交事项纠正，等待重新审核后的确认清单。</Text>}
       {corrections.some(value => !validFields(value)) && <Banner status="warning" title="请补齐已添加的业务字段和数值原文片段；不需要的字段可清空或删除，最高分须大于等于零。" />}
       {!!base.correction?.items.length && <><Heading level={4}>事项业务字段</Heading>
@@ -406,7 +407,7 @@ export function AnalysisReview({ projectId, disabled, onChanged, onUnsafeChange 
         <Button size="sm" variant="secondary" aria-label="事项列表下一页" isDisabled={pagedCorrections.page >= pagedCorrections.totalPages} onClick={() => setCorrectionPage(pagedCorrections.page + 1)} label="下一页" />
       </HStack>}
       <TextArea label="事项纠正理由" htmlMaxLength={4000} isDisabled={locked} value={working.reason} onChange={reason => setWorking(current => current && { ...current, reason })} />
-      <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")} label={pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"} /></HStack></>}
+      <HStack><Button variant="primary" isDisabled={disabled && !pending || saving || (pending ? pending.kind !== "correct" : newer || conflict || staleSources || !corrections.length || !working.reason.trim() || corrections.some(value => !validFields(value)))} onClick={() => void submit("correct")} label={pending?.kind === "correct" ? "确认同一次事项纠正请求" : "提交事项纠正并重新审核"} /></HStack></>}
     </>}
   </VStack>;
 }
