@@ -148,6 +148,26 @@ def test_swapped_heading_destinations_on_the_same_page_are_rejected(tmp_path):
         toc_layout.verify_toc(original, pdf(('Alpha', 'Beta'), swapped_destinations=True))
 
 
+@pytest.mark.parametrize('swapped', [False, True])
+def test_destination_title_with_pdfium_control_char_keeps_its_coordinate_band(tmp_path, monkeypatch, swapped):
+    titles = ('Alpha/Beta', 'Gamma/Delta')
+    original = source_word(tmp_path, titles, cached=3)
+    extract = toc_layout.pdfium.PdfTextPage.get_text_bounded
+
+    def corrupt_body_punctuation(textpage, left, bottom, right, top):
+        text = extract(textpage, left, bottom, right, top)
+        return text.replace('/', '\x01') if left == 0 else text
+
+    monkeypatch.setattr(toc_layout.pdfium.PdfTextPage, 'get_text_bounded', corrupt_body_punctuation)
+    rendered = pdf(titles, swapped_destinations=swapped)
+    if swapped:
+        with pytest.raises(toc_layout.LayoutError) as error:
+            toc_layout.verify_toc(original, rendered)
+        assert error.value.code == 'TOC_PDF_TITLE_MISMATCH'
+    else:
+        assert toc_layout.verify_toc(original, rendered)['display_caches_match']
+
+
 def test_already_correct_caches_are_verified_in_one_conversion(tmp_path):
     original = source_word(tmp_path, cached=3)
     result, receipt = toc_layout.finalize_toc(original, lambda _data: (pdf(), 'same-engine'))
