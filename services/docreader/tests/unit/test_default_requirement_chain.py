@@ -226,6 +226,53 @@ async def test_new_outline_defaults_to_per_document_bid_format_chain(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_inline_amendment_and_clarification_keep_both_same_name_forms_in_delivery(tmp_path, monkeypatch):
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    from docx import Document
+    from docreader.tender.authoring_export import export_authoring_document
+
+    artifacts = ArtifactStore(tmp_path)
+    documents, items = [], []
+    for document_id, role, source in (
+        ('tender', 'main', '第六章 投标文件格式\n附件1 投标函\n仅主件完整原式'),
+        ('rev-a', 'amendment', '补遗一\n投标函\n仅补遗完整原式'),
+        ('rev-b', 'clarification', '答疑一\n投标函\n仅答疑完整原式'),
+    ):
+        document, index = _frozen_document(artifacts, document_id, role, source)
+        documents.append(document)
+        if role != 'main':
+            for duplicate in (1, 2):
+                items.append({'item_id': f'{document_id}:{duplicate}', 'kind': 'submission_requirement',
+                              'text': '提交投标函', 'submission': {'documents': ['投标函']},
+                              'evidence': [{'range_id': index.ranges[0]['range_id'], 'quote': '投标函'}]})
+    snapshot = AuthoringInput.model_validate({
+        'schema_version': 2, 'run_id': 'multiple-inline-forms', 'source_version': 1, 'domain_revision': 1,
+        'frozen_ref': artifacts.put_json({'documents': documents}), 'extract_refs': [artifacts.put_json({'items': items})],
+    }).model_dump()
+    store = _memory_store()
+    _bind(monkeypatch, store)
+    monkeypatch.setattr(document_execution, 'OpenAIModel', _model([]))
+    reference = await _execute(artifacts, store, snapshot, execution_id='multiple-inline-outline',
+                               outline_only=True, context_tokens=16000, output_reserve=2048)
+    outline = artifacts.read_json(reference)
+    assert [chapter['title'] for chapter in outline['chapters']] == ['投标函'] * 3
+    conflicts = [issue['detail'] for issue in outline['issues'] if issue['code'] == 'outline_directory_format_conflict']
+    assert len(conflicts) == 2
+    assert all(any(f'文档 {document_id}' in conflict for conflict in conflicts) for document_id in ('rev-a', 'rev-b'))
+
+    exported = export_authoring_document(artifacts, outline, [])
+    word_bytes = artifacts.read_bytes(exported['docx_ref'])
+    paragraphs = {para.text for para in Document(BytesIO(word_bytes)).paragraphs}
+    assert {'仅主件完整原式', '仅补遗完整原式', '仅答疑完整原式'} <= paragraphs
+    with ZipFile(BytesIO(artifacts.read_bytes(exported['package_ref']))) as package:
+        assert package.read('投标文件.docx') == word_bytes
+        notes = package.read('提交要求与待办.md').decode()
+        assert all(f'文档 {document_id}' in notes for document_id in ('rev-a', 'rev-b'))
+
+
+@pytest.mark.asyncio
 async def test_successor_outline_inherits_the_requirement_chain(tmp_path, monkeypatch):
     artifacts = ArtifactStore(tmp_path)
     record, _index = _frozen_document(artifacts, 'tender', 'main', MAIN)

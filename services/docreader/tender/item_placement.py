@@ -153,17 +153,20 @@ def submission_form_nodes(documents, plan, items, format_pages):
             continue
         for name in (row['semantic'].get('submission') or {}).get('documents') or []:
             key = _compact(name)
+            if not key:
+                continue
             outside = [e for e in row['evidence'] if e['page'] is not None
                        and (e['document_id'], e['page']) not in format_pages]
-            if key in named:
+            conflict = named.get(key)
+            if conflict is not None:
                 outside = [e for e in outside if roles.get(e['document_id']) in _REVISIONS]
-            if key and outside:
-                wanted.setdefault(key, {'name': name.strip(), 'rows': [], 'evidence': [], 'conflict': named.get(key)})
-                wanted[key]['rows'].append(row)
-                wanted[key]['evidence'].extend(outside)
+            for evidence in outside:
+                source = evidence['document_id'] if conflict is not None else None
+                wanted.setdefault((key, source), {'name': name.strip(), 'evidence': [], 'conflict': conflict})
+                wanted[key, source]['evidence'].append(evidence)
     by_id = {document['document_id']: document for document in documents}
     candidates, claimed_headings = [], set()
-    for key, entry in wanted.items():
+    for (key, _source), entry in wanted.items():
         heading = None
         for document_id, page in sorted({(e['document_id'], e['page']) for e in entry['evidence']}):
             document = by_id.get(document_id)
