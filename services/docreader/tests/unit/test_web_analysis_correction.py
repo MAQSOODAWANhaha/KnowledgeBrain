@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from docreader.integrations import web_analysis
-from docreader.integrations.artifacts import ArtifactStore
 from docreader.integrations.web import WebBridge, WebError
 from docreader.tender.evidence import EvidenceRepository
 from docreader.tender.requirements import validate_item_correction
@@ -15,7 +14,8 @@ from test_analysis_extraction import pack, result
 
 @pytest.fixture
 def correction_runtime(tmp_path, monkeypatch):
-    artifacts = ArtifactStore(tmp_path)
+    bridge = WebBridge(SimpleNamespace(dsn="", artifact_root=tmp_path))
+    artifacts = bridge.artifacts
     baseline = result()
     baseline["items"][0]["conditions"] = ["原条件"]
     source = pack()
@@ -53,9 +53,10 @@ def correction_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(EvidenceRepository, "load_pack", lambda self, reference: self.artifacts.read_json(reference))
     monkeypatch.setattr(EvidenceRepository, "source_index",
                         lambda self, reference: SimpleNamespace(by_id=self.artifacts.read_json(reference)))
-    bridge = SimpleNamespace(artifacts=artifacts, lock_project=lock_project, manifest=manifest,
-                             store=SimpleNamespace(correct=correct, transaction=transaction))
-    bridge.manifest_matches = lambda reference, current: WebBridge.manifest_matches(bridge, reference, current)
+    monkeypatch.setattr(bridge, "lock_project", lock_project)
+    monkeypatch.setattr(bridge, "manifest", manifest)
+    monkeypatch.setattr(bridge.store, "correct", correct)
+    monkeypatch.setattr(bridge.store, "transaction", transaction)
     body = {"project_id": "project", "run_id": "run", "source_version": 1, "expected_revision": 1,
             "base_items_digest": extracted["sha256"], "request_key": "structured-action",
             "reason": "对照原文纠正业务字段。", "changes": []}
