@@ -1,6 +1,6 @@
 # 招投标活跃问题与修复记录
 
-本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-350**）。
+本页只保留**当前未关闭、待真实验证或仍被活跃路线图引用的缺陷**（下一编号：**BUG-352**）。
 已闭环的历史缺陷记录保存在 Git 历史，不在此长期堆积；跨模块高频防错规则沉淀在 [LESSONS.md](../../LESSONS.md)，动态运行状态只维护在 [交接](README.md#当前状态交接)。
 
 ## 维护约定
@@ -271,3 +271,10 @@
 - 根因：`services/docreader/tender/item_placement.py` 的 `submission_form_nodes` 对每个格式外 `submission_requirement` 候选章独立从标题行复制到最末引证页末尾，既未在同文档下一个补位候选章标题行前截断，也未规避已有格式节点行、`format_pages`、明示「不适用」式样及页眉/页码装饰行。当同页出现多张外置附表（如 `技术附表 G` 与子表 `附表 G.1`、`附表 G.2` 同在第 70 页）时，各节点 `body_windows` 互相重叠，触发 `directory_compile._validate_body_owners` 抛出 `DirectoryPlanRejected`，导致 `compile_plans` 退回空目录。
 - 改法：在 `submission_form_nodes` 中先收集并按 `(document_id, page, line)` 排序全部候选标题（跳过已归属节点、`format_pages` 及 `_NOT_APPLICABLE` 行），再按顺序为每张候选表切分互不重叠的 `body_windows`（止于下一候选章标题、已有节点行或 `format_pages` 之前，并跳过非网格页边装饰行）。规则并入 [业务工作流 · 新链格式补位与事项归属](workflow.md#新链格式补位与事项归属)。
 - 验证：`services/docreader/tests/unit/test_item_placement.py` 新增 Red→Green 用例覆盖同页多表切分、不跨入已有格式节点/`format_pages`、跳过不适用式样与页眉页码装饰行，并通过 `compile_bid_format_plan` 端到端编译。
+
+## BUG-351：验收断言落后于配置漂移与大纲状态合同
+
+- 现象与影响：Python CI 的两项配置漂移验收期望反复重试，结束项目的大纲状态验收未覆盖项目背景字段，阻断镜像发布。
+- 根因：配置漂移快速失败和项目背景选择接入后，既有集成验收仍使用上一版状态和响应断言。
+- 改法：校验首次配置冲突即以明确原因失败，保留原制品与用量且不耗掉基础设施重试额度。校验结束项目返回空大纲和空背景来源，拒绝变更且不创建作业。
+- 验证：隔离 PostgreSQL 上复跑原失败用例，检查状态、回执、制品和项目作业记录。

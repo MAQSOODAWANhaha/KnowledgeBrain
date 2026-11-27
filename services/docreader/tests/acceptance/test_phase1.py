@@ -313,15 +313,15 @@ async def test_completed_checkpoint_cannot_bypass_execution_spec_on_recovery(run
     pending = await store.get_run(run["run_id"])
     assert pending["status"] == "pending"
     assert any(item["stage"] == "confirm" for item in pending["artifacts"])
-    for attempt in range(1, 4):
-        with pytest.raises(Conflict):
-            await execute_with_spec("changed")
-        current = await store.get_run(run["run_id"])
-        assert current["status"] == ("pending" if attempt < 3 else "failed")
-        assert current["commands"][-1]["infrastructure_failures"] == attempt + 1
+    with pytest.raises(Conflict, match="execution configuration changed"):
+        await execute_with_spec("changed")
     failed = await store.get_run(run["run_id"])
     assert failed["status"] == "failed"
-    assert len(failed["usage"]) == len(pending["usage"])
+    command = failed["commands"][-1]
+    assert command["receipt"]["metadata"]["reason"] == "execution_config_changed"
+    assert command["infrastructure_failures"] == pending["commands"][-1]["infrastructure_failures"] == 1
+    assert failed["usage"] == pending["usage"]
+    assert failed["artifacts"] == pending["artifacts"]
 
 
 async def test_partial_recovery_refuses_changed_native_parser_configuration(runtime, monkeypatch):
@@ -338,15 +338,14 @@ async def test_partial_recovery_refuses_changed_native_parser_configuration(runt
                                 "Retry the failed pack while preserving the frozen parser configuration")
     assert retried["command_id"] != command["command_id"]
     monkeypatch.setattr(pdf_parser, "SCAN_MIN_CHARS_PER_PAGE", pdf_parser.SCAN_MIN_CHARS_PER_PAGE + 1)
-    for attempt in range(1, 5):
-        with pytest.raises(Conflict):
-            await execute(store, settings, run)
-        current = await store.get_run(run["run_id"])
-        assert current["status"] == ("pending" if attempt < 4 else "failed")
-        assert current["commands"][-1]["infrastructure_failures"] == attempt
+    with pytest.raises(Conflict):
+        await execute(store, settings, run)
     after = await store.get_run(run["run_id"])
     assert after["status"] == "failed"
-    assert len(after["usage"]) == len(before["usage"])
+    retry = after["commands"][-1]
+    assert retry["receipt"]["metadata"]["reason"] == "execution_config_changed"
+    assert retry["infrastructure_failures"] == 0
+    assert after["usage"] == before["usage"]
     assert after["artifacts"] == before["artifacts"]
 
 
