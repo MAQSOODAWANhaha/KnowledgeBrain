@@ -14,6 +14,7 @@ import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
+import re
 from typing import Any
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
@@ -229,8 +230,6 @@ def _inspect_docx(docx_bytes: bytes | None, outline: dict[str, Any]) -> dict[str
 def _evaluate_requirements(
     outline: dict[str, Any],
     requirements: dict[str, Any] | None,
-    coverage: dict[str, Any] | None,
-    gaps: list[dict[str, Any]] | None,
     docx_info: dict[str, Any],
     human_review: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -276,16 +275,6 @@ def _evaluate_requirements(
         for ref in issue.get("rule_refs", [])
         if (key := rule_ref_key(ref)) is not None
     }
-    coverage_pending_keys = {
-        key
-        for entry in (coverage or {}).get("entries", [])
-        if (entry.get("resolution") == "pending" or "coverage_target_missing" in (entry.get("gap_codes") or []))
-        and (key := rule_ref_key(entry.get("rule_ref"))) is not None
-    }
-    has_export_unassigned_gap = any(
-        gap.get("code") == "export_requirement_unassigned" for gap in (gaps or [])
-    )
-
     placed_in_docx = 0
     settled = 0
     missing_items: list[dict[str, Any]] = []
@@ -333,11 +322,6 @@ def _evaluate_requirements(
             settled += 1
             continue
 
-        explicitly_listed = (
-            (key in outline_pending_keys)
-            or (key in coverage_pending_keys)
-            or (has_export_unassigned_gap and "pending" in resolutions)
-        )
         record = {
             "item_id": item_id,
             "rule_ref": ref,
@@ -346,7 +330,7 @@ def _evaluate_requirements(
             "target_id": None,
             "text": snippet,
         }
-        if explicitly_listed:
+        if key in outline_pending_keys:
             pending_items.append({**record, "reason": "explicitly_pending_in_gaps"})
         else:
             missing_items.append({**record, "reason": "unplaced_and_unlisted_in_gaps"})
@@ -505,8 +489,6 @@ def _evaluate_original_tables(
     checked_tables = 0
     checked_fixed_texts = 0
     used_tables: set[int] = set()
-    grid_source_available = artifacts is not None or expected_tables is not None
-
     for chapter, is_external in _walk_chapters(outline.get("chapters", [])):
         if is_external:
             continue
@@ -564,7 +546,6 @@ def _evaluate_original_tables(
                     if tbl["table_index"] not in used_tables
                 ]
             for expected_grid, header_rows in target_grids:
-                checked_tables += 1
                 if not candidates:
                     mismatches.append({
                         **location,
@@ -578,6 +559,7 @@ def _evaluate_original_tables(
                     })
                     continue
                 actual_table = candidates.pop(0)
+                checked_tables += 1
                 used_tables.add(actual_table["table_index"])
                 mismatches.extend(
                     _compare_table(expected_grid, actual_table, location,
@@ -599,18 +581,16 @@ def _evaluate_original_tables(
                             "actual": haystack[:160],
                         })
 
-    if not docx_info["valid"] or mismatches:
+    if not docx_info["valid"] or mismatches or not outline.get("chapters"):
         status, machine_passed = "fail", False
-    elif not grid_source_available and form_targets > 0:
+    elif not checked_tables:
         status, machine_passed = "unknown", False
-    elif not outline.get("chapters"):
-        status, machine_passed = "fail", False
     else:
         status, machine_passed = "pass", True
     return {
         "status": status,
         "machine_passed": machine_passed,
-        "grid_comparison": "compared" if grid_source_available else "unavailable",
+        "grid_comparison": "compared" if checked_tables else "unavailable",
         "counts": {
             "form_targets": form_targets,
             "checked_tables": checked_tables,
@@ -779,7 +759,13 @@ def _evaluate_file_usability(
             "detail": f"DOCX 缺少 {len(docx_info['missing_target_ids'])} 个响应位置书签。",
         })
 
-    layout_pdf_ok = bool(isinstance(layout, dict) and layout.get("status") == "fixed")
+    layout_documents = layout.get("documents") if isinstance(layout, dict) else None
+    layout_pdf_ok = bool(
+        isinstance(layout, dict) and layout.get("status") == "fixed"
+        and isinstance(layout_documents, list) and layout_documents and isinstance(layout_documents[0], dict)
+        and layout_documents[0].get("status") == "fixed"
+        and docx_info["docx_sha256"] and layout_documents[0].get("docx_sha256") == docx_info["docx_sha256"]
+    )
     onlyoffice_verified = False
     if onlyoffice_receipt is not None:
         expected_sha = docx_info["docx_sha256"]
@@ -823,6 +809,32 @@ def _evaluate_file_usability(
     }
 
 
+def _analysis_binding(artifact: dict[str, Any] | None) -> dict[str, Any] | None:
+    source = artifact.get("authoring_input") if isinstance(artifact, dict) else None
+    if not isinstance(source, dict):
+        return None
+    frozen = source.get("frozen_ref")
+    frozen_sha = frozen.get("sha256") if isinstance(frozen, dict) else None
+    run_id = source.get("run_id")
+    versions = {key: source.get(key) for key in ("source_version", "domain_revision")}
+    if (not isinstance(frozen_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", frozen_sha)
+            or not isinstance(run_id, str) or not run_id
+            or any(type(version) is not int or version < 1 for version in versions.values())):
+        return None
+    return {"frozen_sha256": frozen_sha, "run_id": run_id, **versions}
+
+
+def _bound_human_review(human_review: dict[str, Any] | None, binding: dict[str, Any] | None,
+                        docx_info: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(human_review, dict) or binding is None or not docx_info["valid"]:
+        return None
+    expected = {**binding, "docx_sha256": docx_info["docx_sha256"]}
+    if any(type(human_review.get(key)) is not type(value) or human_review[key] != value
+           for key, value in expected.items()):
+        return None
+    return human_review
+
+
 def evaluate_acceptance(
     *,
     outline: dict[str, Any],
@@ -839,20 +851,36 @@ def evaluate_acceptance(
 ) -> dict[str, Any]:
     """Score one execution against the four minimum acceptance criteria."""
     docx_info = _inspect_docx(docx_bytes, outline)
+    binding = _analysis_binding(outline)
+    requirements_binding = _analysis_binding(requirements)
+    coverage_binding = _analysis_binding(coverage)
+    human_review = _bound_human_review(
+        human_review,
+        binding if requirements_binding == binding and (coverage is None or coverage_binding == binding) else None,
+        docx_info,
+    )
+    foreign_requirements = bool(requirements is not None and "authoring_input" in requirements
+                                and (binding is None or requirements_binding != binding))
+    foreign_coverage = bool(coverage is not None and "authoring_input" in coverage
+                            and (binding is None or coverage_binding != binding))
     criteria = {
         "requirements_coverage": _evaluate_requirements(
-            outline, requirements, coverage, gaps, docx_info, human_review
+            outline, None if foreign_requirements else requirements, docx_info, human_review
         ),
         "original_tables": _evaluate_original_tables(
             outline, gaps, docx_info, artifacts, expected_tables=expected_tables
         ),
         "no_fabrication": _evaluate_no_fabrication(
-            outline, coverage, gaps, report, human_review
+            outline, None if foreign_coverage else coverage, gaps, report, human_review
         ),
         "file_usability": _evaluate_file_usability(
             docx_info, layout, onlyoffice_receipt
         ),
     }
+    if foreign_requirements:
+        criteria["requirements_coverage"]["detail"] = "招标要求底稿与大纲的分析快照不一致。"
+    if foreign_coverage:
+        criteria["no_fabrication"]["detail"] = "覆盖结算与大纲的分析快照不一致。"
     counts = Counter(item["status"] for item in criteria.values())
     passed = all(item["status"] == "pass" for item in criteria.values())
     summary = {
