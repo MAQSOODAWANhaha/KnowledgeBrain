@@ -1,21 +1,24 @@
 import { expect, test, type Page } from "@playwright/test";
 import { fixture, path, project } from "./tender.fixture";
 
-async function sourcesFixture(page: Page, ended = false) {
+async function sourcesFixture(page: Page, ended = false, registrationPending = false) {
   const f = await fixture(page);
   if (ended) f.view.project.status = "ended";
   f.view.documents.push({ id: "amendment", file_name: "合成补遗.pdf", media_type: "application/pdf", byte_length: 1024 });
+  const documents = f.view.documents.map(document => ({
+    document_id: document.id, file_name: document.file_name, role: "main", replaces: null as string | null,
+    modification_scope: null as string | null,
+  }));
   const state = {
     settings: {
       version: "a".repeat(64),
       expected_document_ids: [] as string[],
-      documents: f.view.documents.map(document => ({
-        document_id: document.id, file_name: document.file_name, role: "main", replaces: null as string | null,
-        modification_scope: null as string | null,
-      })),
+      documents: registrationPending ? documents.slice(0, 1) : documents,
+      pending_documents: registrationPending ? [{ document_id: "amendment", file_name: "合成补遗.pdf" }] : [],
     },
     writes: [] as Array<{ body: unknown; key?: string }>,
     loseSave: false,
+    registrationAttempts: 0,
   };
   await page.route(`**${path}/sources`, async route => {
     if (route.request().method() === "GET") return route.fulfill({ json: { source_settings: state.settings } });
@@ -25,10 +28,19 @@ async function sourcesFixture(page: Page, ended = false) {
     state.writes.push({ body, key });
     if (replayed) return route.fulfill({ json: { source_settings: state.settings } });
     if (body.expected_version !== state.settings.version) return route.fulfill({ status: 409, json: { error: { message: "来源设置已变化" } } });
-    state.settings = { version: "b".repeat(64), expected_document_ids: body.expected_document_ids,
+    state.settings = { ...state.settings, version: "b".repeat(64), expected_document_ids: body.expected_document_ids,
       documents: state.settings.documents.map((document, index) => ({ ...document, ...body.documents[index] })) };
     if (state.loseSave) { state.loseSave = false; return route.abort("failed"); }
     return route.fulfill({ json: { source_settings: state.settings } });
+  });
+  if (registrationPending) await page.route(`**${path}/documents/amendment/register`, async route => {
+    expect(route.request().method()).toBe("POST");
+    state.registrationAttempts++;
+    if (state.registrationAttempts === 1) {
+      return route.fulfill({ status: 503, json: { error: { message: "招标服务暂不可用" } } });
+    }
+    state.settings = { ...state.settings, version: "r".repeat(64), documents, pending_documents: [] };
+    return route.fulfill({ json: { document: { document_id: "amendment" } } });
   });
   await page.goto(`/#/bids/${project}/files`);
   const editor = page.getByRole("region", { name: "来源设置", exact: true });
@@ -102,4 +114,19 @@ test("an unknown source save retries the same body and idempotency key", async (
   await expect(editor.getByText("来源设置已保存。", { exact: true })).toBeVisible();
   expect(state.writes).toHaveLength(2);
   expect(state.writes[0]).toEqual(state.writes[1]);
+});
+
+test("a stored file can retry registration without uploading a duplicate", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { editor, state } = await sourcesFixture(page, false, true);
+  await page.getByRole("link", { name: "合成补遗.pdf", exact: true }).click();
+  const retry = editor.getByRole("button", { name: "重试登记", exact: true });
+  await expect(editor.getByText("原件尚未完成登记：合成补遗.pdf")).toBeVisible();
+  await retry.click();
+  await expect(editor.getByText("招标服务暂不可用")).toBeVisible();
+  await retry.click();
+  await expect(editor.getByRole("combobox", { name: "文件角色", exact: true })).toBeVisible();
+  await expect(retry).toHaveCount(0);
+  expect(state.registrationAttempts).toBe(2);
+  expect(state.settings.documents.filter(item => item.document_id === "amendment")).toHaveLength(1);
 });

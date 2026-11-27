@@ -90,6 +90,8 @@ def _available_input(artifacts: ArtifactStore, row: dict, identity: dict) -> dic
         code = problem.get("code")
         if code == "missing_expected_document":
             issue(code, f"必要附件尚未取得：{problem['document_id']}")
+        elif code == "source_registration_pending":
+            issue(code, problem["detail"])
         elif code == "source_roles_unconfirmed":
             issue(code, f"项目尚未确认此文件的来源角色：{problem['document_id']}")
 

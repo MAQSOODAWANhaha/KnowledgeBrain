@@ -17,7 +17,7 @@ from docreader.tests.workflow.test_web_bridge import (
 )
 
 
-async def upload_source(runtime, title, *, project=None, text=None):
+async def stage_source(runtime, title, *, project=None, text=None):
     project = runtime.project if project is None else project
     document = Document()
     document.add_heading(title, level=1)
@@ -32,6 +32,12 @@ async def upload_source(runtime, title, *, project=None, text=None):
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             hashlib.sha256(data).hexdigest(), len(data),
         ))
+    return document_id, data
+
+
+async def upload_source(runtime, title, *, project=None, text=None):
+    project = runtime.project if project is None else project
+    document_id, data = await stage_source(runtime, title, project=project, text=text)
     await handle_command(payload(runtime, "document.put", project_id=project, document_id=document_id), data)
     return document_id
 
@@ -161,6 +167,56 @@ async def test_upload_invalidates_open_source_settings_and_requires_new_role(run
     run = await runtime.bridge.store.get_run(response["analysis"]["run_id"])
     assert {row["document_id"]: row["role"] for row in runtime.bridge.artifacts.read_json(run["manifest_ref"])["documents"]} == {
         main: "main", amendment: "amendment", attachment: "attachment",
+    }
+
+
+async def test_stored_amendment_pending_registration_invalidates_the_source_snapshot(runtime):
+    main = await upload_source(runtime, "招标文件", text="项目负责人须持A证。")
+    bridge = runtime.bridge
+    original = await save(runtime, await settings(runtime), [entry(main)])
+    started, _ = await handle_command(payload(runtime, "analysis.start", request_key="main-only"))
+    run = await bridge.store.get_run(started["analysis"]["run_id"])
+    waiting = await execute_analysis((bridge.store, bridge.artifacts, runtime.settings, run, []))
+    assert waiting["status"] == "waiting-confirmation"
+    before_review, _ = await handle_command(payload(runtime, "analysis.review"))
+    amendment, data = await stage_source(runtime, "补遗原件")
+
+    pending = await settings(runtime)
+    assert pending["version"] != original["version"]
+    assert pending["pending_documents"] == [{"document_id": amendment, "file_name": "补遗原件.docx"}]
+    registered = await bridge.manifest(runtime.project)
+    assert {row["document_id"] for row in registered["documents"]} == {main}
+    assert [(issue["code"], issue["document_id"], issue["blocking"]) for issue in registered["issues"]] == [
+        ("source_registration_pending", amendment, True),
+    ]
+    review, _ = await handle_command(payload(runtime, "analysis.review"))
+    assert not review["review"]["sources_current"]
+    with pytest.raises(WebError) as stale_confirmation:
+        await handle_command(payload(runtime, "analysis.confirm", request_key="stale-amendment-confirm",
+                                     **confirmation(before_review["review"])))
+    assert stale_confirmation.value.code == "ANALYSIS_SOURCE_CHANGED"
+
+    request = payload(runtime, "analysis.start", request_key="include-amendment")
+    with pytest.raises(WebError) as unregistered:
+        await handle_command(request)
+    assert unregistered.value.code == "SOURCE_REGISTRATION_PENDING"
+    draft_run = await bridge.source_run(runtime.project, registered=registered)
+    draft = await read_authoring_input(bridge.store, bridge.artifacts, run_id=draft_run["run_id"],
+                                       source_version=1, domain_revision=1)
+    assert any(issue["code"] == "source_registration_pending" and "补遗原件.docx" in issue["detail"]
+               for issue in draft["issues"])
+
+    retry = payload(runtime, "document.put", document_id=amendment)
+    assert await handle_command(retry, data) == await handle_command(retry, data)
+    ready = await settings(runtime)
+    assert not ready.get("pending_documents")
+    assert ready["version"] != pending["version"]
+    assert {row["document_id"] for row in ready["documents"]} == {main, amendment}
+    await save(runtime, ready, [entry(main), entry(amendment, "amendment")])
+    response, _ = await handle_command(request)
+    current = await bridge.store.get_run(response["analysis"]["run_id"])
+    assert {row["document_id"] for row in bridge.artifacts.read_json(current["manifest_ref"])["documents"]} == {
+        main, amendment,
     }
 
 

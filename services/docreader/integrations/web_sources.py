@@ -8,10 +8,10 @@ async def project_sources(bridge, project_id, *, connection=None):
     async with bridge.store.transaction(connection) as conn:
         row = await (await conn.execute(
             "SELECT s.settings, COALESCE(s.revision, 0) AS revision, (SELECT COALESCE(jsonb_agg(jsonb_build_object("
-            "'document_id', w.document_id, 'original_ref', w.original_ref, 'file_name', d.file_name) "
-            "ORDER BY w.created_at, w.document_id), '[]'::jsonb) "
-            "FROM tender_document_sources w JOIN tender_documents d "
-            "ON d.id = w.document_id AND d.project_id = w.project_id WHERE w.project_id = p.id) AS documents "
+            "'document_id', d.id, 'original_ref', w.original_ref, 'file_name', d.file_name) "
+            "ORDER BY w.created_at NULLS LAST, d.id), '[]'::jsonb) "
+            "FROM tender_documents d LEFT JOIN tender_document_sources w "
+            "ON d.id = w.document_id AND d.project_id = w.project_id WHERE d.project_id = p.id) AS documents "
             "FROM tender_projects p LEFT JOIN tender_project_source_settings s ON s.project_id = p.id "
             "WHERE p.id = %s",
             (project_id,),
@@ -28,6 +28,8 @@ def configured_documents(rows, settings):
     saved = {document["document_id"]: document for document in settings["documents"]}
     documents = []
     for row in rows:
+        if row["original_ref"] is None:
+            continue
         document_id = row["document_id"]
         documents.append({
             "document_id": document_id,
@@ -42,11 +44,21 @@ def configured_documents(rows, settings):
     return documents
 
 
+def pending_documents(rows):
+    return [{"document_id": row["document_id"], "file_name": row["file_name"]}
+            for row in rows if row["original_ref"] is None]
+
+
 def settings_view(rows, settings, revision):
     documents = configured_documents(rows, settings)
+    pending = pending_documents(rows)
+    identity = {"documents": documents, "settings": settings, "revision": revision}
+    if pending:
+        identity["pending_documents"] = pending
     return {
         "source_settings": {
-            "version": _digest({"documents": documents, "settings": settings, "revision": revision}),
+            "version": _digest(identity),
+            "pending_documents": pending,
             "expected_document_ids": settings["expected_document_ids"],
             "documents": [
                 {key: item[key] for key in ("document_id", "file_name", "role", "replaces", "modification_scope")}
@@ -60,7 +72,7 @@ def submitted_settings(payload, rows):
     if set(payload) - {"action", "project_id", "owner_user_id", "request_key", "expected_version",
                        "documents", "expected_document_ids"}:
         raise WebError("INVALID_SOURCE_SETTINGS", "来源设置包含不支持的字段。")
-    ids = {row["document_id"] for row in rows}
+    ids = {row["document_id"] for row in rows if row["original_ref"] is not None}
     documents = payload.get("documents")
     if not isinstance(documents, list):
         raise WebError("INVALID_SOURCE_SETTINGS", "请提供当前全部项目文件的来源设置。")

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 _INITIALIZED = set()
+_SOURCE_REGISTRATION_MESSAGE = "项目有原件尚未完成登记，请在项目资料中重试登记。"
 
 
 class WebError(ValueError):
@@ -258,19 +259,24 @@ class WebBridge:
         return settings_view(rows, settings, revision + 1)
 
     async def manifest(self, project_id, *, connection=None):
-        from docreader.integrations.web_sources import configured_documents, project_sources
+        from docreader.integrations.web_sources import configured_documents, pending_documents, project_sources
         from docreader.tender.evidence import register_manifest
         from docreader.tender.evidence.registration import issue
 
         rows, settings, _ = await project_sources(self, project_id, connection=connection)
         if not rows:
             raise WebError("TENDER_DOCUMENT_REQUIRED", "请先上传招标文件，再开始分析或编制。", 409)
+        documents = configured_documents(rows, settings)
+        if not documents:
+            raise WebError("SOURCE_REGISTRATION_PENDING", _SOURCE_REGISTRATION_MESSAGE, 409)
         known = {document["document_id"] for document in settings["documents"]}
-        issues = [issue("source_roles_unconfirmed", str(row["document_id"]),
-                        "项目尚未确认此文件的来源角色。")
-                  for row in rows if len(rows) > 1 and str(row["document_id"]) not in known]
+        issues = [issue("source_registration_pending", row["document_id"],
+                        f"原件 {row['file_name']} 尚未完成登记，请在项目资料中重试登记。")
+                  for row in pending_documents(rows)]
+        issues.extend(issue("source_roles_unconfirmed", document["document_id"], "项目尚未确认此文件的来源角色。")
+                      for document in documents if len(rows) > 1 and document["document_id"] not in known)
         return await asyncio.to_thread(register_manifest, {
-            "documents": configured_documents(rows, settings),
+            "documents": documents,
             "expected_document_ids": settings["expected_document_ids"],
             "issues": issues,
         }, self.artifacts)
@@ -297,6 +303,8 @@ class WebBridge:
             if not await self.lock_project(conn, payload):
                 return await replay_ended(self, payload)
             registered = await self.manifest(payload["project_id"], connection=conn)
+            if any(problem["code"] == "source_registration_pending" for problem in registered["issues"]):
+                raise WebError("SOURCE_REGISTRATION_PENDING", _SOURCE_REGISTRATION_MESSAGE, 409)
             if any(problem["code"] == "source_roles_unconfirmed" for problem in registered["issues"]):
                 raise WebError("SOURCE_ROLES_REQUIRED", "请在项目文件页核对并保存全部文件的来源角色后开始分析。", 409)
             reference = await asyncio.to_thread(self.artifacts.put_json, registered)

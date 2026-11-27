@@ -32,6 +32,7 @@ export function SourceSettings({ projectId, active, readOnly, disabled, filesVer
   const [draft, setDraft] = useState<Draft | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [saving, setSaving] = useState(false);
+  const [registering, setRegistering] = useState<string | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -67,11 +68,11 @@ export function SourceSettings({ projectId, active, readOnly, disabled, filesVer
     return () => { controller.abort(); clearTimeout(timer); };
   }, [active, filesVersion, read]);
 
-  const unsafe = !!draft || !!pending || saving;
+  const unsafe = !!draft || !!pending || saving || registering !== null;
   useEffect(() => { onUnsafeChange(unsafe); }, [unsafe, onUnsafeChange]);
   const current = draft ?? (remote && fromSettings(remote));
   const changed = !!draft && !!remote && draft.version !== remote.version;
-  const locked = readOnly || disabled || saving || !!pending;
+  const locked = readOnly || disabled || saving || !!pending || registering !== null;
   const selected = current?.documents.find(document => document.document_id === selectedFileId);
   function edit(update: (working: Draft) => Draft) {
     if (locked || !remote) return;
@@ -113,6 +114,24 @@ export function SourceSettings({ projectId, active, readOnly, disabled, filesVer
     }
   }
 
+  async function register(document: string) {
+    if (locked || writing.current) return;
+    writing.current = true;
+    request.current++;
+    setRegistering(document);
+    setSaveError(null);
+    try {
+      await tenderApi.registerSource(projectId, document);
+      onChanged();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "原件登记未完成，请重试。");
+    } finally {
+      writing.current = false;
+      setRegistering(null);
+      await read();
+    }
+  }
+
   return <Card padding={0} role="region" aria-label="来源设置">
     <VStack gap={0}>
       <Toolbar label="来源设置标题" dividers={["bottom"]} startContent={<Text weight="semibold">来源设置</Text>} />
@@ -121,6 +140,11 @@ export function SourceSettings({ projectId, active, readOnly, disabled, filesVer
         {(saveError || changed) && <Banner role="alert" status={conflict || changed ? "warning" : "error"}
           title={saveError ?? "来源设置已变化，请核对最新设置。"} />}
         {saved && <Text role="status">来源设置已保存。</Text>}
+        {remote?.pending_documents?.map(document => <Banner key={document.document_id} role="alert" status="warning"
+          title={`原件尚未完成登记：${document.file_name}`}
+          endContent={readOnly ? undefined : <Button size="sm" isDisabled={locked}
+            label={registering === document.document_id ? "正在登记…" : "重试登记"}
+            onClick={() => void register(document.document_id)} />} />)}
         {!current && !readError && <Spinner label="正在读取来源设置…" />}
         {current && <>
           {!readOnly && <Text type="supporting">逐份核对文件角色并保存。新文件上传后也需核对。必要附件补齐后，请移除对应缺件登记。</Text>}
@@ -138,7 +162,7 @@ export function SourceSettings({ projectId, active, readOnly, disabled, filesVer
             onChange={missing => edit(working => ({ ...working, missing }))} />
           <HStack gap={2} wrap="wrap">
             {!readOnly && <Button variant="primary" label={pending ? "确认同一次来源设置保存" : "保存来源设置"}
-              isDisabled={disabled || saving || !pending && (changed || conflict || !!readError)}
+              isDisabled={disabled || saving || registering !== null || !pending && (changed || conflict || !!readError)}
               onClick={() => void save()} />}
             {(draft || pending || conflict) && <Button variant="secondary" label="放弃修改并载入最新设置" isDisabled={saving}
               onClick={() => { if (window.confirm("放弃当前修改并载入服务器上的来源设置？")) void read(undefined, true); }} />}

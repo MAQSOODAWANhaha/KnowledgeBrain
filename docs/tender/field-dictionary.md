@@ -6,6 +6,8 @@
 
 `GET /api/v3/tender-projects/{project}/sources` 返回 `source_settings`，包含保存令牌 `version`、已声明的 `expected_document_ids` 和逐文件的 `document_id`、`file_name`、`role`、`replaces`、`modification_scope`。同路径 PUT 接收 `expected_version`、`expected_document_ids` 与完整 `documents`，逐文件提交 ID、角色、替代文件与适用范围。角色为 `main`、`attachment`、`clarification`、`amendment`。替代文件可空，非空时指向同项目的其他已上传原件。适用范围作为登记元数据随原件冻结，效力由文件实际条款确定。
 
+`pending_documents` 列出目录已保存、尚未完成登记的文件，每项包含 `document_id`、`file_name`，并参与 `version` 计算。项目所有者可用 `POST /api/v3/tender-projects/{project}/documents/{document}/register` 从同一已存原件重试登记，成功返回登记的 `document`。重复请求保留原文件身份。
+
 - 单次输入不超过 94208 token（`o200k_base` 校准边界，详见下文）；输出只含判断、问题或填空，不回写宿主已索引原文范围。
 - 硬阻断只阻止把该版本确认成 `analysis-ready`，不拒绝未确认快照的读取、保存、预览或导出。
 

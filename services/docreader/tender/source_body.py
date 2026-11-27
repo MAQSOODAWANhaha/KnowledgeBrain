@@ -231,6 +231,8 @@ def load_source_body(artifacts, snapshot, target, *, repository=None, cache=None
 
 
 def project_context_blocker(frozen):
+    if any(issue.get('code') == 'source_registration_pending' for issue in frozen.get('issues', [])):
+        return '请先补齐项目原件登记，再绑定方案背景。'
     if any(issue.get('code') == 'source_roles_unconfirmed' for issue in frozen.get('issues', [])):
         return '请先核对项目文件的来源角色，再绑定方案背景。'
     if any(source.get('role') in (DocumentRole.AMENDMENT, DocumentRole.CLARIFICATION)

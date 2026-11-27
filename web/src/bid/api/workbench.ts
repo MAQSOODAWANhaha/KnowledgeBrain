@@ -74,6 +74,7 @@ export type TenderSourceDocument = {
 };
 export type TenderSourceSettings = {
   version: string; documents: TenderSourceDocument[]; expected_document_ids: string[];
+  pending_documents?: Array<Pick<TenderSourceDocument, "document_id" | "file_name">>;
 };
 export type TenderSourceSettingsSave = {
   expected_version: string; documents: Omit<TenderSourceDocument, "file_name">[]; expected_document_ids: string[];
@@ -170,6 +171,9 @@ export const tenderApi = {
     const body = new FormData();
     body.append("file", file);
     return (await v2Request<TenderDocument>(`${projectPath(id)}/documents`, { method: "POST", body }, { attempt })).data;
+  },
+  async registerSource(id: string, document: string): Promise<void> {
+    await v2Request(`${projectPath(id)}/documents/${encodeURIComponent(document)}/register`, { method: "POST" });
   },
   async sourceSettings(id: string, signal?: AbortSignal): Promise<TenderSourceSettings> {
     return (await v2Request<{ source_settings: TenderSourceSettings }>(`${projectPath(id)}/sources`, { signal })).data.source_settings;
