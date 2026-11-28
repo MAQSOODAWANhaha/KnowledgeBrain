@@ -608,3 +608,38 @@ def test_other_matching_word_table_does_not_prove_independent_source_inventory(t
                 {**manifest, "tables": [{"source_index_sha256": other_index["sha256"], "unit_id": "u-text"}]}):
         check = tables(bad)
         assert check["status"] == "unknown" and check["inventory_status"] == "invalid"
+
+
+def test_w2_accepts_missing_inputs_and_empty_bidder_slots_but_requires_each_declared_gap(tmp_path):
+    artifacts, outline, requirements, coverage, _ = _export_sample(tmp_path)
+    source_gaps = [{"code": "missing_expected_document", "detail": f"必要附件尚未取得：{name}"}
+                   for name in ("商务附件", "技术附件")]
+    outline["authoring_input"]["issues"] = source_gaps
+    # An unconfirmed analysis can still produce an auditable working draft.
+    outline["authoring_input"]["confirmation_ref"] = None
+    outline["chapters"][1]["targets"][0]["manual_fill"] = True
+    for entry in coverage["entries"]:
+        entry.update(resolution="manual", content_refs=[], material_ids=[], review_status="not_required",
+                     gap_codes=["coverage_unfilled"])
+    exported = export_authoring_document(artifacts, outline, [], requirements=requirements, coverage=coverage,
+                                         review_issues=source_gaps)
+    docx = artifacts.read_bytes(exported["docx_ref"])
+    office = {"docx_sha256": hashlib.sha256(docx).hexdigest(),
+              **dict.fromkeys(("opened", "saved", "reopened", "pdf_exported"), True)}
+
+    def evaluate(gaps):
+        return evaluate_acceptance(outline=outline, docx_bytes=docx, requirements=requirements, coverage=coverage,
+                                   artifacts=artifacts, gaps=gaps, required_tables=_required_tables(artifacts, outline),
+                                   human_review=_human_review(outline, docx), onlyoffice_receipt=office)
+
+    # Losing one of two identically coded shortages must not be hidden by a generic reminder.
+    damaged = [gap for gap in exported["gaps"] if gap != source_gaps[1]]
+    damaged.append({"code": "missing_expected_document", "detail": "存在缺件"})
+    bad = evaluate(damaged)
+    assert not bad["passed"]
+    criterion = bad["criteria"]["requirements_coverage"]
+    assert criterion["status"] == "fail" and criterion["unreported_source_gaps"] == [source_gaps[1]]
+    assert evaluate(None)["criteria"]["requirements_coverage"]["status"] == "unknown"
+    good = evaluate(exported["gaps"])
+    assert good["passed"] and good["evaluation_scope"] == "received_inputs"
+    assert good["criteria"]["requirements_coverage"]["unreported_source_gaps"] == []

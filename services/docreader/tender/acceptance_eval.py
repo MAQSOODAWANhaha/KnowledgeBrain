@@ -232,12 +232,18 @@ def _evaluate_requirements(
     requirements: dict[str, Any] | None,
     docx_info: dict[str, Any],
     human_review: dict[str, Any] | None,
+    gaps: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
+    named_gaps = [issue for issue in (outline.get("authoring_input") or {}).get("issues", [])
+                  if issue["code"] in {"missing_expected_document", "source_registration_pending"}]
+    reported = {(gap.get("code"), gap.get("detail")) for gap in gaps or []}
+    unreported = [issue for issue in named_gaps if (issue["code"], issue["detail"]) not in reported]
     if requirements is None or not isinstance(requirements.get("rules"), list):
         return {
-            "status": "unknown",
+            "status": "fail" if unreported and gaps is not None else "unknown",
             "machine_passed": False,
             "human_verified": False,
+            "unreported_source_gaps": unreported,
             "counts": {"total": None, "placed_in_docx": 0, "settled": 0, "pending_in_gaps": 0, "missing": 0},
             "missing_items": [],
             "pending_items": [],
@@ -335,7 +341,7 @@ def _evaluate_requirements(
         else:
             missing_items.append({**record, "reason": "unplaced_and_unlisted_in_gaps"})
 
-    machine_passed = not missing_items
+    machine_passed = not missing_items and not unreported
     spot = (human_review or {}).get("requirements_spot_check") or {}
     human_verified = bool(
         spot.get("passed") is True
@@ -343,11 +349,17 @@ def _evaluate_requirements(
         and spot["checked_clauses"] >= 3
         and spot.get("double_omissions") == 0
     )
-    status = "fail" if not machine_passed else ("pass" if human_verified else "needs_human_check")
+    if missing_items or (unreported and gaps is not None):
+        status = "fail"
+    elif unreported:
+        status = "unknown"  # The delivery gap list was not supplied.
+    else:
+        status = "pass" if human_verified else "needs_human_check"
     return {
         "status": status,
         "machine_passed": machine_passed,
         "human_verified": human_verified,
+        "unreported_source_gaps": unreported,
         "counts": {
             "total": len(rules),
             "placed_in_docx": placed_in_docx,
@@ -889,7 +901,7 @@ def evaluate_acceptance(
     onlyoffice_receipt: dict[str, Any] | None = None,
     human_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Score one execution against the four minimum acceptance criteria."""
+    """Score the bid compiled from the inputs available in this frozen execution."""
     docx_info = _inspect_docx(docx_bytes, outline)
     binding = _analysis_binding(outline)
     requirements_binding = _analysis_binding(requirements)
@@ -905,7 +917,7 @@ def evaluate_acceptance(
                             and (binding is None or coverage_binding != binding))
     criteria = {
         "requirements_coverage": _evaluate_requirements(
-            outline, None if foreign_requirements else requirements, docx_info, human_review
+            outline, None if foreign_requirements else requirements, docx_info, human_review, gaps
         ),
         "original_tables": _evaluate_original_tables(
             outline, gaps, docx_info, artifacts, expected_tables=expected_tables, required_tables=required_tables
@@ -945,13 +957,14 @@ def evaluate_acceptance(
         }
     return {
         "schema_version": 1,
+        "evaluation_scope": "received_inputs",
         "passed": passed,
         "summary": summary,
         "criteria": criteria,
         "execution_report": execution_report,
         "limits": [
             "Offline checks cannot replace manual spot-checking of at least 3 scoring tables and qualification clauses against original files.",
-            "Original table acceptance requires the independent complete source inventory (--required-tables) and verified frozen grids (--artifact-root).",
+            "Original table acceptance covers the independent inventory of applicable tables in the received sources (--required-tables) and their frozen grids (--artifact-root).",
             "Absence of machine fabrication flags does not verify factual truthfulness against enterprise materials.",
             "DOCX structural validity does not prove live ONLYOFFICE open/save/reopen and PDF roundtrip without a matching receipt.",
         ],
