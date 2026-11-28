@@ -1875,7 +1875,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             from docreader.tender.proposal_outline import expand_proposal_outlines
             outline, _placement = await place_items(
                 outline, chain_items, budget, execute, _ask,
-                lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload), outside_format=chain_added or ())
+                lambda payload: _fits(budget, AuthoringTask.ITEM_PLACEMENT, payload), outside_format=chain_added)
             attach_w2_proposal_answers(outline)
             outline = await expand_proposal_outlines(
                 outline, artifacts, budget, execute, _ask,

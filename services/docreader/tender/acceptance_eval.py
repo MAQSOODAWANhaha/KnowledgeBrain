@@ -459,12 +459,43 @@ def _compare_table(
     return mismatches
 
 
+def _required_grid_inventory(manifest, outline, repository):
+    """Resolve independent source keys against the evaluated freeze, before visiting its outline."""
+    if manifest is None:
+        return "missing", set()
+    if not isinstance(manifest, dict) or type(manifest.get("complete")) is not bool:
+        return "invalid", set()
+    tables = manifest.get("tables")
+    frozen_ref = (outline.get("authoring_input") or {}).get("frozen_ref")
+    if (not isinstance(tables, list) or not tables or not frozen_ref or repository is None
+            or manifest.get("frozen_sha256") != frozen_ref["sha256"]):
+        return "invalid", set()
+    try:
+        expected = {(row["source_index_sha256"], row["unit_id"]) for row in tables}
+        if len(expected) != len(tables):
+            return "invalid", set()
+        wanted_indices = {sha for sha, _ in expected}
+        frozen = repository.artifacts.read_json(frozen_ref)
+        known = set()
+        for document in frozen["documents"]:
+            index_ref = document["source_index_ref"]
+            if index_ref["sha256"] in wanted_indices:
+                units = repository.source_index(index_ref).raw["units"]
+                known.update((index_ref["sha256"], unit["unit_id"]) for unit in units if unit.get("grid"))
+        if not expected <= known:
+            return "invalid", set()
+    except (KeyError, TypeError, ValueError, OSError):
+        return "invalid", set()
+    return ("complete" if manifest["complete"] else "partial"), expected
+
+
 def _evaluate_original_tables(
     outline: dict[str, Any],
     gaps: list[dict[str, Any]] | None,
     docx_info: dict[str, Any],
     artifacts: ArtifactStore | None,
     expected_tables: dict[str, list[dict[str, Any]]] | None = None,
+    required_tables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mismatches: list[dict[str, Any]] = []
     chapter_titles = {
@@ -485,6 +516,7 @@ def _evaluate_original_tables(
             })
 
     repository = EvidenceRepository(artifacts) if artifacts is not None else None
+    inventory_status, missing_grids = _required_grid_inventory(required_tables, outline, repository)
     form_targets = 0
     checked_tables = 0
     checked_fixed_texts = 0
@@ -502,12 +534,12 @@ def _evaluate_original_tables(
             location = {"chapter_id": cid, "chapter_title": title, "target_id": tid}
             expanded = (target.get("response_table") or {}).get("native_layout") is not None
 
-            target_grids: list[tuple[dict[str, Any], int]] = []
+            target_grids: list[tuple[dict[str, Any], int, tuple[str, str] | None]] = []
             target_fixed_lines: list[str] = []
-            if expected_tables is not None and tid in expected_tables:
+            if required_tables is None and expected_tables is not None and tid in expected_tables:
                 for spec in expected_tables[tid]:
                     if "grid" in spec:
-                        target_grids.append((spec["grid"], spec.get("header_row_count", 1)))
+                        target_grids.append((spec["grid"], spec.get("header_row_count", 1), None))
                     for line in spec.get("fixed_texts", []):
                         if _norm(line):
                             target_fixed_lines.append(_norm(line))
@@ -526,7 +558,9 @@ def _evaluate_original_tables(
                     unit = loaded["unit"]
                     if unit.get("grid"):
                         header_count = part.get("header_row_count")
-                        target_grids.append((unit["grid"], header_count if isinstance(header_count, int) else 1))
+                        source = part["source_ref"]
+                        identity = (source["source_index_ref"]["sha256"], source["unit_id"])
+                        target_grids.append((unit["grid"], header_count if isinstance(header_count, int) else 1, identity))
                     elif unit.get("text") and not unit.get("running_header"):
                         for line in unit["text"].splitlines():
                             cleaned = _norm(line)
@@ -540,12 +574,12 @@ def _evaluate_original_tables(
                 tbl for tbl in docx_info["tables_by_target"].get(tid, [])
                 if tbl["table_index"] not in used_tables
             ]
-            if not candidates:
+            if not candidates and not any(source_key in missing_grids for _, _, source_key in target_grids):
                 candidates = [
                     tbl for tbl in docx_info["tables_by_chapter"].get(cid, [])
                     if tbl["table_index"] not in used_tables
                 ]
-            for expected_grid, header_rows in target_grids:
+            for expected_grid, header_rows, source_key in target_grids:
                 if not candidates:
                     mismatches.append({
                         **location,
@@ -561,6 +595,8 @@ def _evaluate_original_tables(
                 actual_table = candidates.pop(0)
                 checked_tables += 1
                 used_tables.add(actual_table["table_index"])
+                if source_key is not None:
+                    missing_grids.discard(source_key)
                 mismatches.extend(
                     _compare_table(expected_grid, actual_table, location,
                                    header_rows=header_rows, expanded=expanded)
@@ -581,15 +617,18 @@ def _evaluate_original_tables(
                             "actual": haystack[:160],
                         })
 
+    mismatches.extend({"kind": "required_table_missing", "source_index_sha256": sha, "unit_id": unit}
+                      for sha, unit in sorted(missing_grids))
     if not docx_info["valid"] or mismatches or not outline.get("chapters"):
         status, machine_passed = "fail", False
-    elif not checked_tables:
+    elif not checked_tables or inventory_status != "complete":
         status, machine_passed = "unknown", False
     else:
         status, machine_passed = "pass", True
     return {
         "status": status,
         "machine_passed": machine_passed,
+        "inventory_status": inventory_status,
         "grid_comparison": "compared" if checked_tables else "unavailable",
         "counts": {
             "form_targets": form_targets,
@@ -846,6 +885,7 @@ def evaluate_acceptance(
     layout: dict[str, Any] | None = None,
     artifacts: ArtifactStore | None = None,
     expected_tables: dict[str, list[dict[str, Any]]] | None = None,
+    required_tables: dict[str, Any] | None = None,
     onlyoffice_receipt: dict[str, Any] | None = None,
     human_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -868,7 +908,7 @@ def evaluate_acceptance(
             outline, None if foreign_requirements else requirements, docx_info, human_review
         ),
         "original_tables": _evaluate_original_tables(
-            outline, gaps, docx_info, artifacts, expected_tables=expected_tables
+            outline, gaps, docx_info, artifacts, expected_tables=expected_tables, required_tables=required_tables
         ),
         "no_fabrication": _evaluate_no_fabrication(
             outline, None if foreign_coverage else coverage, gaps, report, human_review
@@ -911,7 +951,7 @@ def evaluate_acceptance(
         "execution_report": execution_report,
         "limits": [
             "Offline checks cannot replace manual spot-checking of at least 3 scoring tables and qualification clauses against original files.",
-            "Original table fidelity requires frozen source grids (--artifact-root) or explicit expected table specs; without them, grid comparison stays unknown.",
+            "Original table acceptance requires the independent complete source inventory (--required-tables) and verified frozen grids (--artifact-root).",
             "Absence of machine fabrication flags does not verify factual truthfulness against enterprise materials.",
             "DOCX structural validity does not prove live ONLYOFFICE open/save/reopen and PDF roundtrip without a matching receipt.",
         ],
@@ -978,6 +1018,7 @@ def load_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "gaps": gaps,
         "layout": layout,
         "artifacts": artifacts,
+        "required_tables": json.loads(args.required_tables.read_text(encoding="utf-8")) if args.required_tables else None,
         "onlyoffice_receipt": onlyoffice_receipt,
         "human_review": human_review,
     }
@@ -995,6 +1036,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--coverage", type=Path, help="覆盖结算 JSON")
     parser.add_argument("--gaps", type=Path, help="待补事项 JSON")
     parser.add_argument("--layout", type=Path, help="版式核对 JSON")
+    parser.add_argument("--required-tables", type=Path, help="Independent mandatory grid inventory for the frozen sources")
     parser.add_argument("--onlyoffice-receipt", type=Path, help="ONLYOFFICE open/save/reopen/PDF receipt JSON")
     parser.add_argument("--human-review", type=Path, help="Explicit human spot-check and fabrication audit JSON")
     parser.add_argument("--output", type=Path, help="Write JSON scorecard to this path")

@@ -18,7 +18,7 @@
 第一份真实文件先过以下四条最低线才算 `1/4`；过线前不新增协议或阶段，只修缺陷和推进 [W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)：
 
 1. **要求不漏**：以分析事项为分母，每条适用事项都有响应位置或明确列在缺口清单；人工抽查原件 3 处以上评分表和资格条款，无台账和缺口清单双漏项。
-2. **原式表正确**：招标指定格式表在 Word 里是表，列数、表头、合并单元格、固定文字与签章位置与原件一致。
+2. **原式表正确**：从全部原件及适用补遗独立列出必交表，逐张核对 Word 里的对应表，列数、表头、合并单元格、固定文字与签章位置与原件一致。
 3. **缺口不被编造**：无企业资料的位置留空或写待补，不出现虚构证书、业绩、人员、参数或价格。
 4. **文件可用**：同一份 DOCX 能在 ONLYOFFICE 打开、保存、重开并导出 PDF。
 
@@ -33,8 +33,10 @@ cd services/docreader && uv run --frozen python -m docreader.tender.acceptance_e
   --outline <outline.json> --docx <投标文件.docx> \
   --requirements <招标要求底稿.json> --coverage <覆盖结算.json> \
   --gaps <待补事项.json> --report <authoring-report.json> \
-  --artifact-root <artifact-root>
+  --artifact-root <artifact-root> --required-tables <独立原式清单.json>
 ```
+
+原式清单随冻结来源复用。审核人标明清单是否覆盖全部适用原件，每张表引用冻结来源中的原生网格。局部清单可以查出已列的漏表，未提供完整清单时原式完整性保留待核。清单格式见[字段字典](field-dictionary.md)。
 
 也可直接传 `--package <交付包.zip>`（自动读取包内 DOCX、底稿、覆盖结算、待补事项与版式核对）或 `--result <document-result.json> --artifact-root <artifact-root>`。脚本按最低验收线四项输出每项状态与具体漏项/错表位置（字段见[字段字典](field-dictionary.md)的 `acceptance-eval`）：离线脚本只能给出机器核对结果，不能替代人工抽查原件（第 1 项）、人工真实性核验（第 3 项）或 ONLYOFFICE 实测回执（第 4 项）；未提供对应实测/人工回执时状态保留 `needs_human_check` / `needs_onlyoffice_check` 或 `unknown`，不会静默判通过。
 
