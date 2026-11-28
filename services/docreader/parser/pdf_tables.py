@@ -653,6 +653,19 @@ def _text_in_box(chars, left, bottom, right, top):
                      for row in _group_rows(inside)).strip()
 
 
+def table_row_rules(horizontal, vertical):
+    """Keep horizontal strokes that connect distinct column borders at that height."""
+    tolerance = 3.5
+    rules = []
+    for line in horizontal:
+        left, y, right = line
+        crossings = [x for x, bottom, top in vertical if bottom - tolerance <= y <= top + tolerance
+                     and left - tolerance <= x <= right + tolerance]
+        if crossings and max(crossings) - min(crossings) > tolerance:
+            rules.append(line)
+    return rules
+
+
 def _tables_from_rules(
     horizontal: list[tuple[float, float, float]],
     vertical: list[tuple[float, float, float]],
@@ -662,10 +675,7 @@ def _tables_from_rules(
         return []
     # vertical stored as (x, y0, y1)
     xs = sorted(_cluster_positions([line[0] for line in vertical], 3.5))
-    # A short underline inside a one-column box is not a row boundary.
-    row_rules = horizontal
-    if len(xs) == 2:
-        row_rules = [line for line in horizontal if line[0] <= xs[0] + 3.5 and line[2] >= xs[-1] - 3.5]
+    row_rules = table_row_rules(horizontal, vertical)
     ys = _cluster_positions([line[1] for line in row_rules], 3.5)
     if len(xs) < 2 or len(ys) < 2:
         return []
@@ -701,7 +711,7 @@ def _tables_from_rules(
     if filled == 0:
         return []
     merged_ranges = _merged_ranges_from_rules(
-        xs, y_visual, horizontal, vertical
+        xs, y_visual, row_rules, vertical
     )
     spans = {
         (start_row, start_column): (

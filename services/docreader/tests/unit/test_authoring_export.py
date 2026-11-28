@@ -238,6 +238,29 @@ def test_pdf_table_keeps_each_source_row_height(tmp_path, monkeypatch):
     assert all(row.height_rule == WD_ROW_HEIGHT_RULE.AT_LEAST for row in rows)
 
 
+def test_pdf_heights_measure_partial_cell_borders_and_ignore_fill_lines(tmp_path):
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, NameObject
+    from docreader.tender.authoring_export import _pdf_row_heights
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=150, height=150)
+    stream = DecodedStreamObject()
+    stream.set_data(b'10 10 m 130 10 l S 10 70 m 130 70 l S 10 110 m 130 110 l S '
+                    b'10 40 m 40 40 l S 40 90 m 95 90 l S '
+                    b'10 10 m 10 110 l S 40 10 m 40 110 l S 130 10 m 130 110 l S '
+                    b'95 10 m 95 70 l S')
+    page[NameObject('/Contents')] = writer._add_object(stream)
+    buffer = BytesIO()
+    writer.write(buffer)
+    artifacts = ArtifactStore(tmp_path)
+    source = {'original_ref': artifacts.put_bytes(buffer.getvalue(), 'application/pdf')}
+    locator = {'page_ordinal': 0, 'left': 10, 'right': 130, 'top': 110, 'bottom': 10}
+
+    assert _pdf_row_heights(artifacts, source, locator, 3) == [40, 30, 30]
+    assert _pdf_row_heights(artifacts, source, locator, 4) is None
+
+
 def test_single_row_pdf_form_keeps_the_source_box_height(tmp_path, monkeypatch):
     from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
     from docx.enum.text import WD_ALIGN_PARAGRAPH

@@ -401,7 +401,7 @@ def _pdf_row_heights(artifacts, source, locator, row_count):
     import pypdfium2 as pdfium
     import pypdfium2.raw as raw
     from docreader.parser.pdf_parser import _PDFIUM_LOCK
-    from docreader.parser.pdf_tables import _cluster_positions, collect_rule_lines
+    from docreader.parser.pdf_tables import _cluster_positions, collect_rule_lines, table_row_rules
 
     try:
         top, bottom = locator['top'], locator['bottom']
@@ -411,12 +411,14 @@ def _pdf_row_heights(artifacts, source, locator, row_count):
         if not data.startswith(b'%PDF'):
             return None
         with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
-            horizontal, _vertical = collect_rule_lines(pdf[locator['page_ordinal']], raw)
+            horizontal, vertical = collect_rule_lines(pdf[locator['page_ordinal']], raw)
         left, right = locator['left'], locator['right']
         candidates = [line for line in horizontal if bottom - 3.5 <= line[1] <= top + 3.5
                       and line[0] <= right and line[2] >= left]
-        levels = sorted(_cluster_positions([line[1] for line in candidates], 3.5), reverse=True)
-        if len(levels) != row_count + 1:
+        borders = [line for line in vertical if left - 3.5 <= line[0] <= right + 3.5]
+        ruled = table_row_rules(candidates, borders)
+        levels = sorted(_cluster_positions([line[1] for line in ruled or candidates], 3.5), reverse=True)
+        if not ruled and len(levels) != row_count + 1:
             full = [line for line in candidates if line[2] - line[0] > (right - left) * 0.5]
             levels = sorted(_cluster_positions([line[1] for line in full], 3.5), reverse=True)
         if (len(levels) != row_count + 1 or abs(levels[0] - top) > 3.5
