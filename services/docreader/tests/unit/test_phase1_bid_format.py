@@ -532,6 +532,45 @@ async def test_text_cover_uses_only_signature_fields_on_the_formats_own_page(tmp
     assert '采购人自用封面' not in paragraphs and '招标文件页眉' not in front
 
 
+@pytest.mark.parametrize('case', ['vertical', 'selected', 'horizontal', 'interrupted', 'cross_page', 'no_project', 'buyer'])
+async def test_electronic_seal_cover_uses_its_own_title_and_fields(tmp_path, case):
+    import json
+
+    glyphs = '投\n\n标\n\n文\n\n件'
+    title = '投标文件' if case == 'horizontal' else glyphs
+    if case == 'interrupted':
+        title = glyphs.replace('文', '编制说明\n文')
+    project = '' if case == 'no_project' else '招标项目：'
+    stamp = ('采购人' if case == 'buyer' else '投标单位') + '：______（盖电子印章）'
+    fields = '\n'.join([project, stamp, '日期：  年  月  日'])
+    covers = [title, fields] if case == 'cross_page' else [title + '\n' + fields]
+    docs = [{'document_id': 'tender', 'role': 'main',
+             'pages': ['第六章 投标文件格式', *covers, '一、投标函\n致：招标人']}]
+
+    async def select(_task, request, validate):
+        lines = json.loads(request['messages'][1]['content'][0]['text'])['lines']
+        letter = next(ref for ref, line in lines if line == '一、投标函')
+        entries = [{'heading_refs': [letter], 'name': '投标函'}]
+        if case == 'selected':
+            entries.insert(0, {'heading_refs': [r for r, t in lines if t in ('投', '标', '文', '件')],
+                               'name': '投标文件'})
+        return validate({'chapters': entries})
+
+    artifacts, outline = await _outline(tmp_path, documents=docs, execute=select,
+                                        directory_contract='bid_format_source_outline_v1')
+    expected = case in {'vertical', 'selected', 'horizontal'}
+    assert [(c['title'], c['presentation_role']) for c in outline['chapters']] == (
+        ([('投标文件', 'cover')] if expected else []) + [('投标函', 'body')])
+    docx = export_authoring_document(artifacts, outline, [])
+    paragraphs = [p.text.strip() for p in Document(BytesIO(artifacts.read_bytes(docx['docx_ref']))).paragraphs]
+    before_toc = paragraphs[:paragraphs.index('目录')]
+    assert (stamp in before_toc) == expected
+    if expected:
+        assert project in before_toc and not any('代理人' in s for s in before_toc)
+        if case != 'horizontal':
+            assert [s for s in before_toc if s in ('投', '标', '文', '件')] == list('投标文件')
+
+
 def _not_applicable_formats():
     from docreader.tender.bid_format_outline import _Prepared
 

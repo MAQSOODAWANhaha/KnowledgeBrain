@@ -10,6 +10,7 @@ This compiler does not prove that two agreeing plans are complete.
 from enum import StrEnum
 from copy import deepcopy
 import hashlib
+from itertools import islice
 import json
 import re
 from re import compile as _compile
@@ -4027,7 +4028,10 @@ def _continued_heading(source, point, count=None):
     if count is not None:
         if type(count) is not int or not 1 <= count <= 4 or line + count > len(lines):
             raise DirectoryPlanRejected('heading_lines must select consecutive lines on the heading page')
-        return ''.join(part.strip() for part in lines[line:line + count])
+        parts = list(islice((part.strip() for part in lines[line:] if part.strip()), count))
+        if len(parts) != count:
+            raise DirectoryPlanRejected('heading_lines extend past the last printed line on the heading page')
+        return ''.join(parts)
     parts = [lines[line]]
     while _unclosed(''.join(parts)) and line + len(parts) < len(lines):
         nxt = lines[line + len(parts)]

@@ -3,12 +3,49 @@ from io import BytesIO
 from docx import Document
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.authoring_export import export_authoring_document
 from docreader.tender.directory_compile import compile_directory, outline_from_compiled
 from docreader.tender.evidence.references import SourceIndex
 from test_phase1_bid_format import _snapshot
+
+
+@pytest.mark.parametrize('pages', [['投标文件'], ['投标文件投标文件'], ['投标', '文件']])
+def test_vertical_cover_binds_only_one_complete_title_on_its_frozen_page(tmp_path, pages):
+    from docreader.tender.signed_cover_layout import bind_cover_source
+
+    store = ArtifactStore(tmp_path)
+    writer = PdfWriter()
+    units, source_units = [], []
+    for number, letters in enumerate(pages):
+        writer.add_blank_page(width=595, height=842)
+        for letter in letters:
+            ordinal = len(units)
+            identity = f'glyph-{ordinal}'
+            loc = {'locator_kind': 'page', 'page_ordinal': number}
+            units.append({'unit_id': identity, 'kind': 'section', 'text': letter, 'ordinal': ordinal, 'locator': loc})
+            source_units.append({'unit_id': identity, 'section_id': identity, 'parent_section_id': None,
+                                 'heading_path': letter, 'physical_locator': loc})
+    buf = BytesIO()
+    writer.write(buf)
+    original = store.put_bytes(buf.getvalue(), 'application/pdf')
+    record = {'document_id': 'tender', 'document_version': '1', 'original_ref': original}
+    raw = {'schema_version': 2, 'units': units, 'images': {}, 'ocr': {}, 'original_ref': original,
+           'source_contract': {'page_manifest': [], 'units': source_units}}
+    index = SourceIndex(record, raw)
+    index_ref = store.put_json(index.descriptor(store.put_json(index.raw)))
+    snapshot = {'frozen_ref': store.put_json({'documents': [{**record, 'source_index_ref': index_ref}]})}
+    compiled = {'chapters': [{'id': 'cover', 'presentation': 'cover', 'title': '投标文件',
+                              'heading': {'document_id': 'tender', 'page': 0, 'line': 0}}], 'issues': []}
+    target = {'kind': 'form', 'source_refs': []}
+    bind_cover_source(store, snapshot, compiled, {'cover': {'targets': [target]}})
+    if pages == ['投标文件']:
+        assert target['source_refs'] == [{'source_index_ref': index_ref, 'unit_id': 'glyph-0'}]
+        assert not compiled['issues']
+    else:
+        assert not target['source_refs'] and compiled['issues'][0]['code'] == 'outline_directory_literal_pending'
 
 
 def test_bound_cover_keeps_the_original_signature_position_and_only_the_drawn_rule(tmp_path):

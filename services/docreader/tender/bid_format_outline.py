@@ -17,7 +17,8 @@ BID_FORMAT_OPERATION = 'select_bid_format_outline_v1'
 HeadingRefs = Annotated[list[NonnegativeInt], Field(min_length=1, max_length=4)]
 BodyRange = Annotated[list[NonnegativeInt], Field(min_length=2, max_length=2)]
 _COVER_TITLES = {'投标文件', '投标文件封面', '封面'}
-_BIDDER_STAMP = re.compile(r'^(?:投标人|供应商|响应人)(?:名称)?[：:(（＿_].*(?:盖(?:单位)?(?:公)?章|公章|签章)')
+_BIDDER_STAMP = re.compile(r'^(?:投标人|投标单位|供应商|响应人)(?:名称)?[：:(（＿_].*(?:盖(?:单位)?(?:公)?章|公章|签章|电子印章)')
+_COVER_PROJECT = re.compile(r'^(?:招标项目(?:名称)?|项目名称)[：:]')
 _REPRESENTATIVE_SIGNATURE = re.compile(
     r'^(?:法定代表人|单位负责人|委托代理人|授权代表|授权代理人)[^。；]{0,48}[：:(（＿_][^。；]*(?:签字|签名|签章)')
 _COVER_DATE = re.compile(r'^(?:日期[：:])?[＿_\d]*年[＿_\d]*月[＿_\d]*日$|^日期[：:][＿_]*$')
@@ -233,11 +234,28 @@ def _grid_owners(documents, refs):
     return owners
 
 
+def _cover_heading(prepared, refs):
+    printed = [ref for ref in refs if prepared.refs.text(ref).strip()]
+    for index, ref in enumerate(printed):
+        if ref in prepared.page_edges or ref in prepared.grid_rows:
+            continue
+        text = _compact(prepared.refs.text(ref))
+        if text in _COVER_TITLES:
+            return [ref]
+        if text == '投':
+            glyphs = printed[index:index + 4]
+            if ([_compact(prepared.refs.text(r)) for r in glyphs] == list('投标文件')
+                    and all(r not in prepared.page_edges and r not in prepared.grid_rows for r in glyphs)
+                    and prepared.refs.point(ref)['page'] == prepared.refs.point(glyphs[-1])['page']):
+                return glyphs
+    return []
+
+
 def _cover_window(prepared, chapters):
     """Accept an independent format cover backed by its field grid or its own signature lines."""
     limit = min((start if start is not None else heads[0]
                  for heads, _name, start, _end in chapters
-                 if all(_compact(prepared.refs.text(ref)) not in _COVER_TITLES for ref in heads)),
+                 if not _cover_heading(prepared, heads)),
                 default=prepared.end(prepared.order[0]) + 1)
     limit = min(limit, prepared.end(prepared.order[0]) + 1)
     main = prepared.refs.point(prepared.order[0])['document_id']
@@ -253,22 +271,24 @@ def _cover_window(prepared, chapters):
         grid_rows.setdefault(identity, []).append(ref)
     pending = False
     for page, refs in pages.items():
-        headings = [ref for ref in refs if ref not in prepared.page_edges and ref not in prepared.grid_rows
-                    and _compact(prepared.refs.text(ref)) in _COVER_TITLES]
+        headings = _cover_heading(prepared, refs)
         if not headings:
             continue
         pending = True
         heading = headings[0]
         fields = [_compact(prepared.refs.text(ref)) for ref in refs
-                  if ref > heading and ref not in prepared.page_edges and ref not in prepared.grid_rows]
-        if all(any(pattern.match(line) for line in fields)
-               for pattern in (_BIDDER_STAMP, _REPRESENTATIVE_SIGNATURE, _COVER_DATE)):
+                  if ref > headings[-1] and ref not in prepared.page_edges and ref not in prepared.grid_rows]
+        stamps = [line for line in fields if _BIDDER_STAMP.match(line)]
+        electronic_project = any(_COVER_PROJECT.match(line) for line in fields) and any(
+            re.search(r'电子(?:印|公|签)章', line) for line in stamps)
+        if stamps and any(_COVER_DATE.match(line) for line in fields) and (
+                electronic_project or any(_REPRESENTATIVE_SIGNATURE.match(line) for line in fields)):
             doc = next(doc for doc in prepared.refs.documents if doc['document_id'] == main)
             title = prepared.refs.text(heading).strip()
             start = next(ref for ref in refs if ref == heading or (
                 ref not in prepared.page_edges and prepared.refs.text(ref).strip()
                 and not _running_header(prepared.refs.text(ref), page, doc['pages'], {'title': title})))
-            return (heading, start, refs[-1]), False
+            return (headings, start, refs[-1]), False
         for identity in {prepared.grid_rows[ref] for ref in refs if ref in prepared.grid_rows}:
             rows = grid_rows[identity]
             if not set(rows) <= set(refs):
@@ -276,7 +296,7 @@ def _cover_window(prepared, chapters):
             labels = _compact(''.join(prepared.refs.text(ref) for ref in rows))
             if ('编号' in labels and ('投标人名称' in labels or '供应商名称' in labels)
                     and any(field in labels for field in ('盖章', '签章', '日期', '年月日'))):
-                return (headings[0], refs[0], refs[-1]), False
+                return (headings, refs[0], refs[-1]), False
     return None, pending
 
 
@@ -453,7 +473,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     chapters.sort(key=lambda item: item[0][0])
     cover, cover_pending = _cover_window(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])
     if cover:
-        chapters = [chapter for chapter in chapters if cover[0] not in chapter[0]]
+        chapters = [chapter for chapter in chapters if not set(cover[0]).intersection(chapter[0])]
     # Validate parent_heading_ref references exist in the same document (or slice context) and are non-cover.
     known_heads: dict[int, str] = {}
     for heads, _name, _label, _parent_ref, _s, _e in chapters:
@@ -467,7 +487,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     for index, (heads, _name, _label, parent_ref, _s, _e) in enumerate(chapters):
         if parent_ref is None:
             continue
-        if cover and parent_ref == cover[0]:
+        if cover and parent_ref in cover[0]:
             raise ModelContractError([_issue('封面不能作为上级章', ['chapters', index, 'parent_heading_ref'])])
         doc_id = prepared.refs.point(heads[0])['document_id']
         if parent_ref not in valid_parents or valid_parents[parent_ref] != doc_id:
@@ -488,8 +508,9 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
                 raise ModelContractError([_issue('chapter order leaves an empty template', ['chapters', index])])
             chapters[index] = (heads, name, label, parent_ref, start, end)
     if cover:
-        heading, start, end = cover
-        chapters.insert(0, ([heading], prepared.refs.text(heading).strip(), None, None, start, end))
+        heads, start, end = cover
+        title = ''.join(prepared.refs.text(ref).strip() for ref in heads)
+        chapters.insert(0, (heads, title, None, None, start, end))
     chapters = [chapter for chapter in chapters if chapter[0][0] not in prepared.omitted_contents]
     nodes, entries, adopted = [], [], []
     catalog_pending = []
@@ -506,7 +527,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         else:
             windows = [] if tuple(heads) in copied else _copy_windows(prepared, start, end)
         copied.add(tuple(heads))
-        is_cover = bool(cover and heads == [cover[0]])
+        is_cover = bool(cover and heads == cover[0])
         parent_id = None if is_cover or parent_ref is None else ref_to_id.get(parent_ref)
         ref_to_id.setdefault(heads[0], identity)
         node = {'id': identity, 'heading': heading, 'parent_id': parent_id, 'response_kind': 'form',

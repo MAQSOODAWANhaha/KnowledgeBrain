@@ -39,9 +39,15 @@ def bind_cover_source(artifacts, snapshot, compiled, nodes):
             compiled['issues'].append({'code': 'outline_directory_literal_pending',
                                        'detail': '未能读取原始封面页，请核对签署栏版式。'})
             continue
-        matches = {u['unit_id'] for u in index.ranges
-                   if (u.get('physical_locator') or u['locator']).get('page_ordinal') == cover['heading']['page']
-                   and _key(u.get('text', '')) == _key(cover['title'])}
+        page_units = [u for u in index.ranges if (u.get('physical_locator') or u['locator']).get('page_ordinal')
+                      == cover['heading']['page'] and u.get('text', '').strip()]
+        title = _key(cover['title'])
+        matches = {u['unit_id'] for u in page_units if _key(u['text']) == title}
+        if title == '投标文件':
+            for i, unit in enumerate(page_units):
+                if unit['text'].strip() == '投' and [
+                        _key(u['text']) for u in page_units[i:i + len(title)]] == list(title):
+                    matches.add(unit['unit_id'])
         if len(matches) == 1:
             targets[0]['source_refs'] = [{'source_index_ref': record['source_index_ref'], 'unit_id': matches.pop()}]
         else:
