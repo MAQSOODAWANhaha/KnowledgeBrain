@@ -1466,6 +1466,8 @@ def outline_from_compiled(snapshot, compiled, *, artifacts=None):
 
     node_map = {}
     chapters = _assign_ids(_nest(compiled['chapters'], source_nodes=node_map))
+    from docreader.tender.signed_cover_layout import bind_cover_source
+    bind_cover_source(artifacts, snapshot, compiled, node_map)
     native_issues = (_bind_parameter_tables(compiled, node_map)
                      if compiled.get('_parameter_source_contract') == PARAMETER_SOURCE_CONTRACT else [])
     source_issues = [*compiled['issues'], *native_issues]

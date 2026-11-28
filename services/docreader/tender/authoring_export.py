@@ -367,7 +367,7 @@ def _is_duplicate_heading_line(heading_text, first_line):
     return False
 
 
-def _write_carried_source(document, target, *, keep_with_next=False, heading_text=None):
+def _write_carried_source(document, target, *, keep_with_next=False, heading_text=None, keep_blank_lines=False):
     text = _carried_source(target)
     if not text.strip():
         return False
@@ -386,7 +386,7 @@ def _write_carried_source(document, target, *, keep_with_next=False, heading_tex
     wrote = False
     for paragraph in lines:
         if not exact:
-            if not paragraph.strip():
+            if not paragraph.strip() and not keep_blank_lines:
                 continue
             paragraph = re.sub(r' {2,}', lambda match: '\u00a0' * len(match.group()), paragraph)
         added = document.add_paragraph(paragraph)
@@ -1946,10 +1946,19 @@ class _Assembler:
                                and target_index + 1 < len(targets)
                                and targets[target_index + 1]["target_id"] in grid_forms & form_ids)
                 carried_before = bool(_carried_source(target).strip())
-                wrote = (_write_carried_source(
-                             document, target, keep_with_next=keep_source,
-                             heading_text=rendered_heading if target_index == 0 else None)
-                         if not forms[target_id] or _carried_source(target) != chapter['title'] else False)
+                text_cover = chapter.get('presentation_role') == 'cover' and not forms[target_id]
+                wrote = False
+                if text_cover and len(target.get('source_refs', [])) == 1:
+                    from docreader.tender.signed_cover_layout import write_pdf_cover
+                    wrote = write_pdf_cover(document, self.artifacts, self.repository, self.authoring_input,
+                                            target['source_refs'][0], _carried_source(target))
+                    if not wrote:
+                        self.gap('export_cover_layout_unverified', '封面文字及空位已保留，请核对签署栏版式。',
+                                 chapter_id, target_id)
+                if not wrote and (not forms[target_id] or _carried_source(target) != chapter['title']):
+                    wrote = _write_carried_source(document, target, keep_with_next=keep_source,
+                                                  heading_text=rendered_heading if target_index == 0 else None,
+                                                  keep_blank_lines=text_cover)
                 heading_only = carried_before and not wrote and bool(rendered_heading and target_index == 0)
                 for part in forms[target_id].values():
                     key = _source_key(part['source_ref'])
