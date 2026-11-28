@@ -21,6 +21,7 @@ _BIDDER_STAMP = re.compile(r'^(?:投标人|供应商|响应人)(?:名称)?[：:(
 _REPRESENTATIVE_SIGNATURE = re.compile(
     r'^(?:法定代表人|单位负责人|委托代理人|授权代表|授权代理人)[^。；]{0,48}[：:(（＿_][^。；]*(?:签字|签名|签章)')
 _COVER_DATE = re.compile(r'^(?:日期[：:])?[＿_\d]*年[＿_\d]*月[＿_\d]*日$|^日期[：:][＿_]*$')
+_BIDDER_CLAUSE = re.compile(r'(?:^|[。；;：:])(?:投标人|供应商|响应人|申请人)(?:是否|必须|不得|应当|[须应](?:提供|提交|填写|说明))')
 _ROLE_NAMES = {'main': '主件', 'attachment': '附件', **_ROLE_LABEL}
 _SUBFORM_NUMBER = re.compile(r'^(?P<number>[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+)\s*(?P<name>[^0-9０-９\s－-].*)$')
 _NOT_APPLICABLE = re.compile(r'[（(]\s*(?:本次|本项目)?\s*不适用\s*[）)]\s*[；;]?$')
@@ -379,7 +380,10 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
             raise ModelContractError([_issue('标题属于原文明示不适用的式样', [*path, 'heading_refs'])])
         seen_heads.setdefault(tuple(heads), set()).add(_compact(name))
         if _annex_code(name) or not _title_on_lines(name, lines):
-            raise ModelContractError([_issue('章节名称必须是标题原行里的文件名，不能是附件编号或新写的名称', [*path, 'name'])])
+            raise ModelContractError([_issue('章节名称须取所引原行独立列出的文件名。并列文件各取一个名称；'
+                '只有附件编号和说明正文时省略该候选，原段由宿主保留。', [*path, 'name'])],
+                feedback_fragments=[{'path': [*path, 'heading_refs'], 'value': heads},
+                                    {'path': [*path, 'name'], 'value': name[:120]}])
         label = _validate_label(chapter.get('label'), lines, path)
         parent_ref = chapter.get('parent_heading_ref')
         if parent_ref is not None and parent_ref >= heads[0]:
@@ -503,6 +507,77 @@ def _source_issues(prepared, chapters):
     return issues
 
 
+def _verified_format_plan(raw, prepared, shown, *, allowed_parent_refs=None):
+    """Keep a source-backed sentence as prose only when its original owner can be proved."""
+    try:
+        return decode_bid_format_outline(raw, prepared, allowed_parent_refs=allowed_parent_refs)
+    except ModelContractError as error:
+        if not all(e['code'] == 'bid_format_outline_invalid' and e['path'][-1:] == ['name'] for e in error.errors):
+            raise
+        rejection = error
+
+    chapters = BidFormatOutline.model_validate(raw).model_dump()['chapters']
+    if any(c['body'] is not None for c in chapters):
+        raise rejection
+    parents = {c['parent_heading_ref'] for c in chapters}
+    kept, prose = [], []
+    for chapter in chapters:
+        heads, name = chapter['heading_refs'], _compact(chapter['name'])
+        if not set(heads) <= shown:
+            raise rejection
+        lines = [prepared.refs.text(ref) for ref in heads]
+        if not _annex_code(name) and _title_on_lines(name, lines):
+            kept.append(chapter)
+            continue
+        text = _compact(''.join(lines))
+        body, _ = _heading_entries(text)
+        if (chapter['parent_heading_ref'] is None
+                or chapter['parent_heading_ref'] >= heads[0] or heads[0] in parents or chapter['label']
+                or _annex_code(name) or name not in text or not _BIDDER_CLAUSE.search(body)
+                or not any(mark in text for mark in '。；;！？?!')
+                or heads != sorted(set(heads)) or heads[-1] > prepared.end(heads[0])
+                or any(q not in heads and q not in prepared.page_edges and prepared.refs.text(q).strip()
+                       for q in range(heads[0], heads[-1] + 1))):
+            raise rejection
+        prose.append(chapter)
+    if not kept or not prose:
+        raise rejection
+    claimed = {ref for c in kept for ref in c['heading_refs']}
+    for c in prose:
+        if claimed.intersection(c['heading_refs']):
+            raise rejection
+        claimed.update(c['heading_refs'])
+    result = decode_bid_format_outline({'chapters': kept}, prepared, allowed_parent_refs=allowed_parent_refs)
+    nodes = {node['id']: node for node in result['nodes']}
+    cover_ids = {item['node_id'] for scope in result['scopes'] for item in scope['items'] if item['presentation'] == 'cover'}
+    owners = {prepared.refs.by_point[window['document_id'], window['page'], line]: node['id']
+              for node in nodes.values() for window in node['body_windows']
+              for line in range(window['start_line'], window['end_line'] + 1)}
+    starts = sorted(c['heading_refs'][0] for c in kept)
+    for c in prose:
+        first = c['heading_refs'][0]
+        end = next((ref for ref in starts if first < ref <= prepared.end(first)), prepared.end(first) + 1)
+        refs = [ref for ref in range(first, end) if ref not in prepared.page_edges and prepared.refs.text(ref).strip()]
+        owner = nodes.get(owners.get(first))
+        if owner is None or owner['response_kind'] != 'form' or any(
+                owners.get(ref) != owner['id'] or ref in prepared.grid_rows for ref in refs):
+            raise rejection
+        ancestor = owner
+        parent = prepared.refs.point(c['parent_heading_ref'])
+        while ancestor['heading'] != parent:
+            ancestor = nodes.get(ancestor['parent_id'])
+            if ancestor is None:
+                raise rejection
+        if ancestor['id'] in cover_ids:
+            raise rejection
+        point = prepared.refs.point(first)
+        excerpt = prepared.refs.text(first).strip()[:60]
+        result.setdefault('skipped_item_issues', []).append({'code': 'outline_directory_name_unconfirmed',
+            'detail': f'文档 {point["document_id"]} 第{point["page"] + 1}页第{point["line"] + 1}行'
+                      f'「{excerpt}」的独立标题待核，原段已保留在「{owner["name"]}」。'})
+    return result
+
+
 async def select_bid_format_plan(documents, budget, execute, identity):
     """One request per document's bid-format section; an oversized one is sent in slices (BUG-331, BUG-332).
 
@@ -518,9 +593,6 @@ async def select_bid_format_plan(documents, budget, execute, identity):
         return None
     task = AuthoringTask.DIRECTORY_PLAN
 
-    def accept(raw):
-        return decode_bid_format_outline(raw, prepared)
-
     def units():
         found = []
         for section in prepared.sections:
@@ -529,6 +601,11 @@ async def select_bid_format_plan(documents, budget, execute, identity):
         return found
 
     payloads = await asyncio.to_thread(units)
+    shown_refs = {ref for payload in payloads if payload is not None for ref, _ in payload['lines']}
+
+    def accept(raw):
+        return _verified_format_plan(raw, prepared, shown_refs)
+
     if len(prepared.sections) == 1 and payloads == [prepared.sections[0]['payload']]:
         await _plan(execute, task, 1, 'bid-format-plan')
         return await _ask(execute, budget, task, payloads[0], accept)
@@ -549,7 +626,7 @@ async def select_bid_format_plan(documents, budget, execute, identity):
                                    for chapter in plan['chapters']):
                 raise ModelContractError([_issue('return only heading refs from these lines, without body')])
             if plan['chapters']:
-                decode_bid_format_outline(raw, prepared, allowed_parent_refs=context_refs)
+                _verified_format_plan(raw, prepared, shown, allowed_parent_refs=context_refs)
             return plan['chapters']
         try:
             return await _ask(execute, budget, task, payload, accept_unit)
@@ -566,7 +643,7 @@ async def select_bid_format_plan(documents, budget, execute, identity):
         for chapter in merged:
             if chapter.get('parent_heading_ref') is not None and chapter['parent_heading_ref'] not in surviving:
                 chapter['parent_heading_ref'] = None
-    result = decode_bid_format_outline({'chapters': merged}, prepared)
+    result = accept({'chapters': merged})
     if any(result is None for result in results):
         result.setdefault('skipped_item_issues', []).append({
             'code': 'outline_directory_plan_failed',
