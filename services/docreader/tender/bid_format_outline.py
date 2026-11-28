@@ -64,6 +64,7 @@ class _Prepared:
         self.grid_rows = {}
         self.order, self.sections = [], []
         self.omitted_contents, self.catalog_issues = set(), []
+        self.catalog_refs = set()
         if not found:
             return
         self.grid_rows = _grid_owners(documents, self.refs)
@@ -71,7 +72,9 @@ class _Prepared:
         self.page_edges.difference_update(self.grid_rows)
         for role, anchor, section in found:
             doc = next(doc for doc in documents if doc['document_id'] == anchor[0])
-            omitted, issues = _catalog_applicability(doc, anchor, section, self.refs)
+            catalog_refs = _format_catalog_refs(doc, section, self.refs, self.page_edges)
+            self.catalog_refs.update(catalog_refs)
+            omitted, issues = _catalog_applicability(doc, anchor, section, self.refs, catalog_refs)
             self.omitted_contents.update(omitted)
             self.catalog_issues.extend(issues)
             points = [(anchor[0], anchor[1], anchor[2])]
@@ -90,7 +93,45 @@ class _Prepared:
         return self.section(reference)['last']
 
 
-def _catalog_applicability(document, anchor, section, refs):
+def _format_catalog_refs(document, section, refs, page_edges):
+    """Locate consecutive file entries after an explicit contents heading, up to the actual forms."""
+    from docreader.tender.directory_compile import _join_wrapped_heading
+
+    catalog, labels = set(), set()
+    pending = []
+    marker = None
+    index = 0
+    while index < len(section):
+        row = section[index]
+        index += 1
+        text = row[4]
+        if _compact(text) == '目录':
+            catalog.update(pending)
+            marker, pending, labels = refs.by_point[row[:3]], [], set()
+            continue
+        if marker is None or not text or refs.by_point[row[:3]] in page_edges:
+            continue
+        match = _FORMAT_ITEM.match(text)
+        if match is None:
+            if _running_header(text, row[1], document['pages'], {'title': ''}):
+                continue
+            # A field or body after the last heading can belong to that form.
+            marker, pending = None, []
+            continue
+        catalog.update(pending)
+        label = _compact(match[0])
+        if label in labels:
+            marker, pending = None, []
+            continue
+        labels.add(label)
+        _, length = _join_wrapped_heading(section, index - 1)
+        pending = [marker, *(refs.by_point[item[:3]] for item in section[index - 1:index - 1 + length])]
+        index += length - 1
+    catalog.update(pending)
+    return catalog
+
+
+def _catalog_applicability(document, anchor, section, refs, catalog_refs):
     from docreader.tender.directory_compile import _chapter_boundary, _format_heading
 
     excluded = {}
@@ -113,16 +154,15 @@ def _catalog_applicability(document, anchor, section, refs):
                     excluded[_compact(title[:marked.start()])] = page
     if not excluded:
         return set(), []
-    contents = {page for _, page, _, _, text in section if _compact(text) == '目录'}
     bodies = {}
-    for _, page, _, _, text in section:
+    for doc_id, page, line, _, text in section:
         match = _FORMAT_ITEM.match(text)
-        if page not in contents and match and match['annex'] and not _NOT_APPLICABLE.search(text):
+        if refs.by_point[doc_id, page, line] not in catalog_refs and match and match['annex'] and not _NOT_APPLICABLE.search(text):
             bodies.setdefault(_compact(match['annex']), page)
     omitted, issues = set(), []
     for doc_id, page, line, _, text in section:
         title = _compact(text)
-        if page in contents and title in excluded:
+        if refs.by_point[doc_id, page, line] in catalog_refs and title in excluded:
             omitted.add(refs.by_point[doc_id, page, line])
             match = _FORMAT_ITEM.match(title)
             body = bodies.get(match['annex']) if match else None
@@ -264,10 +304,10 @@ def _non_applicable_spans(prepared):
 
 
 def _copy_windows(prepared, start, end):
-    """The form's own lines from start to end; page edges are skipped, nothing else."""
+    """Keep the form's source lines, skipping page decorations and format catalog entries."""
     windows = []
     for reference in range(start, end + 1):
-        if reference in prepared.page_edges or reference in prepared.omitted_contents:
+        if reference in prepared.page_edges or reference in prepared.catalog_refs:
             continue
         point = prepared.refs.point(reference)
         document_id, page, line = point['document_id'], point['page'], point['line']
@@ -392,6 +432,8 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
             chapters.append((heads, name, label, parent_ref, None, None))
             continue
         start, end = chapter['body']
+        if heads[0] in prepared.catalog_refs and (start != heads[0] or end != heads[-1]):
+            raise ModelContractError([_issue('目录条目仅定位文件名，正文须引用独立原式标题', [*path, 'body'])])
         if end < start or end > prepared.end(start) or any(reference not in prepared.visible
                                                              for reference in range(start, end + 1)):
             raise ModelContractError([_issue('body must stay inside the bid-format section', [*path, 'body'])])
@@ -450,13 +492,19 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         chapters.insert(0, ([heading], prepared.refs.text(heading).strip(), None, None, start, end))
     chapters = [chapter for chapter in chapters if chapter[0][0] not in prepared.omitted_contents]
     nodes, entries, adopted = [], [], []
+    catalog_pending = []
     copied = set()
     ref_to_id: dict[int, str] = {}
     for number, (heads, name, label, parent_ref, start, end) in enumerate(chapters, start=1):
         heading = prepared.refs.point(heads[0])
         identity = f'format-{number}'
         # One tender line has one owner; later files listed on it keep their own chapter without a copy.
-        windows = [] if tuple(heads) in copied else _copy_windows(prepared, start, end)
+        if heads[0] in prepared.catalog_refs:
+            windows = []
+            catalog_pending.append({'code': 'outline_directory_format_pending',
+                                    'detail': f'「{name}」在{_place(prepared, heads[0])}的格式目录列名，独立原式待核，请在该章补充。'})
+        else:
+            windows = [] if tuple(heads) in copied else _copy_windows(prepared, start, end)
         copied.add(tuple(heads))
         is_cover = bool(cover and heads == [cover[0]])
         parent_id = None if is_cover or parent_ref is None else ref_to_id.get(parent_ref)
@@ -475,7 +523,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     result = {'nodes': nodes,
               'composition': {'entries': entries},
               'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
-    issues = [*prepared.catalog_issues, *_source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])]
+    issues = [*prepared.catalog_issues, *catalog_pending, *_source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])]
     if cover_pending:
         issues.insert(0, {'code': 'outline_directory_literal_pending',
                           'detail': '格式章节中的封面标题缺少可核对的同页字段表或签署栏，原式待核。'})

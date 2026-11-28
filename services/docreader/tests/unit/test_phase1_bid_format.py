@@ -569,6 +569,53 @@ def test_inapplicable_catalog_annex_is_not_promoted_from_a_list_alone(body_prese
                for i in result['skipped_item_issues'])
 
 
+@pytest.mark.parametrize('same_page', [True, False])
+async def test_catalog_name_keeps_a_manual_slot_without_copying_adjacent_forms(tmp_path, same_page):
+    import json
+    from docreader.tender.acceptance_eval import _inspect_docx
+
+    catalog = '目 录\n附件 1 报价表及价格承诺函\n附件 2 签署说明'
+    forms = '附件 1 报价表\n单价：______\n附件 2 签署说明\n本说明应盖章。'
+    pages = ['第六章 投标文件格式', *([catalog + '\n' + forms] if same_page else [catalog, forms])]
+    docs = [{'document_id': 'source', 'role': 'main', 'pages': pages}]
+
+    async def select(_task, request, validate):
+        lines = json.loads(request['messages'][1]['content'][0]['text'])['lines']
+        directory = next(ref for ref, line in lines if '及价格承诺函' in line)
+        table = next(ref for ref, line in lines if line == '附件 1 报价表')
+        signature = max(ref for ref, line in lines if line == '附件 2 签署说明')
+        return validate({'chapters': [{'heading_refs': [directory], 'name': '价格承诺函'},
+                                      {'heading_refs': [table], 'name': '报价表'},
+                                      {'heading_refs': [signature], 'name': '签署说明'}]})
+
+    artifacts, outline = await _outline(tmp_path, documents=docs, execute=select,
+                                        directory_contract='bid_format_source_outline_v1')
+    letter, table, signature = outline['chapters']
+    target, = letter['targets']
+    assert target['purpose'] == '价格承诺函' and target['manual_fill']
+    assert any('价格承诺函' in issue['detail'] and '第 2 页' in issue['detail'] and '原式待核' in issue['detail']
+               for issue in outline['issues'])
+    exported = export_authoring_document(artifacts, outline, [])
+    docx = _inspect_docx(artifacts.read_bytes(exported['docx_ref']), outline)
+    assert docx['missing_target_ids'] == []
+    text = '\n'.join(docx['texts_by_chapter'][letter['chapter_id']])
+    assert '附件 2' not in text and '报价表' not in text
+    assert '单价：______' in docx['texts_by_chapter'][table['chapter_id']]
+    assert '本说明应盖章。' in docx['texts_by_chapter'][signature['chapter_id']]
+
+
+def test_explicit_catalog_window_cannot_claim_another_entry():
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    doc = {'document_id': 's', 'role': 'main', 'pages': ['第六章 投标文件格式\n目录\n附件1 承诺书\n附件2 说明函']}
+    prepared = _Prepared([doc], {})
+    catalog, other = [prepared.refs.by_point['s', 0, line] for line in (2, 3)]
+    with pytest.raises(ModelContractError):
+        decode_bid_format_outline({'chapters': [{'name': '承诺书', 'heading_refs': [catalog],
+                                                'body': [catalog, other]}]}, prepared)
+
+
 def test_skipped_format_still_bounds_an_implicit_copy_window():
     from docreader.tender.bid_format_outline import decode_bid_format_outline
 
