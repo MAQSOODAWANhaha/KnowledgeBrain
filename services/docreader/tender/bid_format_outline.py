@@ -573,6 +573,7 @@ def compile_bid_format_plan(plan, documents):
     """
     import json
 
+    from docreader.tender.bid_submission_volumes import bind_submission_volumes
     from docreader.tender.directory_compile import compile_plans
 
     order = [document['document_id'] for document in documents]
@@ -584,7 +585,7 @@ def compile_bid_format_plan(plan, documents):
         key=order.index,
     )
     if len(cited) <= 1:
-        return compile_plans([plan], documents, format_candidates=True)
+        return bind_submission_volumes(compile_plans([plan], documents, format_candidates=True), documents)
     compiled, seen = {'chapters': [], 'issues': []}, set()
     for index, document_id in enumerate(cited):
         own = [number for number, entry in enumerate(entries) if entry['name']['document_id'] == document_id]
@@ -608,4 +609,4 @@ def compile_bid_format_plan(plan, documents):
                 continue
             seen.add(key)
             compiled['issues'].append(issue)
-    return compiled
+    return bind_submission_volumes(compiled, documents)

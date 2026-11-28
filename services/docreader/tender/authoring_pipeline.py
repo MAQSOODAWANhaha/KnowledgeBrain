@@ -1864,7 +1864,7 @@ async def generate_document(artifacts, snapshot, budget, execute, *, materials=(
             directory_plans = [selected] if selected else []
         if directory_contract == 'bid_format_source_outline_v1' and len(directory_plans) == 1:
             from docreader.tender.bid_format_outline import compile_bid_format_plan
-            compiled = compile_bid_format_plan(directory_plans[0], directory_documents)
+            compiled = await asyncio.to_thread(compile_bid_format_plan, directory_plans[0], directory_documents)
         else:
             compiled = compile_plans(directory_plans, directory_documents)
         compiled['issues'].extend({'code': 'outline_directory_plan_failed', 'detail': detail} for detail in plan_failures)

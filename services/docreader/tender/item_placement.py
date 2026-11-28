@@ -298,13 +298,20 @@ def add_submission_forms(plan, documents, items, format_pages):
 
 def placement_positions(outline, outside_format=None):
     outside_format = outside_format or {}
+    candidates = {}
+    for root in outline['chapters']:
+        for chapter in (root['children'] if root.get('is_volume') else [root]):
+            if chapter['title'] in outside_format:
+                for _, target in _walk([chapter]):
+                    candidates[target['target_id']] = (chapter['chapter_id'], outside_format[chapter['title']])
     positions = {}
     for path, target in _walk(outline['chapters'], skip_covers=True):
         opening = _compact(target.get('purpose', ''))[:_OPENING]
+        candidate, grids = candidates.get(target['target_id'], (None, ()))
         positions[f't{len(positions) + 1}'] = {'target': target, 'title_path': list(path),
                                                'kind': target['kind'], 'opening': opening,
-                                               'outside_format': path[0] in outside_format,
-                                               'required_form': any(_template_identity(part) in outside_format.get(path[0], ())
+                                               'outside_format': candidate is not None, 'candidate_chapter': candidate,
+                                               'required_form': any(_template_identity(part) in grids
                                                                     for part in target.get('template_refs', []))}
     return positions
 
@@ -421,11 +428,17 @@ def bind_placements(outline, positions, items, decided):
     if pending_evaluation:
         outline['issues'].append({'code': 'outline_rule_unassigned', 'rule_refs': pending_evaluation,
                                   'detail': EVALUATION_PENDING_DETAIL})
-    outside = {value['title_path'][0] for value in positions.values() if value['outside_format']}
+    outside = {value['candidate_chapter'] for value in positions.values() if value['outside_format']}
     required = {value['target']['target_id'] for value in positions.values() if value['required_form']}
-    outline['chapters'] = [chapter for chapter in outline['chapters'] if chapter['title'] not in outside
-                           or any(target['target_id'] in required or target.get('rule_refs')
-                                  for _, target in _walk([chapter]))]
+
+    def keep(chapter):
+        return chapter['chapter_id'] not in outside or any(
+            target['target_id'] in required or target.get('rule_refs') for _, target in _walk([chapter]))
+
+    outline['chapters'] = [chapter for chapter in outline['chapters'] if keep(chapter)]
+    for chapter in outline['chapters']:
+        if chapter.get('is_volume'):
+            chapter['children'] = [child for child in chapter['children'] if keep(child)]
     return outline
 
 
