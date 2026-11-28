@@ -14,6 +14,7 @@ _BOOK = re.compile(r'^第[一二三四五六七八九十0-9]+卷\s*\S{1,24}$')
 _SEPARATE = re.compile(r'(?:分别|单独|独立|分册)(?:进行|编制并)?(?:上传|递交|提交|编制|装订|封装)')
 _DESTINATION = re.compile(r'(?:上传|递交|提交)(?:到|至|于)')
 _NEGATIVE = re.compile(r'(?:不得|不可|禁止|不必|无需|不要求|不应|可以|允许|可)(?:再|进行)?(?:分别|单独|独立|分册|上传|递交|提交)')
+_EXCLUDE_MEMBER = re.compile(r'不(?:包含|包括|含)|(?:不得|禁止|不应)(?:包含|含有|夹带|附带?|列入|出现)')
 
 
 def _source_groups(document):
@@ -78,22 +79,53 @@ def _source_locations(document, groups, headings):
     return annexes, books
 
 
+def _member_parts(text):
+    text = ''.join(text.split())
+    included, excluded, end = [], [], 0
+    for mark in _EXCLUDE_MEMBER.finditer(text):
+        if mark.start() < end:
+            continue
+        included.append(text[end:mark.start()])
+        # An attachment code can be parenthesized inside the excluded list.
+        depth, end = 0, mark.end()
+        while end < len(text):
+            char = text[end]
+            if depth == 0 and char in '）)；;。':
+                break
+            depth += int(char in '（(') - int(char in '）)')
+            end += 1
+        excluded.append(text[mark.end():end])
+    return ''.join([*included, text[end:]]), '、'.join(excluded)
+
+
+def _mentions(text, title, annex):
+    if len(title) >= 2 and title in text:
+        return True
+    return bool(annex and any(_digits(m[1]) == annex[0] and (not m[2] or m[2].upper() == annex[1])
+                              for m in _VOLUME_CODE.finditer(text)))
+
+
 def _membership(chapter, groups, annex, book):
     title = ''.join(_label_key(chapter['title']).split())
-    matches = {}
+    matches, denied = {}, set()
     for group in groups:
+        if _mentions(_member_parts(group['clause'])[1], title, annex):
+            denied.add(group['name'])
         for rank, member in enumerate(group['members']):
-            codes = {(_digits(match[1]), match[2].upper()) for match in _VOLUME_CODE.finditer(member)}
-            if ((annex and (annex in codes or (annex[0], '') in codes))
-                    or (len(title) >= 2 and title in ''.join(member.split()))):
+            included, excluded = _member_parts(member)
+            if _mentions(excluded, title, annex):
+                denied.add(group['name'])
+            if _mentions(included, title, annex):
                 matches.setdefault(group['name'], rank)
+    for group_name in denied:
+        matches.pop(group_name, None)
     if len(matches) > 1:
         return None, float('inf')
     if matches:
         return next(iter(matches.items()))
-    if not matches and book:
+    if book and book not in denied:
         return book, float('inf')
-    return None
+    return (None, float('inf')) if denied else None
 
 
 def _containers(document, groups):

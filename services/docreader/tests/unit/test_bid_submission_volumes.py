@@ -23,12 +23,12 @@ from test_phase1_bid_format import _snapshot
 ])
 async def test_default_outline_exports_only_explicit_separate_submissions(tmp_path, instruction, separate):
     pages = [instruction + '\n3.1 投标文件的组成\n3.1.1 商务文件：应包括下列原式。\n'
-             '(1) 投标函（附件1A）、\n授权书（附件1B）。\n'
+             '(1) 投标函（附件1A）（不含开标表、另行申报单（附件12））、\n授权书（附件1B）。\n'
              '3.1.2 技术文件：须响应技术要求。\n(1) 产品说明（附件4）。\n'
              '3.1.3 报价文件：按以下顺序编制。\n(1) 开标表（附件9）。\n(2) 分项表（附件2）。',
              '第六章 投标文件格式\n附件1A 投标函\n投标人签章：\n附件1B 授权书\n代表签字：\n'
              '附件2 分项表\n分项金额：________\n附件4 产品说明\n产品说明原式\n'
-             '附件9 开标表\n总额：________\n附件11 专项声明\n其他原式']
+             '附件9 开标表\n总额：________\n附件11 专项声明\n其他原式\n附件12 价格补充表\n独立报价空位']
     documents = [{'document_id': 'source', 'role': 'main', 'pages': pages}]
 
     async def choose(task, request, validate):
@@ -61,6 +61,8 @@ async def test_default_outline_exports_only_explicit_separate_submissions(tmp_pa
             assert price.index('总额：') < price.index('分项金额：')
             assert all('分项金额：' not in text and '总额：' not in text for text in (business, tech))
             assert all('其他原式' not in text for text in bodies)
+            assert all('独立报价空位' not in text for text in bodies)
+            assert any('价格补充表' in i['detail'] and '分册' in i['detail'] for i in outline['issues'])
             assert any('专项声明' in i['detail'] and '分册' in i['detail'] for i in outline['issues'])
 
 
