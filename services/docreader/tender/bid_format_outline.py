@@ -6,7 +6,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
-from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, _ROLE_LABEL, bid_format_sections
+from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, _ROLE_LABEL, _running_header, bid_format_sections
 from docreader.tender.directory_sources import SourceRefs
 from docreader.tender.schema import Contract, NonnegativeInt, Text
 from docreader.tender.status import AuthoringTask
@@ -17,6 +17,10 @@ BID_FORMAT_OPERATION = 'select_bid_format_outline_v1'
 HeadingRefs = Annotated[list[NonnegativeInt], Field(min_length=1, max_length=4)]
 BodyRange = Annotated[list[NonnegativeInt], Field(min_length=2, max_length=2)]
 _COVER_TITLES = {'投标文件', '投标文件封面', '封面'}
+_BIDDER_STAMP = re.compile(r'^(?:投标人|供应商|响应人)(?:名称)?[：:(（＿_].*(?:盖(?:单位)?(?:公)?章|公章|签章)')
+_REPRESENTATIVE_SIGNATURE = re.compile(
+    r'^(?:法定代表人|单位负责人|委托代理人|授权代表|授权代理人)[^。；]{0,48}[：:(（＿_][^。；]*(?:签字|签名|签章)')
+_COVER_DATE = re.compile(r'^(?:日期[：:])?[＿_\d]*年[＿_\d]*月[＿_\d]*日$|^日期[：:][＿_]*$')
 _ROLE_NAMES = {'main': '主件', 'attachment': '附件', **_ROLE_LABEL}
 _SUBFORM_NUMBER = re.compile(r'^(?P<number>[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+)\s*(?P<name>[^0-9０-９\s－-].*)$')
 _NOT_APPLICABLE = re.compile(r'[（(]\s*(?:本次|本项目)?\s*不适用\s*[）)]\s*[；;]?$')
@@ -140,7 +144,7 @@ def _grid_owners(documents, refs):
 
 
 def _cover_window(prepared, chapters):
-    """Require an independent prefix page with a source-bound cover grid."""
+    """Accept an independent format cover backed by its field grid or its own signature lines."""
     limit = min((start if start is not None else heads[0]
                  for heads, _name, start, _end in chapters
                  if all(_compact(prepared.refs.text(ref)) not in _COVER_TITLES for ref in heads)),
@@ -158,19 +162,30 @@ def _cover_window(prepared, chapters):
     for ref, identity in prepared.grid_rows.items():
         grid_rows.setdefault(identity, []).append(ref)
     pending = False
-    for refs in pages.values():
+    for page, refs in pages.items():
         headings = [ref for ref in refs if ref not in prepared.page_edges and ref not in prepared.grid_rows
                     and _compact(prepared.refs.text(ref)) in _COVER_TITLES]
         if not headings:
             continue
         pending = True
+        heading = headings[0]
+        fields = [_compact(prepared.refs.text(ref)) for ref in refs
+                  if ref > heading and ref not in prepared.page_edges and ref not in prepared.grid_rows]
+        if all(any(pattern.match(line) for line in fields)
+               for pattern in (_BIDDER_STAMP, _REPRESENTATIVE_SIGNATURE, _COVER_DATE)):
+            doc = next(doc for doc in prepared.refs.documents if doc['document_id'] == main)
+            title = prepared.refs.text(heading).strip()
+            start = next(ref for ref in refs if ref == heading or (
+                ref not in prepared.page_edges and prepared.refs.text(ref).strip()
+                and not _running_header(prepared.refs.text(ref), page, doc['pages'], {'title': title})))
+            return (heading, start, refs[-1]), False
         for identity in {prepared.grid_rows[ref] for ref in refs if ref in prepared.grid_rows}:
             rows = grid_rows[identity]
             if not set(rows) <= set(refs):
                 continue
-            fields = _compact(''.join(prepared.refs.text(ref) for ref in rows))
-            if ('编号' in fields and ('投标人名称' in fields or '供应商名称' in fields)
-                    and any(field in fields for field in ('盖章', '签章', '日期', '年月日'))):
+            labels = _compact(''.join(prepared.refs.text(ref) for ref in rows))
+            if ('编号' in labels and ('投标人名称' in labels or '供应商名称' in labels)
+                    and any(field in labels for field in ('盖章', '签章', '日期', '年月日'))):
                 return (headings[0], refs[0], refs[-1]), False
     return None, pending
 
@@ -409,7 +424,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     issues = _source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])
     if cover_pending:
         issues.insert(0, {'code': 'outline_directory_literal_pending',
-                          'detail': '格式章节中的封面标题缺少可核对的同页字段网格，原式待核。'})
+                          'detail': '格式章节中的封面标题缺少可核对的同页字段表或签署栏，原式待核。'})
     if issues:
         result['skipped_item_issues'] = issues
     return result

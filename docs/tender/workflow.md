@@ -80,7 +80,7 @@
 
 ## 编制目标设计：一条要求链
 
-实施路线见 [修复与改进路线 · W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)。有冻结来源的自动大纲统一走 `single_requirement_chain_v1`（`bid_format_source_outline_v1` + `item_placement` + `proposal_outline`）。分析事项台账是唯一覆盖分母，原式表、固定文字、签章与有据首张原封面由宿主从冻结网格原样复制，标注“不适用”的编号式样为复制边界。
+实施路线见 [修复与改进路线 · W2 一条要求链](../../plans/improvement-roadmap.md#w2-一条要求链)。有冻结来源的自动大纲统一走 `single_requirement_chain_v1`（`bid_format_source_outline_v1` + `item_placement` + `proposal_outline`）。分析事项台账是唯一覆盖分母。宿主从冻结表格和原文行复制原式、固定文字与签章。投标格式开头的独立封面有同页字段表，或在封面标题下有投标人盖章、代表签字和日期栏时，按原文保留项目名称与填写位置，置于目录之前。标注“不适用”的编号式样为复制边界。
 
 ### 新链格式补位与事项归属
 

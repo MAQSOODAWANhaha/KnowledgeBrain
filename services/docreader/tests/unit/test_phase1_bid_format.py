@@ -500,6 +500,38 @@ async def test_original_cover_is_kept_before_toc_with_its_native_grid(tmp_path, 
     assert '招标编号：编号 A' not in paragraphs and '22' not in paragraphs
 
 
+@pytest.mark.parametrize('signed', [True, False])
+async def test_text_cover_uses_only_signature_fields_on_the_formats_own_page(tmp_path, signed):
+    import json
+
+    stamp = '投标人：________（盖单位章）'
+    signature = '法定代表人或其委托代理人：________（签字）'
+    date = '年    月    日'
+    pages = [
+        f'采购人自用封面\n投标文件\n{stamp}\n{signature}\n{date}',
+        '第六章 投标文件格式',
+        '招标文件页眉\n采购项目固定名称\n投 标 文 件\n' + ('\n'.join((stamp, signature, date)) if signed else ''),
+        f'招标文件页眉\n一、投标函\n独立函件正文\n{stamp}\n{signature}\n{date}',
+    ]
+    docs = [{'document_id': 'tender', 'role': 'main', 'pages': pages}]
+
+    async def select(_task, request, validate):
+        payload = json.loads(request['messages'][1]['content'][0]['text'])
+        ref = next(ref for ref, text in payload['lines'] if text == '一、投标函')
+        return validate({'chapters': [{'heading_refs': [ref], 'name': '投标函'}]})
+
+    artifacts, outline = await _outline(tmp_path, documents=docs, execute=select,
+                                        directory_contract='bid_format_source_outline_v1')
+    assert [c['presentation_role'] for c in outline['chapters']] == (['cover', 'body'] if signed else ['body'])
+    exported = export_authoring_document(artifacts, outline, [])
+    word = Document(BytesIO(artifacts.read_bytes(exported['docx_ref'])))
+    paragraphs = [p.text.strip() for p in word.paragraphs]
+    front = [text.replace('\xa0', ' ') for text in paragraphs[:paragraphs.index('目录')]]
+    for field in ('采购项目固定名称', stamp, signature, date):
+        assert (field in front) == signed
+    assert '采购人自用封面' not in paragraphs and '招标文件页眉' not in front
+
+
 def _not_applicable_formats():
     from docreader.tender.bid_format_outline import _Prepared
 
