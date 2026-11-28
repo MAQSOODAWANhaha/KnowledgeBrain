@@ -546,6 +546,29 @@ def _not_applicable_formats():
     return prepared, refs
 
 
+@pytest.mark.parametrize('body_present', [False, True])
+def test_inapplicable_catalog_annex_is_not_promoted_from_a_list_alone(body_present):
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    pages = ['目录\n第六章 投标文件格式......30\n附件3 参数清单（本次不适用）......32',
+             '第六章 投标文件格式', '目 录\n附件3 参数清单\n附件4 承诺函',
+             '附件4 承诺函\n签字：_______']
+    if body_present:
+        pages.append('附件3 参数清单\n型号：_______')
+    prepared = _Prepared([{'role': 'main', 'document_id': 'source', 'pages': pages}], {})
+    ref = prepared.refs.by_point
+    selected = [{'heading_refs': [ref['source', 2, 1]], 'name': '参数清单'},
+                {'heading_refs': [ref['source', 3, 0]], 'name': '承诺函'}]
+    if body_present:
+        selected.append({'heading_refs': [ref['source', 4, 0]], 'name': '参数清单'})
+    result = decode_bid_format_outline({'chapters': selected}, prepared)
+    assert [node['heading']['page'] for node in result['nodes'] if node['name'] == '参数清单'] == (
+        [4] if body_present else [])
+    code = 'outline_directory_applicability_unconfirmed' if body_present else 'outline_directory_excluded'
+    assert any(i['code'] == code and '参数清单' in i['detail'] and '第1页' in i['detail']
+               for i in result['skipped_item_issues'])
+
+
 def test_skipped_format_still_bounds_an_implicit_copy_window():
     from docreader.tender.bid_format_outline import decode_bid_format_outline
 

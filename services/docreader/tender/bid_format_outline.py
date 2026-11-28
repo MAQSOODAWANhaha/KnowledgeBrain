@@ -62,12 +62,17 @@ class _Prepared:
         self.page_edges = set()
         self.grid_rows = {}
         self.order, self.sections = [], []
+        self.omitted_contents, self.catalog_issues = set(), []
         if not found:
             return
         self.grid_rows = _grid_owners(documents, self.refs)
         self.page_edges = {self.refs.by_point[point] for point in _page_edges(documents) if point in self.refs.by_point}
         self.page_edges.difference_update(self.grid_rows)
         for role, anchor, section in found:
+            doc = next(doc for doc in documents if doc['document_id'] == anchor[0])
+            omitted, issues = _catalog_applicability(doc, anchor, section, self.refs)
+            self.omitted_contents.update(omitted)
+            self.catalog_issues.extend(issues)
             points = [(anchor[0], anchor[1], anchor[2])]
             points.extend((row[0], row[1], row[2]) for row in section)
             order = [self.refs.by_point[point] for point in points]
@@ -82,6 +87,50 @@ class _Prepared:
 
     def end(self, reference):
         return self.section(reference)['last']
+
+
+def _catalog_applicability(document, anchor, section, refs):
+    from docreader.tender.directory_compile import _chapter_boundary, _format_heading
+
+    excluded = {}
+    in_format = False
+    for page, text in enumerate(document['pages'][:anchor[1] + 1]):
+        for line, raw in enumerate(text.splitlines()):
+            if (page, line) >= (anchor[1], anchor[2]):
+                break
+            leader = _FORMAT_TOC.search(raw)
+            if not leader:
+                continue
+            title = raw[:leader.start()].strip()
+            if _format_heading(title):
+                in_format = True
+            elif _chapter_boundary(title):
+                in_format = False
+            elif in_format and (marked := _NOT_APPLICABLE.search(title)):
+                match = _FORMAT_ITEM.match(title)
+                if match and match['annex']:
+                    excluded[_compact(title[:marked.start()])] = page
+    if not excluded:
+        return set(), []
+    contents = {page for _, page, _, _, text in section if _compact(text) == '目录'}
+    bodies = {}
+    for _, page, _, _, text in section:
+        match = _FORMAT_ITEM.match(text)
+        if page not in contents and match and match['annex'] and not _NOT_APPLICABLE.search(text):
+            bodies.setdefault(_compact(match['annex']), page)
+    omitted, issues = set(), []
+    for doc_id, page, line, _, text in section:
+        title = _compact(text)
+        if page in contents and title in excluded:
+            omitted.add(refs.by_point[doc_id, page, line])
+            match = _FORMAT_ITEM.match(title)
+            body = bodies.get(match['annex']) if match else None
+            detail = f'文档 {doc_id} 第{excluded[title] + 1}页明示「{text}」不适用，第{page + 1}页仅在格式目录列名。'
+            if body is not None:
+                detail += f'第{body + 1}页另有同号原式，保留原式，请核定适用性。'
+            issues.append({'code': 'outline_directory_excluded' if body is None
+                           else 'outline_directory_applicability_unconfirmed', 'detail': detail})
+    return omitted, issues
 
 
 def _heading_candidates(section, refs):
@@ -217,7 +266,7 @@ def _copy_windows(prepared, start, end):
     """The form's own lines from start to end; page edges are skipped, nothing else."""
     windows = []
     for reference in range(start, end + 1):
-        if reference in prepared.page_edges:
+        if reference in prepared.page_edges or reference in prepared.omitted_contents:
             continue
         point = prepared.refs.point(reference)
         document_id, page, line = point['document_id'], point['page'], point['line']
@@ -395,6 +444,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     if cover:
         heading, start, end = cover
         chapters.insert(0, ([heading], prepared.refs.text(heading).strip(), None, None, start, end))
+    chapters = [chapter for chapter in chapters if chapter[0][0] not in prepared.omitted_contents]
     nodes, entries, adopted = [], [], []
     copied = set()
     ref_to_id: dict[int, str] = {}
@@ -421,7 +471,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     result = {'nodes': nodes,
               'composition': {'entries': entries},
               'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
-    issues = _source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])
+    issues = [*prepared.catalog_issues, *_source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])]
     if cover_pending:
         issues.insert(0, {'code': 'outline_directory_literal_pending',
                           'detail': '格式章节中的封面标题缺少可核对的同页字段表或签署栏，原式待核。'})
