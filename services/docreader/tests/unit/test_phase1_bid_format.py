@@ -302,9 +302,12 @@ async def test_phase1_keeps_tender_file_names_and_drops_metric_rows(tmp_path):
         '投标保证金', '资格证明文件', '投标分项报价表（投标人可根据自身实际情况填写）',
         '技术性能指标的详细描述', '投标函附录', '投标人根据评标办法需要提供的其他商务文件',
         '近年财务状况表', '投标单位股权结构说明及相关证明文件', '企业资信等级证书情况',
-        '资质等级证书', '失信被执行人名单', '开标价格表',
+        '开标价格表',
     ):
         assert title in titles
+    assert not {'资质等级证书', '失信被执行人名单'}.intersection(titles)
+    body = '\n'.join(_purposes(outline))
+    assert '投标人提供原厂有效的资质等级证书' in body and '列入失信被执行人名单' in body
     price = next(chapter for chapter in outline['chapters'] if chapter['title'] == '报价文件')
     assert '投标分项报价表（投标人可根据自身实际情况填写）' in [child['title'] for child in price['children']]
     assert '开标价格表' in [child['title'] for child in price['children']]
@@ -810,24 +813,20 @@ def test_bid_format_outline_allows_blank_lines_between_wrapped_heading_refs_but_
         ]}, prepared)
 
 
-async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tmp_path):
+async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tmp_path, monkeypatch):
     import json
     import re
 
     from docreader.llm.request import ModelWorkUnitExhausted
 
-    # Build a section large enough to split across slices at context_tokens=22000, with a parent at the end of slice 1
-    # and a child inside slice 2 referencing that parent via parent_context.
-    body_lines = ['第六章 投标文件格式']
-    for idx in range(1, 35):
-        body_lines.append(f'附件{idx} 第{idx}号声明')
-        body_lines.append('致：招标人，特此声明。')
-    body_lines.append('五、投标保证金证明')
-    body_lines.append('5-1 电子保函格式')
-    body_lines.append('保函正文。')
-    for idx in range(36, 65):
-        body_lines.append(f'附件{idx} 第{idx}号承诺')
-        body_lines.append('致：招标人，特此承诺。')
+    from docreader.tender import authoring_pipeline
+
+    # Force the parent/child boundary regardless of tokenizer or prompt length.
+    fits = authoring_pipeline._fits
+    monkeypatch.setattr(authoring_pipeline, '_fits', lambda budget, task, payload:
+                        len(payload.get('lines', ())) <= 3 and fits(budget, task, payload))
+    body_lines = ['第六章 投标文件格式', '附件1 投标函', '五、投标保证金证明',
+                  '5-1 电子保函格式', '保函正文。', '附件2 报价表']
     documents = [{'document_id': 'tender', 'role': 'main', 'pages': ['\n'.join(body_lines) + '\n'],
                   'line_units': [[]], 'unread_pages': [], 'ocr_issues': []}]
 
@@ -871,23 +870,23 @@ async def test_bug337_bid_format_outline_preserves_cross_slice_parent_context(tm
         idx for idx, payload in enumerate(sent_payloads)
         if any(text.strip() == '5-1 电子保函格式' for _ref, text in payload['lines'])
     )
-    if parent_slice_idx != child_slice_idx:
-        calls = 0
+    assert parent_slice_idx != child_slice_idx
+    calls = 0
 
-        async def execute_fail_parent(task, request, validate):
-            nonlocal calls
-            current = calls
-            calls += 1
-            if current == parent_slice_idx:
-                raise ModelWorkUnitExhausted(task)
-            return await execute(task, request, validate)
+    async def execute_fail_parent(task, request, validate):
+        nonlocal calls
+        current = calls
+        calls += 1
+        if current == parent_slice_idx:
+            raise ModelWorkUnitExhausted(task)
+        return await execute(task, request, validate)
 
-        artifacts_fail = ArtifactStore(tmp_path / 'fail')
-        ref_fail = await generate_document(
-            artifacts_fail, _snapshot(), RequestBudget(context_tokens=22000, model='unused'), execute_fail_parent,
-            directory_documents=documents, outline_only=True, directory_contract='bid_format_source_outline_v1')
-        outline_fail = artifacts_fail.read_json(ref_fail)
-        assert any(ch['title'] == '5-1 电子保函格式' for ch in outline_fail['chapters'])
+    artifacts_fail = ArtifactStore(tmp_path / 'fail')
+    ref_fail = await generate_document(
+        artifacts_fail, _snapshot(), RequestBudget(context_tokens=22000, model='unused'), execute_fail_parent,
+        directory_documents=documents, outline_only=True, directory_contract='bid_format_source_outline_v1')
+    outline_fail = artifacts_fail.read_json(ref_fail)
+    assert any(ch['title'] == '5-1 电子保函格式' for ch in outline_fail['chapters'])
 
 
 async def test_bug298_host_plan_preserves_wrapped_headings_and_dedups_word_body(tmp_path):
@@ -971,3 +970,50 @@ def test_bug298_host_plan_wrapped_list_heading_keeps_full_window():
         '投标人根据评标办法需要提供的其他商务及技术文件',
         '投标函',
     ]
+
+def test_credit_clause_cannot_supply_a_heading_inside_a_sentence():
+    from docreader.llm.request import ModelContractError
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    lines = ["第六章 投标文件格式", "一、资格材料", "附件 8H",
+             "查询企业记录，并核对投标人是否被相关网站或",
+             "各级平台列入失信被执行人名单（须提供查询截图）。", "附件 9 报价表", "金额"]
+    docs = [{"document_id": "main", "pages": ["\n".join(lines)], "role": "main"}]
+    prepared = _Prepared(docs, None)
+    refs = [prepared.refs.by_point[("main", 0, i)] for i in (1, 4, 5)]
+    valid = [{"heading_refs": [refs[0]], "name": "资格材料"}, {"heading_refs": [refs[2]], "name": "报价表"}]
+    bad = {"heading_refs": [refs[1]], "name": "失信被执行人名单"}
+    with pytest.raises(ModelContractError):
+        decode_bid_format_outline({"chapters": [valid[0], bad, valid[1]]}, prepared)
+    good = decode_bid_format_outline({"chapters": valid}, prepared)
+    assert good["nodes"][0]["body_windows"] == [{"document_id": "main", "page": 0, "start_line": 1, "end_line": 4}]
+
+
+@pytest.mark.parametrize("line", ["1 报价表", "附表 B.1 报价表", "8D-1 表 报价表", "报价表（请按说明填报）"])
+def test_independent_source_title_keeps_printed_prefix_and_note_forms(line):
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    doc = {"document_id": "main", "pages": ["第六章 投标文件格式\n" + line], "role": "main"}
+    prepared = _Prepared([doc], None)
+    head = prepared.refs.by_point[("main", 0, 1)]
+    plan = decode_bid_format_outline({"chapters": [{"heading_refs": [head], "name": "报价表"}]}, prepared)
+    assert plan["nodes"][0]["name"] == "报价表"
+
+
+@pytest.mark.parametrize(("line", "names", "label"), [
+    ("（5）授权书（如需，格式供参考）", ["授权书"], "（5）授权书"),
+    ("三、报价表（可按实际情况填写）", ["报价表"], "三、报价表"),
+    ("A 分项价格表", ["分项价格表"], "A 分项价格表"),
+    ("8B 表 股权结构表", ["股权结构表"], None),
+    ("附件 9 开标表及报价承诺函", ["开标表", "报价承诺函"], None),
+    ("资信证明（或银行证明）；商业信誉（专利、获奖及荣誉证明）。",
+     ["资信证明（或银行证明）", "商业信誉（专利、获奖及荣誉证明）"], None),
+])
+def test_complete_source_titles_with_format_notes_or_separate_list_members(line, names, label):
+    from docreader.tender.bid_format_outline import _Prepared, decode_bid_format_outline
+
+    prepared = _Prepared([{"document_id": "m", "role": "main", "pages": ["第六章 投标文件格式\n" + line]}], None)
+    head = prepared.refs.by_point[("m", 0, 1)]
+    result = decode_bid_format_outline({"chapters": [
+        {"heading_refs": [head], "name": name, "label": label} for name in names]}, prepared)
+    assert [node["name"] for node in result["nodes"]] == ([label] if label else names)

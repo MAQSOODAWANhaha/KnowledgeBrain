@@ -219,13 +219,59 @@ def _bare_annex(text):
     return _ANNEX_ONLY.match(text) is not None
 
 
-def _validate_label(label, text, path):
+_HEADING_PREFIX = re.compile(
+    r'^(?:(?:附件|附录|附表)(?:[0-9０-９]+[A-Za-z]?|[A-Za-z])(?:[.．－-][0-9０-９]+)*[:：]?'
+    r'|[0-9０-９]+[A-Za-z]表|[0-9０-９]+[A-Za-z]?(?:[.．－-][0-9０-９]+)+(?:表)?[、.．]?'
+    r'|[（(][一二三四五六七八九十百0-9０-９]+[）)]'
+    r'|[一二三四五六七八九十百0-9０-９]+[、.．])+')
+
+
+def _heading_entries(text):
+    # Names in parentheses qualify one file, including lists of evidence inside that qualifier.
+    body = _HEADING_PREFIX.sub('', _compact(re.sub(r'^\s*(?:[A-Za-z]|[0-9０-９]+)\s+', '', text)), count=1)
+    entries, start, depth = [], 0, 0
+    for i, char in enumerate(body):
+        if char in '（(':
+            depth += 1
+        elif char in '）)':
+            depth = max(0, depth - 1)
+        elif not depth and (char in '、；;' or (char == '及' and body[:i].endswith(('表', '书', '函', '报告', '清单')))):
+            entries.append(body[start:i])
+            start = i + 1
+    members = [entry for entry in [*entries, body[start:].rstrip('。')] if entry]
+    return body.rstrip('；;'), members
+
+
+def _title_on_lines(title, lines):
+    """A name starts at a title boundary. A printed qualifier or filling note may follow."""
+    name = _compact(title)
+    if not lines or '。' in name or '；' in name:
+        return False
+    sources = [''.join(lines)]
+    if len(lines) > 1 and _HEADING_PREFIX.match(_compact(lines[0])):
+        # A numbered heading and its file name may occupy distinct source lines.
+        sources.extend(lines)
+    for raw in sources:
+        if _FORMAT_TOC.search(raw):
+            continue
+        # Keep the numbered line for the display label and its members for individual names.
+        body, members = _heading_entries(raw)
+        for entry in [_compact(raw).rstrip('；;'), body, *members]:
+            if entry.startswith(name):
+                suffix = entry[len(name):]
+                if (not suffix or suffix == '等' or suffix.startswith(('（', '(', '，', ','))
+                        or re.fullmatch(r'(?:的)?格式(?:[（(].*[）)])?', suffix)):
+                    return True
+    return False
+
+
+def _validate_label(label, lines, path):
     if label is None:
         return None
     cleaned = label.strip()
     if not cleaned:
         return None
-    if _annex_code(cleaned) or _compact(cleaned) not in _compact(text):
+    if _annex_code(cleaned) or not _title_on_lines(cleaned, lines):
         raise ModelContractError([_issue('章节展示标题 label 必须是所引原行的连续片段且不含附件编号', [*path, 'label'])])
     return cleaned
 
@@ -247,11 +293,12 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     for index, chapter in enumerate(plan['chapters']):
         path = ['chapters', index]
         heads = chapter['heading_refs']
-        text = ''.join(prepared.refs.text(reference) for reference in heads) if all(
-            reference in prepared.visible for reference in heads) else ''
+        lines = [prepared.refs.text(ref) for ref in heads if ref in prepared.visible]
+        text = ''.join(lines)
         name = chapter['name'].strip()
         # BUG-301: a顿号 line that names several files yields one chapter per file on the same line.
-        shared = tuple(heads) in seen_heads and '、' in text and _compact(name) not in seen_heads[tuple(heads)]
+        shared = (tuple(heads) in seen_heads and len(_heading_entries(text)[1]) > 1
+                  and _compact(name) not in seen_heads[tuple(heads)])
         if heads != sorted(heads) or any(reference not in prepared.visible for reference in heads) or (
                 any(reference in key for key in seen_heads for reference in heads) and not shared):
             raise ModelContractError([_issue('heading refs must be unused section lines in order', [*path, 'heading_refs'])])
@@ -267,9 +314,9 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         if any(start <= head < end for head in heads for start, end in skipped):
             raise ModelContractError([_issue('标题属于原文明示不适用的式样', [*path, 'heading_refs'])])
         seen_heads.setdefault(tuple(heads), set()).add(_compact(name))
-        if _annex_code(name) or _compact(name) not in _compact(text):
+        if _annex_code(name) or not _title_on_lines(name, lines):
             raise ModelContractError([_issue('章节名称必须是标题原行里的文件名，不能是附件编号或新写的名称', [*path, 'name'])])
-        label = _validate_label(chapter.get('label'), text, path)
+        label = _validate_label(chapter.get('label'), lines, path)
         parent_ref = chapter.get('parent_heading_ref')
         if parent_ref is not None and parent_ref >= heads[0]:
             raise ModelContractError([_issue('上级章行号 parent_heading_ref 必须位于当前章之前', [*path, 'parent_heading_ref'])])

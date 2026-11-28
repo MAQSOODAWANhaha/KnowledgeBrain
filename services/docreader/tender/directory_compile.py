@@ -2119,7 +2119,6 @@ def _digits(text):
 
 
 _TABLE_CAPTION = re.compile(r'表\s*(?P<name>[\u4e00-\u9fff]{2,20})\s*$')
-_NAME_FRAGMENT = re.compile(r'(?=([\u4e00-\u9fff]{4,12}(?:证书|证明文件|证明|名单|截图)))')
 
 
 def _annex_without_file_name(text):
@@ -2152,22 +2151,7 @@ def _resolve_annex_title(section, index, code):
         raw = section[name_at][4]
         if any(mark in raw for mark in '（(，,') or not _unfinished_label(section, name_at, name):
             return name, name_at
-    caption = _table_caption(section, index, end, code)
-    if caption:
-        return caption
-    for cursor in range(index + 1, end):
-        prefix = _prefix_name(section[cursor][4])
-        if prefix and _compact(prefix) in _compact(section[cursor][4]):
-            return prefix, cursor
-    best = None
-    for cursor in range(index + 1, end):
-        for match in _NAME_FRAGMENT.finditer(section[cursor][4] or ''):
-            name = match.group(1)
-            if not _usable_name(name) or name[0] in '入中的和或及被' or any(mark in name for mark in ('是否', '列入', '中', '的')):
-                continue
-            if best is None or len(name) > len(best[0]):
-                best = name, cursor
-    return best
+    return _table_caption(section, index, end, code)
 
 
 def _table_caption(section, index, end, code):
@@ -2190,15 +2174,6 @@ def _table_caption(section, index, end, code):
 def _usable_name(name):
     compact = ''.join(str(name).split())
     return len(compact) >= 2 and not compact.isdigit() and re.search(r'[\u4e00-\u9fff]', compact) is not None
-
-
-def _prefix_name(text):
-    if not text or text.startswith('附件') or '是否' in text or '。' in text or '；' in text:
-        return None
-    cut = re.split(r'[（(]', text, maxsplit=1)[0].strip()
-    if cut and _usable_name(cut) and '、' not in cut and '，' not in cut and len(cut) <= 20:
-        return cut
-    return None
 
 
 def _name_on_next_line(text):
