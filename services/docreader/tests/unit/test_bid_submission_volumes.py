@@ -78,3 +78,48 @@ def test_outside_format_candidate_inside_a_volume_is_pruned_independently_of_its
     assert removed['chapters'][0]['children'] == [children[1]]
     kept = bind_placements(tree, positions, {'r1': item(1)}, {'r1': 't1'})
     assert len(kept['chapters'][0]['children']) == 2
+
+
+@pytest.mark.parametrize('instruction, expected', [
+    ('投标人必须填写本表。', 2), ('如有额外服务，投标人须填写本表。', 0),
+])
+async def test_required_native_grids_in_the_cited_book_survive_a_source_only_draft(tmp_path, instruction, expected):
+    from test_word_continuation_export import _grid, _store
+
+    artifacts = ArtifactStore(tmp_path)
+    pages = ['商务文件和技术文件分别提交。\n3.1.1 商务文件：\n(1) 投标函（附件1）。\n'
+             '3.1.2 技术文件：须响应第二卷技术规范的要求。', '第二卷 技术规范',
+             f'技术附表 G 差异应答表\n{instruction}\n附表 G.1 第一项\n字段甲\n附表 G.2 第二项\n字段乙',
+             '技术附表 H 附加报告（本次不适用）\n投标人必须填写本表。\n附表 H.1 报告\n字段丙',
+             '第三卷 投标文件', '第六章 投标文件格式\n附件1 投标函\n签章：']
+    owners = [[], [], [None, None, None, 'a', None, 'b'], [None, None, None, 'c'], [], []]
+    units = [{'unit_id': uid, 'kind': 'table_region', 'ordinal': i, 'text': '', 'grid': _grid(label),
+              'locator': {'locator_kind': 'document', 'section_ordinal': 0}}
+             for i, (uid, label) in enumerate(zip('abc', ('字段甲', '字段乙', '字段丙'), strict=True))]
+    index = _store(artifacts, units)
+    documents = [{'document_id': 'source', 'role': 'main', 'pages': pages, 'line_units': owners,
+                  'template_parts': {u['unit_id']: {'source_ref': {'source_index_ref': index, 'unit_id': u['unit_id']},
+                                                   'selectors': []} for u in units}}]
+
+    async def choose(task, request, validate):
+        lines = json.loads(request['messages'][1]['content'][0]['text'])['lines']
+        ref = next(ref for ref, text in lines if text == '附件1 投标函')
+        return validate({'chapters': [{'heading_refs': [ref], 'name': '投标函'}]})
+
+    snapshot = {**_snapshot(), 'frozen_ref': artifacts.put_json({'documents': []})}
+    ref = await generate_document(artifacts, snapshot, RequestBudget(model='unused'), choose,
+                                  directory_documents=documents, outline_only=True,
+                                  directory_contract=BID_FORMAT_OUTLINE_CONTRACT,
+                                  requirement_chain_contract=REQUIREMENT_CHAIN_CONTRACT)
+    result = export_authoring_document(artifacts, artifacts.read_json(ref), [])
+    with ZipFile(BytesIO(artifacts.read_bytes(result['package_ref']))) as package:
+        technical, = [v for v in json.loads(package.read('manifest.json'))['volumes'] if v['title'] == '技术文件']
+        word = Document(BytesIO(package.read(technical['package_path'])))
+        assert len(word.tables) == expected
+        if expected:
+            assert [table.cell(1, 0).text for table in word.tables] == ['字段甲', '字段乙']
+            from docreader.tender.submission_book_forms import required_book_forms
+            covered = [{'lines': [{'document_id': 'source', 'page': 2, 'line': 3}]}]
+            missing, issues = required_book_forms(documents[0], {2: '技术文件'}, covered)
+            assert [c['heading']['line'] for c in missing] == [4]
+            assert not any(issue['code'] == 'outline_directory_table_unbound' for issue in issues)

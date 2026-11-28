@@ -136,6 +136,11 @@ def bind_submission_volumes(compiled, documents):
         return compiled
     headings = {(c['heading']['page'], c['heading']['line']) for c in chapters}
     annexes, books = _source_locations(document, groups, headings)
+    if books:
+        from docreader.tender.submission_book_forms import required_book_forms
+        additional, issues = required_book_forms(document, books, chapters)
+        chapters = [*chapters, *additional]
+        compiled['issues'].extend(issue for issue in issues if issue not in compiled['issues'])
     membership = {}
     for c in chapters:
         point = c['heading']
