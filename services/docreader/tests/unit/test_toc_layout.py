@@ -149,14 +149,15 @@ def test_swapped_heading_destinations_on_the_same_page_are_rejected(tmp_path):
 
 
 @pytest.mark.parametrize('swapped', [False, True])
-def test_destination_title_with_pdfium_control_char_keeps_its_coordinate_band(tmp_path, monkeypatch, swapped):
+@pytest.mark.parametrize('replacement', ['\x01', '='])
+def test_destination_title_with_pdfium_misdecoding_keeps_its_coordinate_band(tmp_path, monkeypatch, swapped, replacement):
     titles = ('Alpha/Beta', 'Gamma/Delta')
     original = source_word(tmp_path, titles, cached=3)
     extract = toc_layout.pdfium.PdfTextPage.get_text_bounded
 
     def corrupt_body_punctuation(textpage, left, bottom, right, top):
         text = extract(textpage, left, bottom, right, top)
-        return text.replace('/', '\x01') if left == 0 else text
+        return text.replace('/', replacement) if left == 0 else text
 
     monkeypatch.setattr(toc_layout.pdfium.PdfTextPage, 'get_text_bounded', corrupt_body_punctuation)
     rendered = pdf(titles, swapped_destinations=swapped)

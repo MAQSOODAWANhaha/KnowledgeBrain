@@ -205,9 +205,9 @@ def _measure(docx, pdf):
                     textpage.close()
                     page.close()
                 title = _compact(re.sub(r'^\d+(?:\.\d+)*\s+', '', entry['label']))
-                # PDFium can decode mixed-font punctuation as control characters.
-                # Read the same band through the font map without widening the destination.
-                if title not in _compact(target_text) and re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', target_text):
+                # PDFium can misdecode glyphs into printable text as well as controls.
+                # Check the same destination band using the PDF font map.
+                if title not in _compact(target_text):
                     if title_reader is None:
                         import pdfplumber
                         title_reader = readers.enter_context(pdfplumber.open(BytesIO(pdf)))
