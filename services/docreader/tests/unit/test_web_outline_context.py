@@ -154,3 +154,24 @@ def test_project_context_sources_handles_missing_frozen_ref(tmp_path):
     assert projected["available"] is False
     assert projected["frozen_sha256"] is None
     assert projected["options"] == []
+
+
+def test_unconfirmed_source_roles_prevent_listing_and_binding_project_context(tmp_path):
+    from docreader.integrations.artifacts import ArtifactIntegrityError
+    from docreader.tender.source_body import load_source_context
+
+    artifacts = ArtifactStore(tmp_path)
+    main = _build_index(artifacts, role=DocumentRole.MAIN, doc_id="main")
+    other = _build_index(artifacts, role=DocumentRole.MAIN, doc_id="other")
+    main_outline = _outline(artifacts.put_json({"documents": [main]}))
+    option, = project_context_sources(artifacts, main_outline)["options"]
+    pending = _outline(artifacts.put_json({
+        "documents": [main, other],
+        "issues": [{"code": "source_roles_unconfirmed", "document_id": "other"}],
+    }))
+    projected = project_context_sources(artifacts, pending)
+    assert not projected["available"] and not projected["options"]
+    target = pending["chapters"][0]["targets"][0]
+    target["project_context_excerpts"] = [option["excerpt"]]
+    with pytest.raises(ArtifactIntegrityError, match="来源角色"):
+        load_source_context(artifacts, pending["authoring_input"], target)

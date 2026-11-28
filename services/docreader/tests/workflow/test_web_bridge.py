@@ -614,7 +614,13 @@ async def test_ended_project_rejects_outline_mutations_without_creating_jobs(run
         with pytest.raises(WebError) as ended:
             await handle_command(payload(runtime, action, request_key="ended"))
         assert ended.value.code == "PROJECT_ENDED"
-    assert (await handle_command(payload(runtime, "outline.status")))[0] == {"draft": None, "candidate": None, "generation": None}
+    view, _ = await handle_command(payload(runtime, "outline.status"))
+    assert view == {"draft": None, "candidate": None, "generation": None, "project_context_sources": None}
+    async with runtime.bridge.store.transaction() as conn:
+        row = await (await conn.execute(
+            "SELECT count(*) AS n FROM tender_authoring_jobs WHERE project_id=%s", (runtime.project,)
+        )).fetchone()
+    assert row is not None and row["n"] == 0
 
 
 async def test_authoring_submission_is_idempotent_and_does_not_wait_for_analysis(runtime, monkeypatch):

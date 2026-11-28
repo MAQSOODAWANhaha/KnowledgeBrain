@@ -6,8 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from docreader.integrations import web_analysis
-from docreader.integrations.artifacts import ArtifactStore
-from docreader.integrations.web import WebError
+from docreader.integrations.web import WebBridge, WebError
 from docreader.tender.evidence import EvidenceRepository
 from docreader.tender.requirements import validate_item_correction
 from test_analysis_extraction import pack, result
@@ -15,7 +14,8 @@ from test_analysis_extraction import pack, result
 
 @pytest.fixture
 def correction_runtime(tmp_path, monkeypatch):
-    artifacts = ArtifactStore(tmp_path)
+    bridge = WebBridge(SimpleNamespace(dsn="", artifact_root=tmp_path))
+    artifacts = bridge.artifacts
     baseline = result()
     baseline["items"][0]["conditions"] = ["原条件"]
     source = pack()
@@ -25,8 +25,9 @@ def correction_runtime(tmp_path, monkeypatch):
     extracted = artifacts.put_json({"schema_version": 2, "packs": [
         {"pack_id": "p1", "artifact_ref": artifacts.put_json(baseline)}]})
     planned = artifacts.put_json({"schema_version": 2, "packs": [{"pack_id": "p1", "artifact_ref": source_ref}]})
+    registered = {"schema_version": 1, "documents": [], "issues": []}
     run = {"run_id": "run", "source_version": 1, "domain_revision": 1, "status": "waiting-confirmation",
-           "history": {"artifacts": []}, "artifacts": [
+           "manifest_ref": artifacts.put_json(registered), "history": {"artifacts": []}, "artifacts": [
                {"stage": stage, "scope": "", "source_version": 1, "domain_revision": 1, "artifact_ref": reference}
                for stage, reference in (("extract", extracted), ("pack-plan", planned))]}
     async def owned(*_args, **_kwargs):
@@ -39,6 +40,9 @@ def correction_runtime(tmp_path, monkeypatch):
     async def lock_project(conn, _payload):
         assert conn is connection
         return True
+    async def manifest(_project, *, connection=None):
+        assert connection is not None
+        return registered
     async def correct(*args, connection=None):
         assert connection is not None
         submitted.append(args)
@@ -49,8 +53,10 @@ def correction_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(EvidenceRepository, "load_pack", lambda self, reference: self.artifacts.read_json(reference))
     monkeypatch.setattr(EvidenceRepository, "source_index",
                         lambda self, reference: SimpleNamespace(by_id=self.artifacts.read_json(reference)))
-    bridge = SimpleNamespace(artifacts=artifacts, lock_project=lock_project,
-                             store=SimpleNamespace(correct=correct, transaction=transaction))
+    monkeypatch.setattr(bridge, "lock_project", lock_project)
+    monkeypatch.setattr(bridge, "manifest", manifest)
+    monkeypatch.setattr(bridge.store, "correct", correct)
+    monkeypatch.setattr(bridge.store, "transaction", transaction)
     body = {"project_id": "project", "run_id": "run", "source_version": 1, "expected_revision": 1,
             "base_items_digest": extracted["sha256"], "request_key": "structured-action",
             "reason": "对照原文纠正业务字段。", "changes": []}

@@ -66,6 +66,7 @@ test("an unknown human confirmation survives reload and retries the same frozen 
   const f = await reviewFixture(page); await f.open(); await f.decide(); f.state.lose = true;
   await page.getByRole("button", { name: "提交人工确认", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认同一次人工确认请求", exact: true })).toBeEnabled();
+  f.review.sources_current = false;
   page.on("dialog", dialog => void dialog.accept()); await page.reload();
   await expect(page.getByLabel("问题 1 判定理由")).toHaveValue("已人工核对招标原件，保留待业务落实事项。");
   await page.getByRole("button", { name: "确认同一次人工确认请求", exact: true }).click();
@@ -115,11 +116,23 @@ test("a correction conflict and remote version refresh retain local edits", asyn
 
 test("hard blocking findings have an exit and cannot be cleared with a human verdict", async ({ page }) => {
   const f = await reviewFixture(page); f.review.hard_blocking = true; f.review.status = "blocked";
-  f.review.sources_current = false; await f.open(); await f.decide();
+  await f.open(); await f.decide();
   await expect(page.getByText(/人工判定不能解除/)).toBeVisible();
   await expect(page.getByText(/补充来源、使用完整纠正流程或联系管理员处理/)).toBeVisible();
-  await expect(page.getByText(/项目来源已变化/)).toBeVisible();
   await expect(page.getByRole("button", { name: "提交人工确认", exact: true })).toBeDisabled();
+  expect(f.state.calls).toHaveLength(0);
+});
+
+test("source changes retain review input and disable new confirmations and corrections", async ({ page }) => {
+  const f = await reviewFixture(page);
+  await f.open(); await f.decide(); await f.edit();
+  f.review.sources_current = false;
+  await page.getByRole("button", { name: "刷新复核状态", exact: true }).click();
+  await expect(page.getByText(/项目来源已变化/)).toBeVisible();
+  await expect(page.getByLabel("问题 1 判定理由")).toHaveValue("已人工核对招标原件，保留待业务落实事项。");
+  await expect(page.getByLabel("事项 1 纠正文案")).toHaveValue("合同服务期内，服务响应不超过2小时。");
+  await expect(page.getByRole("button", { name: "提交人工确认", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "提交事项纠正并重新审核", exact: true })).toBeDisabled();
   expect(f.state.calls).toHaveLength(0);
 });
 

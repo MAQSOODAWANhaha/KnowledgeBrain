@@ -36,9 +36,12 @@ async def review_runtime(analysis_runtime, monkeypatch):
         await conn.execute("INSERT INTO tender_project_analyses(run_id,project_id,request_key) VALUES(%s,%s,'fixture')",
                            (run["run_id"], project))
     registered = artifacts.read_json(run["manifest_ref"])
-    async def manifest(_project):
+    async def manifest(_bridge, project_id, *, connection=None):
+        assert project_id == project
         return registered
-    monkeypatch.setattr(bridge, "manifest", manifest)
+    # The review tests use synthetic extracted data. Both direct calls and the
+    # HTTP relay's fresh WebBridge instance must see the same fixture sources.
+    monkeypatch.setattr(WebBridge, "manifest", manifest)
     return SimpleNamespace(bridge=bridge, project=project, owner=owner, other=other, analysis=analysis_runtime, calls=calls)
 
 

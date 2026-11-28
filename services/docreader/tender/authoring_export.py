@@ -367,7 +367,7 @@ def _is_duplicate_heading_line(heading_text, first_line):
     return False
 
 
-def _write_carried_source(document, target, *, keep_with_next=False, heading_text=None):
+def _write_carried_source(document, target, *, keep_with_next=False, heading_text=None, keep_blank_lines=False):
     text = _carried_source(target)
     if not text.strip():
         return False
@@ -386,7 +386,7 @@ def _write_carried_source(document, target, *, keep_with_next=False, heading_tex
     wrote = False
     for paragraph in lines:
         if not exact:
-            if not paragraph.strip():
+            if not paragraph.strip() and not keep_blank_lines:
                 continue
             paragraph = re.sub(r' {2,}', lambda match: '\u00a0' * len(match.group()), paragraph)
         added = document.add_paragraph(paragraph)
@@ -401,7 +401,7 @@ def _pdf_row_heights(artifacts, source, locator, row_count):
     import pypdfium2 as pdfium
     import pypdfium2.raw as raw
     from docreader.parser.pdf_parser import _PDFIUM_LOCK
-    from docreader.parser.pdf_tables import _cluster_positions, collect_rule_lines
+    from docreader.parser.pdf_tables import _cluster_positions, collect_rule_lines, table_row_rules
 
     try:
         top, bottom = locator['top'], locator['bottom']
@@ -411,12 +411,14 @@ def _pdf_row_heights(artifacts, source, locator, row_count):
         if not data.startswith(b'%PDF'):
             return None
         with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
-            horizontal, _vertical = collect_rule_lines(pdf[locator['page_ordinal']], raw)
+            horizontal, vertical = collect_rule_lines(pdf[locator['page_ordinal']], raw)
         left, right = locator['left'], locator['right']
         candidates = [line for line in horizontal if bottom - 3.5 <= line[1] <= top + 3.5
                       and line[0] <= right and line[2] >= left]
-        levels = sorted(_cluster_positions([line[1] for line in candidates], 3.5), reverse=True)
-        if len(levels) != row_count + 1:
+        borders = [line for line in vertical if left - 3.5 <= line[0] <= right + 3.5]
+        ruled = table_row_rules(candidates, borders)
+        levels = sorted(_cluster_positions([line[1] for line in ruled or candidates], 3.5), reverse=True)
+        if not ruled and len(levels) != row_count + 1:
             full = [line for line in candidates if line[2] - line[0] > (right - left) * 0.5]
             levels = sorted(_cluster_positions([line[1] for line in full], 3.5), reverse=True)
         if (len(levels) != row_count + 1 or abs(levels[0] - top) > 3.5
@@ -463,6 +465,8 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
     import pypdfium2 as pdfium
     import pypdfium2.raw as raw
     from docreader.parser.pdf_parser import _PDFIUM_LOCK
+    from docreader.parser.pdf_tables import collect_rule_lines
+    from docreader.tender.signed_cover_layout import fill_line_parts
 
     try:
         data = artifacts.read_bytes(source['original_ref'])
@@ -472,6 +476,7 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
         chars = []
         with _PDFIUM_LOCK, pdfium.PdfDocument(data) as pdf:
             page = pdf[locator['page_ordinal']]
+            horizontal, _ = collect_rule_lines(page, raw)
             text = page.get_textpage()
             try:
                 matrix = raw.FS_MATRIX()
@@ -489,7 +494,7 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
                         size = round(raw.FPDFText_GetFontSize(text, index) * hypot(matrix.c, matrix.d), 2)
                         if not isfinite(size) or size <= 0:
                             return None
-                        chars.append({'ch': ch, 'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
+                        chars.append({'text': ch, 'x0': x0, 'x1': x1, 'y0': y0, 'y1': y1,
                                       'baseline': round(origin_y.value, 2), 'font': size})
             finally:
                 text.close()
@@ -502,7 +507,7 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
             xs.append(xs[-1] + width / sum(grid['widths_mm']) * (right - left))
         for height in heights:
             ys.append(ys[-1] - height)
-        gaps, insets = [], []
+        gaps, insets, fill_lines = [], [], {}
         for cell in grid['cells']:
             row, column = cell['row'], cell['column']
             x0, x1 = xs[column], xs[column + cell.get('col_span', 1)]
@@ -515,8 +520,19 @@ def _pdf_table_typography(artifacts, source, locator, grid, heights):
                 baselines = sorted({char['baseline'] for char in selected}, reverse=True)
                 gaps.extend(upper - lower for upper, lower in zip(baselines, baselines[1:])
                             if upper - lower >= size * 0.5)
+                fixed = cell.get('text') or ''
+                if len(baselines) == 1 and fixed and '\n' not in fixed and x1 > x0:
+                    rules = [(a, b) for a, y, b in horizontal if b - a >= size / 2
+                             and x0 - 1 <= a and b <= x1 + 1 and y0 + 1 < y < y1 - 1
+                             and abs(y - baselines[0]) <= size / 4]
+                    field = fill_line_parts(selected, fixed, rules)
+                    if field:
+                        start, parts = field
+                        relative = [part if isinstance(part, str) else ((part[0] - x0) / (x1 - x0), part[1])
+                                    for part in parts]
+                        fill_lines[row, column] = (fixed, (start - x0) / (x1 - x0), relative)
         return {'font_size': size, 'line_spacing': median(gaps) if gaps else None,
-                'padding': min([5.4, *insets])}
+                'padding': min([5.4, *insets]), 'fill_lines': fill_lines}
     except (OSError, ValueError, KeyError, IndexError, TypeError, pdfium.PdfiumError):
         return None
 
@@ -1487,7 +1503,7 @@ class _Assembler:
             self.gap("export_source_unavailable", f"原格式暂不可用：{type(exc).__name__}。", chapter_id, target_id)
 
     def table(self, document, grid, fills, chapter_id, target_id, *, header_count=0, row_heights=None,
-              centered=(False, False), typography=None, borders=None):
+              centered=(False, False), typography=None, borders=None, source_rows=None):
         table = document.add_table(rows=grid["row_count"], cols=grid["column_count"])
         table.style = "Table Grid"
         _apply_table_borders(table, borders)
@@ -1532,6 +1548,22 @@ class _Assembler:
                 text = next(iter(values))
             target.text = xml_text(text)
             if typography:
+                source_row = source_rows[row] if source_rows is not None else row
+                field = typography.get('fill_lines', {}).get((source_row, column))
+                if field and widths and field[0] == text:
+                    paragraph = target.paragraphs[0]
+                    paragraph.clear()
+                    fmt = paragraph.paragraph_format
+                    width = sum(widths[column:column + col_span]) / 12700
+                    padding = typography['padding']
+                    fmt.left_indent = Pt(max(0, field[1] * width - padding))
+                    for part in field[2]:
+                        if isinstance(part, str):
+                            paragraph.add_run(xml_text(part))
+                        else:
+                            position, underline = part
+                            fmt.tab_stops.add_tab_stop(Pt(max(0, position * width - padding)))
+                            paragraph.add_run('\t').underline = underline
                 margins = OxmlElement('w:tcMar')
                 for side in ('left', 'right'):
                     margin = OxmlElement('w:' + side)
@@ -1658,7 +1690,7 @@ class _Assembler:
                   'text': self._row_answer(choices, row_id, chapter_id, target['target_id'])}
                  for row_id, row in plan['row_positions'].items()]
         self.table(document, plan['grid'], fills, chapter_id, target['target_id'], header_count=count,
-                   row_heights=expanded_heights, typography=typography, borders=borders)
+                   row_heights=expanded_heights, typography=typography, borders=borders, source_rows=plan['row_origins'])
         self.gap("export_template_layout_unverified", "已保留原表列、固定文字及来源条款；新增行的分页仍需核对。",
                  chapter_id, target['target_id'])
 
@@ -1946,10 +1978,19 @@ class _Assembler:
                                and target_index + 1 < len(targets)
                                and targets[target_index + 1]["target_id"] in grid_forms & form_ids)
                 carried_before = bool(_carried_source(target).strip())
-                wrote = (_write_carried_source(
-                             document, target, keep_with_next=keep_source,
-                             heading_text=rendered_heading if target_index == 0 else None)
-                         if not forms[target_id] or _carried_source(target) != chapter['title'] else False)
+                text_cover = chapter.get('presentation_role') == 'cover' and not forms[target_id]
+                wrote = False
+                if text_cover and len(target.get('source_refs', [])) == 1:
+                    from docreader.tender.signed_cover_layout import write_pdf_cover
+                    wrote = write_pdf_cover(document, self.artifacts, self.repository, self.authoring_input,
+                                            target['source_refs'][0], _carried_source(target))
+                    if not wrote:
+                        self.gap('export_cover_layout_unverified', '封面文字及空位已保留，请核对签署栏版式。',
+                                 chapter_id, target_id)
+                if not wrote and (not forms[target_id] or _carried_source(target) != chapter['title']):
+                    wrote = _write_carried_source(document, target, keep_with_next=keep_source,
+                                                  heading_text=rendered_heading if target_index == 0 else None,
+                                                  keep_blank_lines=text_cover)
                 heading_only = carried_before and not wrote and bool(rendered_heading and target_index == 0)
                 for part in forms[target_id].values():
                     key = _source_key(part['source_ref'])

@@ -13,7 +13,7 @@ from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
 from docreader.tender.bid_format_outline import _NOT_APPLICABLE, _page_edges
-from docreader.tender.directory_compile import _FORMAT_ITEM, _REVISIONS, _ROLE_LABEL
+from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, _LABEL_NOTE, _REVISIONS, _ROLE_LABEL, _template_identity
 from docreader.tender.schema import Contract, Text
 from docreader.tender.status import AuthoringTask
 
@@ -75,16 +75,43 @@ def _items(context):
     return rows
 
 
-def _grid_points(documents):
-    points = set()
+def _grid_parts_by_line(documents):
+    points = {}
     for document in documents:
         identity = document['document_id']
         parts = document.get('template_parts') or {}
         for page, units in enumerate(document.get('line_units') or []):
             for line, unit_id in enumerate(units or []):
                 if unit_id in parts:
-                    points.add((identity, page, line))
+                    points[identity, page, line] = parts[unit_id]
     return points
+
+
+_NUMBERED_ANNEX = re.compile(
+    r'^(?:技术|商务)?(附表|附件|附录)\s*([A-Za-z]|[0-9]+[A-Za-z]?)([.．－-][0-9]+(?:[.．－-][0-9]+)*)?')
+
+
+def _excluded_form_headings(documents):
+    """A numbered parent marked inapplicable also excludes its numbered children."""
+    excluded = set()
+    for document in documents:
+        parent = None
+        for page, content in enumerate(document['pages']):
+            for line, text in enumerate(content.splitlines()):
+                text = text.strip()
+                if _FORMAT_TOC.search(text):
+                    continue
+                number = _NUMBERED_ANNEX.match(text)
+                marked = _NOT_APPLICABLE.search(text)
+                if number:
+                    path = (number[1], *re.findall(r'[A-Za-z]+|[0-9]+', number[0][number.end(1):].upper()))
+                    if parent and (path == parent or path[:len(parent)] != parent):
+                        parent = None
+                    if marked and not parent:
+                        parent = path
+                if marked or (number and parent):
+                    excluded.add((document['document_id'], page, line))
+    return excluded
 
 
 def _existing_plan_lines(plan):
@@ -145,44 +172,49 @@ def submission_form_nodes(documents, plan, items, format_pages):
         if stripped:
             named.setdefault(_compact(stripped), node)
     existing_lines, existing_ids = _existing_plan_lines(plan)
-    page_edges = _page_edges(documents) - _grid_points(documents)
+    existing_lines.update(_excluded_form_headings(documents))
+    grid_parts = _grid_parts_by_line(documents)
+    page_edges = _page_edges(documents).difference(grid_parts)
     roles = {document['document_id']: document.get('role') or 'main' for document in documents}
     wanted = {}
     for row in items:
         if row['semantic'].get('kind') != 'submission_requirement':
             continue
+        unconditional = not row['semantic'].get('conditions') and not row['semantic'].get('exceptions')
         for name in (row['semantic'].get('submission') or {}).get('documents') or []:
             key = _compact(name)
+            if not key:
+                continue
             outside = [e for e in row['evidence'] if e['page'] is not None
                        and (e['document_id'], e['page']) not in format_pages]
-            if key in named:
+            conflict = named.get(key)
+            if conflict is not None:
                 outside = [e for e in outside if roles.get(e['document_id']) in _REVISIONS]
-            if key and outside:
-                wanted.setdefault(key, {'name': name.strip(), 'rows': [], 'evidence': [], 'conflict': named.get(key)})
-                wanted[key]['rows'].append(row)
-                wanted[key]['evidence'].extend(outside)
+            for evidence in outside:
+                source = evidence['document_id']
+                entry = wanted.setdefault((key, source), {'name': name.strip(), 'evidence': [],
+                                                          'cited_pages': set(), 'conflict': conflict})
+                entry['evidence'].append(evidence)
+                if unconditional and not _LABEL_NOTE.search(name) and _compact(evidence['quote']) == key:
+                    entry['cited_pages'].add(evidence['page'])
     by_id = {document['document_id']: document for document in documents}
     candidates, claimed_headings = [], set()
-    for key, entry in wanted.items():
+    for (key, document_id), entry in wanted.items():
         heading = None
-        for document_id, page in sorted({(e['document_id'], e['page']) for e in entry['evidence']}):
-            document = by_id.get(document_id)
-            if document is None:
+        document = by_id.get(document_id)
+        if document is None:
+            continue
+        evidence_pages = sorted({e['page'] for e in entry['evidence']})
+        search_pages = dict.fromkeys([*sorted(entry['cited_pages']),
+                                      *(p for page in evidence_pages for p in (page - 1, page))])
+        for page in search_pages:
+            if not 0 <= page < len(document['pages']) or (document_id, page) in format_pages:
                 continue
-            for candidate in (page - 1, page):
-                if 0 <= candidate < len(document['pages']) and (document_id, candidate) not in format_pages:
-                    lines = document['pages'][candidate].splitlines()
-                    found = next(
-                        (i for i, text in enumerate(lines)
-                         if _compact(text) == key
-                         and (document_id, candidate, i) not in existing_lines
-                         and (document_id, candidate, i) not in claimed_headings
-                         and not _NOT_APPLICABLE.search(text.strip())),
-                        None,
-                    )
-                    if found is not None:
-                        heading = (document_id, candidate, found)
-                        break
+            for line, text in enumerate(document['pages'][page].splitlines()):
+                point = (document_id, page, line)
+                if _compact(text) == key and point not in existing_lines and point not in claimed_headings:
+                    heading = point
+                    break
             if heading:
                 break
         if heading is None:
@@ -213,19 +245,26 @@ def submission_form_nodes(documents, plan, items, format_pages):
             seq += 1
         node_id = f'submission-{seq}'
         existing_ids.add(node_id)
+        required_grids = set()
+        if page in entry['cited_pages']:
+            for window in windows:
+                for line_no in range(window['start_line'], window['end_line'] + 1):
+                    if part := grid_parts.get((document_id, window['page'], line_no)):
+                        required_grids.add(_template_identity(part))
         nodes.append({'node': {'id': node_id, 'parent_id': None, 'response_kind': 'form',
                                'name': entry['name'],
                                'heading': {'document_id': document_id, 'page': page, 'line': line},
                                'body_windows': windows},
-                      'point': heading, 'conflict': entry['conflict'], 'role': roles.get(document_id)})
+                      'point': heading, 'conflict': entry['conflict'], 'role': roles.get(document_id),
+                      'required_grids': required_grids})
     return nodes
 
 
 def add_submission_forms(plan, documents, items, format_pages):
-    """Insert candidate forms in source order. Returns their names; placement decides whether each stays."""
+    """Append supplementary forms and return their independently required source grids by name."""
     extra = submission_form_nodes(documents, plan, items, format_pages)
     if not extra:
-        return plan, []
+        return plan, {}
     plan = deepcopy(plan)
     entries = plan['composition']['entries']
     items_in_scope = plan['scopes'][0]['items']
@@ -250,16 +289,30 @@ def add_submission_forms(plan, documents, items, format_pages):
                           f"和{_ROLE_LABEL[added['role']]}（文档 {heading['document_id']}）第 {heading['page'] + 1} 页，"
                           '各章均保留，请核定以哪份为准。'})
     # Conflicts are not outside-format candidates: they stay even when no item is placed in them.
-    return plan, [added['node']['name'] for added in extra if added['conflict'] is None]
+    outside = {}
+    for added in extra:
+        if added['conflict'] is None:
+            outside.setdefault(added['node']['name'], set()).update(added['required_grids'])
+    return plan, outside
 
 
-def placement_positions(outline, outside_format=()):
+def placement_positions(outline, outside_format=None):
+    outside_format = outside_format or {}
+    candidates = {}
+    for root in outline['chapters']:
+        for chapter in (root['children'] if root.get('is_volume') else [root]):
+            if chapter['title'] in outside_format:
+                for _, target in _walk([chapter]):
+                    candidates[target['target_id']] = (chapter['chapter_id'], outside_format[chapter['title']])
     positions = {}
     for path, target in _walk(outline['chapters'], skip_covers=True):
         opening = _compact(target.get('purpose', ''))[:_OPENING]
+        candidate, grids = candidates.get(target['target_id'], (None, ()))
         positions[f't{len(positions) + 1}'] = {'target': target, 'title_path': list(path),
                                                'kind': target['kind'], 'opening': opening,
-                                               'outside_format': path[0] in outside_format}
+                                               'outside_format': candidate is not None, 'candidate_chapter': candidate,
+                                               'required_form': any(_template_identity(part) in grids
+                                                                    for part in target.get('template_refs', []))}
     return positions
 
 
@@ -375,17 +428,24 @@ def bind_placements(outline, positions, items, decided):
     if pending_evaluation:
         outline['issues'].append({'code': 'outline_rule_unassigned', 'rule_refs': pending_evaluation,
                                   'detail': EVALUATION_PENDING_DETAIL})
-    # A candidate form outside the bid-format chapter stays only if an item is placed in it.
-    outline['chapters'] = [chapter for chapter in outline['chapters'] if not any(
-        value['outside_format'] and value['title_path'][0] == chapter['title'] for value in positions.values())
-        or any(target.get('rule_refs') for _, target in _walk([chapter]))]
+    outside = {value['candidate_chapter'] for value in positions.values() if value['outside_format']}
+    required = {value['target']['target_id'] for value in positions.values() if value['required_form']}
+
+    def keep(chapter):
+        return chapter['chapter_id'] not in outside or any(
+            target['target_id'] in required or target.get('rule_refs') for _, target in _walk([chapter]))
+
+    outline['chapters'] = [chapter for chapter in outline['chapters'] if keep(chapter)]
+    for chapter in outline['chapters']:
+        if chapter.get('is_volume'):
+            chapter['children'] = [child for child in chapter['children'] if keep(child)]
     return outline
 
 
-async def place_items(outline, items, budget, execute, ask, fits, outside_format=()):
+async def place_items(outline, items, budget, execute, ask, fits, outside_format=None):
     """One logical request per batch. A failed batch leaves its items pending."""
     keyed = {f'r{number}': row for number, row in enumerate(items, start=1)}
-    positions = placement_positions(outline, set(outside_format))
+    positions = placement_positions(outline, outside_format)
     if not keyed or not positions:
         return outline, {'batches': 0, 'failed': 0}
     batches, unsent = await asyncio.to_thread(plan_batches, budget, positions, keyed, fits)

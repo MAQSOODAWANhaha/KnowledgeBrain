@@ -185,6 +185,14 @@ pub(crate) fn router() -> Router<AppState> {
             get(download_document),
         )
         .route(
+            "/api/v3/tender-projects/{project}/documents/{document}/register",
+            post(register_document),
+        )
+        .route(
+            "/api/v3/tender-projects/{project}/sources",
+            get(sources_status).put(sources_save),
+        )
+        .route(
             "/api/v3/tender-projects/{project}/analysis",
             get(analysis_status).post(analysis_start),
         )
@@ -559,6 +567,49 @@ async fn upload(
     Ok((StatusCode::CREATED, Json(value)))
 }
 
+async fn register_document(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project, document)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiErr> {
+    let (pool, owner) = require_project(&headers, &state, project).await?;
+    let (digest, name): (String, String) = sqlx::query_as(
+        "SELECT content_sha256::text,file_name FROM tender_documents WHERE id=$1 AND project_id=$2",
+    )
+    .bind(document)
+    .bind(project)
+    .fetch_optional(&pool)
+    .await
+    .map_err(pg_error)?
+    .ok_or_else(|| not_found("document"))?;
+    let blob_digest = digest.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        platform::read_blob_bounded(
+            &blob_digest,
+            platform::max_file_bytes().saturating_sub(65536),
+        )
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TENDER_SOURCE_BYTES_UNAVAILABLE",
+            "暂时无法读取已保存的原件，请稍后重试登记。",
+        )
+    })?;
+    let (value, _) = bridge(
+        project,
+        owner,
+        "document.put",
+        json!({"document_id": document, "file_name": name, "sha256": digest}),
+        bytes,
+    )
+    .await?;
+    Ok(Json(value))
+}
+
 async fn download_document(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -784,6 +835,21 @@ async fn start(
         StatusCode::ACCEPTED,
         Json(bridge(id, owner, action, body, vec![]).await?.0),
     ))
+}
+async fn sources_status(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiErr> {
+    status(s, h, id, "sources.status").await
+}
+async fn sources_save(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, ApiErr> {
+    Ok(start(s, h, id, "sources.save", b).await?.1)
 }
 async fn analysis_status(
     State(s): State<AppState>,
@@ -1197,12 +1263,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outline_mutations_authenticate_before_bridge_access() {
+    async fn tender_project_workflow_routes_authenticate_before_bridge_access() {
         let state = AppState {
             jwt_secret: "tender-test-secret".into(),
             bootstrap_key: String::new(),
         };
         for (method, suffix) in [
+            ("GET", "sources"),
+            ("PUT", "sources"),
+            (
+                "POST",
+                "documents/00000000-0000-4000-8000-000000000000/register",
+            ),
             ("POST", "outline/generate"),
             ("PUT", "outline"),
             ("GET", "outline/revisions"),

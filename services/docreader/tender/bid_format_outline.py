@@ -6,7 +6,7 @@ from typing import Annotated
 from pydantic import Field, ValidationError
 
 from docreader.llm.request import ModelBudgetError, ModelContractError, ModelWorkUnitExhausted
-from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, _ROLE_LABEL, bid_format_sections
+from docreader.tender.directory_compile import _FORMAT_ITEM, _FORMAT_TOC, _ROLE_LABEL, _running_header, bid_format_sections
 from docreader.tender.directory_sources import SourceRefs
 from docreader.tender.schema import Contract, NonnegativeInt, Text
 from docreader.tender.status import AuthoringTask
@@ -17,6 +17,12 @@ BID_FORMAT_OPERATION = 'select_bid_format_outline_v1'
 HeadingRefs = Annotated[list[NonnegativeInt], Field(min_length=1, max_length=4)]
 BodyRange = Annotated[list[NonnegativeInt], Field(min_length=2, max_length=2)]
 _COVER_TITLES = {'投标文件', '投标文件封面', '封面'}
+_BIDDER_STAMP = re.compile(r'^(?:投标人|投标单位|供应商|响应人)(?:名称)?[：:(（＿_].*(?:盖(?:单位)?(?:公)?章|公章|签章|电子印章)')
+_COVER_PROJECT = re.compile(r'^(?:招标项目(?:名称)?|项目名称)[：:]')
+_REPRESENTATIVE_SIGNATURE = re.compile(
+    r'^(?:法定代表人|单位负责人|委托代理人|授权代表|授权代理人)[^。；]{0,48}[：:(（＿_][^。；]*(?:签字|签名|签章)')
+_COVER_DATE = re.compile(r'^(?:日期[：:])?[＿_\d]*年[＿_\d]*月[＿_\d]*日$|^日期[：:][＿_]*$')
+_BIDDER_CLAUSE = re.compile(r'(?:^|[。；;：:])(?:投标人|供应商|响应人|申请人)(?:是否|必须|不得|应当|[须应](?:提供|提交|填写|说明))')
 _ROLE_NAMES = {'main': '主件', 'attachment': '附件', **_ROLE_LABEL}
 _SUBFORM_NUMBER = re.compile(r'^(?P<number>[0-9０-９]+(?:\s*[-－]\s*[0-9０-９]+)+)\s*(?P<name>[^0-9０-９\s－-].*)$')
 _NOT_APPLICABLE = re.compile(r'[（(]\s*(?:本次|本项目)?\s*不适用\s*[）)]\s*[；;]?$')
@@ -58,12 +64,20 @@ class _Prepared:
         self.page_edges = set()
         self.grid_rows = {}
         self.order, self.sections = [], []
+        self.omitted_contents, self.catalog_issues = set(), []
+        self.catalog_refs = set()
         if not found:
             return
         self.grid_rows = _grid_owners(documents, self.refs)
         self.page_edges = {self.refs.by_point[point] for point in _page_edges(documents) if point in self.refs.by_point}
         self.page_edges.difference_update(self.grid_rows)
         for role, anchor, section in found:
+            doc = next(doc for doc in documents if doc['document_id'] == anchor[0])
+            catalog_refs = _format_catalog_refs(doc, section, self.refs, self.page_edges)
+            self.catalog_refs.update(catalog_refs)
+            omitted, issues = _catalog_applicability(doc, anchor, section, self.refs, catalog_refs)
+            self.omitted_contents.update(omitted)
+            self.catalog_issues.extend(issues)
             points = [(anchor[0], anchor[1], anchor[2])]
             points.extend((row[0], row[1], row[2]) for row in section)
             order = [self.refs.by_point[point] for point in points]
@@ -78,6 +92,87 @@ class _Prepared:
 
     def end(self, reference):
         return self.section(reference)['last']
+
+
+def _format_catalog_refs(document, section, refs, page_edges):
+    """Locate consecutive file entries after an explicit contents heading, up to the actual forms."""
+    from docreader.tender.directory_compile import _join_wrapped_heading
+
+    catalog, labels = set(), set()
+    pending = []
+    marker = None
+    index = 0
+    while index < len(section):
+        row = section[index]
+        index += 1
+        text = row[4]
+        if _compact(text) == '目录':
+            catalog.update(pending)
+            marker, pending, labels = refs.by_point[row[:3]], [], set()
+            continue
+        if marker is None or not text or refs.by_point[row[:3]] in page_edges:
+            continue
+        match = _FORMAT_ITEM.match(text)
+        if match is None:
+            if _running_header(text, row[1], document['pages'], {'title': ''}):
+                continue
+            # A field or body after the last heading can belong to that form.
+            marker, pending = None, []
+            continue
+        catalog.update(pending)
+        label = _compact(match[0])
+        if label in labels:
+            marker, pending = None, []
+            continue
+        labels.add(label)
+        _, length = _join_wrapped_heading(section, index - 1)
+        pending = [marker, *(refs.by_point[item[:3]] for item in section[index - 1:index - 1 + length])]
+        index += length - 1
+    catalog.update(pending)
+    return catalog
+
+
+def _catalog_applicability(document, anchor, section, refs, catalog_refs):
+    from docreader.tender.directory_compile import _chapter_boundary, _format_heading
+
+    excluded = {}
+    in_format = False
+    for page, text in enumerate(document['pages'][:anchor[1] + 1]):
+        for line, raw in enumerate(text.splitlines()):
+            if (page, line) >= (anchor[1], anchor[2]):
+                break
+            leader = _FORMAT_TOC.search(raw)
+            if not leader:
+                continue
+            title = raw[:leader.start()].strip()
+            if _format_heading(title):
+                in_format = True
+            elif _chapter_boundary(title):
+                in_format = False
+            elif in_format and (marked := _NOT_APPLICABLE.search(title)):
+                match = _FORMAT_ITEM.match(title)
+                if match and match['annex']:
+                    excluded[_compact(title[:marked.start()])] = page
+    if not excluded:
+        return set(), []
+    bodies = {}
+    for doc_id, page, line, _, text in section:
+        match = _FORMAT_ITEM.match(text)
+        if refs.by_point[doc_id, page, line] not in catalog_refs and match and match['annex'] and not _NOT_APPLICABLE.search(text):
+            bodies.setdefault(_compact(match['annex']), page)
+    omitted, issues = set(), []
+    for doc_id, page, line, _, text in section:
+        title = _compact(text)
+        if refs.by_point[doc_id, page, line] in catalog_refs and title in excluded:
+            omitted.add(refs.by_point[doc_id, page, line])
+            match = _FORMAT_ITEM.match(title)
+            body = bodies.get(match['annex']) if match else None
+            detail = f'文档 {doc_id} 第{excluded[title] + 1}页明示「{text}」不适用，第{page + 1}页仅在格式目录列名。'
+            if body is not None:
+                detail += f'第{body + 1}页另有同号原式，保留原式，请核定适用性。'
+            issues.append({'code': 'outline_directory_excluded' if body is None
+                           else 'outline_directory_applicability_unconfirmed', 'detail': detail})
+    return omitted, issues
 
 
 def _heading_candidates(section, refs):
@@ -139,11 +234,28 @@ def _grid_owners(documents, refs):
     return owners
 
 
+def _cover_heading(prepared, refs):
+    printed = [ref for ref in refs if prepared.refs.text(ref).strip()]
+    for index, ref in enumerate(printed):
+        if ref in prepared.page_edges or ref in prepared.grid_rows:
+            continue
+        text = _compact(prepared.refs.text(ref))
+        if text in _COVER_TITLES:
+            return [ref]
+        if text == '投':
+            glyphs = printed[index:index + 4]
+            if ([_compact(prepared.refs.text(r)) for r in glyphs] == list('投标文件')
+                    and all(r not in prepared.page_edges and r not in prepared.grid_rows for r in glyphs)
+                    and prepared.refs.point(ref)['page'] == prepared.refs.point(glyphs[-1])['page']):
+                return glyphs
+    return []
+
+
 def _cover_window(prepared, chapters):
-    """Require an independent prefix page with a source-bound cover grid."""
+    """Accept an independent format cover backed by its field grid or its own signature lines."""
     limit = min((start if start is not None else heads[0]
                  for heads, _name, start, _end in chapters
-                 if all(_compact(prepared.refs.text(ref)) not in _COVER_TITLES for ref in heads)),
+                 if not _cover_heading(prepared, heads)),
                 default=prepared.end(prepared.order[0]) + 1)
     limit = min(limit, prepared.end(prepared.order[0]) + 1)
     main = prepared.refs.point(prepared.order[0])['document_id']
@@ -158,20 +270,33 @@ def _cover_window(prepared, chapters):
     for ref, identity in prepared.grid_rows.items():
         grid_rows.setdefault(identity, []).append(ref)
     pending = False
-    for refs in pages.values():
-        headings = [ref for ref in refs if ref not in prepared.page_edges and ref not in prepared.grid_rows
-                    and _compact(prepared.refs.text(ref)) in _COVER_TITLES]
+    for page, refs in pages.items():
+        headings = _cover_heading(prepared, refs)
         if not headings:
             continue
         pending = True
+        heading = headings[0]
+        fields = [_compact(prepared.refs.text(ref)) for ref in refs
+                  if ref > headings[-1] and ref not in prepared.page_edges and ref not in prepared.grid_rows]
+        stamps = [line for line in fields if _BIDDER_STAMP.match(line)]
+        electronic_project = any(_COVER_PROJECT.match(line) for line in fields) and any(
+            re.search(r'电子(?:印|公|签)章', line) for line in stamps)
+        if stamps and any(_COVER_DATE.match(line) for line in fields) and (
+                electronic_project or any(_REPRESENTATIVE_SIGNATURE.match(line) for line in fields)):
+            doc = next(doc for doc in prepared.refs.documents if doc['document_id'] == main)
+            title = prepared.refs.text(heading).strip()
+            start = next(ref for ref in refs if ref == heading or (
+                ref not in prepared.page_edges and prepared.refs.text(ref).strip()
+                and not _running_header(prepared.refs.text(ref), page, doc['pages'], {'title': title})))
+            return (headings, start, refs[-1]), False
         for identity in {prepared.grid_rows[ref] for ref in refs if ref in prepared.grid_rows}:
             rows = grid_rows[identity]
             if not set(rows) <= set(refs):
                 continue
-            fields = _compact(''.join(prepared.refs.text(ref) for ref in rows))
-            if ('编号' in fields and ('投标人名称' in fields or '供应商名称' in fields)
-                    and any(field in fields for field in ('盖章', '签章', '日期', '年月日'))):
-                return (headings[0], refs[0], refs[-1]), False
+            labels = _compact(''.join(prepared.refs.text(ref) for ref in rows))
+            if ('编号' in labels and ('投标人名称' in labels or '供应商名称' in labels)
+                    and any(field in labels for field in ('盖章', '签章', '日期', '年月日'))):
+                return (headings, refs[0], refs[-1]), False
     return None, pending
 
 
@@ -199,10 +324,10 @@ def _non_applicable_spans(prepared):
 
 
 def _copy_windows(prepared, start, end):
-    """The form's own lines from start to end; page edges are skipped, nothing else."""
+    """Keep the form's source lines, skipping page decorations and format catalog entries."""
     windows = []
     for reference in range(start, end + 1):
-        if reference in prepared.page_edges:
+        if reference in prepared.page_edges or reference in prepared.catalog_refs:
             continue
         point = prepared.refs.point(reference)
         document_id, page, line = point['document_id'], point['page'], point['line']
@@ -219,13 +344,59 @@ def _bare_annex(text):
     return _ANNEX_ONLY.match(text) is not None
 
 
-def _validate_label(label, text, path):
+_HEADING_PREFIX = re.compile(
+    r'^(?:(?:附件|附录|附表)(?:[0-9０-９]+[A-Za-z]?|[A-Za-z])(?:[.．－-][0-9０-９]+)*[:：]?'
+    r'|[0-9０-９]+[A-Za-z]表|[0-9０-９]+[A-Za-z]?(?:[.．－-][0-9０-９]+)+(?:表)?[、.．]?'
+    r'|[（(][一二三四五六七八九十百0-9０-９]+[）)]'
+    r'|[一二三四五六七八九十百0-9０-９]+[、.．])+')
+
+
+def _heading_entries(text):
+    # Names in parentheses qualify one file, including lists of evidence inside that qualifier.
+    body = _HEADING_PREFIX.sub('', _compact(re.sub(r'^\s*(?:[A-Za-z]|[0-9０-９]+)\s+', '', text)), count=1)
+    entries, start, depth = [], 0, 0
+    for i, char in enumerate(body):
+        if char in '（(':
+            depth += 1
+        elif char in '）)':
+            depth = max(0, depth - 1)
+        elif not depth and (char in '、；;' or (char == '及' and body[:i].endswith(('表', '书', '函', '报告', '清单')))):
+            entries.append(body[start:i])
+            start = i + 1
+    members = [entry for entry in [*entries, body[start:].rstrip('。')] if entry]
+    return body.rstrip('；;'), members
+
+
+def _title_on_lines(title, lines):
+    """A name starts at a title boundary. A printed qualifier or filling note may follow."""
+    name = _compact(title)
+    if not lines or '。' in name or '；' in name:
+        return False
+    sources = [''.join(lines)]
+    if len(lines) > 1 and _HEADING_PREFIX.match(_compact(lines[0])):
+        # A numbered heading and its file name may occupy distinct source lines.
+        sources.extend(lines)
+    for raw in sources:
+        if _FORMAT_TOC.search(raw):
+            continue
+        # Keep the numbered line for the display label and its members for individual names.
+        body, members = _heading_entries(raw)
+        for entry in [_compact(raw).rstrip('；;'), body, *members]:
+            if entry.startswith(name):
+                suffix = entry[len(name):]
+                if (not suffix or suffix == '等' or suffix.startswith(('（', '(', '，', ','))
+                        or re.fullmatch(r'(?:的)?格式(?:[（(].*[）)])?', suffix)):
+                    return True
+    return False
+
+
+def _validate_label(label, lines, path):
     if label is None:
         return None
     cleaned = label.strip()
     if not cleaned:
         return None
-    if _annex_code(cleaned) or _compact(cleaned) not in _compact(text):
+    if _annex_code(cleaned) or not _title_on_lines(cleaned, lines):
         raise ModelContractError([_issue('章节展示标题 label 必须是所引原行的连续片段且不含附件编号', [*path, 'label'])])
     return cleaned
 
@@ -247,11 +418,12 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     for index, chapter in enumerate(plan['chapters']):
         path = ['chapters', index]
         heads = chapter['heading_refs']
-        text = ''.join(prepared.refs.text(reference) for reference in heads) if all(
-            reference in prepared.visible for reference in heads) else ''
+        lines = [prepared.refs.text(ref) for ref in heads if ref in prepared.visible]
+        text = ''.join(lines)
         name = chapter['name'].strip()
         # BUG-301: a顿号 line that names several files yields one chapter per file on the same line.
-        shared = tuple(heads) in seen_heads and '、' in text and _compact(name) not in seen_heads[tuple(heads)]
+        shared = (tuple(heads) in seen_heads and len(_heading_entries(text)[1]) > 1
+                  and _compact(name) not in seen_heads[tuple(heads)])
         if heads != sorted(heads) or any(reference not in prepared.visible for reference in heads) or (
                 any(reference in key for key in seen_heads for reference in heads) and not shared):
             raise ModelContractError([_issue('heading refs must be unused section lines in order', [*path, 'heading_refs'])])
@@ -267,9 +439,12 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         if any(start <= head < end for head in heads for start, end in skipped):
             raise ModelContractError([_issue('标题属于原文明示不适用的式样', [*path, 'heading_refs'])])
         seen_heads.setdefault(tuple(heads), set()).add(_compact(name))
-        if _annex_code(name) or _compact(name) not in _compact(text):
-            raise ModelContractError([_issue('章节名称必须是标题原行里的文件名，不能是附件编号或新写的名称', [*path, 'name'])])
-        label = _validate_label(chapter.get('label'), text, path)
+        if _annex_code(name) or not _title_on_lines(name, lines):
+            raise ModelContractError([_issue('章节名称须取所引原行独立列出的文件名。并列文件各取一个名称；'
+                '只有附件编号和说明正文时省略该候选，原段由宿主保留。', [*path, 'name'])],
+                feedback_fragments=[{'path': [*path, 'heading_refs'], 'value': heads},
+                                    {'path': [*path, 'name'], 'value': name[:120]}])
+        label = _validate_label(chapter.get('label'), lines, path)
         parent_ref = chapter.get('parent_heading_ref')
         if parent_ref is not None and parent_ref >= heads[0]:
             raise ModelContractError([_issue('上级章行号 parent_heading_ref 必须位于当前章之前', [*path, 'parent_heading_ref'])])
@@ -277,6 +452,8 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
             chapters.append((heads, name, label, parent_ref, None, None))
             continue
         start, end = chapter['body']
+        if heads[0] in prepared.catalog_refs and (start != heads[0] or end != heads[-1]):
+            raise ModelContractError([_issue('目录条目仅定位文件名，正文须引用独立原式标题', [*path, 'body'])])
         if end < start or end > prepared.end(start) or any(reference not in prepared.visible
                                                              for reference in range(start, end + 1)):
             raise ModelContractError([_issue('body must stay inside the bid-format section', [*path, 'body'])])
@@ -296,7 +473,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     chapters.sort(key=lambda item: item[0][0])
     cover, cover_pending = _cover_window(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])
     if cover:
-        chapters = [chapter for chapter in chapters if cover[0] not in chapter[0]]
+        chapters = [chapter for chapter in chapters if not set(cover[0]).intersection(chapter[0])]
     # Validate parent_heading_ref references exist in the same document (or slice context) and are non-cover.
     known_heads: dict[int, str] = {}
     for heads, _name, _label, _parent_ref, _s, _e in chapters:
@@ -310,7 +487,7 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
     for index, (heads, _name, _label, parent_ref, _s, _e) in enumerate(chapters):
         if parent_ref is None:
             continue
-        if cover and parent_ref == cover[0]:
+        if cover and parent_ref in cover[0]:
             raise ModelContractError([_issue('封面不能作为上级章', ['chapters', index, 'parent_heading_ref'])])
         doc_id = prepared.refs.point(heads[0])['document_id']
         if parent_ref not in valid_parents or valid_parents[parent_ref] != doc_id:
@@ -331,18 +508,26 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
                 raise ModelContractError([_issue('chapter order leaves an empty template', ['chapters', index])])
             chapters[index] = (heads, name, label, parent_ref, start, end)
     if cover:
-        heading, start, end = cover
-        chapters.insert(0, ([heading], prepared.refs.text(heading).strip(), None, None, start, end))
+        heads, start, end = cover
+        title = ''.join(prepared.refs.text(ref).strip() for ref in heads)
+        chapters.insert(0, (heads, title, None, None, start, end))
+    chapters = [chapter for chapter in chapters if chapter[0][0] not in prepared.omitted_contents]
     nodes, entries, adopted = [], [], []
+    catalog_pending = []
     copied = set()
     ref_to_id: dict[int, str] = {}
     for number, (heads, name, label, parent_ref, start, end) in enumerate(chapters, start=1):
         heading = prepared.refs.point(heads[0])
         identity = f'format-{number}'
         # One tender line has one owner; later files listed on it keep their own chapter without a copy.
-        windows = [] if tuple(heads) in copied else _copy_windows(prepared, start, end)
+        if heads[0] in prepared.catalog_refs:
+            windows = []
+            catalog_pending.append({'code': 'outline_directory_format_pending',
+                                    'detail': f'「{name}」在{_place(prepared, heads[0])}的格式目录列名，独立原式待核，请在该章补充。'})
+        else:
+            windows = [] if tuple(heads) in copied else _copy_windows(prepared, start, end)
         copied.add(tuple(heads))
-        is_cover = bool(cover and heads == [cover[0]])
+        is_cover = bool(cover and heads == cover[0])
         parent_id = None if is_cover or parent_ref is None else ref_to_id.get(parent_ref)
         ref_to_id.setdefault(heads[0], identity)
         node = {'id': identity, 'heading': heading, 'parent_id': parent_id, 'response_kind': 'form',
@@ -356,16 +541,13 @@ def decode_bid_format_outline(raw, prepared, *, allowed_parent_refs=None):
         presentation = 'cover' if is_cover else 'section'
         adopted.append({'node_id': identity, 'entry': number - 1, 'depth': 'self',
                         'presentation': presentation, 'clause': []})
-    first = nodes[0]['heading']
     result = {'nodes': nodes,
-              'composition': {'priority_basis': [{'document_id': first['document_id'], 'page': first['page'],
-                                                   'start_line': first['line'], 'end_line': first['line']}],
-                              'entries': entries},
+              'composition': {'entries': entries},
               'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
-    issues = _source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])
+    issues = [*prepared.catalog_issues, *catalog_pending, *_source_issues(prepared, [(h, n, s, e) for h, n, _l, _p, s, e in chapters])]
     if cover_pending:
         issues.insert(0, {'code': 'outline_directory_literal_pending',
-                          'detail': '格式章节中的封面标题缺少可核对的同页字段网格，原式待核。'})
+                          'detail': '格式章节中的封面标题缺少可核对的同页字段表或签署栏，原式待核。'})
     if issues:
         result['skipped_item_issues'] = issues
     return result
@@ -394,6 +576,77 @@ def _source_issues(prepared, chapters):
     return issues
 
 
+def _verified_format_plan(raw, prepared, shown, *, allowed_parent_refs=None):
+    """Keep a source-backed sentence as prose only when its original owner can be proved."""
+    try:
+        return decode_bid_format_outline(raw, prepared, allowed_parent_refs=allowed_parent_refs)
+    except ModelContractError as error:
+        if not all(e['code'] == 'bid_format_outline_invalid' and e['path'][-1:] == ['name'] for e in error.errors):
+            raise
+        rejection = error
+
+    chapters = BidFormatOutline.model_validate(raw).model_dump()['chapters']
+    if any(c['body'] is not None for c in chapters):
+        raise rejection
+    parents = {c['parent_heading_ref'] for c in chapters}
+    kept, prose = [], []
+    for chapter in chapters:
+        heads, name = chapter['heading_refs'], _compact(chapter['name'])
+        if not set(heads) <= shown:
+            raise rejection
+        lines = [prepared.refs.text(ref) for ref in heads]
+        if not _annex_code(name) and _title_on_lines(name, lines):
+            kept.append(chapter)
+            continue
+        text = _compact(''.join(lines))
+        body, _ = _heading_entries(text)
+        if (chapter['parent_heading_ref'] is None
+                or chapter['parent_heading_ref'] >= heads[0] or heads[0] in parents or chapter['label']
+                or _annex_code(name) or name not in text or not _BIDDER_CLAUSE.search(body)
+                or not any(mark in text for mark in '。；;！？?!')
+                or heads != sorted(set(heads)) or heads[-1] > prepared.end(heads[0])
+                or any(q not in heads and q not in prepared.page_edges and prepared.refs.text(q).strip()
+                       for q in range(heads[0], heads[-1] + 1))):
+            raise rejection
+        prose.append(chapter)
+    if not kept or not prose:
+        raise rejection
+    claimed = {ref for c in kept for ref in c['heading_refs']}
+    for c in prose:
+        if claimed.intersection(c['heading_refs']):
+            raise rejection
+        claimed.update(c['heading_refs'])
+    result = decode_bid_format_outline({'chapters': kept}, prepared, allowed_parent_refs=allowed_parent_refs)
+    nodes = {node['id']: node for node in result['nodes']}
+    cover_ids = {item['node_id'] for scope in result['scopes'] for item in scope['items'] if item['presentation'] == 'cover'}
+    owners = {prepared.refs.by_point[window['document_id'], window['page'], line]: node['id']
+              for node in nodes.values() for window in node['body_windows']
+              for line in range(window['start_line'], window['end_line'] + 1)}
+    starts = sorted(c['heading_refs'][0] for c in kept)
+    for c in prose:
+        first = c['heading_refs'][0]
+        end = next((ref for ref in starts if first < ref <= prepared.end(first)), prepared.end(first) + 1)
+        refs = [ref for ref in range(first, end) if ref not in prepared.page_edges and prepared.refs.text(ref).strip()]
+        owner = nodes.get(owners.get(first))
+        if owner is None or owner['response_kind'] != 'form' or any(
+                owners.get(ref) != owner['id'] or ref in prepared.grid_rows for ref in refs):
+            raise rejection
+        ancestor = owner
+        parent = prepared.refs.point(c['parent_heading_ref'])
+        while ancestor['heading'] != parent:
+            ancestor = nodes.get(ancestor['parent_id'])
+            if ancestor is None:
+                raise rejection
+        if ancestor['id'] in cover_ids:
+            raise rejection
+        point = prepared.refs.point(first)
+        excerpt = prepared.refs.text(first).strip()[:60]
+        result.setdefault('skipped_item_issues', []).append({'code': 'outline_directory_name_unconfirmed',
+            'detail': f'文档 {point["document_id"]} 第{point["page"] + 1}页第{point["line"] + 1}行'
+                      f'「{excerpt}」的独立标题待核，原段已保留在「{owner["name"]}」。'})
+    return result
+
+
 async def select_bid_format_plan(documents, budget, execute, identity):
     """One request per document's bid-format section; an oversized one is sent in slices (BUG-331, BUG-332).
 
@@ -409,9 +662,6 @@ async def select_bid_format_plan(documents, budget, execute, identity):
         return None
     task = AuthoringTask.DIRECTORY_PLAN
 
-    def accept(raw):
-        return decode_bid_format_outline(raw, prepared)
-
     def units():
         found = []
         for section in prepared.sections:
@@ -420,6 +670,11 @@ async def select_bid_format_plan(documents, budget, execute, identity):
         return found
 
     payloads = await asyncio.to_thread(units)
+    shown_refs = {ref for payload in payloads if payload is not None for ref, _ in payload['lines']}
+
+    def accept(raw):
+        return _verified_format_plan(raw, prepared, shown_refs)
+
     if len(prepared.sections) == 1 and payloads == [prepared.sections[0]['payload']]:
         await _plan(execute, task, 1, 'bid-format-plan')
         return await _ask(execute, budget, task, payloads[0], accept)
@@ -440,7 +695,7 @@ async def select_bid_format_plan(documents, budget, execute, identity):
                                    for chapter in plan['chapters']):
                 raise ModelContractError([_issue('return only heading refs from these lines, without body')])
             if plan['chapters']:
-                decode_bid_format_outline(raw, prepared, allowed_parent_refs=context_refs)
+                _verified_format_plan(raw, prepared, shown, allowed_parent_refs=context_refs)
             return plan['chapters']
         try:
             return await _ask(execute, budget, task, payload, accept_unit)
@@ -457,7 +712,7 @@ async def select_bid_format_plan(documents, budget, execute, identity):
         for chapter in merged:
             if chapter.get('parent_heading_ref') is not None and chapter['parent_heading_ref'] not in surviving:
                 chapter['parent_heading_ref'] = None
-    result = decode_bid_format_outline({'chapters': merged}, prepared)
+    result = accept({'chapters': merged})
     if any(result is None for result in results):
         result.setdefault('skipped_item_issues', []).append({
             'code': 'outline_directory_plan_failed',
@@ -509,32 +764,32 @@ def _slices(payload, fits):
 def compile_bid_format_plan(plan, documents):
     """BUG-332: a compile list stays inside one document, so a plan spanning documents compiles per document.
 
-    Parts keep registered document order; host issues repeated by every part are kept once, and a revision
-    document that one part cites is not reported unreviewed by another.
+    Parts keep registered document order and carry the same explicit priority windows.
+    Each source diagnostic is reported once.
     """
     import json
 
+    from docreader.tender.bid_submission_volumes import bind_submission_volumes
     from docreader.tender.directory_compile import compile_plans
 
     order = [document['document_id'] for document in documents]
     entries = plan['composition']['entries']
+    basis = plan['composition'].get('priority_basis', [])
     cited = sorted(
         {entry['name']['document_id'] for entry in entries}
         | {node['heading']['document_id'] for node in plan['nodes']},
         key=order.index,
     )
     if len(cited) <= 1:
-        return compile_plans([plan], documents)
+        return bind_submission_volumes(compile_plans([plan], documents, format_candidates=True), documents)
     compiled, seen = {'chapters': [], 'issues': []}, set()
     for index, document_id in enumerate(cited):
         own = [number for number, entry in enumerate(entries) if entry['name']['document_id'] == document_id]
         renumber = {number: position for position, number in enumerate(own)}
         own_nodes = [node for node in plan['nodes'] if node['heading']['document_id'] == document_id]
         own_node_ids = {node['id'] for node in own_nodes}
-        first = entries[own[0]]['name'] if own else own_nodes[0]['heading']
         part = {'nodes': own_nodes,
-                'composition': {'priority_basis': [{'document_id': document_id, 'page': first['page'],
-                                                    'start_line': first['line'], 'end_line': first['line']}],
+                'composition': {'priority_basis': basis,
                                 'entries': [entries[number] for number in own]},
                 'scopes': [{'items': [{**item, 'entry': renumber[item['entry']] if item.get('entry') in renumber else None}
                                       for item in plan['scopes'][0]['items']
@@ -542,13 +797,12 @@ def compile_bid_format_plan(plan, documents):
                 'excluded': [], 'source_only': []}
         if index == 0 and plan.get('skipped_item_issues'):
             part['skipped_item_issues'] = plan['skipped_item_issues']
-        value = compile_plans([part], documents)
+        value = compile_plans([part], documents, format_candidates=True)
         compiled['chapters'].extend(value['chapters'])
         for issue in value['issues']:
             key = json.dumps(issue, ensure_ascii=False, sort_keys=True)
-            if key in seen or (issue['code'] == 'outline_directory_revision_unreviewed'
-                               and any(issue['detail'].startswith(f'{cited_id}是') for cited_id in cited)):
+            if key in seen:
                 continue
             seen.add(key)
             compiled['issues'].append(issue)
-    return compiled
+    return bind_submission_volumes(compiled, documents)

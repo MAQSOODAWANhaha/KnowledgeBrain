@@ -98,6 +98,26 @@ def test_single_cell_frame_with_segmented_vertical_borders_and_underlines(monkey
     assert tables[0].cells[0].text == '固定文字'
 
 
+def test_fill_line_in_a_merged_cell_keeps_true_partial_row_boundaries(monkeypatch) -> None:
+    horizontal = [(0, y, 90) for y in (0, 60, 90)]
+    horizontal.extend([(0, 30, 20), (20, 75, 65)])
+    vertical = [(x, 0, 90) for x in (0, 20, 90)]
+    vertical.extend([(45, 0, 60), (65, 0, 60)])
+    # At y=75 only the left end of the fill line touches a border.
+    # At y=30 the short rule spans both borders of the first column.
+    monkeypatch.setattr(pdf_tables, 'collect_rule_lines', lambda _page, _raw: (horizontal, vertical))
+    chars = (_cell_text(25, 78, '学校') + _cell_text(55, 62, '专业')
+             + _cell_text(2, 42, '甲') + _cell_text(2, 12, '乙'))
+
+    grid, = extract_tables_from_page(object(), object(), chars)
+
+    assert (grid.row_count, grid.column_count) == (3, 4)
+    assert grid.merged_ranges == [(0, 1, 0, 3), (1, 1, 2, 1), (1, 2, 2, 2), (1, 3, 2, 3)]
+    assert {(c.row, c.column): c.text for c in grid.cells if c.text} == {
+        (0, 1): '学校\n专业', (1, 0): '甲', (2, 0): '乙',
+    }
+
+
 @pytest.mark.parametrize('columns', [1, 2])
 def test_single_row_ruled_forms_keep_complete_boxes(columns) -> None:
     horizontal = [(0.0, y, columns * 60.0) for y in (0.0, 30.0)]

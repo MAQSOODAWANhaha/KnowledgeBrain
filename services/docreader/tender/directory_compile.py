@@ -10,6 +10,7 @@ This compiler does not prove that two agreeing plans are complete.
 from enum import StrEnum
 from copy import deepcopy
 import hashlib
+from itertools import islice
 import json
 import re
 from re import compile as _compile
@@ -1466,6 +1467,8 @@ def outline_from_compiled(snapshot, compiled, *, artifacts=None):
 
     node_map = {}
     chapters = _assign_ids(_nest(compiled['chapters'], source_nodes=node_map))
+    from docreader.tender.signed_cover_layout import bind_cover_source
+    bind_cover_source(artifacts, snapshot, compiled, node_map)
     native_issues = (_bind_parameter_tables(compiled, node_map)
                      if compiled.get('_parameter_source_contract') == PARAMETER_SOURCE_CONTRACT else [])
     source_issues = [*compiled['issues'], *native_issues]
@@ -2119,7 +2122,6 @@ def _digits(text):
 
 
 _TABLE_CAPTION = re.compile(r'表\s*(?P<name>[\u4e00-\u9fff]{2,20})\s*$')
-_NAME_FRAGMENT = re.compile(r'(?=([\u4e00-\u9fff]{4,12}(?:证书|证明文件|证明|名单|截图)))')
 
 
 def _annex_without_file_name(text):
@@ -2152,22 +2154,7 @@ def _resolve_annex_title(section, index, code):
         raw = section[name_at][4]
         if any(mark in raw for mark in '（(，,') or not _unfinished_label(section, name_at, name):
             return name, name_at
-    caption = _table_caption(section, index, end, code)
-    if caption:
-        return caption
-    for cursor in range(index + 1, end):
-        prefix = _prefix_name(section[cursor][4])
-        if prefix and _compact(prefix) in _compact(section[cursor][4]):
-            return prefix, cursor
-    best = None
-    for cursor in range(index + 1, end):
-        for match in _NAME_FRAGMENT.finditer(section[cursor][4] or ''):
-            name = match.group(1)
-            if not _usable_name(name) or name[0] in '入中的和或及被' or any(mark in name for mark in ('是否', '列入', '中', '的')):
-                continue
-            if best is None or len(name) > len(best[0]):
-                best = name, cursor
-    return best
+    return _table_caption(section, index, end, code)
 
 
 def _table_caption(section, index, end, code):
@@ -2190,15 +2177,6 @@ def _table_caption(section, index, end, code):
 def _usable_name(name):
     compact = ''.join(str(name).split())
     return len(compact) >= 2 and not compact.isdigit() and re.search(r'[\u4e00-\u9fff]', compact) is not None
-
-
-def _prefix_name(text):
-    if not text or text.startswith('附件') or '是否' in text or '。' in text or '；' in text:
-        return None
-    cut = re.split(r'[（(]', text, maxsplit=1)[0].strip()
-    if cut and _usable_name(cut) and '、' not in cut and '，' not in cut and len(cut) <= 20:
-        return cut
-    return None
 
 
 def _name_on_next_line(text):
@@ -2524,11 +2502,8 @@ def bid_format_plan(documents):
             entry['heading_lines'] = form['order_heading_lines']
         entries.append(entry)
         adopted.append({'node_id': identity, 'entry': len(entries) - 1, 'depth': 'self', 'presentation': 'section', 'clause': []})
-    first = chosen[order[0]]['point']
     return {'nodes': nodes,
-            'composition': {'priority_basis': [{'document_id': first[0], 'page': first[1],
-                                                 'start_line': first[2], 'end_line': first[2]}],
-                            'entries': entries},
+            'composition': {'entries': entries},
             'scopes': [{'items': adopted}], 'excluded': [], 'source_only': []}
 
 
@@ -2671,7 +2646,7 @@ def _list_heading(section, index):
     return index < len(section) and _single_form_title(section[index][4]) is not None
 
 
-def compile_plans(plans, documents):
+def compile_plans(plans, documents, *, format_candidates=False):
     """Compile at most two plans. An illegal plan yields no directory."""
     if len(plans) > 2:
         return _empty('目录对照只接受两份计划，多出的计划不会参与表决')
@@ -2680,7 +2655,7 @@ def compile_plans(plans, documents):
     compiled, rejected = [], []
     for index, plan in enumerate(plans, start=1):
         try:
-            compiled.append(compile_directory(plan, documents))
+            compiled.append(compile_directory(plan, documents, format_candidates=format_candidates))
         except DirectoryPlanRejected as error:
             rejected.append({'code': 'outline_directory_rejected', 'detail': f'计划{index}：{error.detail}'})
     if not compiled:
@@ -2740,14 +2715,14 @@ def soften_directory_plan(plan):
     return plan, issues
 
 
-def compile_directory(plan, documents):
+def compile_directory(plan, documents, *, format_candidates=False):
     plan, skipped = soften_directory_plan(plan)
     skipped = [*plan.pop('skipped_item_issues', []), *skipped]
     _keys(plan, _PLAN, 'directory plan')
     source = _Source(documents)
     nodes = _nodes(plan, source)
     reading = _reading_references(plan, source, nodes)
-    composition = _composition(plan, source)
+    composition = _composition(plan, source, format_candidates=format_candidates)
     parents = _parents(nodes, source)
     excluded = _excluded(plan, nodes, parents, source, composition)
     adopted = _adopt(plan, source, nodes, parents, composition, excluded)
@@ -2774,7 +2749,7 @@ def compile_directory(plan, documents):
                 source_issues.append(issue)
     compiled = {'chapters': adopted['chapters'],
             'issues': [*adopted['issues'], *excluded['issues'], *binding_issues, *skipped,
-                       *_revision_issues(source, nodes, composition), *source_issues]}
+                       *_revision_issues(source, composition['priority_basis']), *source_issues]}
     if 'reading_only_sources' in plan:
         compiled['_reading_references'] = reading
     return _note_conditions(compiled)
@@ -3404,7 +3379,7 @@ def _nodes(plan, source):
     return nodes
 
 
-def _composition(plan, source):
+def _composition(plan, source, *, format_candidates):
     raw = plan.get('composition', {'priority_basis': [], 'entries': []})
     _keys(raw, _COMPOSITION, 'composition')
     entries = []
@@ -3420,17 +3395,15 @@ def _composition(plan, source):
     if len(documents) > 1:
         raise DirectoryPlanRejected('a composition list must stay inside one document')
     basis = [_window(window, source, 'priority basis') for window in raw.get('priority_basis', [])]
-    if documents:
+    if documents and not format_candidates:
         identity = next(iter(documents))
         if source.by_id[identity]['role'] in _REVISIONS and not any(window[0] == identity for window in basis):
             raise DirectoryPlanRejected('a revision composition requires a priority basis in that document')
     return {'entries': entries, 'priority_basis': basis}
 
 
-def _revision_issues(source, nodes, composition):
-    cited = {node['heading'][0] for node in nodes.values()}
-    cited.update(entry['name'][0] for entry in composition['entries'])
-    cited.update(window[0] for window in composition['priority_basis'])
+def _revision_issues(source, priority_basis):
+    cited = {window[0] for window in priority_basis}
     issues = []
     for document in source.documents:
         if document['role'] in _REVISIONS and document['document_id'] not in cited:
@@ -4055,7 +4028,10 @@ def _continued_heading(source, point, count=None):
     if count is not None:
         if type(count) is not int or not 1 <= count <= 4 or line + count > len(lines):
             raise DirectoryPlanRejected('heading_lines must select consecutive lines on the heading page')
-        return ''.join(part.strip() for part in lines[line:line + count])
+        parts = list(islice((part.strip() for part in lines[line:] if part.strip()), count))
+        if len(parts) != count:
+            raise DirectoryPlanRejected('heading_lines extend past the last printed line on the heading page')
+        return ''.join(parts)
     parts = [lines[line]]
     while _unclosed(''.join(parts)) and line + len(parts) < len(lines):
         nxt = lines[line + len(parts)]

@@ -2,6 +2,12 @@
 
 本页是招标分析与编制（`services/docreader`）字段名称、类型、可选性、枚举与身份语义的唯一规范。处理顺序与调用公式见 [业务工作流](workflow.md#当前发送边界) 与 [编制实际模型调用](workflow.md#编制实际模型调用)，数据库内部表名与外键规则见 [共享平台与数据库](../platform/README.md#数据库命名状态与约束约定)，动态部署与验证事实见 [招投标入口 · 当前状态](README.md#当前状态交接)。
 
+## Web 项目来源设置
+
+`GET /api/v3/tender-projects/{project}/sources` 返回 `source_settings`，包含保存令牌 `version`、已声明的 `expected_document_ids` 和逐文件的 `document_id`、`file_name`、`role`、`replaces`、`modification_scope`。同路径 PUT 接收 `expected_version`、`expected_document_ids` 与完整 `documents`，逐文件提交 ID、角色、替代文件与适用范围。角色为 `main`、`attachment`、`clarification`、`amendment`。替代文件可空，非空时指向同项目的其他已上传原件。适用范围作为登记元数据随原件冻结，效力由文件实际条款确定。
+
+`pending_documents` 列出目录已保存、尚未完成登记的文件，每项包含 `document_id`、`file_name`，并参与 `version` 计算。项目所有者可用 `POST /api/v3/tender-projects/{project}/documents/{document}/register` 从同一已存原件重试登记，成功返回登记的 `document`。重复请求保留原文件身份。
+
 - 单次输入不超过 94208 token（`o200k_base` 校准边界，详见下文）；输出只含判断、问题或填空，不回写宿主已索引原文范围。
 - 硬阻断只阻止把该版本确认成 `analysis-ready`，不拒绝未确认快照的读取、保存、预览或导出。
 
@@ -249,13 +255,15 @@ expected为待人工复核草案，含verdict、rationale、source_evidence和af
 
 | 字段 | 定义 |
 | --- | --- |
-| `schema_version`、`passed` | 固定 `1`；`passed` 仅在四项最低验收线全部为 `pass` 时为 `true` |
+| `schema_version`、`passed` | 固定 `1`；`evaluation_scope="received_inputs"`，`passed` 表示本次实际输入下的四项 W2 最低验收线全部通过 |
 | `summary` | `score_passed` / `score_total`（`4`）、`machine_passed`（机器检查通过的项数）以及各状态计数（`pass`、`fail`、`needs_human_check`、`needs_onlyoffice_check`、`unknown`） |
-| `criteria.requirements_coverage` | 第 1 项（要求不漏）：以分析事项为分母统计已落位、已结案（约束/排除）、显式待补和静默漏项，`missing_items` 列出每条漏项的 `rule_ref`、`item_id`、位置与原因；缺底稿时为 `unknown`，缺人工抽查回执且机器无漏项时为 `needs_human_check` |
-| `criteria.original_tables` | 第 2 项（原式表正确）：核对大纲原式表在 Word 中的表格结构（列数、行数、表头、合并单元格）与固定文字/签章行保留，输出 `mismatches` 精确到 `chapter_id`、`chapter_title`、`target_id`、`table_index`、`kind`、`expected` 与 `actual`；无原件网格且无模板错误时保留 `unknown` |
+| `criteria.requirements_coverage` | 第 1 项（要求不漏）：以分析事项为分母统计已落位、已结案（约束/排除）、显式待补和静默漏项。显式待补按大纲待核的完整事项引用匹配。`unreported_source_gaps` 列出固定输入已声明但交付待补清单未逐件保留的缺件，按来源问题的 `code` 和完整 `detail` 匹配。缺底稿时为 `unknown`，缺有效人工抽查回执且机器无漏项时为 `needs_human_check`。 `missing_items` 列出每条漏项的 `rule_ref`、`item_id`、位置与原因 |
+| `criteria.original_tables` | 第 2 项（原式表正确）：`--required-tables` 接受独立清单 `{frozen_sha256, complete:bool, tables:[{source_index_sha256,unit_id}]}`。每个引用须属于本次冻结的原生网格，清单内同一网格只列一次。`inventory_status` 取 `complete`、`partial`、`missing` 或 `invalid`。清单中未对应到实测 Word 表的网格记 `required_table_missing`。清单缺失、局部或无效时不能判通过。核对 Word 表格的列数、行数、表头、合并单元格、固定文字和签章。单元格内的空白下划线制表位允许两侧固定文字按原顺序相接或以空格分隔，输出 `mismatches` 精确到 `chapter_id`、`chapter_title`、`target_id`、`table_index`、`kind`、`expected` 与 `actual`；无原件网格且无模板错误时保留 `unknown` |
 | `criteria.no_fabrication` | 第 3 项（缺口不被编造）：核对未剔除的 `unsupported_content`、人工位自动填值（`manual_target_has_generated_content`）、无资料无来源正文写入（`content_without_material_or_source`）、未复核正文（`generated_content_unreviewed`）与导出编造/越界缺口，`violations` 列出具体违规项；已被 `_adopt_reviewed` 剔除的历史 `unsupported_content` 计入 `counts.removed_by_review`；覆盖结算中仅表示响应不足/待补资料的 `assessment == "unsupported"`（`coverage_unsupported`）单独记入 `counts.unmet_by_review` 与 `unmet_items`，不误判为编造违规 |
-| `criteria.file_usability` | 第 4 项（文件可用）：校验 DOCX 压缩包与 XML 完整性、大纲章节/目标书签覆盖，并结合 `版式核对.json` 或 `--onlyoffice-receipt` 核对同摘要 `docx_sha256` 的 ONLYOFFICE 保存与 PDF 导出；缺实测回执时为 `needs_onlyoffice_check` |
+| `criteria.file_usability` | 第 4 项（文件可用）：校验 DOCX 压缩包与 XML 完整性、大纲章节/目标书签覆盖，用 `--onlyoffice-receipt` 核对同摘要 `docx_sha256` 的保存、重开与 PDF 导出。缺实测回执时为 `needs_onlyoffice_check`。 `layout_pdf_fixed` 记录与当前 DOCX 摘要一致的生成版式核对 |
 | `execution_report`、`limits` | 透传的 `authoring-report` 摘要（含 `failures`、`outline_issues`、`document_gaps`）及离线评测局限说明 |
+
+`--human-review` 接收人工抽查与真实性结论。顶层 `docx_sha256` 对应受评 Word，`frozen_sha256` 对应大纲冻结来源摘要，`run_id`、`source_version`、`domain_revision` 对应大纲固定分析。要求底稿和已提供的覆盖结算需与大纲固定同一分析快照。全部匹配时读取 `requirements_spot_check` 的 `passed`、`checked_clauses`、`double_omissions` 以及 `no_fabrication_audit.passed`。明确来自其他快照的底稿或覆盖结算不计入机器核对。
 
 工作台任务进度（`progress`）的 `accepted_by_phase` 每行为 `phase`、`count`（已接受工作单元）和 `planned`（宿主登记的计划单元数，`null` 表示未知）。`planned` 只来自已登记的计划：编制取各 task 的 `execution-plan` 回执 `planned_requests` 之和，分析的 `extract` 取当前修订提取范围规划的包数，其余阶段为 `null`。有计划但尚未接受单元的阶段也列出（`count` 为 0）。整体总量不给出：后续阶段的计划在前序阶段完成后才登记。
 

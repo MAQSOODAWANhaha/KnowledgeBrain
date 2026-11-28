@@ -29,6 +29,10 @@ async def initialize_schema(dsn, sections=("analysis", "authoring")):
         exists = await (await conn.execute("SELECT to_regclass('tender_authoring_gap_dispositions')")).fetchone()
         if "web" in sections and exists is not None and exists[0] is None:
             await conn.execute(cast(Any, _gap_dispositions(web=True)))
+        if "web" in sections:
+            settings = (_MIGRATIONS / "20261127000001_tender_source_settings.sql").read_text()
+            settings = settings.split("-- BEGIN web_source_settings\n", 1)[1].split("-- END web_source_settings", 1)[0]
+            await conn.execute(cast(Any, settings))
 
 
 async def initialize_gap_dispositions(dsn):

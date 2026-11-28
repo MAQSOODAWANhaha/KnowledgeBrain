@@ -14,6 +14,7 @@ import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
+import re
 from typing import Any
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
@@ -60,9 +61,27 @@ def _norm(text: str | None) -> str:
 def _element_text(element: Any) -> str:
     return "".join(
         (node.text or "") if node.tag == qn("w:t") else "\t" if node.tag == qn("w:tab") else "\n"
-        for node in element.iter()
+        for run in element.iter(qn("w:r")) for node in run
         if node.tag in {qn("w:t"), qn("w:tab"), qn("w:br"), qn("w:cr")}
     )
+
+
+def _fixed_parts_around_fields(tc):
+    """Read fixed text on either side of an editable, underlined tab."""
+    parts = [""]
+    for index, paragraph in enumerate(tc.findall(qn("w:p"))):
+        if index:
+            parts[-1] += "\n"
+        for run in paragraph.iter(qn("w:r")):
+            value = _element_text(run)
+            underline = run.find(qn("w:rPr") + "/" + qn("w:u"))
+            if value == "\t" and underline is not None and underline.get(qn("w:val")) not in {None, "none", "0", "false"}:
+                # A positioning tab can precede the beginning of the blank rule.
+                parts[-1] = parts[-1].rstrip("\t")
+                parts.append("")
+            else:
+                parts[-1] += value
+    return parts if len(parts) > 1 else []
 
 
 def _walk_chapters(chapters: list[dict[str, Any]], external: bool = False):
@@ -98,6 +117,8 @@ def _parse_docx_table(tbl_element: Any) -> dict[str, Any]:
                     "col_span": col_span,
                     "text": text,
                 }
+                if tc.find(".//" + qn("w:u")) is not None:
+                    cell["field_parts"] = _fixed_parts_around_fields(tc)
                 cells.append(cell)
                 if vmerge_val == "restart":
                     for offset in range(col_span):
@@ -229,16 +250,20 @@ def _inspect_docx(docx_bytes: bytes | None, outline: dict[str, Any]) -> dict[str
 def _evaluate_requirements(
     outline: dict[str, Any],
     requirements: dict[str, Any] | None,
-    coverage: dict[str, Any] | None,
-    gaps: list[dict[str, Any]] | None,
     docx_info: dict[str, Any],
     human_review: dict[str, Any] | None,
+    gaps: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
+    named_gaps = [issue for issue in (outline.get("authoring_input") or {}).get("issues", [])
+                  if issue["code"] in {"missing_expected_document", "source_registration_pending"}]
+    reported = {(gap.get("code"), gap.get("detail")) for gap in gaps or []}
+    unreported = [issue for issue in named_gaps if (issue["code"], issue["detail"]) not in reported]
     if requirements is None or not isinstance(requirements.get("rules"), list):
         return {
-            "status": "unknown",
+            "status": "fail" if unreported and gaps is not None else "unknown",
             "machine_passed": False,
             "human_verified": False,
+            "unreported_source_gaps": unreported,
             "counts": {"total": None, "placed_in_docx": 0, "settled": 0, "pending_in_gaps": 0, "missing": 0},
             "missing_items": [],
             "pending_items": [],
@@ -276,16 +301,6 @@ def _evaluate_requirements(
         for ref in issue.get("rule_refs", [])
         if (key := rule_ref_key(ref)) is not None
     }
-    coverage_pending_keys = {
-        key
-        for entry in (coverage or {}).get("entries", [])
-        if (entry.get("resolution") == "pending" or "coverage_target_missing" in (entry.get("gap_codes") or []))
-        and (key := rule_ref_key(entry.get("rule_ref"))) is not None
-    }
-    has_export_unassigned_gap = any(
-        gap.get("code") == "export_requirement_unassigned" for gap in (gaps or [])
-    )
-
     placed_in_docx = 0
     settled = 0
     missing_items: list[dict[str, Any]] = []
@@ -333,11 +348,6 @@ def _evaluate_requirements(
             settled += 1
             continue
 
-        explicitly_listed = (
-            (key in outline_pending_keys)
-            or (key in coverage_pending_keys)
-            or (has_export_unassigned_gap and "pending" in resolutions)
-        )
         record = {
             "item_id": item_id,
             "rule_ref": ref,
@@ -346,12 +356,12 @@ def _evaluate_requirements(
             "target_id": None,
             "text": snippet,
         }
-        if explicitly_listed:
+        if key in outline_pending_keys:
             pending_items.append({**record, "reason": "explicitly_pending_in_gaps"})
         else:
             missing_items.append({**record, "reason": "unplaced_and_unlisted_in_gaps"})
 
-    machine_passed = not missing_items
+    machine_passed = not missing_items and not unreported
     spot = (human_review or {}).get("requirements_spot_check") or {}
     human_verified = bool(
         spot.get("passed") is True
@@ -359,11 +369,17 @@ def _evaluate_requirements(
         and spot["checked_clauses"] >= 3
         and spot.get("double_omissions") == 0
     )
-    status = "fail" if not machine_passed else ("pass" if human_verified else "needs_human_check")
+    if missing_items or (unreported and gaps is not None):
+        status = "fail"
+    elif unreported:
+        status = "unknown"  # The delivery gap list was not supplied.
+    else:
+        status = "pass" if human_verified else "needs_human_check"
     return {
         "status": status,
         "machine_passed": machine_passed,
         "human_verified": human_verified,
+        "unreported_source_gaps": unreported,
         "counts": {
             "total": len(rules),
             "placed_in_docx": placed_in_docx,
@@ -418,6 +434,17 @@ def _compare_table(
 
     header_limit = max(1, header_rows) if expected["row_count"] > 0 else 0
     actual_by_pos = {(c["row"], c["column"]): _norm(c["text"]) for c in actual["cells"]}
+    field_patterns = {
+        (c["row"], c["column"]): re.compile(" ?".join(re.escape(_norm(s)) for s in c["field_parts"] if _norm(s)))
+        for c in actual["cells"] if c.get("field_parts")
+    }
+
+    def matches(row, column, text):
+        position = (row, column)
+        if text in actual_by_pos.get(position, ""):
+            return True
+        pattern = field_patterns.get(position)
+        return pattern is not None and pattern.fullmatch(text) is not None
 
     exp_headers = [
         (c["row"], c["column"], _norm(c.get("text")))
@@ -427,7 +454,7 @@ def _compare_table(
     bad_headers = [
         {"row": r, "column": c, "expected": text, "actual": actual_by_pos.get((r, c), "")}
         for r, c, text in exp_headers
-        if text not in actual_by_pos.get((r, c), "")
+        if not matches(r, c, text)
     ]
     if bad_headers:
         mismatches.append({
@@ -461,7 +488,7 @@ def _compare_table(
         if not text:
             continue
         actual_text = actual_by_pos.get((r, c), "")
-        if text not in actual_text:
+        if not matches(r, c, text):
             bad_fixed.append({"row": r, "column": c, "expected": text, "actual": actual_text})
     if bad_fixed:
         mismatches.append({
@@ -475,12 +502,43 @@ def _compare_table(
     return mismatches
 
 
+def _required_grid_inventory(manifest, outline, repository):
+    """Resolve independent source keys against the evaluated freeze, before visiting its outline."""
+    if manifest is None:
+        return "missing", set()
+    if not isinstance(manifest, dict) or type(manifest.get("complete")) is not bool:
+        return "invalid", set()
+    tables = manifest.get("tables")
+    frozen_ref = (outline.get("authoring_input") or {}).get("frozen_ref")
+    if (not isinstance(tables, list) or not tables or not frozen_ref or repository is None
+            or manifest.get("frozen_sha256") != frozen_ref["sha256"]):
+        return "invalid", set()
+    try:
+        expected = {(row["source_index_sha256"], row["unit_id"]) for row in tables}
+        if len(expected) != len(tables):
+            return "invalid", set()
+        wanted_indices = {sha for sha, _ in expected}
+        frozen = repository.artifacts.read_json(frozen_ref)
+        known = set()
+        for document in frozen["documents"]:
+            index_ref = document["source_index_ref"]
+            if index_ref["sha256"] in wanted_indices:
+                units = repository.source_index(index_ref).raw["units"]
+                known.update((index_ref["sha256"], unit["unit_id"]) for unit in units if unit.get("grid"))
+        if not expected <= known:
+            return "invalid", set()
+    except (KeyError, TypeError, ValueError, OSError):
+        return "invalid", set()
+    return ("complete" if manifest["complete"] else "partial"), expected
+
+
 def _evaluate_original_tables(
     outline: dict[str, Any],
     gaps: list[dict[str, Any]] | None,
     docx_info: dict[str, Any],
     artifacts: ArtifactStore | None,
     expected_tables: dict[str, list[dict[str, Any]]] | None = None,
+    required_tables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mismatches: list[dict[str, Any]] = []
     chapter_titles = {
@@ -501,12 +559,11 @@ def _evaluate_original_tables(
             })
 
     repository = EvidenceRepository(artifacts) if artifacts is not None else None
+    inventory_status, missing_grids = _required_grid_inventory(required_tables, outline, repository)
     form_targets = 0
     checked_tables = 0
     checked_fixed_texts = 0
     used_tables: set[int] = set()
-    grid_source_available = artifacts is not None or expected_tables is not None
-
     for chapter, is_external in _walk_chapters(outline.get("chapters", [])):
         if is_external:
             continue
@@ -520,12 +577,12 @@ def _evaluate_original_tables(
             location = {"chapter_id": cid, "chapter_title": title, "target_id": tid}
             expanded = (target.get("response_table") or {}).get("native_layout") is not None
 
-            target_grids: list[tuple[dict[str, Any], int]] = []
+            target_grids: list[tuple[dict[str, Any], int, tuple[str, str] | None]] = []
             target_fixed_lines: list[str] = []
-            if expected_tables is not None and tid in expected_tables:
+            if required_tables is None and expected_tables is not None and tid in expected_tables:
                 for spec in expected_tables[tid]:
                     if "grid" in spec:
-                        target_grids.append((spec["grid"], spec.get("header_row_count", 1)))
+                        target_grids.append((spec["grid"], spec.get("header_row_count", 1), None))
                     for line in spec.get("fixed_texts", []):
                         if _norm(line):
                             target_fixed_lines.append(_norm(line))
@@ -544,7 +601,9 @@ def _evaluate_original_tables(
                     unit = loaded["unit"]
                     if unit.get("grid"):
                         header_count = part.get("header_row_count")
-                        target_grids.append((unit["grid"], header_count if isinstance(header_count, int) else 1))
+                        source = part["source_ref"]
+                        identity = (source["source_index_ref"]["sha256"], source["unit_id"])
+                        target_grids.append((unit["grid"], header_count if isinstance(header_count, int) else 1, identity))
                     elif unit.get("text") and not unit.get("running_header"):
                         for line in unit["text"].splitlines():
                             cleaned = _norm(line)
@@ -558,13 +617,12 @@ def _evaluate_original_tables(
                 tbl for tbl in docx_info["tables_by_target"].get(tid, [])
                 if tbl["table_index"] not in used_tables
             ]
-            if not candidates:
+            if not candidates and not any(source_key in missing_grids for _, _, source_key in target_grids):
                 candidates = [
                     tbl for tbl in docx_info["tables_by_chapter"].get(cid, [])
                     if tbl["table_index"] not in used_tables
                 ]
-            for expected_grid, header_rows in target_grids:
-                checked_tables += 1
+            for expected_grid, header_rows, source_key in target_grids:
                 if not candidates:
                     mismatches.append({
                         **location,
@@ -578,7 +636,10 @@ def _evaluate_original_tables(
                     })
                     continue
                 actual_table = candidates.pop(0)
+                checked_tables += 1
                 used_tables.add(actual_table["table_index"])
+                if source_key is not None:
+                    missing_grids.discard(source_key)
                 mismatches.extend(
                     _compare_table(expected_grid, actual_table, location,
                                    header_rows=header_rows, expanded=expanded)
@@ -599,18 +660,19 @@ def _evaluate_original_tables(
                             "actual": haystack[:160],
                         })
 
-    if not docx_info["valid"] or mismatches:
+    mismatches.extend({"kind": "required_table_missing", "source_index_sha256": sha, "unit_id": unit}
+                      for sha, unit in sorted(missing_grids))
+    if not docx_info["valid"] or mismatches or not outline.get("chapters"):
         status, machine_passed = "fail", False
-    elif not grid_source_available and form_targets > 0:
+    elif not checked_tables or inventory_status != "complete":
         status, machine_passed = "unknown", False
-    elif not outline.get("chapters"):
-        status, machine_passed = "fail", False
     else:
         status, machine_passed = "pass", True
     return {
         "status": status,
         "machine_passed": machine_passed,
-        "grid_comparison": "compared" if grid_source_available else "unavailable",
+        "inventory_status": inventory_status,
+        "grid_comparison": "compared" if checked_tables else "unavailable",
         "counts": {
             "form_targets": form_targets,
             "checked_tables": checked_tables,
@@ -779,7 +841,13 @@ def _evaluate_file_usability(
             "detail": f"DOCX 缺少 {len(docx_info['missing_target_ids'])} 个响应位置书签。",
         })
 
-    layout_pdf_ok = bool(isinstance(layout, dict) and layout.get("status") == "fixed")
+    layout_documents = layout.get("documents") if isinstance(layout, dict) else None
+    layout_pdf_ok = bool(
+        isinstance(layout, dict) and layout.get("status") == "fixed"
+        and isinstance(layout_documents, list) and layout_documents and isinstance(layout_documents[0], dict)
+        and layout_documents[0].get("status") == "fixed"
+        and docx_info["docx_sha256"] and layout_documents[0].get("docx_sha256") == docx_info["docx_sha256"]
+    )
     onlyoffice_verified = False
     if onlyoffice_receipt is not None:
         expected_sha = docx_info["docx_sha256"]
@@ -823,6 +891,32 @@ def _evaluate_file_usability(
     }
 
 
+def _analysis_binding(artifact: dict[str, Any] | None) -> dict[str, Any] | None:
+    source = artifact.get("authoring_input") if isinstance(artifact, dict) else None
+    if not isinstance(source, dict):
+        return None
+    frozen = source.get("frozen_ref")
+    frozen_sha = frozen.get("sha256") if isinstance(frozen, dict) else None
+    run_id = source.get("run_id")
+    versions = {key: source.get(key) for key in ("source_version", "domain_revision")}
+    if (not isinstance(frozen_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", frozen_sha)
+            or not isinstance(run_id, str) or not run_id
+            or any(type(version) is not int or version < 1 for version in versions.values())):
+        return None
+    return {"frozen_sha256": frozen_sha, "run_id": run_id, **versions}
+
+
+def _bound_human_review(human_review: dict[str, Any] | None, binding: dict[str, Any] | None,
+                        docx_info: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(human_review, dict) or binding is None or not docx_info["valid"]:
+        return None
+    expected = {**binding, "docx_sha256": docx_info["docx_sha256"]}
+    if any(type(human_review.get(key)) is not type(value) or human_review[key] != value
+           for key, value in expected.items()):
+        return None
+    return human_review
+
+
 def evaluate_acceptance(
     *,
     outline: dict[str, Any],
@@ -834,25 +928,42 @@ def evaluate_acceptance(
     layout: dict[str, Any] | None = None,
     artifacts: ArtifactStore | None = None,
     expected_tables: dict[str, list[dict[str, Any]]] | None = None,
+    required_tables: dict[str, Any] | None = None,
     onlyoffice_receipt: dict[str, Any] | None = None,
     human_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Score one execution against the four minimum acceptance criteria."""
+    """Score the bid compiled from the inputs available in this frozen execution."""
     docx_info = _inspect_docx(docx_bytes, outline)
+    binding = _analysis_binding(outline)
+    requirements_binding = _analysis_binding(requirements)
+    coverage_binding = _analysis_binding(coverage)
+    human_review = _bound_human_review(
+        human_review,
+        binding if requirements_binding == binding and (coverage is None or coverage_binding == binding) else None,
+        docx_info,
+    )
+    foreign_requirements = bool(requirements is not None and "authoring_input" in requirements
+                                and (binding is None or requirements_binding != binding))
+    foreign_coverage = bool(coverage is not None and "authoring_input" in coverage
+                            and (binding is None or coverage_binding != binding))
     criteria = {
         "requirements_coverage": _evaluate_requirements(
-            outline, requirements, coverage, gaps, docx_info, human_review
+            outline, None if foreign_requirements else requirements, docx_info, human_review, gaps
         ),
         "original_tables": _evaluate_original_tables(
-            outline, gaps, docx_info, artifacts, expected_tables=expected_tables
+            outline, gaps, docx_info, artifacts, expected_tables=expected_tables, required_tables=required_tables
         ),
         "no_fabrication": _evaluate_no_fabrication(
-            outline, coverage, gaps, report, human_review
+            outline, None if foreign_coverage else coverage, gaps, report, human_review
         ),
         "file_usability": _evaluate_file_usability(
             docx_info, layout, onlyoffice_receipt
         ),
     }
+    if foreign_requirements:
+        criteria["requirements_coverage"]["detail"] = "招标要求底稿与大纲的分析快照不一致。"
+    if foreign_coverage:
+        criteria["no_fabrication"]["detail"] = "覆盖结算与大纲的分析快照不一致。"
     counts = Counter(item["status"] for item in criteria.values())
     passed = all(item["status"] == "pass" for item in criteria.values())
     summary = {
@@ -877,13 +988,14 @@ def evaluate_acceptance(
         }
     return {
         "schema_version": 1,
+        "evaluation_scope": "received_inputs",
         "passed": passed,
         "summary": summary,
         "criteria": criteria,
         "execution_report": execution_report,
         "limits": [
             "Offline checks cannot replace manual spot-checking of at least 3 scoring tables and qualification clauses against original files.",
-            "Original table fidelity requires frozen source grids (--artifact-root) or explicit expected table specs; without them, grid comparison stays unknown.",
+            "Original table acceptance covers the independent inventory of applicable tables in the received sources (--required-tables) and their frozen grids (--artifact-root).",
             "Absence of machine fabrication flags does not verify factual truthfulness against enterprise materials.",
             "DOCX structural validity does not prove live ONLYOFFICE open/save/reopen and PDF roundtrip without a matching receipt.",
         ],
@@ -950,6 +1062,7 @@ def load_inputs(args: argparse.Namespace) -> dict[str, Any]:
         "gaps": gaps,
         "layout": layout,
         "artifacts": artifacts,
+        "required_tables": json.loads(args.required_tables.read_text(encoding="utf-8")) if args.required_tables else None,
         "onlyoffice_receipt": onlyoffice_receipt,
         "human_review": human_review,
     }
@@ -967,6 +1080,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--coverage", type=Path, help="覆盖结算 JSON")
     parser.add_argument("--gaps", type=Path, help="待补事项 JSON")
     parser.add_argument("--layout", type=Path, help="版式核对 JSON")
+    parser.add_argument("--required-tables", type=Path, help="Independent mandatory grid inventory for the frozen sources")
     parser.add_argument("--onlyoffice-receipt", type=Path, help="ONLYOFFICE open/save/reopen/PDF receipt JSON")
     parser.add_argument("--human-review", type=Path, help="Explicit human spot-check and fabrication audit JSON")
     parser.add_argument("--output", type=Path, help="Write JSON scorecard to this path")

@@ -129,7 +129,7 @@ def test_named_submission_form_outside_the_format_chapter_stays_after_bid_format
     items = [item(1, "submission_requirement", ["无关联关系承诺函"], page=0),
              item(2, "submission_requirement", ["投标书"], page=0)]
     result, added_names = placement.add_submission_forms(plan(), DOCUMENTS, items, {("tender", 1)})
-    assert added_names == ["无关联关系承诺函"]
+    assert list(added_names) == ["无关联关系承诺函"]
     added, = [node for node in result["nodes"] if node["id"].startswith("submission-")]
     assert added["name"] == "无关联关系承诺函"
     assert added["heading"] == {"document_id": "tender", "page": 0, "line": 1}
@@ -142,14 +142,14 @@ def test_named_submission_form_outside_the_format_chapter_stays_after_bid_format
 
 def test_submission_form_without_a_title_line_is_not_invented():
     items = [item(1, "submission_requirement", ["股权结构说明"], page=0)]
-    assert placement.add_submission_forms(plan(), DOCUMENTS, items, {("tender", 1)}) == (plan(), [])
+    assert placement.add_submission_forms(plan(), DOCUMENTS, items, {("tender", 1)}) == (plan(), {})
 
 
 def test_a_candidate_form_stays_only_when_an_item_is_placed_in_it():
     base = outline()
     base["chapters"].insert(0, {"chapter_id": "c0", "title": "廉洁履约承诺书", "children": [], "targets": [
         {"target_id": "z", "kind": "form", "purpose": "廉洁履约承诺书", "rule_refs": []}]})
-    positions = placement.placement_positions(base, {"廉洁履约承诺书"})
+    positions = placement.placement_positions(base, {"廉洁履约承诺书": set()})
     payload = placement.placement_payload(positions, {"r1": item(1)}, ["r1"])
     assert [row.get("origin") for row in payload["positions"]] == ["outside_format", None, None]
     items = {"r1": item(1)}
@@ -337,7 +337,7 @@ def test_bug332_an_amendment_restating_a_listed_form_is_kept_beside_it_as_a_conf
     amended = item(1, "submission_requirement", ["投标书"], page=0)
     amended["evidence"] = [{"document_id": "addendum", "page": 0, "quote": "投标书"}]
     result, added_names = placement.add_submission_forms(plan(), documents, [amended], {("tender", 1)})
-    assert added_names == []
+    assert list(added_names) == []
     added, = [node for node in result["nodes"] if node["id"].startswith("submission-")]
     assert added["name"] == "投标书" and added["heading"] == {"document_id": "addendum", "page": 0, "line": 2}
     conflict, = result["skipped_item_issues"]
@@ -345,7 +345,7 @@ def test_bug332_an_amendment_restating_a_listed_form_is_kept_beside_it_as_a_conf
     assert "第 2 页" in conflict["detail"] and "补遗（文档 addendum）第 1 页" in conflict["detail"]
 
     main_only = item(2, "submission_requirement", ["投标书"], page=0)
-    assert placement.add_submission_forms(plan(), documents, [main_only], {("tender", 1)}) == (plan(), [])
+    assert placement.add_submission_forms(plan(), documents, [main_only], {("tender", 1)}) == (plan(), {})
 
 
 async def test_bug332_the_requirement_chain_keeps_an_inline_amendment_form_beside_the_original(tmp_path, monkeypatch):
@@ -381,7 +381,8 @@ async def test_bug332_the_requirement_chain_keeps_an_inline_amendment_form_besid
     assert [chapter["title"] for chapter in outline["chapters"]] == ["投标书", "开标一览表", "投标书"]
     codes = [issue["code"] for issue in outline["issues"]]
     assert "outline_directory_format_conflict" in codes
-    assert "outline_directory_revision_unreviewed" not in codes and "outline_directory_rejected" not in codes
+    assert codes.count("outline_directory_revision_unreviewed") == 1
+    assert "outline_directory_rejected" not in codes
 
 
 def test_bug340_decode_placements_normalizes_string_null():
@@ -446,7 +447,7 @@ def test_bug350_same_page_outside_forms_partition_windows_and_compile_cleanly():
         item(1, "submission_requirement", ["技术附表 G 技术条款偏差表", "附表 G.1 结构性不响应偏差", "附表 G.2 实际不响应偏差"], page=0),
     ]
     result, added_names = placement.add_submission_forms(base_plan, documents, items, {("tender", 1)})
-    assert added_names == ["技术附表 G 技术条款偏差表", "附表 G.1 结构性不响应偏差", "附表 G.2 实际不响应偏差"]
+    assert list(added_names) == ["技术附表 G 技术条款偏差表", "附表 G.1 结构性不响应偏差", "附表 G.2 实际不响应偏差"]
     added = {node["name"]: node["body_windows"] for node in result["nodes"] if node["id"].startswith("submission-")}
     assert added["技术附表 G 技术条款偏差表"] == [{"document_id": "tender", "page": 0, "start_line": 1, "end_line": 2}]
     assert added["附表 G.1 结构性不响应偏差"] == [{"document_id": "tender", "page": 0, "start_line": 3, "end_line": 5}]
@@ -494,8 +495,44 @@ def test_bug350_outside_forms_never_cross_format_pages_owned_lines_or_not_applic
     result, added_names = placement.add_submission_forms(
         base_plan, documents, [cross, na_item, format_neighbor], {("tender", 1)}
     )
-    assert added_names == ["外置承诺函"]
+    assert list(added_names) == ["外置承诺函"]
     added, = [node for node in result["nodes"] if node["id"].startswith("submission-")]
     assert added["heading"] == {"document_id": "tender", "page": 0, "line": 2}
     # Must stop before format_pages (page 1), never crossing into page 1 or swallowing format-1.
     assert added["body_windows"] == [{"document_id": "tender", "page": 0, "start_line": 2, "end_line": 3}]
+
+
+@pytest.mark.parametrize("first_binding", [None, "t2"])
+def test_required_sibling_grids_survive_pending_or_single_placement(first_binding):
+    names = ["附表 A.1 设备表", "附表 A.2 配件表"]
+    optional = "附表 C.1 选配表"
+    skipped = "附表 B.1 配件表"
+    pages = ["\n".join(["技术附表 A 设备及配件", names[0], "规格 数量", names[1], "型号 金额",
+                        "技术附表 B 备品（本次不适用）", skipped, "型号 数量",
+                        "技术附表 C 选配", optional, "规格 名称"]),
+             "第六章 投标文件格式\n投标书"]
+    units = [None, None, "g1", None, "g2", None, None, "g3", None, None, "g4"]
+    parts = {key: {"source_ref": {"source_index_ref": ARTIFACT, "unit_id": key}, "selectors": []}
+             for key in units if key}
+    documents = [{"document_id": "tender", "role": "main", "pages": pages,
+                  "line_units": [units, []], "template_parts": parts}]
+    both = item(1, "submission_requirement", names, quote=names[0])
+    both["evidence"].append({"document_id": "tender", "page": 0, "quote": names[1]})
+    conditional = item(2, "submission_requirement", [optional], quote=optional)
+    conditional["semantic"]["conditions"] = ["提供选配件时"]
+    items = {"r1": both, "r2": conditional, "r3": item(3, "submission_requirement", [skipped], quote=skipped)}
+    supplemented, outside = placement.add_submission_forms(plan(), documents, items.values(), {("tender", 1)})
+    nodes = supplemented["nodes"][1:]
+    assert [n["name"] for n in nodes] == [*names, optional]
+    base = outline()
+    base["chapters"] = base["chapters"][:1]
+    for n, unit in zip(nodes, ("g1", "g2", "g4"), strict=True):
+        base["chapters"].append({"chapter_id": n["id"], "title": n["name"], "children": [], "targets": [
+            {"target_id": unit, "kind": "form", "purpose": n["name"], "manual_fill": True,
+             "template_refs": [parts[unit]], "rule_refs": []}]})
+    positions = placement.placement_positions(base, outside)
+    decided = {"r1": first_binding, "r2": None, "r3": None}
+    bound = placement.bind_placements(base, positions, items, decided)
+    assert [ch["title"] for ch in bound["chapters"]] == ["投标书", *names]
+    refs = [t["rule_refs"] for ch in bound["chapters"][1:] for t in ch["targets"]]
+    assert refs == [[ref(1)] if first_binding else [], []]

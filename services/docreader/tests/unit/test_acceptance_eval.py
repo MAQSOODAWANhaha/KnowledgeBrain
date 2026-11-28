@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from docx import Document
+import pytest
 
 from docreader.integrations.artifacts import ArtifactStore
 from docreader.tender.acceptance_eval import evaluate_acceptance, main
@@ -79,6 +80,10 @@ def _export_sample(tmp_path):
     rule_2 = _rule_ref("item-2")
     outline = {
         "schema_version": 2,
+        "authoring_input": {
+            "run_id": "run-1", "source_version": 1, "domain_revision": 1,
+            "frozen_ref": artifacts.put_json({"documents": [{"source_index_ref": parts[0]["source_ref"]["source_index_ref"]}]}),
+        },
         "chapters": [
             {
                 "chapter_id": "ch-1",
@@ -114,12 +119,14 @@ def _export_sample(tmp_path):
         "issues": [],
     }
     requirements = {
+        "authoring_input": outline["authoring_input"],
         "rules": [
             {"rule_ref": rule_1, "rule": {"item_id": "item-1", "text": "须提交开标一览表并盖章"}},
             {"rule_ref": rule_2, "rule": {"item_id": "item-2", "text": "须提供完整运维技术方案"}},
         ]
     }
     coverage = {
+        "authoring_input": outline["authoring_input"],
         "entries": [
             {
                 "coverage_id": "c-1",
@@ -166,6 +173,24 @@ def _export_sample(tmp_path):
     return artifacts, outline, requirements, coverage, exported
 
 
+def _required_tables(artifacts, outline):
+    frozen = outline["authoring_input"]["frozen_ref"]
+    doc, = artifacts.read_json(frozen)["documents"]
+    return {"frozen_sha256": frozen["sha256"], "complete": True,
+            "tables": [{"source_index_sha256": doc["source_index_ref"]["sha256"], "unit_id": "u-grid"}]}
+
+
+def _human_review(outline, docx_bytes):
+    source = outline["authoring_input"]
+    return {
+        "docx_sha256": hashlib.sha256(docx_bytes).hexdigest(),
+        "frozen_sha256": source["frozen_ref"]["sha256"],
+        **{key: source[key] for key in ("run_id", "source_version", "domain_revision")},
+        "requirements_spot_check": {"passed": True, "checked_clauses": 3, "double_omissions": 0},
+        "no_fabrication_audit": {"passed": True},
+    }
+
+
 def test_clean_export_passes_machine_checks_and_waits_for_human_and_onlyoffice(tmp_path):
     artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
     docx_bytes = artifacts.read_bytes(exported["docx_ref"])
@@ -183,6 +208,7 @@ def test_clean_export_passes_machine_checks_and_waits_for_human_and_onlyoffice(t
         outline=outline,
         docx_bytes=docx_bytes,
         report=report,
+        required_tables=_required_tables(artifacts, outline),
         requirements=requirements,
         coverage=coverage,
         gaps=exported["gaps"],
@@ -203,6 +229,7 @@ def test_clean_export_passes_machine_checks_and_waits_for_human_and_onlyoffice(t
         outline=outline,
         docx_bytes=docx_bytes,
         report=report,
+        required_tables=_required_tables(artifacts, outline),
         requirements=requirements,
         coverage=coverage,
         gaps=exported["gaps"],
@@ -214,13 +241,92 @@ def test_clean_export_passes_machine_checks_and_waits_for_human_and_onlyoffice(t
             "reopened": True,
             "pdf_exported": True,
         },
-        human_review={
-            "requirements_spot_check": {"passed": True, "checked_clauses": 3, "double_omissions": 0},
-            "no_fabrication_audit": {"passed": True},
-        },
+        human_review=_human_review(outline, docx_bytes),
     )
     assert verified["passed"] is True
     assert verified["summary"]["score_passed"] == 4
+
+
+@pytest.mark.parametrize(("field", "wrong"), [
+    ("docx_sha256", "0" * 64),
+    ("frozen_sha256", "0" * 64),
+    ("run_id", "another-run"),
+    ("source_version", 2),
+    ("domain_revision", 2),
+])
+def test_human_review_cannot_pass_when_its_identity_is_stale(tmp_path, field, wrong):
+    artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
+    docx_bytes = artifacts.read_bytes(exported["docx_ref"])
+    receipt = _human_review(outline, docx_bytes)
+    receipt[field] = wrong
+    for review in (receipt, {key: value for key, value in receipt.items() if key != field}):
+        criteria = evaluate_acceptance(
+            outline=outline, docx_bytes=docx_bytes, requirements=requirements, coverage=coverage,
+            gaps=exported["gaps"], artifacts=artifacts, human_review=review,
+        )["criteria"]
+        assert criteria["requirements_coverage"]["status"] == "needs_human_check"
+        assert criteria["no_fabrication"]["status"] == "needs_human_check"
+
+
+@pytest.mark.parametrize("component", ["requirements", "coverage"])
+def test_mixed_analysis_snapshots_cannot_satisfy_formal_acceptance(tmp_path, component):
+    artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
+    docx_bytes = artifacts.read_bytes(exported["docx_ref"])
+    inputs = {"requirements": requirements, "coverage": coverage}
+    other = {"authoring_input": {**outline["authoring_input"], "domain_revision": 2}}
+    inputs[component] = {**other, **({"rules": []} if component == "requirements" else {"entries": []})}
+    score = evaluate_acceptance(
+        outline=outline, docx_bytes=docx_bytes, **inputs, artifacts=artifacts, gaps=exported["gaps"],
+        human_review=_human_review(outline, docx_bytes),
+        onlyoffice_receipt={"docx_sha256": hashlib.sha256(docx_bytes).hexdigest(),
+                            **dict.fromkeys(("opened", "saved", "reopened", "pdf_exported"), True)},
+    )
+    assert not score["passed"]
+    criteria = score["criteria"]
+    assert criteria["requirements_coverage"]["status"] == (
+        "unknown" if component == "requirements" else "needs_human_check"
+    )
+    assert criteria["no_fabrication"]["status"] == "needs_human_check"
+
+
+def test_unassigned_summary_and_derived_coverage_do_not_clear_unlisted_items(tmp_path):
+    artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
+    documented, omitted = _rule_ref("documented"), _rule_ref("omitted")
+    for reference in (documented, omitted):
+        requirements["rules"].append({"rule_ref": reference, "rule": {"item_id": reference["item_id"], "text": "要响应"}})
+        coverage["entries"].append({"rule_ref": reference, "resolution": "pending", "gap_codes": ["coverage_target_missing"]})
+    outline["issues"].append({"code": "outline_rule_unassigned", "rule_refs": [documented], "detail": "已逐条登记。"})
+    result = evaluate_acceptance(
+        outline=outline, docx_bytes=artifacts.read_bytes(exported["docx_ref"]), requirements=requirements,
+        coverage=coverage, gaps=[{"code": "export_requirement_unassigned"}], artifacts=artifacts,
+    )["criteria"]["requirements_coverage"]
+    assert [item["item_id"] for item in result["pending_items"]] == ["documented"]
+    assert [item["item_id"] for item in result["missing_items"]] == ["omitted"]
+    assert result["status"] == "fail"
+
+
+def test_empty_original_grid_evidence_cannot_pass_the_table_criterion(tmp_path):
+    artifacts, outline, _, _, _ = _export_sample(tmp_path)
+    outline["chapters"][0]["targets"][0]["template_refs"] = []
+    exported = export_authoring_document(artifacts, outline, [])
+    result = evaluate_acceptance(
+        outline=outline, docx_bytes=artifacts.read_bytes(exported["docx_ref"]),
+        artifacts=artifacts, expected_tables={},
+    )["criteria"]["original_tables"]
+    assert result["counts"]["docx_tables"] == 0
+    assert result["counts"]["checked_tables"] == 0
+    assert result["grid_comparison"] == "unavailable"
+    assert result["status"] == "unknown"
+
+
+def test_layout_fixed_is_for_the_exact_document_bytes(tmp_path):
+    artifacts, outline, _, _, exported = _export_sample(tmp_path)
+    docx_bytes = artifacts.read_bytes(exported["docx_ref"])
+    for sha, expected in (("0" * 64, False), (hashlib.sha256(docx_bytes).hexdigest(), True)):
+        layout = {"status": "fixed", "documents": [{"status": "fixed", "docx_sha256": sha}]}
+        criterion = evaluate_acceptance(outline=outline, docx_bytes=docx_bytes, layout=layout)["criteria"]["file_usability"]
+        assert criterion["layout_pdf_fixed"] is expected
+        assert criterion["status"] == "needs_onlyoffice_check"
 
 
 def test_pinpoints_silent_missing_requirement_wrong_table_and_fabrication(tmp_path):
@@ -302,7 +408,10 @@ def test_cli_reads_exported_package_zip_offline(tmp_path):
     package_path = artifacts.path(exported["package_ref"])
     out_path = tmp_path / "score.json"
 
+    required_path = tmp_path / "required-tables.json"
+    required_path.write_text(json.dumps(_required_tables(artifacts, outline)))
     exit_code = main([
+        "--required-tables", str(required_path),
         "--outline", str(outline_path),
         "--package", str(package_path),
         "--artifact-root", str(artifacts.root),
@@ -388,7 +497,8 @@ def test_unknown_inputs_stay_unknown_and_explicit_pending_is_not_silent_omission
         "--output", str(out_path),
     ]) == 0
     loaded_score = json.loads(out_path.read_text(encoding="utf-8"))
-    assert loaded_score["summary"]["machine_passed"] == 4
+    assert loaded_score["summary"]["machine_passed"] == 3
+    assert loaded_score["criteria"]["original_tables"]["inventory_status"] == "missing"
 
 
 def test_removed_unsupported_content_is_audited_separately_while_unremoved_still_fails(tmp_path):
@@ -467,3 +577,69 @@ def test_coverage_unsupported_is_audited_as_unmet_not_fabrication_while_unground
         "content_without_material_or_source",
     }
 
+
+
+def test_other_matching_word_table_does_not_prove_independent_source_inventory(tmp_path):
+    artifacts, outline, requirements, coverage, exported = _export_sample(tmp_path)
+    docx_bytes = artifacts.read_bytes(exported["docx_ref"])
+
+    def tables(inventory=None):
+        return evaluate_acceptance(outline=outline, docx_bytes=docx_bytes, required_tables=inventory,
+                                   requirements=requirements, coverage=coverage, artifacts=artifacts
+                                   )["criteria"]["original_tables"]
+
+    missing = tables()
+    assert missing["counts"]["checked_tables"] == 1
+    assert missing["status"] == "unknown"
+    partial = {**_required_tables(artifacts, outline), "complete": False}
+    assert tables(partial)["status"] == "unknown"
+    # A second, independently identified source contains an identical grid.
+    other_parts = _frozen_template(artifacts, _sample_grid(), fixed_text="另一张必交附件")
+    other_index = other_parts[-1]["source_ref"]["source_index_ref"]
+    freeze = outline["authoring_input"]
+    docs = artifacts.read_json(freeze["frozen_ref"])["documents"]
+    freeze["frozen_ref"] = artifacts.put_json({"documents": [*docs, {"source_index_ref": other_index}]})
+    manifest = {"frozen_sha256": freeze["frozen_ref"]["sha256"], "complete": False,
+                "tables": [{"source_index_sha256": other_index["sha256"], "unit_id": "u-grid"}]}
+    criterion = tables(manifest)
+    assert criterion["status"] == "fail"
+    assert criterion["mismatches"] == [{"kind": "required_table_missing", **manifest["tables"][0]}]
+    for bad in ({**manifest, "frozen_sha256": "0" * 64}, {**manifest, "tables": manifest["tables"] * 2},
+                {**manifest, "tables": [{"source_index_sha256": other_index["sha256"], "unit_id": "u-text"}]}):
+        check = tables(bad)
+        assert check["status"] == "unknown" and check["inventory_status"] == "invalid"
+
+
+def test_w2_accepts_missing_inputs_and_empty_bidder_slots_but_requires_each_declared_gap(tmp_path):
+    artifacts, outline, requirements, coverage, _ = _export_sample(tmp_path)
+    source_gaps = [{"code": "missing_expected_document", "detail": f"必要附件尚未取得：{name}"}
+                   for name in ("商务附件", "技术附件")]
+    outline["authoring_input"]["issues"] = source_gaps
+    # An unconfirmed analysis can still produce an auditable working draft.
+    outline["authoring_input"]["confirmation_ref"] = None
+    outline["chapters"][1]["targets"][0]["manual_fill"] = True
+    for entry in coverage["entries"]:
+        entry.update(resolution="manual", content_refs=[], material_ids=[], review_status="not_required",
+                     gap_codes=["coverage_unfilled"])
+    exported = export_authoring_document(artifacts, outline, [], requirements=requirements, coverage=coverage,
+                                         review_issues=source_gaps)
+    docx = artifacts.read_bytes(exported["docx_ref"])
+    office = {"docx_sha256": hashlib.sha256(docx).hexdigest(),
+              **dict.fromkeys(("opened", "saved", "reopened", "pdf_exported"), True)}
+
+    def evaluate(gaps):
+        return evaluate_acceptance(outline=outline, docx_bytes=docx, requirements=requirements, coverage=coverage,
+                                   artifacts=artifacts, gaps=gaps, required_tables=_required_tables(artifacts, outline),
+                                   human_review=_human_review(outline, docx), onlyoffice_receipt=office)
+
+    # Losing one of two identically coded shortages must not be hidden by a generic reminder.
+    damaged = [gap for gap in exported["gaps"] if gap != source_gaps[1]]
+    damaged.append({"code": "missing_expected_document", "detail": "存在缺件"})
+    bad = evaluate(damaged)
+    assert not bad["passed"]
+    criterion = bad["criteria"]["requirements_coverage"]
+    assert criterion["status"] == "fail" and criterion["unreported_source_gaps"] == [source_gaps[1]]
+    assert evaluate(None)["criteria"]["requirements_coverage"]["status"] == "unknown"
+    good = evaluate(exported["gaps"])
+    assert good["passed"] and good["evaluation_scope"] == "received_inputs"
+    assert good["criteria"]["requirements_coverage"]["unreported_source_gaps"] == []

@@ -177,6 +177,11 @@ async function fixture(page: Page) {
       state.reads++;
       return state.failRead ? json({ error: { code: "OFFLINE", message: "项目读取暂时不可用" } }, 503) : json(view);
     }
+    if (url.pathname === `${path}/sources` && method === "GET") {
+      return json({ source_settings: { version: sha, expected_document_ids: [], documents: view.documents.map(document => ({
+        document_id: document.id, file_name: document.file_name, role: "main", replaces: null, modification_scope: null,
+      })) } });
+    }
     if (url.pathname === `${path}/authoring` || url.pathname === `${path}/analysis`) {
       state.starts.push({ body: request.postDataJSON(), key: request.headers()["idempotency-key"], kind: url.pathname.split("/").at(-1)! });
       if (state.loseStart) { state.loseStart = false; return route.abort("failed"); }

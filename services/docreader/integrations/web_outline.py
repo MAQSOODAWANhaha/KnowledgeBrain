@@ -5,6 +5,7 @@ import asyncio
 
 from docreader.integrations.artifacts import ArtifactIntegrityError
 from docreader.tender.evidence.references import EvidenceRepository, selector
+from docreader.tender.source_body import project_context_blocker
 from docreader.tender.status import DocumentRole
 
 
@@ -85,11 +86,10 @@ def project_context_sources(artifacts, outline) -> dict:
         }
     frozen_sha = frozen_ref.get('sha256')
     docs = frozen.get('documents') or []
-    if any(doc.get('role') in (DocumentRole.AMENDMENT, DocumentRole.CLARIFICATION, 'amendment', 'clarification')
-           for doc in docs):
+    if reason := project_context_blocker(frozen):
         return {
             'available': False,
-            'reason': '主件有补遗或澄清，请核对适用范围后再绑定方案背景。',
+            'reason': reason,
             'frozen_sha256': frozen_sha,
             'options': [],
         }

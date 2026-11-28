@@ -69,6 +69,8 @@ manifest 示例（路径相对 manifest 文件；首次提交会复制原件）�
 
 业务人员已确认必要但尚未取得的附件，用固定 ID 列在 `expected_document_ids`，在取得原件前不加到 `documents`，用 `revise` 提交。补齐时在 `documents` 以同一个 ID 登记原件及其角色。登记问题和草稿边界见[业务工作流](workflow.md#状态修订与恢复)。
 
+Web 项目的「招标文件」区保存已上传原件的角色、同项目替代关系、适用范围和已知缺件。补齐上传后，核对新文件角色并移除对应的缺件登记。版本冲突时重新加载来源设置后再保存。
+
 ```sh
 uv run --frozen python -m docreader.integrations.cli submit manifest.json --request-key submission-001
 uv run --frozen python -m docreader.integrations.cli status <run_id>

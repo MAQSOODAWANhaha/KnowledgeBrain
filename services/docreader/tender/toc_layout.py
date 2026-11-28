@@ -1,5 +1,6 @@
 """Calculate generated TOC caches from measured, independently checked PDF pages."""
 
+from contextlib import ExitStack
 from copy import deepcopy
 import hashlib
 from html import unescape
@@ -169,8 +170,9 @@ def _measure(docx, pdf):
         if len(producer) > 512:
             raise LayoutError('TOC_ENGINE_INVALID', 'PDF布局引擎标识无效。')
         measured = []
+        title_reader = None
         from docreader.parser.pdf_parser import _PDFIUM_LOCK
-        with _PDFIUM_LOCK, pdfium.PdfDocument(pdf) as rendered:
+        with _PDFIUM_LOCK, pdfium.PdfDocument(pdf) as rendered, ExitStack() as readers:
             if len(rendered) != count:
                 raise LayoutError('TOC_PDF_PAGES_INVALID', 'PDF页数未能独立核对。')
             for entry, link in zip(entries, links):
@@ -198,12 +200,22 @@ def _measure(docx, pdf):
                 page = rendered[physical - 1]
                 textpage = page.get_textpage()
                 try:
-                    target_text = _compact(textpage.get_text_bounded(0, lower, page.get_width(), link['top']))
+                    target_text = textpage.get_text_bounded(0, lower, page.get_width(), link['top'])
                 finally:
                     textpage.close()
                     page.close()
-                title = re.sub(r'^\d+(?:\.\d+)*\s+', '', entry['label'])
-                if _compact(title) not in target_text:
+                title = _compact(re.sub(r'^\d+(?:\.\d+)*\s+', '', entry['label']))
+                # PDFium can misdecode glyphs into printable text as well as controls.
+                # Check the same destination band using the PDF font map.
+                if title not in _compact(target_text):
+                    if title_reader is None:
+                        import pdfplumber
+                        title_reader = readers.enter_context(pdfplumber.open(BytesIO(pdf)))
+                    target = title_reader.pages[physical - 1]
+                    if target.bbox[:2] == (0, 0):
+                        band = (0, target.height - link['top'], target.width, target.height - lower)
+                        target_text = target.within_bbox(band).extract_text(use_text_flow=True)
+                if title not in _compact(target_text):
                     raise LayoutError('TOC_PDF_TITLE_MISMATCH', '目录目标区域未能核对对应正文标题。')
                 measured.append({**entry, 'page': labels[physical - 1],
                     'display_cache': _compact(display).lstrip('.'),
