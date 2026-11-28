@@ -61,9 +61,27 @@ def _norm(text: str | None) -> str:
 def _element_text(element: Any) -> str:
     return "".join(
         (node.text or "") if node.tag == qn("w:t") else "\t" if node.tag == qn("w:tab") else "\n"
-        for node in element.iter()
+        for run in element.iter(qn("w:r")) for node in run
         if node.tag in {qn("w:t"), qn("w:tab"), qn("w:br"), qn("w:cr")}
     )
+
+
+def _fixed_parts_around_fields(tc):
+    """Read fixed text on either side of an editable, underlined tab."""
+    parts = [""]
+    for index, paragraph in enumerate(tc.findall(qn("w:p"))):
+        if index:
+            parts[-1] += "\n"
+        for run in paragraph.iter(qn("w:r")):
+            value = _element_text(run)
+            underline = run.find(qn("w:rPr") + "/" + qn("w:u"))
+            if value == "\t" and underline is not None and underline.get(qn("w:val")) not in {None, "none", "0", "false"}:
+                # A positioning tab can precede the beginning of the blank rule.
+                parts[-1] = parts[-1].rstrip("\t")
+                parts.append("")
+            else:
+                parts[-1] += value
+    return parts if len(parts) > 1 else []
 
 
 def _walk_chapters(chapters: list[dict[str, Any]], external: bool = False):
@@ -99,6 +117,8 @@ def _parse_docx_table(tbl_element: Any) -> dict[str, Any]:
                     "col_span": col_span,
                     "text": text,
                 }
+                if tc.find(".//" + qn("w:u")) is not None:
+                    cell["field_parts"] = _fixed_parts_around_fields(tc)
                 cells.append(cell)
                 if vmerge_val == "restart":
                     for offset in range(col_span):
@@ -414,6 +434,17 @@ def _compare_table(
 
     header_limit = max(1, header_rows) if expected["row_count"] > 0 else 0
     actual_by_pos = {(c["row"], c["column"]): _norm(c["text"]) for c in actual["cells"]}
+    field_patterns = {
+        (c["row"], c["column"]): re.compile(" ?".join(re.escape(_norm(s)) for s in c["field_parts"] if _norm(s)))
+        for c in actual["cells"] if c.get("field_parts")
+    }
+
+    def matches(row, column, text):
+        position = (row, column)
+        if text in actual_by_pos.get(position, ""):
+            return True
+        pattern = field_patterns.get(position)
+        return pattern is not None and pattern.fullmatch(text) is not None
 
     exp_headers = [
         (c["row"], c["column"], _norm(c.get("text")))
@@ -423,7 +454,7 @@ def _compare_table(
     bad_headers = [
         {"row": r, "column": c, "expected": text, "actual": actual_by_pos.get((r, c), "")}
         for r, c, text in exp_headers
-        if text not in actual_by_pos.get((r, c), "")
+        if not matches(r, c, text)
     ]
     if bad_headers:
         mismatches.append({
@@ -457,7 +488,7 @@ def _compare_table(
         if not text:
             continue
         actual_text = actual_by_pos.get((r, c), "")
-        if text not in actual_text:
+        if not matches(r, c, text):
             bad_fixed.append({"row": r, "column": c, "expected": text, "actual": actual_text})
     if bad_fixed:
         mismatches.append({

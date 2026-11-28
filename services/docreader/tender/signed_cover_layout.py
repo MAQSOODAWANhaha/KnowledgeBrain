@@ -56,31 +56,43 @@ def bind_cover_source(artifacts, snapshot, compiled, nodes):
 
 
 def _line_parts(line, edges, size, source_text):
-    chars = sorted((c for c in line['chars'] if c['text'].strip()), key=lambda c: c['x0'])
-    rules = sorted({(edge['x0'], edge['x1']) for edge in edges
-                    if edge['orientation'] == 'h' and edge['width'] >= size / 2
-                    and abs(edge['top'] - line['bottom']) <= size / 4
-                    and edge['x1'] >= line['x0'] - 3 * size and edge['x0'] <= line['x1'] + 3 * size
-                    and not any(c['x0'] + 1 < edge['x1'] and edge['x0'] < c['x1'] - 1 for c in chars)})
-    if not rules:
-        return line['x0'], [source_text.strip()]
+    rules = [(e['x0'], e['x1']) for e in edges if e['orientation'] == 'h' and e['width'] >= size / 2
+             and abs(e['top'] - line['bottom']) <= size / 4
+             and e['x1'] >= line['x0'] - 3 * size and e['x0'] <= line['x1'] + 3 * size]
+    return fill_line_parts(line['chars'], source_text, rules) or (line['x0'], [source_text.strip()])
+
+
+def fill_line_parts(glyphs, source_text, rules):
+    """Interleave verified fixed text and blank rule endpoints in source order."""
+    chars = sorted((c for c in glyphs if c['text'].strip()), key=lambda c: c['x0'])
+    rules = sorted({(left, right) for left, right in rules
+                    if not any(c['x0'] + 1 < right and left < c['x1'] - 1 for c in chars)})
+    if not chars or not rules:
+        return None
     positions = [i for i, char in enumerate(source_text) if not char.isspace()]
     if (len(positions) != len(chars)
             or _key(source_text) != _key(''.join(c['text'] for c in chars))):
-        return line['x0'], [source_text.strip()]
+        return None
 
     def text_between(first, end):
         return source_text[positions[first]:positions[end - 1] + 1] if end > first else ''
 
-    parts, start = [], 0
+    first = min(chars[0]['x0'], rules[0][0])
+    parts, start, cursor = [], 0, first
     for left, right in rules:
         end = start
         while end < len(chars) and chars[end]['x1'] <= left + 1:
             end += 1
-        parts.extend([text_between(start, end), right])
+        parts.append(text_between(start, end))
+        if end > start:
+            cursor = chars[end - 1]['x1']
+        if left > cursor + 2:
+            parts.append((left, False))
+        parts.append((right, True))
         start = end
+        cursor = right
     parts.append(text_between(start, len(chars)))
-    return min(line['x0'], rules[0][0]), parts
+    return first, parts
 
 
 def _page_layout(data, page_number, text):
@@ -148,9 +160,10 @@ def write_pdf_cover(document, artifacts, repository, snapshot, source_ref, text)
             if isinstance(part, str):
                 run = p.add_run(part)
             else:
-                fmt.tab_stops.add_tab_stop(Pt(max(0, part * sx - margin)))
+                position, underline = part
+                fmt.tab_stops.add_tab_stop(Pt(max(0, position * sx - margin)))
                 run = p.add_run('\t')
-                run.underline = True
+                run.underline = underline
             run.font.size = Pt(size * sy)
         cursor = top * sy + line_height
     return True
